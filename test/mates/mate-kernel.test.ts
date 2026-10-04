@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
-import { MateLifecycle } from "../../src/mates/events.ts"
 import { isMateId, isMateRevisionId } from "../../src/mates/ids.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createMemoryMateStore } from "./memory-mate-store.ts"
@@ -28,8 +27,6 @@ describe("mate kernel", () => {
         role: "Builder",
       },
       id: result.mate.id,
-      lifecycle: MateLifecycle.Active,
-      revisions: [result.mate.currentRevision],
       seq: 1,
       updatedAt: result.mate.updatedAt,
     })
@@ -73,7 +70,6 @@ describe("mate kernel", () => {
     expect([...first.mates, ...second.mates].map((mate) => mate.id)).toEqual(
       expect.arrayContaining(created.map((result) => result.mate.id)),
     )
-    expect(first.mates[0]).not.toHaveProperty("revisions")
     expect(second.nextCursor).toBeUndefined()
   })
 

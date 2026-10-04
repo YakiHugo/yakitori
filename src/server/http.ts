@@ -26,6 +26,7 @@ import {
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
 import { MessageProcessor } from "./rpc/message-processor.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
+import type { ProviderService } from "./provider-service.ts"
 import type { SideChatService } from "./side-chat.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import type { UserConfigStore } from "./user-config.ts"
@@ -36,6 +37,7 @@ export type YakitoriStaticAssets = {
 }
 
 type YakitoriHttpServerCommonOptions = {
+  readonly providerConfiguration?: ProviderService
   readonly mcp?: McpService
   readonly interactions?: SessionInteractions
   readonly sideChats?: SideChatService
@@ -123,6 +125,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const messageProcessor =
     options.messageProcessor ??
     new MessageProcessor({
+      ...(options.providerConfiguration === undefined
+        ? {}
+        : { providerConfiguration: options.providerConfiguration }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
       ...(options.interactions === undefined
         ? {}

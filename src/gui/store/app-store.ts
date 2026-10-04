@@ -16,7 +16,6 @@ import { createRequestId } from "../../kernel/ids.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { QueuedInput } from "../../server/input-queue.ts"
 import type {
-  ApiPendingPermission,
   ApiProject,
   ApiProviderSummary,
   ApiReadUsageResponse,
@@ -28,14 +27,6 @@ import type {
   ApiSubscriptionSummary,
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
-import {
-  acknowledgeAdmission,
-  listAdmissionsForApiBase,
-  listAdmissionsForSession,
-  type PendingAdmission,
-  readAdmissionByRequestId,
-  reserveAdmission,
-} from "../admission-outbox.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
 import {
   createExecutionViewState,
@@ -44,19 +35,17 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
-import { inputRecoveryMemory } from "../input-recovery-memory.ts"
+import {
+  inputRecoveryMemory,
+  type PendingAdmission,
+  type StoredSteer,
+} from "../input-recovery-memory.ts"
 import {
   ApiRequestError,
   type AppRpcClient,
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
-import {
-  readSteers,
-  reserveSteer,
-  type StoredSteer,
-  updateSteers,
-} from "../steer-outbox.ts"
 import { useWorkspaceStore } from "./workspace-store.ts"
 
 type SessionSelection = {
@@ -108,6 +97,7 @@ export type SubscriptionUsageState = Readonly<{
 export type SettingsSection =
   | "general"
   | "notifications"
+  | "providers"
   | "subscriptions"
   | "mcp"
   | "usage"
@@ -154,6 +144,7 @@ export type AppStoreData = {
   // shows a retry note while this is set.
   projectsError: string | undefined
   providers: ApiProviderSummary[]
+  providersError: string | undefined
   subscriptionsByProvider: Record<
     ApiSubscriptionProvider,
     SubscriptionUsageState
@@ -325,6 +316,7 @@ export function createInitialAppState(): AppStoreData {
     projects: [],
     projectsError: undefined,
     providers: [],
+    providersError: undefined,
     subscriptionsByProvider: createInitialSubscriptionUsage(),
     userPreference: undefined,
     selection: {},
@@ -383,9 +375,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const projectPinRevisions: Record<string, number> = {}
   const confirmedProjectPins: Record<string, boolean> = {}
   const pendingProjectPins: Record<string, number> = {}
-  // Admissions whose server acknowledgment arrived but whose durable event is
-  // still pending; the outbox entry clears when the stream confirms it.
-  const pendingAdmissions = new Map<string, PendingAdmission>()
   const inFlightAdmissions = new Set<string>()
   const rejectedAdmissions = new Set<string>()
   const inFlightSteerRequests = new Set<string>()
@@ -399,6 +388,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     kimi: 0,
   }
   let projectChangesSubscribedClient: AppRpcClient | undefined
+  let providersReadRevision = 0
   let queueReadRevision = 0
   const runTask = async (
     task: () => Promise<void>,
@@ -607,7 +597,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ...state.pendingSteers,
         [sessionId]: pending.filter((steer) => !restoring.includes(steer)),
       }
-      updateSteers(inputRecoveryMemory, state.apiBase, sessionId, (steers) =>
+      inputRecoveryMemory.updateSteers(state.apiBase, sessionId, (steers) =>
         steers.map((steer) =>
           restoring.some((item) => item.requestId === steer.requestId)
             ? { ...steer, restored: true }
@@ -681,18 +671,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
     requestId: string,
   ): void => {
     if (get().execution.admittedRequestIds[requestId]) return
-    const admission =
-      pendingAdmissions.get(requestId) ??
-      readAdmissionByRequestId(
-        inputRecoveryMemory,
-        get().apiBase,
-        sessionId,
-        requestId,
-      )
+    const admission = inputRecoveryMemory.readAdmissionByRequestId(
+      get().apiBase,
+      sessionId,
+      requestId,
+    )
     if (admission === undefined) return
     if (inFlightAdmissions.has(requestId)) rejectedAdmissions.add(requestId)
-    pendingAdmissions.delete(requestId)
-    void acknowledgeAdmission(inputRecoveryMemory, admission)
+    inputRecoveryMemory.acknowledgeAdmission(admission)
     set((state) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
@@ -741,17 +727,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
   }
 
   const retireRestoredSteers = (sessionId: string): void => {
-    const ids = readSteers(
-      inputRecoveryMemory,
-      get().apiBase,
-      sessionId,
-    ).flatMap((steer) =>
-      steer.restored && get().restoredSteerRequestIds[steer.requestId]
-        ? [steer.requestId]
-        : [],
-    )
+    const ids = inputRecoveryMemory
+      .readSteers(get().apiBase, sessionId)
+      .flatMap((steer) =>
+        steer.restored && get().restoredSteerRequestIds[steer.requestId]
+          ? [steer.requestId]
+          : [],
+      )
     if (ids.length === 0) return
-    updateSteers(inputRecoveryMemory, get().apiBase, sessionId, (steers) =>
+    inputRecoveryMemory.updateSteers(get().apiBase, sessionId, (steers) =>
       steers.filter((steer) => !ids.includes(steer.requestId)),
     )
     set((state) => ({
@@ -816,11 +800,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
     set((state) => ({
       pendingSteers: {
         ...state.pendingSteers,
-        [selection.sessionId]: readSteers(
-          inputRecoveryMemory,
-          state.apiBase,
-          selection.sessionId,
-        ).filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
+        [selection.sessionId]: inputRecoveryMemory
+          .readSteers(state.apiBase, selection.sessionId)
+          .filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
       },
     }))
     if (after === 0) set({ hydratingSessionId: selection.sessionId })
@@ -908,11 +890,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             void (async () => {
               const recoverableRequests = new Set(
-                listAdmissionsForSession(
-                  inputRecoveryMemory,
-                  get().apiBase,
-                  selection.sessionId,
-                )
+                inputRecoveryMemory
+                  .listAdmissionsForSession(get().apiBase, selection.sessionId)
                   .filter(
                     (admission) => !inFlightAdmissions.has(admission.requestId),
                   )
@@ -933,8 +912,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               }
               if (!isCurrentSelection(selection)) return
               const execution = get().execution
-              for (const admission of listAdmissionsForSession(
-                inputRecoveryMemory,
+              for (const admission of inputRecoveryMemory.listAdmissionsForSession(
                 get().apiBase,
                 selection.sessionId,
               )) {
@@ -942,7 +920,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   execution.admittedRequestIds[admission.requestId] ||
                   queuedRequestIds.has(admission.requestId)
                 ) {
-                  await acknowledgeAdmission(inputRecoveryMemory, admission)
+                  inputRecoveryMemory.acknowledgeAdmission(admission)
                 } else if (
                   recoverableRequests.has(admission.requestId) &&
                   !inFlightAdmissions.has(admission.requestId) &&
@@ -969,20 +947,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 inFlightSteerRequests.has(event.data.requestId)
               )
                 committedSteerRequests.add(event.data.requestId)
-              const admission =
-                pendingAdmissions.get(event.data.requestId) ??
-                readAdmissionByRequestId(
-                  inputRecoveryMemory,
-                  get().apiBase,
-                  selection.sessionId,
-                  event.data.requestId,
-                )
+              const admission = inputRecoveryMemory.readAdmissionByRequestId(
+                get().apiBase,
+                selection.sessionId,
+                event.data.requestId,
+              )
               if (admission !== undefined) {
-                pendingAdmissions.delete(event.data.requestId)
-                void acknowledgeAdmission(inputRecoveryMemory, admission)
+                inputRecoveryMemory.acknowledgeAdmission(admission)
               }
-              updateSteers(
-                inputRecoveryMemory,
+              inputRecoveryMemory.updateSteers(
                 get().apiBase,
                 selection.sessionId,
                 (steers) =>
@@ -1104,6 +1077,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
+        client.subscribeToProviderChanges(() => {
+          if (getAppRpcClient(get().apiBase) !== client) return
+          void get().loadProviders()
+        })
         goalSnapshots.clear()
         client.subscribeToGoalChanges((notification) => {
           if (getAppRpcClient(get().apiBase) !== client) return
@@ -1205,8 +1182,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (!loaded || get().sessionSelectionIntentRevision !== intentRevision) {
         return
       }
-      const admissions = listAdmissionsForApiBase(
-        inputRecoveryMemory,
+      const admissions = inputRecoveryMemory.listAdmissionsForApiBase(
         get().apiBase,
       )
       const superseded = new Set(
@@ -1218,7 +1194,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
       for (const admission of admissions) {
         if (superseded.has(admission.requestId))
-          await acknowledgeAdmission(inputRecoveryMemory, admission)
+          inputRecoveryMemory.acknowledgeAdmission(admission)
       }
       const pending = admissions
         .filter((admission) => !superseded.has(admission.requestId))
@@ -1501,20 +1477,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     loadProviders: async () => {
       const apiBase = get().apiBase
+      const revision = ++providersReadRevision
       try {
         const response = await getAppRpcClient(apiBase).request(
           "provider/list",
           {},
         )
+        if (revision !== providersReadRevision || apiBase !== get().apiBase)
+          return
         set({
           providers: [...response.providers],
+          providersError: undefined,
           defaultProvider: response.defaultProvider,
           defaultModel: response.defaultModel,
           userPreference: response.userPreference,
         })
-      } catch {
-        // Servers without a provider catalog answer method-not-found; the
-        // model selector stays hidden.
+      } catch (error) {
+        if (!(error instanceof ApiRequestError)) throw error
+        if (revision !== providersReadRevision || apiBase !== get().apiBase)
+          return
+        set({ providersError: error.message })
       }
     },
 
@@ -2134,7 +2116,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         try {
           firstInputAdmission =
             state.recoveredAdmission ??
-            (await reserveAdmission(inputRecoveryMemory, {
+            inputRecoveryMemory.reserveAdmission({
               apiBase: state.apiBase,
               sessionId: firstInputDraftSessionId,
               text,
@@ -2145,7 +2127,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ...(queuedModelSelection === undefined
                 ? {}
                 : { modelSelection: queuedModelSelection }),
-            }))
+            })
           if (state.promptDraft === undefined) set({ promptDraft: text })
           const creation = pendingCreation ?? get().createSession()
           sessionId = await creation
@@ -2191,8 +2173,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             let reserved = false
             let promotedAttachments: readonly ImageAttachment[] | undefined
             try {
-              reserveSteer(
-                inputRecoveryMemory,
+              inputRecoveryMemory.reserveSteer(
                 get().apiBase,
                 selection.sessionId,
                 {
@@ -2232,8 +2213,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               inFlightSteerRequests.delete(requestId)
               committedSteerRequests.delete(requestId)
               if (reserved)
-                updateSteers(
-                  inputRecoveryMemory,
+                inputRecoveryMemory.updateSteers(
                   get().apiBase,
                   selection.sessionId,
                   (steers) =>
@@ -2259,8 +2239,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             committedSteerRequests.delete(requestId)
             const acceptedAttachments = promotedAttachments
             if (acceptedAttachments !== undefined) {
-              updateSteers(
-                inputRecoveryMemory,
+              inputRecoveryMemory.updateSteers(
                 get().apiBase,
                 selection.sessionId,
                 (steers) =>
@@ -2421,7 +2400,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
       }
 
-      // The compact directive takes a dedicated lane: no admission outbox,
+      // The compact directive takes a dedicated lane: no input recovery,
       // no model selection — the server admits it as a runtime-role Input.
       // A per-invocation requestId keeps a retried call from admitting a
       // duplicate compact directive.
@@ -2470,7 +2449,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const admittedModelSelection = queuedForCreation
             ? queuedModelSelection
             : normalizeKimiModelSelection(modelSelection, state.providers)
-          const pendingAdmission = await reserveAdmission(inputRecoveryMemory, {
+          const pendingAdmission = inputRecoveryMemory.reserveAdmission({
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
             text,
@@ -2487,13 +2466,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           let response: Awaited<ReturnType<AppRpcClient["request"]>>
           try {
             if (firstInputAdmission !== undefined) {
-              await acknowledgeAdmission(
-                inputRecoveryMemory,
-                firstInputAdmission,
-              )
+              inputRecoveryMemory.acknowledgeAdmission(firstInputAdmission)
               set({ recoveredAdmission: undefined })
             }
             if (!isCurrentSelection(selection)) return
+            // Equivalent retries retain the original payload's nested key order.
             response = await getAppRpcClient(get().apiBase).request(
               queueAdmission ? "session/input/queue" : "session/input",
               {
@@ -2501,15 +2478,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 requestId: pendingAdmission.requestId,
                 content: {
                   kind: "text",
-                  text,
-                  ...(attachments.length === 0 ? {} : { attachments }),
-                  ...(excerpts.length === 0
+                  text: pendingAdmission.text,
+                  ...(pendingAdmission.attachments === undefined
                     ? {}
-                    : { contextAttachments: excerpts }),
+                    : { attachments: pendingAdmission.attachments }),
+                  ...(pendingAdmission.contextAttachments === undefined
+                    ? {}
+                    : {
+                        contextAttachments: pendingAdmission.contextAttachments,
+                      }),
                 },
-                ...(admittedModelSelection === undefined
+                ...(pendingAdmission.modelSelection === undefined
                   ? {}
-                  : { modelSelection: admittedModelSelection }),
+                  : { modelSelection: pendingAdmission.modelSelection }),
               },
             )
           } finally {
@@ -2526,9 +2507,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             queueAdmission ||
             get().execution.admittedRequestIds[pendingAdmission.requestId]
           ) {
-            await acknowledgeAdmission(inputRecoveryMemory, pendingAdmission)
-          } else {
-            pendingAdmissions.set(pendingAdmission.requestId, pendingAdmission)
+            inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
           }
           if (!isCurrentSelection(selection)) return
           set((state) => ({
@@ -2628,31 +2607,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
               pendingInputs.map((item) => [item.id, item]),
             ),
           },
-          ...(state.selectedSession?.id === selection.sessionId
-            ? {
-                selectedSession: {
-                  ...state.selectedSession,
-                  pendingInputs,
-                  counts: {
-                    ...state.selectedSession.counts,
-                    pendingInputs: pendingInputs.length,
-                  },
-                },
-              }
-            : {}),
         }))
         for (const item of items) {
-          const admission =
-            pendingAdmissions.get(item.input.submissionId) ??
-            readAdmissionByRequestId(
-              inputRecoveryMemory,
-              get().apiBase,
-              selection.sessionId,
-              item.input.submissionId,
-            )
+          const admission = inputRecoveryMemory.readAdmissionByRequestId(
+            get().apiBase,
+            selection.sessionId,
+            item.input.submissionId,
+          )
           if (admission === undefined) continue
-          pendingAdmissions.delete(item.input.submissionId)
-          await acknowledgeAdmission(inputRecoveryMemory, admission)
+          inputRecoveryMemory.acknowledgeAdmission(admission)
         }
       } catch (error) {
         if (isCurrentSelection(selection))
@@ -3294,8 +3257,6 @@ function applyDurableSessionDetail(
     return session
   }
 
-  const counts = { ...session.counts }
-  let pendingInputs = [...session.pendingInputs]
   const next: ApiSessionDetail = {
     ...session,
     seq: event.seq,
@@ -3305,46 +3266,17 @@ function applyDurableSessionDetail(
     case "input.admitted":
       return {
         ...next,
-        counts: { ...counts, inputs: counts.inputs + 1 },
+        counts: { ...session.counts, inputs: session.counts.inputs + 1 },
       }
     case "turn.started":
-      pendingInputs = pendingInputs.filter(
-        (input) => input.id !== event.data.inputId,
-      )
       return {
         ...next,
         activeTurnId: event.data.turnId,
-        pendingInputs,
-        counts: {
-          ...counts,
-          pendingInputs: pendingInputs.length,
-          turns: counts.turns + 1,
-        },
       }
     case "turn.completed": {
       const { activeTurnId: _, ...withoutActiveTurn } = next
-      return {
-        ...withoutActiveTurn,
-        ...(event.data.sessionUsage === undefined
-          ? {}
-          : { usage: event.data.sessionUsage }),
-      }
+      return withoutActiveTurn
     }
-    case "item.completed":
-      return {
-        ...next,
-        counts: {
-          ...counts,
-          items: counts.items + 1,
-          tools:
-            counts.tools +
-            (event.data.item.type === "agent_message" ||
-            event.data.item.type === "reasoning" ||
-            event.data.item.type === "context_compaction"
-              ? 0
-              : 1),
-        },
-      }
     default:
       return next
   }
@@ -3358,47 +3290,6 @@ function applyTransientSessionDetail(
   if (event.type === "turn.finished" && event.turnId === session.activeTurnId) {
     const { activeTurnId: _, ...withoutActiveTurn } = session
     return { ...withoutActiveTurn, active: false }
-  }
-  if (event.type === "session.usage") return { ...session, usage: event.usage }
-  if (event.type === "permission.requested") {
-    if (
-      session.pendingPermissions.some(
-        (permission) =>
-          permission.permissionRequestId === event.permissionRequestId,
-      )
-    ) {
-      return session
-    }
-    const { type: _, sessionId: __, ...permission } = event
-    const pendingPermissions: ApiPendingPermission[] = [
-      ...session.pendingPermissions,
-      permission,
-    ]
-    return {
-      ...session,
-      pendingPermissions,
-      counts: {
-        ...session.counts,
-        permissions: pendingPermissions.length,
-      },
-    }
-  }
-  if (event.type === "permission.resolved") {
-    const pendingPermissions = session.pendingPermissions.filter(
-      (permission) =>
-        permission.permissionRequestId !== event.permissionRequestId,
-    )
-    if (pendingPermissions.length === session.pendingPermissions.length) {
-      return session
-    }
-    return {
-      ...session,
-      pendingPermissions,
-      counts: {
-        ...session.counts,
-        permissions: pendingPermissions.length,
-      },
-    }
   }
   return session
 }

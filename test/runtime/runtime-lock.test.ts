@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -31,10 +31,16 @@ describe("runtime lock", () => {
     try {
       const path = join(root, "runtime.lock")
       await writeFile(path, "999\n2020-01-01T00:00:00.000Z\nstale\n")
+      const before = await stat(path)
 
       const lock = await acquireRuntimeLock(root, { pid: 404 })
 
       expect(lock.path).toBe(path)
+      const after = await stat(path)
+      expect({ dev: after.dev, ino: after.ino }).toEqual({
+        dev: before.dev,
+        ino: before.ino,
+      })
       expect(await readFile(path, "utf8")).toMatch(/^404\n/)
       await lock.release()
     } finally {

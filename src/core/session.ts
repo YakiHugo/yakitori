@@ -695,16 +695,6 @@ export class Session {
     if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
     try {
       await this.#store.flushThread(this.id)
-      const stored = await this.#store.readThread(this.id)
-      if (
-        stored?.rollout.some(
-          ({ item }) =>
-            item.type === "turn_started" &&
-            item.turnId === pending.input.submissionId &&
-            item.inputItemId === pending.inputItem.id,
-        )
-      ) {
-      }
     } catch (recoveryError) {
       this.#reportPersistenceError(recoveryError)
     }

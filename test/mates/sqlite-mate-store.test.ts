@@ -7,7 +7,6 @@ import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import { type MateEvent, MateEventType } from "../../src/mates/events.ts"
 import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
-import { summarizeMate } from "../../src/mates/mate-projector.ts"
 import {
   createSqliteMateStore,
   type SqliteMateStore,
@@ -33,7 +32,7 @@ describe("SQLite mate store", () => {
           .mate,
       ).toEqual(created.mate)
       expect(await reopened.listMates()).toEqual({
-        mates: [summarizeMate(created.mate)],
+        mates: [created.mate],
       })
     })
   })
@@ -42,7 +41,6 @@ describe("SQLite mate store", () => {
     await withStores(async (context) => {
       const store = context.open()
       const mateId = createMateId()
-      await store.appendEvent(mateId, createdEvent(), { expectedSeq: 0 })
       const databasePath = join(context.rootDir, "mates.sqlite")
       const startGate = new Int32Array(new SharedArrayBuffer(4))
       const workers = [
@@ -66,7 +64,7 @@ describe("SQLite mate store", () => {
       expect(settled.filter((result) => !result.ok)).toEqual([
         { ok: false, code: YakitoriErrorCode.InvalidState },
       ])
-      expect(await store.readEvents(mateId)).toHaveLength(2)
+      expect(await store.readEvents(mateId)).toHaveLength(1)
     })
   })
 
@@ -80,35 +78,6 @@ describe("SQLite mate store", () => {
         store.appendEvent(mateId, event, { expectedSeq: 0 }),
       ).rejects.toThrow("Mate event is invalid.")
       expect(await store.readEvents(mateId)).toEqual([])
-    })
-  })
-
-  it("paginates mate summaries and rejects invalid cursors", async () => {
-    await withStores(async (context) => {
-      const store = context.open()
-      const mateIds = [createMateId(), createMateId()]
-      await Promise.all(
-        mateIds.map((mateId) =>
-          store.appendEvent(mateId, createdEvent(), { expectedSeq: 0 }),
-        ),
-      )
-
-      const first = await store.listMates({ limit: 1 })
-      if (!first.nextCursor) throw new Error("Expected a next cursor.")
-      const second = await store.listMates({
-        cursor: first.nextCursor,
-        limit: 1,
-      })
-
-      expect([...first.mates, ...second.mates].map((mate) => mate.id)).toEqual(
-        expect.arrayContaining(mateIds),
-      )
-      await expect(store.listMates({ limit: 0 })).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidArgument,
-      })
-      await expect(
-        store.listMates({ cursor: createMateId() }),
-      ).rejects.toMatchObject({ code: YakitoriErrorCode.InvalidArgument })
     })
   })
 

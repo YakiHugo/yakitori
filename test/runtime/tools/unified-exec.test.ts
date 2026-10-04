@@ -369,6 +369,89 @@ describe("unified exec tools", () => {
     }
   })
 
+  it.skipIf(process.platform === "win32" || !existsSync("/bin/bash")).each(
+    [
+      {
+        inherit: "none" as const,
+        profileValue: "missing",
+        appValue: "missing",
+        path: "/configured/bin",
+      },
+      {
+        inherit: "core" as const,
+        profileValue: "missing",
+        appValue: "missing",
+        path: "/profile/bin",
+      },
+      {
+        inherit: "all" as const,
+        profileValue: "from-profile",
+        appValue: "from-app",
+        path: "/profile/bin",
+      },
+    ].flatMap((policy) => [false, true].map((tty) => ({ ...policy, tty }))),
+  )(
+    "keeps the $inherit inheritance policy for captured shells (tty=$tty)",
+    async ({ inherit, profileValue, appValue, path, tty }) => {
+      const workspace = await realpath(
+        await mkdtemp(join(tmpdir(), "yakitori-snapshot-policy-")),
+      )
+      try {
+        await writeFile(
+          join(workspace, ".bashrc"),
+          "export SNAPSHOT_PROFILE_VALUE=from-profile\nexport PATH=/profile/bin\nexport CHOSEN=from-profile\nsnapshot_function() { builtin printf '%s\\n' function-restored; }\n",
+        )
+        const userShellEnv = createUserShellEnv({
+          appEnv: {
+            HOME: workspace,
+            PATH: "/usr/bin:/bin",
+            APP_ONLY: "from-app",
+          },
+          shellEnvironmentPolicy: {
+            inherit,
+            set: {
+              CHOSEN: "configured",
+              ...(inherit === "none"
+                ? { HOME: workspace, PATH: "/configured/bin" }
+                : {}),
+            },
+          },
+          resolveShell: async () => ({ shell: "/bin/bash", warnings: [] }),
+          log: () => {},
+        })
+        const [execCommand] = createUnifiedExecTools({ userShellEnv })
+        if (execCommand === undefined) throw new Error("missing exec_command")
+        try {
+          const output = requireOutput(
+            await execCommand.execute(
+              {
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: The child shell expands these placeholders.
+                cmd: 'printf "%s\\n" "${SNAPSHOT_PROFILE_VALUE:-missing}" "${APP_ONLY:-missing}" "$CHOSEN" "$HOME" "$PATH"; snapshot_function',
+                tty,
+                yield_time_ms: 1_000,
+              },
+              { workspaceRoot: workspace },
+            ),
+          )
+          expect(output.exit_code).toBe(0)
+          expect(output.output.replaceAll("\r", "").split("\n")).toEqual([
+            profileValue,
+            appValue,
+            "configured",
+            workspace,
+            path,
+            "function-restored",
+            "",
+          ])
+        } finally {
+          await execCommand.dispose?.()
+        }
+      } finally {
+        await rm(workspace, { recursive: true, force: true })
+      }
+    },
+  )
+
   it.each([
     false,
     true,
@@ -474,32 +557,70 @@ describe("unified exec tools", () => {
     await manager.close()
   })
 
-  it("rejects unknown sessions and closes every live process idempotently", async () => {
+  it.each([
+    false,
+    true,
+  ])("rejects unknown sessions and closes every live process idempotently when tty is %s", async (tty) => {
     const manager = createUnifiedExecProcessManager({
       backgroundTimeoutMs: 10_000,
       killGraceMs: 20,
     })
-    const running = await manager.exec({
-      command: "sleep 10",
-      cwd: process.cwd(),
-      shell: "/bin/sh",
-      env: process.env,
-      tty: false,
-      yieldTimeMs: 250,
-      maxOutputTokens: 100,
-    })
-    expect(running.session_id).toEqual(expect.any(Number))
-
-    await manager.close()
-    await manager.close()
-    await expect(
-      manager.write({
-        sessionId: running.session_id as number,
-        chars: "",
-        yieldTimeMs: 5_000,
-        maxOutputTokens: 100,
-      }),
-    ).rejects.toThrow("manager is closed")
+    const pids: number[] = []
+    const sessionIds: number[] = []
+    try {
+      await expect(
+        manager.write({
+          sessionId: 999_999,
+          chars: "",
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        }),
+      ).rejects.toThrow("Unknown unified exec session_id")
+      for (let index = 0; index < 2; index++) {
+        const running = await manager.exec({
+          command: "echo $$; exec sleep 10",
+          cwd: process.cwd(),
+          shell: "/bin/sh",
+          env: process.env,
+          tty,
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        })
+        if (running.session_id === undefined)
+          throw new Error("Command did not stay alive")
+        const pid = Number(running.output.trim())
+        expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+        pids.push(pid)
+        sessionIds.push(running.session_id)
+        expect(() => process.kill(pid, 0)).not.toThrow()
+      }
+      await manager.close()
+      await manager.close()
+      for (const pid of pids) {
+        expect(() => process.kill(pid, 0)).toThrowError(
+          expect.objectContaining({ code: "ESRCH" }),
+        )
+      }
+      for (const sessionId of sessionIds) {
+        await expect(
+          manager.write({
+            sessionId,
+            chars: "",
+            yieldTimeMs: 250,
+            maxOutputTokens: 100,
+          }),
+        ).rejects.toThrow("manager is closed")
+      }
+    } finally {
+      await manager.close()
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch (error) {
+          expect(error).toMatchObject({ code: "ESRCH" })
+        }
+      }
+    }
   })
 
   it("fails closed on invalid input and the catastrophic-command fuse", async () => {

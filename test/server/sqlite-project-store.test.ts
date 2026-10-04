@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { isYakitoriError } from "../../src/kernel/errors.ts"
 import {
   createSqliteProjectStore,
@@ -106,6 +106,7 @@ describe("sqlite project store", () => {
 
   it("detects no-op updates and bumps updatedAt only on changes", async () => {
     const store = memoryStore()
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000)
     try {
       const created = await store.createProject({
         name: "alpha",
@@ -113,21 +114,22 @@ describe("sqlite project store", () => {
         metadata: { tier: "one" },
       })
 
+      now.mockReturnValue(2_000)
       const noop = await store.updateProject(created.project.id, {
         name: "alpha",
         metadata: { tier: "one" },
       })
       expect(noop).toEqual({ project: created.project, changed: false })
 
+      now.mockReturnValue(3_000)
       const renamed = await store.updateProject(created.project.id, {
         name: "renamed",
       })
       expect(renamed?.changed).toBe(true)
       expect(renamed?.project.name).toBe("renamed")
       expect(renamed?.project.metadata).toEqual({ tier: "one" })
-      expect(renamed?.project.updatedAt).toBeGreaterThanOrEqual(
-        created.project.updatedAt,
-      )
+      expect(renamed?.project.updatedAt).toBe(3_000)
+      expect(renamed?.project.createdAt).toBe(1_000)
 
       expect(
         await store.updateProject(
@@ -136,6 +138,7 @@ describe("sqlite project store", () => {
         ),
       ).toBeUndefined()
     } finally {
+      now.mockRestore()
       store.close()
     }
   })

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
@@ -22,6 +23,144 @@ afterEach(async () => {
 type ModelFixture = { window: number; hash?: string }
 
 describe("pre-sampling model switches", () => {
+  it.each([
+    { usage: 100, compacts: false },
+    { usage: 100_000, compacts: true },
+  ])("continues ordinary history after the previous configured model is removed ($compacts compaction)", async ({
+    usage,
+    compacts,
+  }) => {
+    const requests: ModelRequest[] = []
+    const harness = await setupConfigured(recordingStream(requests, usage))
+    const thread = await harness.manager.createThread({
+      workingDirectory: harness.root,
+      mateId: "mate",
+      mateRevisionId: "revision",
+    })
+    await thread.startIfIdle({
+      content: { kind: "text", text: "Original task." },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done model-a" })
+
+    harness.registry.replace({
+      work: harness.provider("work", [
+        { id: "model-b", contextWindowTokens: 100_000 },
+      ]),
+    })
+    await thread.startIfIdle({
+      content: { kind: "text", text: "Continue with the available model." },
+      modelSelection: { provider: "work", model: "model-b" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done model-b" })
+    expect(
+      requests
+        .filter((request) => request.compaction !== undefined)
+        .map((request) => ({
+          provider: request.target.provider,
+          model: request.target.model,
+          compaction: request.compaction,
+        })),
+    ).toEqual(
+      compacts
+        ? [{ provider: "work", model: "model-b", compaction: "local" }]
+        : [],
+    )
+    const history = JSON.stringify(requests.at(-1)?.messages)
+    expect(history).toContain(compacts ? "Portable progress" : "Original task.")
+    expect(history).toContain("Continue with the available model.")
+    expect(thread.snapshot().context.previousModel).toMatchObject({
+      provider: "work",
+      model: "model-b",
+    })
+  })
+
+  it.each([
+    "model",
+    "provider",
+  ])("requires restoring a native checkpoint's removed source %s", async (removed) => {
+    const requests: ModelRequest[] = []
+    let samples = 0
+    const stream: StreamFn = async function* (request) {
+      requests.push(request)
+      if (request.compaction === "remote_v2") {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            providerRequestId: "native_response",
+            content: [
+              {
+                type: "compaction",
+                provider: "work",
+                model: "model-a",
+                scope: "work:account",
+                encryptedContent: "opaque checkpoint",
+              },
+            ],
+          },
+        }
+        return
+      }
+      samples += 1
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: `sample ${samples}` }],
+          usage: { activeContextTokens: samples === 1 ? 100_000 : 100 },
+        },
+      }
+    }
+    const harness = await setupConfigured(stream, true)
+    const thread = await harness.manager.createThread({
+      workingDirectory: harness.root,
+      mateId: "mate",
+      mateRevisionId: "revision",
+    })
+    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "sample 1" })
+    await thread.startIfIdle({
+      content: { kind: "text", text: "create checkpoint" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "sample 2" })
+    expect(
+      requests.filter((request) => request.compaction === "remote_v2"),
+    ).toHaveLength(1)
+    const provider = removed === "model" ? "work" : "other"
+    harness.registry.replace({
+      [provider]: harness.provider(provider, [
+        { id: "model-b", contextWindowTokens: 200_000 },
+      ]),
+    })
+    const callsBeforeSwitch = requests.length
+    await thread.startIfIdle({
+      content: { kind: "text", text: "continue" },
+      modelSelection: { provider, model: "model-b" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
+        errored:
+          "Native checkpoint continuation requires work/model-a. Restore its provider connection and model configuration before continuing.",
+      })
+    expect(requests).toHaveLength(callsBeforeSwitch)
+    expect(thread.snapshot().context.previousModel).toMatchObject({
+      provider: "work",
+      model: "model-a",
+    })
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "opaque checkpoint",
+    )
+  })
+
   it("uses the previous provider for a portable checkpoint when switching to a smaller foreign model", async () => {
     const requests: ModelRequest[] = []
     const harness = await setup(
@@ -373,6 +512,49 @@ describe("pre-sampling model switches", () => {
     ).toEqual(["old", "old"])
   })
 })
+
+async function setupConfigured(stream: StreamFn, remoteCompaction = false) {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-configured-switch-"))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const provider = (
+    id: string,
+    models: readonly { id: string; contextWindowTokens: number }[],
+  ) =>
+    createModelProvider({
+      info: {
+        id,
+        wireApi: remoteCompaction
+          ? "openai_responses"
+          : "openai_chat_completions",
+        capabilities: { remoteCompaction },
+        retry: { maxAttempts: 1 },
+      },
+      models: createConfiguredModelsManager({ provider: id, models }),
+      continuationScope: `${id}:account`,
+      stream,
+    })
+  const registry = createProviderRegistry({
+    work: provider("work", [
+      {
+        id: "model-a",
+        contextWindowTokens: remoteCompaction ? 100_000 : 200_000,
+      },
+      { id: "model-b", contextWindowTokens: 100_000 },
+    ]),
+  })
+  const manager = new ThreadManager({
+    store: new JsonlThreadStore({ root }),
+    createTurnProcessor: () =>
+      createTurnProcessor({
+        modelClient: registry.createClient(),
+        provider: "work",
+        model: "model-a",
+        loadProjectInstructions: async () => undefined,
+      }),
+  })
+  cleanups.push(() => manager.shutdown())
+  return { root, manager, registry, provider }
+}
 
 function recordingStream(requests: ModelRequest[], usage: number): StreamFn {
   let samples = 0

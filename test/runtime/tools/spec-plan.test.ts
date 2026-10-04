@@ -1,14 +1,100 @@
 import { describe, expect, it } from "vitest"
 import type { ModelTarget } from "../../../src/runtime/model.ts"
+import { createConfiguredModelsManager } from "../../../src/runtime/configured-models-manager.ts"
+import { createModelProvider } from "../../../src/runtime/model-provider.ts"
+import { createProviderRegistry } from "../../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../../src/runtime/session-configuration.ts"
-import {
-  createToolRegistry,
-  namespacedToolName,
-} from "../../../src/runtime/tools/registry.ts"
+import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../../src/runtime/tools/spec-plan.ts"
 import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
 describe("Step tool planning", () => {
+  it.each([
+    {
+      provider: "openai-work",
+      catalogProvider: "openai",
+      model: "gpt-5",
+      wireApi: "openai_responses",
+      protocol: "openai_deferred",
+      tool: "apply_patch",
+    },
+    {
+      provider: "claude-work",
+      catalogProvider: "anthropic",
+      model: "claude-sonnet-4-6",
+      wireApi: "anthropic_messages",
+      protocol: "anthropic_deferred",
+      tool: "write_file",
+    },
+    {
+      provider: "openai",
+      catalogProvider: "openai",
+      model: "gpt-5",
+      wireApi: "openai_chat_completions",
+      protocol: "meta_dispatch",
+      tool: "write_file",
+    },
+  ] as const)("uses declared $wireApi for connection $provider", async ({
+    provider,
+    catalogProvider,
+    model,
+    wireApi,
+    protocol,
+    tool,
+  }) => {
+    const models = createConfiguredModelsManager({
+      provider,
+      catalogProvider,
+      wireApi,
+      models: [{ id: model }],
+    })
+    const registry = createToolRegistry()
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
+    const client = createProviderRegistry({
+      [provider]: createModelProvider({
+        info: {
+          id: provider,
+          wireApi,
+          capabilities: { remoteCompaction: false },
+        },
+        models,
+        stream: async function* () {},
+      }),
+    }).createClient()
+    const turn = client.startTurn(provider)
+    const selection = { provider, model }
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: registry.trustedToolNames(),
+        approvalPolicy: "always_approve",
+        promptCacheKey: "configured",
+      },
+      models,
+    ).resolveStep(selection, models)
+    const step = captureStepContext({
+      registry,
+      configuration,
+      ...(turn.wireApi === undefined ? {} : { wireApi: turn.wireApi }),
+    })
+    expect(step.toolWireProtocol).toBe(protocol)
+    expect(
+      step.toolRouter.modelDefinitions.map((entry) => entry.name),
+    ).toContain(tool)
+    const toolNames = step.toolRouter.modelDefinitions.map(({ name }) => name)
+    if (wireApi === "openai_chat_completions")
+      expect(toolNames).not.toContain("view_image")
+    else expect(toolNames).toContain("view_image")
+    if (protocol === "openai_deferred")
+      expect(
+        step.toolRouter.modelDefinitions.find((entry) => entry.name === tool)
+          ?.kind,
+      ).toBe("custom")
+    await step.toolRouter.release()
+    await client.close()
+  })
+
   it.each([
     {
       target: target("codex", "gpt-5.6-sol", "codex"),
@@ -67,7 +153,7 @@ describe("Step tool planning", () => {
   it("keeps unknown model capabilities conservative and falls back to meta-dispatch", () => {
     const registry = createToolRegistry()
     const deferred = externalDeferredTool()
-    registry.registerExternal(deferred, "calendar")
+    registry.replaceExternalSource("calendar", [deferred])
     const step = captureStepContext({
       registry,
       configuration: configuration(
@@ -90,7 +176,7 @@ describe("Step tool planning", () => {
 
   it("keeps Grok's model-visible catalog stable and resolves use_tool through the Step router", () => {
     const registry = createToolRegistry()
-    registry.registerExternal(externalDeferredTool(), "calendar")
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const step = captureStepContext({
       registry,
       configuration: configuration(
@@ -168,7 +254,7 @@ describe("Step tool planning", () => {
 
   it("keeps meta-dispatch and native deferred projections isolated", async () => {
     const registry = createToolRegistry()
-    registry.registerExternal(externalDeferredTool(), "calendar")
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const enabledTools = registry.trustedToolNames()
     const kimiTarget = target("kimi", "k3", "kimi")
     const kimi = captureStepContext({
@@ -247,7 +333,7 @@ function configuration(
 
 function externalDeferredTool(name = "search_events"): RuntimeTool {
   return {
-    toolName: namespacedToolName("calendar", name),
+    toolName: { namespace: "calendar", name },
     exposure: "deferred",
     description: "Search calendar events",
     inputSchema: {

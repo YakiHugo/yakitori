@@ -10,16 +10,16 @@ import {
   type SessionDelivery,
   type SessionEventHub,
 } from "../../../src/server/event-hub.ts"
+import type {
+  ApiPendingPermission,
+  ApiSessionDetail,
+} from "../../../src/server/protocol.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import {
   INTERNAL_ERROR,
   type JsonRpcNotification,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
-import type {
-  ApiPendingPermission,
-  ApiSessionDetail,
-} from "../../../src/server/protocol.ts"
 import { reconcileBufferedSessionDeliveries } from "../../../src/server/rpc/subscriptions.ts"
 import {
   createFakeHandlers,
@@ -113,6 +113,8 @@ describe("buffered turn lifecycle", () => {
           kind: "transient",
           event: {
             type: "reasoning.delta",
+            streamId: "stream_1",
+            offset: 0,
             sessionId,
             turnId: "turn_1",
             itemId: "late_reasoning",
@@ -1026,6 +1028,80 @@ describe("session/permission/request", () => {
     )
     await waitForCondition(() => resolveCalls.length === 1)
     expect(resolveCalls[0]?.behavior).toBe("allow")
+  })
+
+  it.each([
+    "allow",
+    "deny",
+  ] as const)("keeps a live permission answerable when a concurrent snapshot predates it (%s)", async (behavior) => {
+    const snapshotRead = deferred<void>()
+    const releaseSnapshot = deferred<void>()
+    const resolveCalls: ResolveCall[] = []
+    let reads = 0
+    const handlers = createFakeHandlers({
+      readSession: async () => {
+        const response = okResult({
+          session: makeSessionDetail(sessionId, {
+            seq: 0,
+            activeTurnId: "turn_1",
+            pendingPermissions: [],
+          }),
+        })
+        if (++reads === 2) {
+          // The real handler samples permissions before awaiting project
+          // and presentation reads; a live request can arrive meanwhile.
+          snapshotRead.resolve()
+          await releaseSnapshot.promise
+        }
+        return response
+      },
+      resolvePermission: async (input) => {
+        resolveCalls.push(input as ResolveCall)
+        return okResult({
+          sessionId,
+          turnId: "turn_1",
+          permissionRequestId: "perm_1",
+          behavior,
+        })
+      },
+    })
+    const { processor, eventHub } = createTestProcessor({ handlers })
+    const watching = openTestConnection(processor)
+    const reconnecting = openTestConnection(processor)
+    await initializeConnection(watching)
+    await initializeConnection(reconnecting)
+    await subscribeAndDrain(watching)
+    const subscribing = subscribeAndDrain(reconnecting)
+    await snapshotRead.promise
+
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
+    const [originalRequest] = permissionRequests(watching)
+    expect(originalRequest).toBeDefined()
+    releaseSnapshot.resolve()
+    await subscribing
+    await flush()
+    const [replayedRequest] = permissionRequests(reconnecting)
+    watching.sendRaw(
+      JSON.stringify({ id: originalRequest?.id, result: { behavior } }),
+    )
+    await flush()
+    expect(resolveCalls).toEqual([
+      { sessionId, turnId: "turn_1", permissionRequestId: "perm_1", behavior },
+    ])
+    expect(replayedRequest?.id).toBe(originalRequest?.id)
+    reconnecting.sendRaw(
+      JSON.stringify({
+        id: replayedRequest?.id,
+        result: { behavior: behavior === "allow" ? "deny" : "allow" },
+      }),
+    )
+    await flush()
+    expect(resolveCalls).toHaveLength(1)
+    expect(processor.pendingServerRequests.size).toBe(0)
+    await processor.closeConnection(watching.id)
+    await processor.closeConnection(reconnecting.id)
   })
 
   it("prunes pending requests the snapshot no longer lists, without resolving", async () => {

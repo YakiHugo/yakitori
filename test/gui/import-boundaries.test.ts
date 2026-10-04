@@ -25,7 +25,7 @@ function guiSourceFiles(directory: string): string[] {
 }
 
 describe("GUI import boundaries", () => {
-  it("keeps node-only modules out of the browser bundle", () => {
+  it("keeps static import-from statements within the allowed GUI module boundaries", () => {
     const guiRoot = join(__dirname, "..", "..", "src", "gui")
     const violations: string[] = []
     for (const file of guiSourceFiles(guiRoot)) {

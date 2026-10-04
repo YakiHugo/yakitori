@@ -23,11 +23,6 @@ export type ToolExecutionGate = Readonly<{
     supportsParallel: boolean,
     signal: AbortSignal | undefined,
   ): ToolExecutionReservation
-  run<T>(
-    supportsParallel: boolean,
-    signal: AbortSignal | undefined,
-    operation: () => Promise<T>,
-  ): Promise<T>
 }>
 
 export function createToolExecutionGate(): ToolExecutionGate {
@@ -151,11 +146,6 @@ export function createToolExecutionGate(): ToolExecutionGate {
   return {
     reserve(supportsParallel, signal) {
       return reserve(supportsParallel ? "parallel" : "exclusive", signal)
-    },
-    run(supportsParallel, signal, operation) {
-      return reserve(supportsParallel ? "parallel" : "exclusive", signal).run(
-        operation,
-      )
     },
   }
 }

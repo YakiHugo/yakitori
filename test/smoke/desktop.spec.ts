@@ -13,6 +13,7 @@ import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runFauxTurn,
+  runProviderFlow,
 } from "./fixtures.ts"
 
 const execFileAsync = promisify(execFile)
@@ -99,6 +100,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     expect(["granted", "unsupported"]).toContain(bridge.permission)
     await runFauxTurn(page)
     await runBudgetedGoal(page)
+    await runProviderFlow(page, testInfo)
     expect(rendererErrors).toEqual([])
 
     // Playwright's graceful close invokes the real app.quit(). It must finish

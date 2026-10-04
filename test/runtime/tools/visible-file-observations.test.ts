@@ -2,52 +2,70 @@ import { describe, expect, it } from "vitest"
 import {
   createVisibleFileObservations,
   createVisibleFileObservationsFromMessages,
-  type StoredToolObservation,
+  grantsFromToolOutput,
 } from "../../../src/runtime/tools/visible-file-observations.ts"
 
 describe("visible file observations", () => {
-  it("projects only the successful tool results supplied for one model request", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("read_file", {
-        path: "src/value.ts",
-        complete: true,
-        sha256: "a".repeat(64),
-        range: { offset: 1, limit: 20, requestedLimit: 20 },
-      }),
-      toolProjection("edit_file", {
-        path: "src/value.ts",
-        sha256: "b".repeat(64),
-        optimisticRebase: false,
-      }),
+  it("restores only explicit grants from the model's visible messages", () => {
+    const visible = createVisibleFileObservationsFromMessages([
+      {
+        role: "tool",
+        toolCallId: "read",
+        content: "read contents",
+        fileObservations: [
+          {
+            path: "src/value.ts",
+            kind: "whole_file_read",
+            complete: true,
+            sha256: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "edit",
+        content: "edited contents",
+        fileObservations: [
+          {
+            path: "src/value.ts",
+            kind: "edit",
+            complete: false,
+            sha256: "b".repeat(64),
+          },
+        ],
+      },
+      { role: "tool", toolCallId: "hidden", content: "no grant" },
     ])
     expect(visible.latest("src/value.ts")).toEqual({
       sha256: "b".repeat(64),
       complete: true,
       observation: "edit",
     })
-
-    const editWithoutVisibleBase = createVisibleFileObservations([
-      toolProjection("edit_file", {
-        path: "src/value.ts",
-        sha256: "b".repeat(64),
-      }),
-    ])
-    expect(editWithoutVisibleBase.latest("src/value.ts")).toBeUndefined()
+    const withoutVisibleBase = createVisibleFileObservations()
+    withoutVisibleBase.apply({
+      path: "src/value.ts",
+      kind: "edit",
+      complete: false,
+      sha256: "b".repeat(64),
+    })
+    expect(withoutVisibleBase.latest("src/value.ts")).toBeUndefined()
   })
 
-  it("treats visible whole-file writes and edit creations as authorship", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("edit_file", {
-        path: "created-by-edit.ts",
-        sha256: "d".repeat(64),
-        created: true,
-      }),
-      toolProjection("write_file", {
-        path: "new.ts",
-        sha256: "c".repeat(64),
-        created: true,
-      }),
-    ])
+  it("treats whole-file writes and edit creations as authorship", () => {
+    const visible = createVisibleFileObservations()
+    visible.apply({
+      path: "created-by-edit.ts",
+      kind: "edit",
+      complete: false,
+      created: true,
+      sha256: "d".repeat(64),
+    })
+    visible.apply({
+      path: "new.ts",
+      kind: "write",
+      complete: true,
+      sha256: "c".repeat(64),
+    })
     expect(visible.latest("created-by-edit.ts")).toEqual({
       sha256: "d".repeat(64),
       complete: true,
@@ -60,30 +78,20 @@ describe("visible file observations", () => {
     })
   })
 
-  it("keeps live ranged reads revisionless and merges their visible lines", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("grep", {
-        observations: [
-          {
-            path: "src/value.ts",
-            sha256: "a".repeat(64),
-            kind: "grep_snippet",
-            ranges: [{ startLine: 7, endLine: 9 }],
-          },
-        ],
-      }),
-      toolProjection("read_file", {
-        path: "src/value.ts",
-        complete: false,
-        range: { offset: 1, limit: 20, requestedLimit: 20 },
-      }),
-      toolProjection("read_file", {
-        path: "src/value.ts",
-        complete: false,
-        range: { offset: 21, limit: 10, requestedLimit: 10 },
-      }),
-    ])
-
+  it("keeps ranged reads revisionless and merges their visible lines", () => {
+    const visible = createVisibleFileObservations()
+    visible.apply({
+      path: "src/value.ts",
+      kind: "ranged_read",
+      complete: false,
+      ranges: [{ startLine: 1, endLine: 20 }],
+    })
+    visible.apply({
+      path: "src/value.ts",
+      kind: "ranged_read",
+      complete: false,
+      ranges: [{ startLine: 21, endLine: 30 }],
+    })
     expect(visible.latest("src/value.ts")).toEqual({
       complete: false,
       observation: "ranged_read",
@@ -92,29 +100,20 @@ describe("visible file observations", () => {
   })
 
   it("keeps a complete revision when a later live page is applied", () => {
-    const complete = toolProjection("read_file", {
+    const visible = createVisibleFileObservations()
+    visible.apply({
       path: "src/value.ts",
+      kind: "whole_file_read",
       complete: true,
       sha256: "a".repeat(64),
-      range: { offset: 1, limit: 20, requestedLimit: 20 },
     })
-    expect(
-      createVisibleFileObservations([complete]).latest("src/value.ts"),
-    ).toEqual({
-      sha256: "a".repeat(64),
-      complete: true,
-      observation: "whole_file_read",
+    visible.apply({
+      path: "src/value.ts",
+      kind: "ranged_read",
+      complete: false,
+      ranges: [{ startLine: 100, endLine: 119 }],
     })
-
-    const stillComplete = createVisibleFileObservations([
-      complete,
-      toolProjection("read_file", {
-        path: "src/value.ts",
-        complete: false,
-        range: { offset: 100, limit: 20, requestedLimit: 20 },
-      }),
-    ])
-    expect(stillComplete.latest("src/value.ts")).toEqual({
+    expect(visible.latest("src/value.ts")).toEqual({
       sha256: "a".repeat(64),
       complete: true,
       observation: "whole_file_read",
@@ -122,43 +121,27 @@ describe("visible file observations", () => {
     })
   })
 
-  it("does not infer a legacy grant when fileObservation is present but invalid", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("read_file", {
+  it("does not grant file authorship from unstructured or invalid tool output", () => {
+    expect(
+      grantsFromToolOutput({
         path: "src/value.ts",
         complete: true,
         sha256: "a".repeat(64),
-        range: { offset: 1, limit: 20, requestedLimit: 20 },
+      }),
+    ).toEqual([])
+    expect(
+      grantsFromToolOutput({
+        path: "src/value.ts",
+        complete: true,
+        sha256: "a".repeat(64),
         fileObservation: { kind: "not-a-grant" },
       }),
-    ])
-    expect(visible.latest("src/value.ts")).toBeUndefined()
+    ).toEqual([])
   })
 
-  it("applies a later edit grant without requiring a sibling read", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("read_file", {
-        path: "src/value.ts",
-        complete: true,
-        sha256: "a".repeat(64),
-      }),
-    ])
-    visible.apply({
-      path: "src/value.ts",
-      kind: "edit",
-      complete: false,
-      sha256: "b".repeat(64),
-    })
-    expect(visible.latest("src/value.ts")).toEqual({
-      sha256: "b".repeat(64),
-      complete: true,
-      observation: "edit",
-    })
-  })
-
-  it("restores every file revision emitted by a multi-file patch", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("apply_patch", {
+  it("extracts every explicit revision emitted by a multi-file patch", () => {
+    expect(
+      grantsFromToolOutput({
         fileObservations: [
           {
             path: "src/a.ts",
@@ -175,16 +158,21 @@ describe("visible file observations", () => {
           },
         ],
       }),
+    ).toEqual([
+      {
+        path: "src/a.ts",
+        kind: "write",
+        complete: true,
+        created: true,
+        sha256: "a".repeat(64),
+      },
+      {
+        path: "src/b.ts",
+        kind: "edit",
+        complete: true,
+        sha256: "b".repeat(64),
+      },
     ])
-
-    expect(visible.latest("src/a.ts")).toMatchObject({
-      sha256: "a".repeat(64),
-      complete: true,
-    })
-    expect(visible.latest("src/b.ts")).toMatchObject({
-      sha256: "b".repeat(64),
-      complete: true,
-    })
   })
 
   it("restores plural message grants and applies deletion tombstones", () => {
@@ -210,7 +198,6 @@ describe("visible file observations", () => {
         ],
       },
     ])
-
     expect(visible.latest("src/a.ts")).toBeUndefined()
     expect(visible.latest("src/b.ts")).toMatchObject({
       sha256: "b".repeat(64),
@@ -219,14 +206,13 @@ describe("visible file observations", () => {
   })
 
   it("invalidates a revision when a patch delta is not exact", () => {
-    const visible = createVisibleFileObservations([
-      toolProjection("write_file", {
-        path: "destination.txt",
-        sha256: "a".repeat(64),
-        created: true,
-      }),
-    ])
-
+    const visible = createVisibleFileObservations()
+    visible.apply({
+      path: "destination.txt",
+      kind: "write",
+      complete: true,
+      sha256: "a".repeat(64),
+    })
     visible.apply({
       path: "destination.txt",
       kind: "invalidate",
@@ -235,14 +221,3 @@ describe("visible file observations", () => {
     expect(visible.latest("destination.txt")).toBeUndefined()
   })
 })
-
-function toolProjection(
-  name: string,
-  output: Exclude<StoredToolObservation["output"], undefined>,
-): StoredToolObservation {
-  return {
-    name,
-    state: "completed",
-    output,
-  }
-}

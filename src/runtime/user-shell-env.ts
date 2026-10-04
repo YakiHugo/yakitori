@@ -562,8 +562,8 @@ async function captureShellSnapshot(
     return undefined
   }
   const environment = applyShellEnvironmentPolicy(
-    parseNullEnvironment(capture.stdout.subarray(separator + 1)) ?? {},
-    { ...policy, inherit: "all" },
+    parseNullEnvironment(capture.stdout.subarray(separator + 1)),
+    policy,
   )
   delete environment.PWD
   delete environment.OLDPWD

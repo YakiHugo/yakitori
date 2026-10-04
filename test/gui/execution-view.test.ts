@@ -110,6 +110,8 @@ describe("execution view", () => {
         type: "transient",
         event: {
           type: kind === "assistant" ? "assistant.delta" : "reasoning.delta",
+          streamId: "stream_1",
+          offset: 0,
           sessionId,
           turnId: "turn_1",
           itemId,
@@ -150,6 +152,8 @@ describe("execution view", () => {
         type: "transient",
         event: {
           type: kind === "assistant" ? "assistant.delta" : "reasoning.delta",
+          streamId: "stream_1",
+          offset: 7,
           sessionId,
           turnId: "turn_1",
           itemId: kind,
@@ -194,6 +198,8 @@ describe("execution view", () => {
         type: "transient",
         event: {
           type: kind === "reasoning" ? "reasoning.delta" : "assistant.delta",
+          streamId: "stream_1",
+          offset: 0,
           sessionId,
           turnId: "turn_1",
           itemId,
@@ -247,6 +253,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "answer",
@@ -325,6 +333,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",
@@ -336,6 +346,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 3,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",
@@ -389,6 +401,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "reasoning.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "reasoning_1",
@@ -403,6 +417,9 @@ describe("execution view", () => {
         itemId: "reasoning_1",
         turnId: "turn_1",
         text: "Inspecting files",
+        streamId: "stream_1",
+        textOffset: 0,
+        incomplete: false,
         status: "streaming",
         at: "2026-07-24T00:00:00.000Z",
       },
@@ -474,6 +491,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",
@@ -526,6 +545,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",
@@ -781,7 +802,7 @@ describe("execution view", () => {
     ])
   })
 
-  it("does not fabricate permission resolution from a terminal Turn", () => {
+  it("settles pending permission UI on a terminal Turn without inventing an allow or deny decision", () => {
     let state = reduceExecutionView(createExecutionViewState(), {
       type: "transient",
       event: {
@@ -809,11 +830,15 @@ describe("execution view", () => {
       }),
     })
 
-    expect(
-      projectExecutionView(state).entries.some(
-        (entry) => entry.kind === "permission",
-      ),
-    ).toBe(true)
+    const permission = projectExecutionView(state).entries.find(
+      (entry) => entry.kind === "permission",
+    )
+    expect(permission).toMatchObject({
+      kind: "permission",
+      permissionRequestId: "permission_terminal",
+      state: "resolved",
+    })
+    expect(permission).not.toHaveProperty("behavior")
   })
 
   it("extracts structured diff and command results from tool output", () => {
@@ -1360,6 +1385,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "item_streaming",
@@ -1603,6 +1630,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",
@@ -1615,6 +1644,8 @@ describe("execution view", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 5,
         sessionId,
         turnId: "turn_1",
         itemId: "item_1",

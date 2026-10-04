@@ -11,13 +11,15 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import type { JsonValue } from "../../../src/kernel/events.ts"
 import { createEditFileTool } from "../../../src/runtime/tools/edit-file.ts"
 import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
 import {
   createVisibleFileObservations,
-  type StoredToolObservation,
+  grantsFromToolOutput,
+  type FileObservationGrant,
 } from "../../../src/runtime/tools/visible-file-observations.ts"
 import { createWriteFileTool } from "../../../src/runtime/tools/write-file.ts"
 
@@ -124,7 +126,8 @@ describe("bounded file tools", () => {
       const partial = visibleReadObservation({
         path: "revision.txt",
         complete: false,
-        range: { offset: 1, limit: 1, requestedLimit: 1 },
+        kind: "ranged_read",
+        ranges: [{ startLine: 1, endLine: 1 }],
       })
       expect(
         await write.execute(
@@ -276,9 +279,7 @@ describe("bounded file tools", () => {
       expect(created.output).not.toHaveProperty("changedRanges")
       expect(created.output).not.toHaveProperty("optimisticRebase")
 
-      const visibleFileObservations = createVisibleFileObservations([
-        toolProjection("edit_file", created.output),
-      ])
+      const visibleFileObservations = observeToolOutputs(created.output)
       expect(visibleFileObservations.latest("created-by-edit.ts")).toEqual({
         sha256: sha256("const value = 1\n"),
         complete: true,
@@ -425,9 +426,7 @@ describe("bounded file tools", () => {
       if (!unread.ok) return
       expect(unread.output).not.toHaveProperty("observation")
       expect(
-        createVisibleFileObservations([
-          toolProjection("edit_file", unread.output),
-        ]).latest("observed.ts"),
+        observeToolOutputs(unread.output).latest("observed.ts"),
       ).toBeUndefined()
       expect(await readFile(join(workspace, "observed.ts"), "utf8")).toBe(
         "const value = 2\n",
@@ -505,7 +504,8 @@ describe("bounded file tools", () => {
       const visibleFileObservations = visibleReadObservation({
         path: "rebase.txt",
         complete: false,
-        range: { offset: 1, limit: 1, requestedLimit: 1 },
+        kind: "ranged_read",
+        ranges: [{ startLine: 1, endLine: 1 }],
       })
       await writeFile(join(workspace, "rebase.txt"), `${before}external\n`)
 
@@ -546,11 +546,12 @@ describe("bounded file tools", () => {
       const before = "const count = 1\nconst message = “hello”\n"
       await writeFile(join(workspace, path), before)
       const edit = createEditFileTool()
-      const rangedRead = toolProjection("read_file", {
+      const rangedRead: FileObservationGrant = {
         path,
         complete: false,
-        range: { offset: 1, limit: 1, requestedLimit: 1 },
-      })
+        kind: "ranged_read",
+        ranges: [{ startLine: 1, endLine: 1 }],
+      }
       const first = await edit.execute(
         {
           path,
@@ -559,16 +560,16 @@ describe("bounded file tools", () => {
         },
         {
           workspaceRoot: workspace,
-          visibleFileObservations: createVisibleFileObservations([rangedRead]),
+          visibleFileObservations: visibleReadObservation(rangedRead),
         },
       )
       expect(first).toMatchObject({ ok: true })
       if (!first.ok) return
 
-      const visibleFileObservations = createVisibleFileObservations([
-        rangedRead,
-        toolProjection("edit_file", first.output),
-      ])
+      const visibleFileObservations = visibleReadObservation(rangedRead)
+      for (const grant of grantsFromToolOutput(first.output)) {
+        visibleFileObservations.apply(grant)
+      }
       expect(visibleFileObservations.latest(path)).toMatchObject({
         complete: false,
         sha256: expect.any(String),
@@ -827,7 +828,8 @@ describe("bounded file tools", () => {
           visibleFileObservations: visibleReadObservation({
             path: "flags.txt",
             complete: false,
-            range: { offset: 1, limit: 1, requestedLimit: 1 },
+            kind: "ranged_read",
+            ranges: [{ startLine: 1, endLine: 1 }],
           }),
         },
       )
@@ -878,8 +880,14 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("registers edit_file in the default model toolset", () => {
-    const definitions = createToolRegistry().definitions()
+  it("registers edit_file in the default model toolset", async () => {
+    const registry = createToolRegistry()
+    const router = registry.finalize({
+      enabledTrustedTools: new Set(registry.trustedToolNames()),
+      customToolMode: "function",
+      wireProtocol: "eager",
+    })
+    const { definitions } = router
     expect(definitions.map((tool) => tool.name)).toEqual([
       "read_file",
       "view_image",
@@ -945,6 +953,8 @@ describe("bounded file tools", () => {
         expect(String(property.description).trim().length).toBeGreaterThan(0)
       }
     }
+    await router.release()
+    await registry.dispose()
   })
 
   it("accepts absolute paths and symlinks outside the workspace", async () => {
@@ -1205,24 +1215,19 @@ function observedContext(workspaceRoot: string, path: string, content: string) {
       path,
       complete: true,
       sha256: sha256(content),
-      range: { offset: 1, limit: 2_000, requestedLimit: 2_000 },
+      kind: "whole_file_read",
     }),
   }
 }
 
-function visibleReadObservation(
-  output: Exclude<StoredToolObservation["output"], undefined>,
-) {
-  return createVisibleFileObservations([toolProjection("read_file", output)])
+function visibleReadObservation(grant: FileObservationGrant) {
+  const observations = createVisibleFileObservations()
+  observations.apply(grant)
+  return observations
 }
 
-function toolProjection(
-  name: string,
-  output: Exclude<StoredToolObservation["output"], undefined>,
-): StoredToolObservation {
-  return {
-    name,
-    state: "completed",
-    output,
-  }
+function observeToolOutputs(output: JsonValue) {
+  const observations = createVisibleFileObservations()
+  for (const grant of grantsFromToolOutput(output)) observations.apply(grant)
+  return observations
 }

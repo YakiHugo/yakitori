@@ -14,10 +14,19 @@ import {
 } from "../../src/runtime/agent-control.ts"
 import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
-import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
+import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
+import type {
+  ModelRequest,
+  ModelStreamEvent,
+  StreamFn,
+} from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
-import type { ModelClient } from "../../src/runtime/model-provider.ts"
+import {
+  createModelProvider,
+  type ModelClient,
+} from "../../src/runtime/model-provider.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import {
   createStaticModelsManager,
   type ModelsManager,
@@ -25,6 +34,7 @@ import {
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
 import { mcpResult } from "../../src/runtime/tools/mcp-result.ts"
+import { createReadDocumentTool } from "../../src/runtime/tools/read-media.ts"
 import {
   createToolRegistry,
   plainToolName,
@@ -824,6 +834,7 @@ describe("Turn processor", () => {
         const text = responses.shift()
         if (text === undefined) throw new Error("Missing scripted response.")
         return {
+          models: createStaticModelsManager("faux"),
           stream: async function* () {
             yield responseEvent(text)
           },
@@ -1786,30 +1797,27 @@ describe("Turn processor", () => {
 
   it("carries a deferred search hit through the next model request and dispatches it", async () => {
     const registry = createToolRegistry([])
-    expect(
-      registry.registerExternal(
-        {
-          toolName: { namespace: "calendar", name: "search_events" },
-          exposure: "deferred",
-          description: "Search calendar events",
-          inputSchema: {
-            type: "object",
-            properties: { query: { type: "string" } },
-            required: ["query"],
-          },
-          effect: "observe",
-          approvalRequirement: { kind: "none" },
-          async execute() {
-            return {
-              ok: true,
-              output: { events: ["planning"] },
-              content: "planning",
-            }
-          },
+    registry.replaceExternalSource("calendar-server", [
+      {
+        toolName: { namespace: "calendar", name: "search_events" },
+        exposure: "deferred",
+        description: "Search calendar events",
+        inputSchema: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
         },
-        "calendar-server",
-      ),
-    ).toBe(true)
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          return {
+            ok: true,
+            output: { events: ["planning"] },
+            content: "planning",
+          }
+        },
+      },
+    ])
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
@@ -1888,7 +1896,7 @@ describe("Turn processor", () => {
         required: ["replacementQuery"],
       },
     }
-    expect(registry.registerExternal(versionOne, "calendar-server")).toBe(true)
+    registry.replaceExternalSource("calendar-server", [versionOne])
     let callCount = 0
     const stream: StreamFn = async function* (request) {
       callCount += 1
@@ -2002,12 +2010,9 @@ describe("Turn processor", () => {
     model,
   }) => {
     const registry = createToolRegistry([])
-    expect(
-      registry.registerExternal(
-        identifiedDeferredTool("meta result"),
-        "calendar-server",
-      ),
-    ).toBe(true)
+    registry.replaceExternalSource("calendar-server", [
+      identifiedDeferredTool("meta result"),
+    ])
     const visibleToolSets: string[][] = []
     let callCount = 0
     const stream: StreamFn = async function* (request) {
@@ -2066,31 +2071,67 @@ describe("Turn processor", () => {
   })
 
   it("warns once when a Turn uses conservative fallback model metadata", async () => {
-    const provider = createFauxProvider([
-      { content: [{ type: "text", text: "done" }] },
-    ])
-    const runtime = await createRuntime(provider.stream, createToolRegistry([]))
+    const provider = createFauxProvider(
+      ["first", "second"].flatMap((id) => [
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            { type: "tool_call" as const, id, name: "probe", input: {} },
+          ],
+        },
+        { content: [{ type: "text" as const, text: "done" }] },
+      ]),
+    )
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("probe"),
+          description: "Run a second model step",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            return { ok: true, output: "step done", content: "step done" }
+          },
+        },
+      ]),
+    )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({
-      content: { kind: "text", text: "continue safely" },
-      modelSelection: { provider: "future-provider", model: "future-model" },
-    })
-
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
-    let warning: SessionEvent | undefined
-    while (warning?.type !== "runtime.warning") {
-      warning = await thread.nextEvent()
-      if (warning === undefined) throw new Error("Thread ended before warning.")
+    for (const { turnId, text } of [
+      { turnId: "turn_fallback_first", text: "continue safely" },
+      { turnId: "turn_fallback_second", text: "continue again" },
+    ]) {
+      await thread.startIfIdle({
+        submissionId: turnId,
+        content: { kind: "text", text },
+        modelSelection: { provider: "future-provider", model: "future-model" },
+      })
+      const events: SessionEvent[] = []
+      for (;;) {
+        const event = await thread.nextEvent()
+        if (event === undefined)
+          throw new Error("Thread ended before completion.")
+        events.push(event)
+        if (event.type === "turn.completed") break
+      }
+      const warnings = events.filter(
+        (event) =>
+          event.type === "runtime.warning" &&
+          event.message.includes("future-provider/future-model was not found"),
+      )
+      expect(warnings).toEqual([
+        expect.objectContaining({
+          type: "runtime.warning",
+          turnId,
+          message: expect.stringContaining(
+            "future-provider/future-model was not found",
+          ),
+        }),
+      ])
     }
-    expect(warning).toMatchObject({
-      type: "runtime.warning",
-      turnId: expect.any(String),
-      message: expect.stringContaining(
-        "future-provider/future-model was not found",
-      ),
-    })
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(provider.callCount).toBe(4)
   })
 
   it("uses a provider ModelsManager for Step capabilities and capacity validation", async () => {
@@ -2118,6 +2159,7 @@ describe("Turn processor", () => {
       models: () => models,
       startTurn() {
         return {
+          models,
           stream: async function* (request) {
             expect(request.tools.map(({ name }) => name)).not.toContain(
               "exec_command",
@@ -2967,6 +3009,7 @@ describe("Turn processor", () => {
         sessions += 1
         closes[index] = 0
         return {
+          models: createStaticModelsManager("faux"),
           stream() {
             if (index !== 0) {
               return (async function* () {
@@ -3377,7 +3420,17 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     release.resolve()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await waitForValue(() => runtimeErrors.length === 2)
+    await runtime.manager.closeThread(thread.id)
+    const trailingEvents: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) break
+      trailingEvents.push(event)
+    }
+    expect(
+      trailingEvents.filter((event) => event.type === "model.stream"),
+    ).toEqual([])
 
     expect(runtimeErrors).toEqual([
       {
@@ -3698,14 +3751,19 @@ describe("Turn processor", () => {
     expect(thread.snapshot().context.activeContextTokens).toBe(100)
   })
 
-  it("retries provider-overflowed compaction with an older prefix", async () => {
+  it("shrinks overflowed local compaction by removing the oldest input and retaining later history", async () => {
     let normalCalls = 0
     let compactionCalls = 0
     const operationalFailures: TurnProcessorOperationalFailure[] = []
+    const compactionRequests: ModelRequest[] = []
     const stream: StreamFn = async function* (request) {
       const compacting = request.compaction === "local"
       if (compacting) {
         compactionCalls += 1
+        compactionRequests.push({
+          ...request,
+          messages: structuredClone(request.messages),
+        })
         if (compactionCalls === 1) {
           throw new Error("provider context length exceeded")
         }
@@ -3734,6 +3792,45 @@ describe("Turn processor", () => {
     }
 
     expect(compactionCalls).toBe(2)
+    expect(
+      compactionRequests.map((request) =>
+        request.messages.flatMap((message) =>
+          message.role === "user"
+            ? message.content.flatMap((block) =>
+                block.type === "text" ? [block.text] : [],
+              )
+            : [],
+        ),
+      ),
+    ).toEqual([
+      [
+        "one",
+        expect.stringContaining("<environment>"),
+        "two",
+        "three",
+        expect.stringContaining("Write a concise checkpoint"),
+      ],
+      [
+        expect.stringContaining("<environment>"),
+        "two",
+        "three",
+        expect.stringContaining("Write a concise checkpoint"),
+      ],
+    ])
+    for (const request of compactionRequests) {
+      expect(
+        request.messages.flatMap((message) =>
+          message.role === "assistant"
+            ? message.content.flatMap((block) =>
+                block.type === "text" ? [block.text] : [],
+              )
+            : [],
+        ),
+      ).toEqual(["a".repeat(15_000), "a".repeat(15_000), "b".repeat(35_000)])
+    }
+    expect(compactionRequests[1]?.messages.length).toBeLessThan(
+      compactionRequests[0]?.messages.length ?? 0,
+    )
     expect(normalCalls).toBe(4)
     expect(operationalFailures).toEqual([])
     expect(
@@ -4053,23 +4150,68 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
       content: [{ type: "text", text: "Native PDF inspected" }],
     },
   ])
+  const selections = [
+    {
+      provider: "faux",
+      model: "scripted",
+      inputModalities: ["text", "image"],
+      nativePdf: false,
+    },
+    {
+      provider: "future-provider",
+      model: "text-only",
+      inputModalities: ["text"],
+      nativePdf: false,
+    },
+    {
+      provider: "native-pdf-connection",
+      model: "native-pdf-test",
+      inputModalities: ["text", "image"],
+      nativePdf: true,
+    },
+  ] as const
+  const client = createProviderRegistry(
+    Object.fromEntries(
+      selections.map((selection) => [
+        selection.provider,
+        createModelProvider({
+          info: {
+            id: selection.provider,
+            wireApi: "faux",
+            capabilities: {
+              remoteCompaction: false,
+              nativePdf: selection.nativePdf,
+            },
+            retry: { maxAttempts: 1 },
+          },
+          models: createConfiguredModelsManager({
+            provider: selection.provider,
+            models: [
+              {
+                id: selection.model,
+                inputModalities: selection.inputModalities,
+              },
+            ],
+          }),
+          stream: provider.stream,
+        }),
+      ]),
+    ),
+  ).createClient()
   const runtime = await createRuntime(
     provider.stream,
     createToolRegistry([tool]),
     {
+      modelClient: client,
       rolloutAssets: assets,
       modelContextWindowTokens: 100_000,
     },
   )
   const thread = await runtime.createThread()
-  for (const modelSelection of [
-    { provider: "faux", model: "scripted" },
-    { provider: "future-provider", model: "text-only" },
-    { provider: "openai", model: "native-pdf-test" },
-  ]) {
+  for (const { provider, model } of selections) {
     await thread.startIfIdle({
       content: { kind: "text", text: "Read the report" },
-      modelSelection,
+      modelSelection: { provider, model },
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     const completed = await nextLifecycleEvent(thread)
@@ -4091,6 +4233,291 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
   if (durable?.role !== "tool") throw new Error("Missing durable PDF")
   expect(durable.documents?.[0]?.data).toBeUndefined()
   expect(durable.images).toBeUndefined()
+})
+
+it("uses the Turn's native PDF capability for tool reads, retries, history, and compaction", async () => {
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-native-pdf-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(
+    Array.from({ length: 11 }, (_, page) => `Page ${page + 1}`),
+  )
+  const provider = "anthropic-work"
+  const model = "claude-sonnet-4-6"
+  const requests: ModelRequest[] = []
+  const stream: StreamFn = async function* (request) {
+    requests.push(request)
+    if (requests.length === 1) {
+      yield {
+        type: "output_item",
+        itemId: "read_pdf",
+        content: [
+          {
+            type: "tool_call",
+            id: "call_pdf",
+            name: "read_document",
+            input: { path: "report.pdf" },
+          },
+        ],
+      }
+      yield {
+        type: "failure",
+        failure: {
+          kind: "stream_disconnected",
+          stage: "response_body",
+          provider,
+          wireApi: "anthropic_messages",
+          message: "Disconnected after the completed tool call",
+        },
+      }
+      return
+    }
+    yield responseEvent(
+      request.compaction === "local" ? "PDF checkpoint" : "PDF inspected",
+    )
+  }
+  const client = createProviderRegistry({
+    [provider]: createModelProvider({
+      info: {
+        id: provider,
+        wireApi: "anthropic_messages",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+        retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
+      },
+      models: createConfiguredModelsManager({
+        provider,
+        catalogProvider: "anthropic",
+        wireApi: "anthropic_messages",
+        models: [{ id: model }],
+      }),
+      stream,
+    }),
+  }).createClient()
+  const runtime = await createRuntime(
+    stream,
+    createToolRegistry([createReadDocumentTool()]),
+    {
+      provider,
+      model,
+      modelClient: client,
+      rolloutAssets: assets,
+    },
+  )
+  await writeFile(join(runtime.root, "report.pdf"), bytes)
+  const thread = await runtime.createThread()
+  for (const text of ["Read the report", "Review the same report"]) {
+    await thread.startIfIdle({ content: { kind: "text", text } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect(await nextLifecycleEvent(thread)).toMatchObject({
+      type: "turn.completed",
+    })
+  }
+  const result = thread
+    .snapshot()
+    .context.history.find(
+      ({ item }) => item.role === "tool" && item.toolCallId === "call_pdf",
+    )?.item
+  expect(result).toMatchObject({ documents: [{ file: expect.any(Object) }] })
+  if (result?.role !== "tool") throw new Error("Missing retained PDF")
+  expect(result.documents?.[0]?.data).toBeUndefined()
+  await thread.compact("compact-pdf")
+  expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+  const completed = await nextLifecycleEvent(thread)
+  expect(completed, JSON.stringify(completed)).toMatchObject({
+    type: "turn.completed",
+  })
+  expect(requests).toHaveLength(4)
+  expect(requests[1]?.attempt?.number).toBe(2)
+  expect(requests[3]?.compaction).toBe("local")
+  for (const request of requests.slice(1)) {
+    expect(request.target.provider).toBe(provider)
+    const result = request.messages.find((message) => message.role === "tool")
+    expect(result).toMatchObject({
+      content: expect.stringContaining("(11 pages)"),
+      documents: [{ type: "document", data: bytes.toString("base64") }],
+    })
+    expect(result).not.toHaveProperty("images")
+  }
+  expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+    "PDF checkpoint",
+  )
+})
+
+it("keeps a Turn's model directory and transport together across provider replacement during refresh", async () => {
+  const refreshEntered = deferred<void>()
+  const releaseRefresh = deferred<void>()
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-provider-refresh-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(Array.from({ length: 11 }, () => "Retained report"))
+  const oldTransport = createFauxProvider([
+    {
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        {
+          type: "tool_call",
+          id: "call_pdf",
+          name: "read_document",
+          input: { path: "report.pdf" },
+        },
+      ],
+    },
+    { content: [{ type: "text", text: "old transport" }] },
+  ])
+  const newTransport = createFauxProvider([
+    { content: [{ type: "text", text: "new transport" }] },
+  ])
+  const oldModels = createConfiguredModelsManager({
+    provider: "personal",
+    models: [
+      {
+        id: "pdf-model",
+        inputModalities: ["text", "image"],
+        contextWindowTokens: 100_000,
+      },
+    ],
+  })
+  const registry = createProviderRegistry({
+    personal: createModelProvider({
+      info: {
+        id: "personal",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+        retry: { maxAttempts: 1 },
+      },
+      models: {
+        ...oldModels,
+        async refresh() {
+          refreshEntered.resolve()
+          await releaseRefresh.promise
+        },
+      },
+      stream: oldTransport.stream,
+    }),
+  })
+  const runtime = await createRuntime(
+    oldTransport.stream,
+    createToolRegistry([createReadDocumentTool()]),
+    {
+      provider: "personal",
+      model: "pdf-model",
+      modelClient: registry.createClient(),
+      rolloutAssets: assets,
+    },
+  )
+  await writeFile(join(runtime.root, "report.pdf"), bytes)
+  const thread = await runtime.createThread()
+  await thread.startIfIdle({
+    content: { kind: "text", text: "Read the report" },
+  })
+  await refreshEntered.promise
+  registry.replace({
+    personal: createModelProvider({
+      info: {
+        id: "personal",
+        wireApi: "openai_chat_completions",
+        capabilities: { remoteCompaction: false, nativePdf: false },
+        retry: { maxAttempts: 1 },
+      },
+      models: createConfiguredModelsManager({
+        provider: "personal",
+        models: [
+          {
+            id: "pdf-model",
+            inputModalities: ["text"],
+            contextWindowTokens: 100_000,
+          },
+        ],
+      }),
+      stream: newTransport.stream,
+    }),
+  })
+  releaseRefresh.resolve()
+  await expect
+    .poll(() => thread.agentStatus)
+    .toEqual({ completed: "old transport" })
+  expect(oldTransport.callCount).toBe(2)
+  expect(newTransport.callCount).toBe(0)
+  expect(
+    oldTransport.requests[1]?.messages.find(
+      (message) => message.role === "tool",
+    ),
+  ).toMatchObject({
+    documents: [{ data: bytes.toString("base64") }],
+    content: expect.stringContaining("(11 pages)"),
+  })
+  await thread.startIfIdle({ content: { kind: "text", text: "Continue" } })
+  await expect
+    .poll(() => thread.agentStatus)
+    .toEqual({ completed: "new transport" })
+  expect(newTransport.callCount).toBe(1)
+  const result = newTransport.requests[0]?.messages.find(
+    (message) => message.role === "tool",
+  )
+  expect(result).not.toHaveProperty("documents")
+  expect(result).not.toHaveProperty("images")
+})
+
+it("closes the captured Turn when its model directory cannot refresh", async () => {
+  let closes = 0
+  let sampled = false
+  const provider = createModelProvider({
+    info: {
+      id: "faux",
+      wireApi: "faux",
+      capabilities: { remoteCompaction: false },
+    },
+    models: {
+      ...createStaticModelsManager("faux"),
+      async refresh() {
+        throw new Error("Model directory refresh failed")
+      },
+    },
+    stream: async function* () {
+      sampled = true
+      yield responseEvent("unexpected")
+    },
+  })
+  const registry = createProviderRegistry({
+    faux: {
+      ...provider,
+      startTurn(policy) {
+        const turn = provider.startTurn(policy)
+        return {
+          ...turn,
+          close() {
+            closes += 1
+          },
+        }
+      },
+    },
+  })
+  const runtime = await createRuntime(
+    () => {
+      throw new Error("Fallback must not run")
+    },
+    createToolRegistry([]),
+    { modelClient: registry.createClient() },
+  )
+  const thread = await runtime.createThread()
+  await thread.startIfIdle({ content: { kind: "text", text: "Start" } })
+  await expect
+    .poll(() => thread.agentStatus)
+    .toEqual({ errored: "Model directory refresh failed" })
+  expect(sampled).toBe(false)
+  expect(closes).toBe(1)
+  await runtime.manager.shutdown()
+  expect(closes).toBe(1)
 })
 
 async function createRuntime(

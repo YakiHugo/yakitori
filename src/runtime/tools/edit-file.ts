@@ -91,7 +91,7 @@ export function createEditFileTool(
             : written
         }
         const baseOutput = asJsonObject(written.output)
-        const createdGrant = writeGrant(baseOutput, "edit", { created: true })
+        const createdGrant = editGrant(baseOutput, { created: true })
         const result = {
           ok: true,
           output: {
@@ -283,15 +283,8 @@ export function createEditFileTool(
         )
       }
 
-      const baseOutput =
-        typeof written.output === "object" &&
-        written.output !== null &&
-        !Array.isArray(written.output)
-          ? written.output
-          : {}
-      const editGrant = writeGrant(asJsonObject(written.output), "edit", {
-        optimisticRebase,
-      })
+      const baseOutput = asJsonObject(written.output)
+      const grant = editGrant(baseOutput, { optimisticRebase })
       const output = {
         ...baseOutput,
         replacementCount: matches.length,
@@ -309,7 +302,7 @@ export function createEditFileTool(
                 editWithinObservedRanges,
               },
             }),
-        ...(editGrant === undefined ? {} : { fileObservation: editGrant }),
+        ...(grant === undefined ? {} : { fileObservation: grant }),
       }
       return {
         ok: true,
@@ -327,18 +320,17 @@ function asJsonObject(value: unknown): JsonObject {
   return {}
 }
 
-function writeGrant(
+function editGrant(
   output: JsonObject,
-  kind: "edit" | "write",
-  flags: { readonly created?: boolean; readonly optimisticRebase?: boolean },
+  flags: Readonly<{ created?: boolean; optimisticRebase?: boolean }>,
 ): JsonObject | undefined {
   const path = output.path
   const sha256 = output.sha256
   if (typeof path !== "string" || typeof sha256 !== "string") return undefined
   return {
     path,
-    kind,
-    complete: flags.created === true || kind === "write",
+    kind: "edit",
+    complete: flags.created === true,
     sha256,
     ...(flags.created === true ? { created: true } : {}),
     ...(flags.optimisticRebase === true ? { optimisticRebase: true } : {}),

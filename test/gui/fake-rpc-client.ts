@@ -165,6 +165,17 @@ export class FakeRpcClient {
     }
   }
 
+  readonly providerChangeListeners = new Set<() => void>()
+  subscribeToProviderChanges(listener: () => void): () => void {
+    this.providerChangeListeners.add(listener)
+    return () => {
+      this.providerChangeListeners.delete(listener)
+    }
+  }
+  emitProviderChanged(): void {
+    for (const listener of this.providerChangeListeners) listener()
+  }
+
   readonly mcpStatusChangedListeners = new Set<
     (notification: McpStatusChangedNotification) => void
   >()

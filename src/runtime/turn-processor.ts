@@ -29,6 +29,7 @@ import {
   isContextOverflowError,
   trimRemoteCompactionToolTail,
 } from "./compaction.ts"
+import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
@@ -56,7 +57,7 @@ import {
   retainRemoteCompactionMessages,
 } from "./model-context.ts"
 import { adaptImagesForModel } from "./model-images.ts"
-import type { ModelClient } from "./model-provider.ts"
+import type { ModelClient, ModelClientSession } from "./model-provider.ts"
 import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
@@ -71,6 +72,8 @@ import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
+  resolveModelRequestPolicy,
+  type ResolvedStepConfiguration,
   SessionConfiguration,
 } from "./session-configuration.ts"
 import {
@@ -461,27 +464,12 @@ async function executeTurn(input: {
   ) => void
 }): Promise<TurnCompletion | undefined> {
   const metadata = input.runtime.snapshot().metadata
-  const models = input.options.modelClient?.models(
-    input.context.selection.provider,
-  )
-  await models?.refresh()
-  const requestSettings = SessionConfiguration.restore(
-    input.context.configuration,
-    models,
-  ).resolveStep(input.context.selection, models)
-  const turn = createTurnContext({
-    requestSettings,
-    mateId: requireValue(metadata.mateId, "Mate id"),
-    mateRevisionId: requireValue(metadata.mateRevisionId, "Mate revision id"),
-  })
-  if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
-    input.runtime.emitWarning(
-      `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
-    )
-  }
   const modelSession = input.options.modelClient?.startTurn(
-    turn.requestSettings.target.provider,
-    turn.requestSettings.modelRequestPolicy,
+    input.context.selection.provider,
+    resolveModelRequestPolicy(
+      input.context.configuration.modelTransport,
+      input.context.selection.provider,
+    ),
   )
   let closePromise: Promise<void> | undefined
   const closeModelSession = () => {
@@ -489,49 +477,65 @@ async function executeTurn(input: {
     return closePromise
   }
   input.setCloseModelSession(closeModelSession)
-  const stream = modelSession?.stream ?? input.options.stream
-  if (stream === undefined) {
-    throw new Error("Turn has no model stream.")
-  }
-  let initialInputHandled = false
-  const admitInitialInput = async (): Promise<boolean> => {
-    if (initialInputHandled) return true
-    initialInputHandled = true
-    const promptHook =
-      input.input.goalId === undefined
-        ? await input.options.hookRunner?.run({
-            event: HookEvent.UserPromptSubmit,
-            payload: {
-              session_id: metadata.id,
-              turn_id: input.input.submissionId,
-              prompt: input.input.content.text,
-            },
-            cwd: requireValue(metadata.workingDirectory, "Working directory"),
-            signal: input.signal,
-          })
-        : undefined
-    if (promptHook?.continue === false) {
+  try {
+    const models = modelSession?.models
+    await models?.refresh()
+    const requestSettings = SessionConfiguration.restore(
+      input.context.configuration,
+      models,
+    ).resolveStep(input.context.selection, models)
+    const turn = createTurnContext({
+      requestSettings,
+      mateId: requireValue(metadata.mateId, "Mate id"),
+      mateRevisionId: requireValue(metadata.mateRevisionId, "Mate revision id"),
+    })
+    if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
+      input.runtime.emitWarning(
+        `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using generic model settings${turn.requestSettings.modelInfo.fileEditingToolType === "none" ? "; file editing tools are unavailable" : " and coding tools"}.`,
+      )
+    }
+    const stream = modelSession?.stream ?? input.options.stream
+    if (stream === undefined) {
+      throw new Error("Turn has no model stream.")
+    }
+    let initialInputHandled = false
+    const admitInitialInput = async (): Promise<boolean> => {
+      if (initialInputHandled) return true
+      initialInputHandled = true
+      const promptHook =
+        input.input.goalId === undefined
+          ? await input.options.hookRunner?.run({
+              event: HookEvent.UserPromptSubmit,
+              payload: {
+                session_id: metadata.id,
+                turn_id: input.input.submissionId,
+                prompt: input.input.content.text,
+              },
+              cwd: requireValue(metadata.workingDirectory, "Working directory"),
+              signal: input.signal,
+            })
+          : undefined
+      if (promptHook?.continue === false) {
+        await recordHookContext(
+          input.runtime,
+          input.input.submissionId,
+          promptHook.additionalContext ?? [],
+        )
+        return false
+      }
+      await input.runtime.recordInitialInput()
       await recordHookContext(
         input.runtime,
         input.input.submissionId,
-        promptHook.additionalContext ?? [],
+        promptHook?.additionalContext ?? [],
       )
-      return false
+      return true
     }
-    await input.runtime.recordInitialInput()
-    await recordHookContext(
-      input.runtime,
-      input.input.submissionId,
-      promptHook?.additionalContext ?? [],
-    )
-    return true
-  }
-  try {
     return await executeTurnModelLoop(
       input,
       turn,
       stream,
-      modelSession?.remoteCompaction ?? false,
+      modelSession,
       admitInitialInput,
     )
   } catch (error) {
@@ -567,9 +571,12 @@ async function executeTurnModelLoop(
   input: Parameters<typeof executeTurn>[0],
   turn: ReturnType<typeof createTurnContext>,
   stream: StreamFn,
-  remoteCompaction: boolean,
+  modelSession: ModelClientSession | undefined,
   admitInitialInput: () => Promise<boolean>,
 ): Promise<TurnCompletion | undefined> {
+  const remoteCompaction = modelSession?.remoteCompaction ?? false
+  const wireApi = modelSession?.wireApi
+  const nativePdf = modelSession?.nativePdf === true
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
@@ -647,6 +654,8 @@ async function executeTurnModelLoop(
       step = captureStepContext({
         registry: input.toolRegistry,
         configuration: turn.requestSettings,
+        ...(wireApi === undefined ? {} : { wireApi }),
+        nativePdf,
       })
       const configuration = step.configuration
       const toolPlan = step.toolRouter
@@ -805,13 +814,12 @@ async function executeTurnModelLoop(
         })
         return
       }
-      const foreignCheckpoint = beforeStep.context.history
+      const nativeCheckpoints = beforeStep.context.history
         .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
-        .find(
-          (block) =>
-            block.type === "compaction" &&
-            block.provider !== step?.target.provider,
-        )
+        .filter((block) => block.type === "compaction")
+      const foreignCheckpoint = nativeCheckpoints.find(
+        (block) => block.provider !== step?.target.provider,
+      )
       const previousModel = beforeStep.context.previousModel
       const sourceSelection =
         foreignCheckpoint?.type === "compaction"
@@ -830,93 +838,127 @@ async function executeTurnModelLoop(
             : undefined
       if (sourceSelection !== undefined) {
         const client = input.options.modelClient
-        if (client === undefined && foreignCheckpoint !== undefined) {
+        if (
+          foreignCheckpoint !== undefined &&
+          !client?.hasProvider(sourceSelection.provider)
+        ) {
           throw new Error(
-            "Cross-provider continuation requires the native checkpoint's provider client.",
+            `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
           )
         }
-        const sourceModels = client?.models(sourceSelection.provider)
-        await sourceModels?.refresh()
-        const {
-          modelContextWindowTokens: _contextWindowOverride,
-          ...sourceSnapshot
-        } = input.context.configuration
-        const sourceConfiguration = SessionConfiguration.restore(
-          {
-            ...(sourceSelection.provider === step.target.provider
-              ? input.context.configuration
-              : sourceSnapshot),
-            defaultTarget: sourceSelection,
-          },
-          sourceModels,
-        ).resolveStep(sourceSelection, sourceModels)
-        const oldWindow =
-          sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
-        const newWindow =
-          configuration.modelCapacity?.effectiveContextWindowTokens
-        const activeTokens = admission.activeTokens
-        const hashChanged =
-          previousModel?.provider === step.target.provider &&
-          previousModel.compactionHash !== undefined &&
-          step.modelInfo.compactionHash !== undefined &&
-          previousModel.compactionHash !== step.modelInfo.compactionHash
-        const downshift =
-          (sourceSelection.model !== step.target.model ||
-            sourceSelection.provider !== step.target.provider) &&
-          oldWindow !== undefined &&
-          newWindow !== undefined &&
-          oldWindow > newWindow &&
-          (activeTokens >= newWindow ||
-            (configuration.autoCompact.scope === "total" &&
-              configuration.autoCompact.limitTokens !== undefined &&
-              activeTokens > configuration.autoCompact.limitTokens))
-        if (foreignCheckpoint !== undefined || hashChanged || downshift) {
-          const sourceStep = captureStepContext({
-            registry: input.toolRegistry,
-            configuration: sourceConfiguration,
-          })
-          const sourceSession = client?.startTurn(
-            sourceSelection.provider,
-            sourceStep.configuration.modelRequestPolicy,
-          )
+        const sourceSession =
+          sourceSelection.provider === step.target.provider
+            ? modelSession
+            : client?.startTurn(
+                sourceSelection.provider,
+                resolveModelRequestPolicy(
+                  input.context.configuration.modelTransport,
+                  sourceSelection.provider,
+                ),
+              )
+        try {
+          const sourceModels = sourceSession?.models
+          await sourceModels?.refresh()
+          const {
+            modelContextWindowTokens: _contextWindowOverride,
+            ...sourceSnapshot
+          } = input.context.configuration
+          let sourceConfiguration: ResolvedStepConfiguration | undefined
           try {
-            try {
-              await compactLiveHistory({
-                runtime: input.runtime,
-                turnId: input.input.submissionId,
-                step: sourceStep,
-                worldState,
-                history: compactionHistory,
-                injectWorldState: modelCalls !== 0,
-                stream: sourceSession?.stream ?? stream,
-                remoteCompaction:
-                  sourceSelection.provider === step.target.provider &&
-                  (sourceSession?.remoteCompaction ?? false),
-                ...(sourceSelection.provider === step.target.provider &&
-                step.target.provider === "codex" &&
-                sourceSelection.model !== step.target.model &&
-                remoteCompaction
-                  ? { fallback: { step, stream } }
-                  : {}),
-                signal: input.signal,
-                rolloutAssets: input.options.rolloutAssets,
-                usages,
-                onModelTiming: onCompactionModelTiming,
-                rolloutBudget: budget,
-                onOperationalFailure: input.options.onOperationalFailure,
-                ...(input.options.hookRunner === undefined
-                  ? {}
-                  : { hookRunner: input.options.hookRunner }),
-                setActiveStream: input.setActiveStream,
-              })
-            } finally {
-              await sourceStep.toolRouter.release()
+            sourceConfiguration = SessionConfiguration.restore(
+              {
+                ...(sourceSelection.provider === step.target.provider
+                  ? input.context.configuration
+                  : sourceSnapshot),
+                defaultTarget: sourceSelection,
+              },
+              sourceModels,
+            ).resolveStep(sourceSelection, sourceModels)
+          } catch (error) {
+            if (!(error instanceof ModelNotConfiguredError)) throw error
+            if (
+              nativeCheckpoints.some(
+                (block) =>
+                  block.provider === sourceSelection.provider &&
+                  block.model === sourceSelection.model,
+              )
+            ) {
+              throw new Error(
+                `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
+                { cause: error },
+              )
             }
-          } finally {
-            await sourceSession?.close()
+            // Ordinary history is portable. A removed prior model cannot prepare
+            // a checkpoint; let the selected model's admission use its transport.
           }
-          compactedAtModelCall = modelCalls
-          continue
+          if (sourceConfiguration !== undefined) {
+            const oldWindow =
+              sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
+            const newWindow =
+              configuration.modelCapacity?.effectiveContextWindowTokens
+            const activeTokens = admission.activeTokens
+            const hashChanged =
+              previousModel?.provider === step.target.provider &&
+              previousModel.compactionHash !== undefined &&
+              step.modelInfo.compactionHash !== undefined &&
+              previousModel.compactionHash !== step.modelInfo.compactionHash
+            const downshift =
+              (sourceSelection.model !== step.target.model ||
+                sourceSelection.provider !== step.target.provider) &&
+              oldWindow !== undefined &&
+              newWindow !== undefined &&
+              oldWindow > newWindow &&
+              (activeTokens >= newWindow ||
+                (configuration.autoCompact.scope === "total" &&
+                  configuration.autoCompact.limitTokens !== undefined &&
+                  activeTokens > configuration.autoCompact.limitTokens))
+            if (foreignCheckpoint !== undefined || hashChanged || downshift) {
+              const sourceStep = captureStepContext({
+                registry: input.toolRegistry,
+                configuration: sourceConfiguration,
+                ...(sourceSession?.wireApi === undefined
+                  ? {}
+                  : { wireApi: sourceSession.wireApi }),
+                nativePdf: sourceSession?.nativePdf === true,
+              })
+              try {
+                await compactLiveHistory({
+                  runtime: input.runtime,
+                  turnId: input.input.submissionId,
+                  step: sourceStep,
+                  worldState,
+                  history: compactionHistory,
+                  injectWorldState: modelCalls !== 0,
+                  stream: sourceSession?.stream ?? stream,
+                  remoteCompaction:
+                    sourceSelection.provider === step.target.provider &&
+                    (sourceSession?.remoteCompaction ?? false),
+                  ...(sourceSelection.provider === step.target.provider &&
+                  step.target.provider === "codex" &&
+                  sourceSelection.model !== step.target.model &&
+                  remoteCompaction
+                    ? { fallback: { step, stream } }
+                    : {}),
+                  signal: input.signal,
+                  rolloutAssets: input.options.rolloutAssets,
+                  usages,
+                  onModelTiming: onCompactionModelTiming,
+                  rolloutBudget: budget,
+                  onOperationalFailure: input.options.onOperationalFailure,
+                  ...(input.options.hookRunner === undefined
+                    ? {}
+                    : { hookRunner: input.options.hookRunner }),
+                  setActiveStream: input.setActiveStream,
+                })
+              } finally {
+                await sourceStep.toolRouter.release()
+              }
+              compactedAtModelCall = modelCalls
+              continue
+            }
+          }
+        } finally {
+          if (sourceSession !== modelSession) await sourceSession?.close()
         }
       }
       if (
@@ -1093,12 +1135,7 @@ async function executeTurnModelLoop(
               executionStep.modelInfo,
             ).messages,
             input.options.rolloutAssets,
-            {
-              nativePdf:
-                executionStep.target.provider === "openai" ||
-                executionStep.target.provider === "anthropic",
-              images: executionStep.modelInfo.inputModalities.includes("image"),
-            },
+            executionStep.documentReading,
             input.signal,
           )
         },
@@ -1113,12 +1150,7 @@ async function executeTurnModelLoop(
         messages: await resolveRolloutAssetMedia(
           adapted.messages,
           input.options.rolloutAssets,
-          {
-            nativePdf:
-              step.target.provider === "openai" ||
-              step.target.provider === "anthropic",
-            images: step.modelInfo.inputModalities.includes("image"),
-          },
+          step.documentReading,
           input.signal,
         ),
         tools: toolPlan.modelDefinitions,
@@ -1205,13 +1237,7 @@ async function executeTurnModelLoop(
               turnId: input.input.submissionId,
               workspaceRoot,
               signal: input.signal,
-              documentReading: {
-                nativePdf:
-                  executionStep.target.provider === "openai" ||
-                  executionStep.target.provider === "anthropic",
-                images:
-                  executionStep.modelInfo.inputModalities.includes("image"),
-              },
+              documentReading: executionStep.documentReading,
               toolPlan,
               permissionGate: input.permissionGate,
               recordToolStarted: input.runtime.recordToolStarted,
@@ -1258,7 +1284,7 @@ async function executeTurnModelLoop(
                 )
               const fileObservations =
                 toolContentTruncated !== true
-                  ? toolFileObservations(item.name, result)
+                  ? toolFileObservations(result)
                   : []
               const resultItem = envelope(input.input.submissionId, {
                 role: "tool",
@@ -2010,12 +2036,7 @@ async function compactLiveHistory(
           compactionStep.modelInfo,
         ).messages,
         input.rolloutAssets,
-        {
-          nativePdf:
-            compactionStep.target.provider === "openai" ||
-            compactionStep.target.provider === "anthropic",
-          images: compactionStep.modelInfo.inputModalities.includes("image"),
-        },
+        compactionStep.documentReading,
         input.signal,
       )
       try {
@@ -2608,10 +2629,7 @@ async function executePreparedTool(
         }
       }
       if (input.toolPlan.get(prepared.invocation.name)?.effect !== "observe") {
-        const observations = toolFileObservations(
-          prepared.invocation.name,
-          result,
-        )
+        const observations = toolFileObservations(result)
         for (const observation of observations) {
           input.visibleFileObservations.apply(observation)
         }
@@ -2692,10 +2710,8 @@ async function waitForToolReadiness(
   }
 }
 
-function toolFileObservations(name: string, result: ToolExecutionResult) {
-  return result.output === undefined
-    ? []
-    : grantsFromToolOutput(name, result.output)
+function toolFileObservations(result: ToolExecutionResult) {
+  return result.output === undefined ? [] : grantsFromToolOutput(result.output)
 }
 
 async function recordSteering(

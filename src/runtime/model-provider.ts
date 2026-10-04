@@ -15,6 +15,8 @@ import {
 
 export type ModelProviderCapabilities = Readonly<{
   remoteCompaction: boolean
+  // Opt in only for an endpoint whose native PDF support is known.
+  nativePdf?: boolean
 }>
 
 export type ModelProviderInfo = Readonly<{
@@ -26,13 +28,17 @@ export type ModelProviderInfo = Readonly<{
 }>
 
 export type ModelClientSession = {
+  // Captured with this Turn's transport and capabilities, including after reload.
+  readonly models: ModelsManager
+  readonly wireApi?: ModelWireApi
   readonly remoteCompaction?: boolean
+  readonly nativePdf?: boolean
   readonly stream: StreamFn
   close(): void | Promise<void>
 }
 
-// Session-scoped transport owner. It retains provider clients while every
-// startTurn call creates a fresh Turn-scoped connection/retry state owner.
+// Session-scoped transport owner. Each startTurn call captures a provider and
+// creates fresh Turn-scoped connection/retry state.
 export type ModelClient = {
   hasProvider(provider: string): boolean
   models(provider: string): ModelsManager
@@ -40,15 +46,10 @@ export type ModelClient = {
   close(): void | Promise<void>
 }
 
-export type ModelProviderClient = {
-  startTurn(policy?: ModelRequestPolicy): ModelClientSession
-  close(): void | Promise<void>
-}
-
 export type ModelProvider = {
   readonly info: ModelProviderInfo
   readonly models: ModelsManager
-  createClient(): ModelProviderClient
+  startTurn(policy?: ModelRequestPolicy): ModelClientSession
 }
 
 export type ModelAttemptContext = NonNullable<ModelRequest["attempt"]>
@@ -100,69 +101,65 @@ export function createModelProvider(
   return {
     info: input.info,
     models,
-    createClient() {
+    startTurn(policy) {
+      const providerStream: StreamFn =
+        "createTurnStream" in input
+          ? input.createTurnStream()
+          : "createAttemptStream" in input
+            ? (request) =>
+                input.createAttemptStream(
+                  request.attempt ?? { number: 1, maxAttempts: 1 },
+                )(request)
+            : input.stream
+      // Text deltas remain provisional. A completed output item commits
+      // history and may start tools, so retries must rebuild from that history.
+      const stream = createModelRequestStream(providerStream, {
+        wireApi: input.info.wireApi,
+        ...(input.info.streamIdleTimeoutMs === undefined
+          ? {}
+          : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
+        ...input.info.retry,
+        ...policy,
+      })
+      // Codex remote v2 permits at most two stream retries, including
+      // failures after provisional output. No history is installed yet.
+      const remoteStream = createModelRequestStream(providerStream, {
+        wireApi: input.info.wireApi,
+        ...(input.info.streamIdleTimeoutMs === undefined
+          ? {}
+          : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
+        ...input.info.retry,
+        ...policy,
+        maxAttempts: Math.min(
+          policy?.maxAttempts ?? input.info.retry?.maxAttempts ?? 4,
+          3,
+        ),
+        rateLimitMaxAttempts: Math.min(
+          policy?.rateLimitMaxAttempts ??
+            input.info.retry?.rateLimitMaxAttempts ??
+            2,
+          3,
+        ),
+      })
       return {
-        startTurn(policy) {
-          const providerStream: StreamFn =
-            "createTurnStream" in input
-              ? input.createTurnStream()
-              : "createAttemptStream" in input
-                ? (request) =>
-                    input.createAttemptStream(
-                      request.attempt ?? { number: 1, maxAttempts: 1 },
-                    )(request)
-                : input.stream
-          // Text deltas remain provisional. A completed output item commits
-          // history and may start tools, so retries must rebuild from that history.
-          const stream = createModelRequestStream(providerStream, {
-            wireApi: input.info.wireApi,
-            ...(input.info.streamIdleTimeoutMs === undefined
-              ? {}
-              : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
-            ...input.info.retry,
-            ...policy,
-          })
-          // Codex remote v2 permits at most two stream retries, including
-          // failures after provisional output. No history is installed yet.
-          const remoteStream = createModelRequestStream(providerStream, {
-            wireApi: input.info.wireApi,
-            ...(input.info.streamIdleTimeoutMs === undefined
-              ? {}
-              : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
-            ...input.info.retry,
-            ...policy,
-            maxAttempts: Math.min(
-              policy?.maxAttempts ?? input.info.retry?.maxAttempts ?? 4,
-              3,
-            ),
-            rateLimitMaxAttempts: Math.min(
-              policy?.rateLimitMaxAttempts ??
-                input.info.retry?.rateLimitMaxAttempts ??
-                2,
-              3,
-            ),
-          })
-          return {
-            remoteCompaction: input.info.capabilities.remoteCompaction,
-            stream(request) {
-              requireTargetProvider(input.info.id, request.target)
-              if (
-                request.compaction === "remote_v2" &&
-                !input.info.capabilities.remoteCompaction
-              ) {
-                throw new Error(
-                  `Provider ${input.info.id} does not support remote compaction.`,
-                )
-              }
-              return (
-                request.compaction === "remote_v2" ? remoteStream : stream
-              )({
-                ...request,
-                continuationScope,
-              })
-            },
-            close() {},
+        models,
+        wireApi: input.info.wireApi,
+        remoteCompaction: input.info.capabilities.remoteCompaction,
+        nativePdf: input.info.capabilities.nativePdf === true,
+        stream(request) {
+          requireTargetProvider(input.info.id, request.target)
+          if (
+            request.compaction === "remote_v2" &&
+            !input.info.capabilities.remoteCompaction
+          ) {
+            throw new Error(
+              `Provider ${input.info.id} does not support remote compaction.`,
+            )
           }
+          return (request.compaction === "remote_v2" ? remoteStream : stream)({
+            ...request,
+            continuationScope,
+          })
         },
         close() {},
       }

@@ -350,6 +350,8 @@ it("shows retry activity before any output and restores the activity heading on 
           type: "transient",
           event: {
             type: "assistant.delta",
+            streamId: "stream_1",
+            offset: 0,
             sessionId: "session_1",
             turnId: "turn_1",
             itemId: "answer",
@@ -415,7 +417,11 @@ it("keeps failures and intent updates visible while reasoning is collapsed", () 
     },
   })
   render(<Transcript />)
-  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(
+    screen
+      .getByRole("button", { name: "Worked for 1m 49s" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false")
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })

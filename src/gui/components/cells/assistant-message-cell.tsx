@@ -1,7 +1,8 @@
-import type { ExecutionEntry } from "../../execution-view.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
+import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { MarkdownView } from "../markdown.tsx"
+import { LiveTextNotice } from "./live-text-notice.tsx"
 
 export function AssistantMessageCell({
   entry,
@@ -20,6 +21,7 @@ export function AssistantMessageCell({
         ...(sessionId ? { sessionId } : {}),
       })}
     >
+      <LiveTextNotice entry={entry} />
       <MarkdownView
         text={entry.text}
         streaming={entry.status === "streaming"}

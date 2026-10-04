@@ -3,7 +3,6 @@ import { isModelMessage } from "../../../src/kernel/events.ts"
 import {
   canonicalToolName,
   createToolRegistry,
-  namespacedToolName,
   plainToolName,
 } from "../../../src/runtime/tools/registry.ts"
 import type { ToolName } from "../../../src/runtime/tools/tool-name.ts"
@@ -64,37 +63,33 @@ describe("finalized tool router", () => {
     )
   })
 
-  it("keeps namespaced identity, source, and exposure in one router snapshot", async () => {
+  it("advertises direct tools, searches deferred tools, and omits hidden tools", async () => {
     const registry = createToolRegistry([])
     const direct = identifiedTool(
-      namespacedToolName("calendar", "create_event"),
+      { namespace: "calendar", name: "create_event" },
       "direct",
     )
     const deferred = identifiedTool(
-      namespacedToolName("calendar", "search_events"),
+      { namespace: "calendar", name: "search_events" },
       "deferred",
       "deferred",
     )
     const hidden = identifiedTool(
-      namespacedToolName("calendar", "refresh_token"),
+      { namespace: "calendar", name: "refresh_token" },
       "hidden",
       "hidden",
     )
-    expect(registry.registerExternal(direct, "calendar-server")).toBe(true)
-    expect(registry.registerExternal(deferred, "calendar-server")).toBe(true)
-    expect(registry.registerExternal(hidden, "calendar-server")).toBe(true)
+    registry.replaceExternalSource("calendar-server", [
+      direct,
+      deferred,
+      hidden,
+    ])
     const router = finalize(registry, new Set())
 
     expect(router.definitions.map((definition) => definition.name)).toEqual([
       "calendar__create_event",
       "tool_search",
     ])
-    expect(router.source("calendar__create_event")).toEqual({
-      kind: "external",
-      sourceId: "calendar-server",
-    })
-    expect(router.exposure("calendar__search_events")).toBe("deferred")
-    expect(router.exposure("calendar__refresh_token")).toBe("hidden")
     expect(router.search("search calendar events")).toMatchObject([
       { name: "calendar__search_events" },
     ])
@@ -132,7 +127,7 @@ describe("finalized tool router", () => {
       "calendar-server",
       Array.from({ length: 9 }, (_, index) =>
         identifiedTool(
-          namespacedToolName("calendar", `search_events_${String(index)}`),
+          { namespace: "calendar", name: `search_events_${String(index)}` },
           "deferred",
           "deferred",
         ),
@@ -148,12 +143,9 @@ describe("finalized tool router", () => {
     const trustedTools = new Set(["read_file"])
     const beforeRegistration = finalize(registry, trustedTools)
 
-    expect(
-      registry.registerExternal(
-        identifiedTool(namespacedToolName("calendar", "list_events")),
-        "calendar-server",
-      ),
-    ).toBe(true)
+    registry.replaceExternalSource("calendar-server", [
+      identifiedTool({ namespace: "calendar", name: "list_events" }),
+    ])
     const afterRegistration = finalize(registry, trustedTools)
 
     expect(
@@ -171,16 +163,16 @@ describe("finalized tool router", () => {
       toolName: { namespace: "bad__namespace", name: "read" },
     }
 
-    expect(() => registry.registerExternal(invalid, "mcp-a")).toThrow(
+    expect(() => registry.replaceExternalSource("mcp-a", [invalid])).toThrow(
       "Invalid tool namespace name",
     )
-    expect(() => registry.registerExternal(tool("read"), " mcp-a")).toThrow(
-      "contain no surrounding whitespace",
-    )
-    expect(() => namespacedToolName("a", "_b")).toThrow(
+    expect(() =>
+      registry.replaceExternalSource(" mcp-a", [tool("read")]),
+    ).toThrow("contain no surrounding whitespace")
+    expect(() => canonicalToolName({ namespace: "a", name: "_b" })).toThrow(
       "Invalid namespaced tool boundary",
     )
-    expect(() => namespacedToolName("a_", "b")).toThrow(
+    expect(() => canonicalToolName({ namespace: "a_", name: "b" })).toThrow(
       "Invalid namespaced tool boundary",
     )
   })
@@ -188,29 +180,27 @@ describe("finalized tool router", () => {
   it("protects trusted names and namespace ownership from external tools", () => {
     const registry = createToolRegistry([
       tool("read_file"),
-      identifiedTool(namespacedToolName("github", "status")),
+      identifiedTool({ namespace: "github", name: "status" }),
     ])
-    expect(registry.registerExternal(tool("read_file"), "mcp-a")).toBe(false)
-    expect(registry.registerExternal(tool("exec_command"), "mcp-a")).toBe(false)
-    expect(
-      registry.registerExternal(
-        identifiedTool(namespacedToolName("github", "issues")),
-        "mcp-a",
-      ),
-    ).toBe(false)
-    expect(
-      registry.registerExternal(
-        identifiedTool(namespacedToolName("gitlab", "pulls")),
-        "mcp-a",
-      ),
-    ).toBe(true)
-    expect(
-      registry.registerExternal(
-        identifiedTool(namespacedToolName("gitlab", "issues")),
-        "trusted",
-      ),
-    ).toBe(false)
-    expect(registry.firstCollision()).toEqual(plainToolName("read_file"))
+    expect(() =>
+      registry.replaceExternalSource("mcp-a", [tool("read_file")]),
+    ).toThrow("conflicting tool read_file")
+    expect(() =>
+      registry.replaceExternalSource("mcp-a", [tool("exec_command")]),
+    ).toThrow("conflicting tool exec_command")
+    expect(() =>
+      registry.replaceExternalSource("mcp-a", [
+        identifiedTool({ namespace: "github", name: "issues" }),
+      ]),
+    ).toThrow("conflicting tool github__issues")
+    registry.replaceExternalSource("mcp-a", [
+      identifiedTool({ namespace: "gitlab", name: "pulls" }),
+    ])
+    expect(() =>
+      registry.replaceExternalSource("trusted", [
+        identifiedTool({ namespace: "gitlab", name: "issues" }),
+      ]),
+    ).toThrow("conflicting tool gitlab__issues")
   })
 
   it("keeps trusted configuration and external catalogs scoped separately", () => {
@@ -218,12 +208,9 @@ describe("finalized tool router", () => {
     const firstSession = createToolRegistry(trusted)
     const secondSession = createToolRegistry(trusted)
 
-    expect(
-      firstSession.registerExternal(
-        identifiedTool(namespacedToolName("calendar", "events")),
-        "calendar-server",
-      ),
-    ).toBe(true)
+    firstSession.replaceExternalSource("calendar-server", [
+      identifiedTool({ namespace: "calendar", name: "events" }),
+    ])
 
     expect(firstSession.trustedToolNames()).toEqual(["read_file"])
     expect(secondSession.trustedToolNames()).toEqual(["read_file"])
@@ -243,22 +230,16 @@ describe("finalized tool router", () => {
 
   it("keeps a finalized router bound to the runtime the model saw", async () => {
     const registry = createToolRegistry([])
-    const toolName = namespacedToolName("demo", "lookup")
-    expect(
-      registry.registerExternal(
-        identifiedTool(toolName, "version one"),
-        "demo",
-      ),
-    ).toBe(true)
+    const toolName = { namespace: "demo", name: "lookup" }
+    registry.replaceExternalSource("demo", [
+      identifiedTool(toolName, "version one"),
+    ])
     const first = finalize(registry, new Set([canonicalToolName(toolName)]))
 
-    expect(registry.unregisterExternalSource("demo")).toBe(1)
-    expect(
-      registry.registerExternal(
-        identifiedTool(toolName, "version two"),
-        "demo",
-      ),
-    ).toBe(true)
+    registry.replaceExternalSource("demo", [])
+    registry.replaceExternalSource("demo", [
+      identifiedTool(toolName, "version two"),
+    ])
     const second = finalize(registry, new Set([canonicalToolName(toolName)]))
 
     await expect(
@@ -274,19 +255,19 @@ describe("finalized tool router", () => {
   it("replaces one external source atomically and retires old runtimes after Step release", async () => {
     const disposed: string[] = []
     const versionOne = {
-      ...identifiedTool(namespacedToolName("demo", "lookup"), "version one"),
+      ...identifiedTool({ namespace: "demo", name: "lookup" }, "version one"),
       dispose() {
         disposed.push("version one")
       },
     }
     const versionTwo = {
-      ...identifiedTool(namespacedToolName("demo", "lookup"), "version two"),
+      ...identifiedTool({ namespace: "demo", name: "lookup" }, "version two"),
       dispose() {
         disposed.push("version two")
       },
     }
     const registry = createToolRegistry([])
-    expect(registry.registerExternal(versionOne, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [versionOne])
     const oldStep = finalize(registry, new Set())
 
     expect(registry.replaceExternalSource("demo", [versionTwo])).toEqual({
@@ -320,7 +301,7 @@ describe("finalized tool router", () => {
     })
     let disposed = false
     const runtime = {
-      ...identifiedTool(namespacedToolName("demo", "lookup")),
+      ...identifiedTool({ namespace: "demo", name: "lookup" }),
       async waitUntilReady() {
         entered()
         await readiness
@@ -330,7 +311,7 @@ describe("finalized tool router", () => {
       },
     }
     const registry = createToolRegistry([])
-    registry.registerExternal(runtime, "demo")
+    registry.replaceExternalSource("demo", [runtime])
     const step = finalize(registry, new Set())
     const pendingReadiness = step.waitUntilReady("demo__lookup", {
       workspaceRoot: "/workspace",
@@ -346,36 +327,17 @@ describe("finalized tool router", () => {
     expect(disposed).toBe(true)
   })
 
-  it("does not create a runtime lease for definition-only inspection", async () => {
-    let disposed = false
-    const runtime = {
-      ...identifiedTool(namespacedToolName("demo", "lookup")),
-      dispose() {
-        disposed = true
-      },
-    }
-    const registry = createToolRegistry([])
-    expect(registry.registerExternal(runtime, "demo")).toBe(true)
-
-    expect(registry.definitions().map((definition) => definition.name)).toEqual(
-      ["demo__lookup"],
-    )
-    expect(registry.unregisterExternalSource("demo")).toBe(1)
-    await Promise.resolve()
-    expect(disposed).toBe(true)
-  })
-
   it("leaves the previous external source untouched when replacement validation fails", async () => {
     const registry = createToolRegistry([tool("read_file")])
     const previous = identifiedTool(
-      namespacedToolName("demo", "lookup"),
+      { namespace: "demo", name: "lookup" },
       "previous",
     )
-    expect(registry.registerExternal(previous, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [previous])
 
     expect(() =>
       registry.replaceExternalSource("demo", [
-        identifiedTool(namespacedToolName("demo", "new_lookup")),
+        identifiedTool({ namespace: "demo", name: "new_lookup" }),
         tool("read_file"),
       ]),
     ).toThrow("conflicting tool read_file")
@@ -392,45 +354,39 @@ describe("finalized tool router", () => {
 
   it("uses exact-name lookup and BM25 identifier/schema terms for deferred tools", async () => {
     const registry = createToolRegistry([])
-    expect(
-      registry.registerExternal(
-        {
-          ...identifiedTool(
-            namespacedToolName("grafana-ai", "SearchDashboards"),
-            "dashboards",
-            "deferred",
-          ),
-          description: "Find observability views",
-          inputSchema: {
-            type: "object",
-            properties: {
-              datasourceId: {
-                anyOf: [
-                  {
-                    type: "string",
-                    description: "Prometheus data source identifier",
-                  },
-                ],
-              },
+    registry.replaceExternalSource("grafana", [
+      {
+        ...identifiedTool(
+          { namespace: "grafana-ai", name: "SearchDashboards" },
+          "dashboards",
+          "deferred",
+        ),
+        description: "Find observability views",
+        inputSchema: {
+          type: "object",
+          properties: {
+            datasourceId: {
+              anyOf: [
+                {
+                  type: "string",
+                  description: "Prometheus data source identifier",
+                },
+              ],
             },
           },
         },
-        "grafana",
-      ),
-    ).toBe(true)
-    expect(
-      registry.registerExternal(
-        {
-          ...identifiedTool(
-            namespacedToolName("calendar", "search_events"),
-            "events",
-            "deferred",
-          ),
-          description: "Find meetings and calendar appointments",
-        },
-        "calendar",
-      ),
-    ).toBe(true)
+      },
+    ])
+    registry.replaceExternalSource("calendar", [
+      {
+        ...identifiedTool(
+          { namespace: "calendar", name: "search_events" },
+          "events",
+          "deferred",
+        ),
+        description: "Find meetings and calendar appointments",
+      },
+    ])
 
     const step = finalize(registry, new Set())
     expect(step.search("grafana-ai__SearchDashboards")[0]?.name).toBe(
@@ -457,11 +413,11 @@ describe("finalized tool router", () => {
 
   it("captures runtime method identity and capabilities for the finalized Step", async () => {
     const mutable = {
-      ...identifiedTool(namespacedToolName("demo", "mutable"), "version one"),
+      ...identifiedTool({ namespace: "demo", name: "mutable" }, "version one"),
       supportsParallelToolCalls: true,
     }
     const registry = createToolRegistry([])
-    expect(registry.registerExternal(mutable, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [mutable])
     const router = finalize(registry, new Set())
 
     Reflect.set(mutable, "supportsParallelToolCalls", false)
@@ -480,7 +436,7 @@ describe("finalized tool router", () => {
   it("owns an immutable definition snapshot for deferred custom tools", () => {
     const external = {
       ...identifiedTool(
-        namespacedToolName("demo", "evaluate"),
+        { namespace: "demo", name: "evaluate" },
         "evaluate",
         "deferred",
       ),
@@ -498,7 +454,7 @@ describe("finalized tool router", () => {
       search: { searchText: "alpha evaluator", source: "demo" },
     } satisfies RuntimeTool
     const registry = createToolRegistry([])
-    expect(registry.registerExternal(external, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [external])
     const router = finalize(registry, new Set())
 
     external.inputSchema.properties.code.type = "number"
@@ -521,7 +477,7 @@ describe("finalized tool router", () => {
   it("produces durable deferred history when custom tools fall back to functions", () => {
     const external = {
       ...identifiedTool(
-        namespacedToolName("demo", "evaluate"),
+        { namespace: "demo", name: "evaluate" },
         "evaluate",
         "deferred",
       ),
@@ -539,7 +495,7 @@ describe("finalized tool router", () => {
       search: { searchText: "expression evaluator", source: "demo" },
     } satisfies RuntimeTool
     const registry = createToolRegistry([])
-    expect(registry.registerExternal(external, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [external])
     const router = registry.finalize({
       enabledTrustedTools: new Set(),
       customToolMode: "function",
@@ -570,14 +526,14 @@ describe("finalized tool router", () => {
   it("refreshes a later Step when deferred metadata mutates in place", async () => {
     const external = {
       ...identifiedTool(
-        namespacedToolName("demo", "lookup"),
+        { namespace: "demo", name: "lookup" },
         "version one",
         "deferred",
       ),
       search: { searchText: "alpha lookup", source: "demo" },
     } satisfies RuntimeTool
     const registry = createToolRegistry([])
-    expect(registry.registerExternal(external, "demo")).toBe(true)
+    registry.replaceExternalSource("demo", [external])
     const first = finalize(registry, new Set())
 
     external.description = "version two description"
@@ -598,7 +554,7 @@ describe("finalized tool router", () => {
 
   it("rejects custom tools without a required string fallback property", () => {
     const invalid = {
-      ...identifiedTool(namespacedToolName("demo", "invalid")),
+      ...identifiedTool({ namespace: "demo", name: "invalid" }),
       customInputFormat: {
         type: "grammar" as const,
         syntax: "lark" as const,
@@ -613,16 +569,13 @@ describe("finalized tool router", () => {
     } satisfies RuntimeTool
 
     expect(() =>
-      createToolRegistry([]).registerExternal(invalid, "demo"),
+      createToolRegistry([]).replaceExternalSource("demo", [invalid]),
     ).toThrow("must require string property code")
   })
 
   it("keeps execution presentation separate from approval requirements", async () => {
     const registry = createToolRegistry()
-    const router = finalize(
-      registry,
-      new Set(registry.definitions().map((definition) => definition.name)),
-    )
+    const router = finalize(registry, new Set(registry.trustedToolNames()))
 
     await expect(
       router.approvalRequirement(

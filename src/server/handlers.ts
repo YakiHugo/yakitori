@@ -560,12 +560,9 @@ export function createThreadServerHandlers(
               // from the failed attempt after the retry starts.
               for (const publisher of streams.values()) publisher.flush()
               const itemIds = event.details?.discardedResponseItemIds
-              const singleId = event.details?.discardedResponseItemId
               const discarded = Array.isArray(itemIds)
                 ? itemIds.filter((id): id is string => typeof id === "string")
-                : typeof singleId === "string"
-                  ? [singleId]
-                  : []
+                : []
               for (const itemId of discarded) {
                 for (const kind of ["assistant", "reasoning"] as const) {
                   streams.delete(`${itemId}:${kind}`)

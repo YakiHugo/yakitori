@@ -23,6 +23,7 @@ import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
+import { LiveTextNotice } from "./cells/live-text-notice.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -169,6 +170,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
       const last = pieces.at(-1)
       if (last === undefined || pieces.length !== itemIds.length) continue
       const text = pieces.map((entry) => entry.text).join("")
+      const incomplete = pieces.some((entry) => entry.incomplete)
       const previous = previousAnswers.current.get(turnId)
       answers.set(
         turnId,
@@ -176,10 +178,11 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
           previous.entry.text === text &&
           previous.entry.at === last.at &&
           previous.entry.status === last.status &&
+          previous.entry.incomplete === incomplete &&
           previous.itemIds.length === itemIds.length &&
           previous.itemIds.every((id, index) => id === itemIds[index])
           ? previous
-          : { itemIds, entry: { ...last, text } },
+          : { itemIds, entry: { ...last, text, incomplete } },
       )
     }
     previousAnswers.current = answers
@@ -506,12 +509,25 @@ const TurnBlock = memo(
               >
                 <div className="min-h-0 overflow-hidden">
                   {reasoningExpanded ? (
-                    <MarkdownView
-                      text={reasoningText}
-                      streaming={active}
-                      className="markdown max-w-2xl pt-4 text-sm text-muted-foreground"
-                      workspaceRoot={workspaceRoot}
-                    />
+                    <>
+                      {entries
+                        .filter(
+                          (entry) =>
+                            entry.kind === "reasoning" && entry.incomplete,
+                        )
+                        .slice(0, 1)
+                        .map((entry) =>
+                          entry.kind === "reasoning" ? (
+                            <LiveTextNotice key={entry.itemId} entry={entry} />
+                          ) : null,
+                        )}
+                      <MarkdownView
+                        text={reasoningText}
+                        streaming={active}
+                        className="markdown max-w-2xl pt-4 text-sm text-muted-foreground"
+                        workspaceRoot={workspaceRoot}
+                      />
+                    </>
                   ) : null}
                 </div>
               </div>

@@ -21,18 +21,17 @@ try {
   await store.appendEvent(
     input.mateId,
     {
-      type: MateEventType.ProfileRevised,
+      type: MateEventType.Created,
       data: {
         profile: {
-          instructions: "Concurrent revision",
+          instructions: "Concurrent creation",
           name: "Momo",
           role: "Reviewer",
         },
-        revision: 2,
         revisionId: createMateRevisionId(),
       },
     },
-    { expectedSeq: 1 },
+    { expectedSeq: 0 },
   )
   port.postMessage({ ok: true })
 } catch (error) {

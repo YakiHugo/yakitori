@@ -8,6 +8,7 @@ import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runFauxTurn,
+  runProviderFlow,
 } from "./fixtures.ts"
 
 test("built GUI sends a turn and restores its transcript after reload", async ({
@@ -39,6 +40,7 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
       page.getByRole("main").getByText("Hello from faux.", { exact: true }),
     ).toBeVisible()
     await runBudgetedGoal(page)
+    await runProviderFlow(page, testInfo)
     expect(errors).toEqual([])
   } finally {
     try {

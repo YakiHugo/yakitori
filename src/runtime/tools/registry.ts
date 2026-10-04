@@ -10,12 +10,7 @@ import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
-import {
-  canonicalToolName,
-  namespacedToolName,
-  plainToolName,
-  type ToolName,
-} from "./tool-name.ts"
+import { canonicalToolName, plainToolName, type ToolName } from "./tool-name.ts"
 import {
   createToolSearchIndex,
   type ToolSearchIndex,
@@ -33,7 +28,7 @@ import { createWebFetchTool } from "./web-fetch.ts"
 import { createWebSearchTool } from "./web-search.ts"
 import { createWriteFileTool } from "./write-file.ts"
 
-export type ToolSource =
+type ToolSource =
   | Readonly<{ kind: "trusted" }>
   | Readonly<{ kind: "external"; sourceId: string }>
 
@@ -76,8 +71,6 @@ export type ToolRouter = Readonly<{
     input: JsonValue,
   ): Readonly<{ name: string; input: JsonValue }>
   get(name: string): RuntimeTool | undefined
-  source(name: string): ToolSource | undefined
-  exposure(name: string): ToolExposure | undefined
   supportsParallelToolCalls(name: string): boolean
   search(query: string, limit?: number): ReadonlyArray<ModelToolDefinition>
   describeExecution(name: string, input: JsonValue): ToolExecutionDescriptor
@@ -106,14 +99,10 @@ export type ToolRouter = Readonly<{
 
 export type ToolRegistry = Readonly<{
   trustedToolNames(): ReadonlyArray<string>
-  definitions(): ReadonlyArray<ModelToolDefinition>
-  registerExternal(tool: RuntimeTool, sourceId: string): boolean
-  unregisterExternalSource(sourceId: string): number
   replaceExternalSource(
     sourceId: string,
     tools: ReadonlyArray<RuntimeTool>,
   ): Readonly<{ removed: number; registered: number }>
-  firstCollision(): ToolName | undefined
   finalize(options: ToolFinalizeOptions): ToolRouter
   dispose(): Promise<void>
 }>
@@ -123,8 +112,7 @@ export function createToolRegistry(
 ): ToolRegistry {
   let registered = new Map<string, RegisteredTool>()
   const trustedToolNames: string[] = []
-  let namespaceOwners = new Map<string, string>()
-  let firstCollision: ToolName | undefined
+  const trustedNamespaceOwners = new Map<string, string>()
   let catalogGeneration = 0
   const searchCache = new Map<
     string,
@@ -147,7 +135,7 @@ export function createToolRegistry(
     if (registered.has(canonicalName)) {
       throw new Error(`Duplicate trusted tool name: ${canonicalName}`)
     }
-    claimTrustedNamespace(tool.toolName, namespaceOwners)
+    claimTrustedNamespace(tool.toolName, trustedNamespaceOwners)
     registered.set(canonicalName, {
       runtime: tool,
       source: { kind: "trusted" },
@@ -159,55 +147,6 @@ export function createToolRegistry(
   const registry: ToolRegistry = {
     trustedToolNames() {
       return [...trustedToolNames]
-    },
-    definitions() {
-      const definitions = [...registered.values()]
-        .filter((entry) => entry.exposure === "direct")
-        .map((entry) =>
-          modelVisibleDefinition(snapshotDefinition(entry.runtime)),
-        )
-      if (
-        [...registered.values()].some((entry) => entry.exposure === "deferred")
-      ) {
-        definitions.push(
-          modelVisibleDefinition(
-            snapshotDefinition(createToolSearchTool(() => [])),
-          ),
-        )
-      }
-      return definitions
-    },
-    registerExternal(tool, sourceId) {
-      validateSourceId(sourceId)
-      validateCustomTool(tool)
-      if (retirements.has(tool)) {
-        throw new Error("Cannot register a retired external tool runtime.")
-      }
-      const canonicalName = canonicalToolName(tool.toolName)
-      if (
-        (tool.toolName.namespace === undefined &&
-          RESERVED_EXTERNAL_DEFAULT_NAMES.has(tool.toolName.name)) ||
-        registered.has(canonicalName) ||
-        !claimExternalNamespace(
-          tool.toolName,
-          externalOwner(sourceId),
-          namespaceOwners,
-        )
-      ) {
-        firstCollision ??= { ...tool.toolName }
-        return false
-      }
-      registered.set(canonicalName, {
-        runtime: tool,
-        source: { kind: "external", sourceId },
-        exposure: tool.exposure ?? "direct",
-      })
-      catalogGeneration += 1
-      searchCache.clear()
-      return true
-    },
-    unregisterExternalSource(sourceId) {
-      return registry.replaceExternalSource(sourceId, []).removed
     },
     replaceExternalSource(sourceId, tools) {
       validateSourceId(sourceId)
@@ -240,7 +179,6 @@ export function createToolRegistry(
             stagedNamespaceOwners,
           )
         ) {
-          firstCollision ??= { ...tool.toolName }
           throw new Error(
             `External source ${sourceId} contains conflicting tool ${canonicalName}.`,
           )
@@ -253,7 +191,6 @@ export function createToolRegistry(
       }
 
       registered = staged
-      namespaceOwners = stagedNamespaceOwners
       catalogGeneration += 1
       searchCache.clear()
       retireUnregisteredRuntimes(
@@ -264,9 +201,6 @@ export function createToolRegistry(
       )
       return { removed: previousEntries.length, registered: tools.length }
     },
-    firstCollision() {
-      return firstCollision === undefined ? undefined : { ...firstCollision }
-    },
     async dispose() {
       retireUnregisteredRuntimes(
         [...registered.values()].map((entry) => entry.runtime),
@@ -275,7 +209,6 @@ export function createToolRegistry(
         retirements,
       )
       registered = new Map()
-      namespaceOwners = new Map()
       await Promise.all([...retirements.values()].map((state) => state.promise))
     },
     finalize(options) {
@@ -419,13 +352,6 @@ export function createToolRegistry(
         },
         get(name) {
           return snapshot.get(name)?.runtime
-        },
-        source(name) {
-          const source = snapshot.get(name)?.source
-          return source === undefined ? undefined : { ...source }
-        },
-        exposure(name) {
-          return snapshot.get(name)?.exposure
         },
         supportsParallelToolCalls(name) {
           const entry = snapshot.get(name)
@@ -908,4 +834,4 @@ export type {
   ToolExecutionContext,
   ToolExecutionResult,
 } from "./types.ts"
-export { canonicalToolName, namespacedToolName, plainToolName }
+export { canonicalToolName, plainToolName }

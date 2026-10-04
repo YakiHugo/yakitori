@@ -221,6 +221,46 @@ describe("rollout assets", () => {
     )
   })
 
+  it("rejects a reused copy owner when the source image has different bytes", async () => {
+    const root = await makeRoot()
+    const sourceRolloutId = createSessionId()
+    const targetRolloutId = createSessionId()
+    const files = await createTestRolloutAssets(
+      root,
+      sourceRolloutId,
+      targetRolloutId,
+    )
+    const original = pngBytes()
+    const replacement = Buffer.from(original)
+    replacement[12] = 1
+    const firstSource = await files.importImageBytes(
+      sourceRolloutId,
+      "first_source",
+      [{ name: "screen.png", data: original }],
+    )
+    const replacementSource = await files.importImageBytes(
+      sourceRolloutId,
+      "replacement_source",
+      [{ name: "screen.png", data: replacement }],
+    )
+    const first = await files.copyImageAttachments(
+      targetRolloutId,
+      "request_same",
+      firstSource,
+    )
+
+    await expect(
+      files.copyImageAttachments(
+        targetRolloutId,
+        "request_same",
+        replacementSource,
+      ),
+    ).rejects.toThrow("A different image already exists for this request.")
+    const copied = first.attachments[0]
+    if (copied === undefined) throw new Error("missing original copy")
+    await expect(files.read(copied.file)).resolves.toEqual(original)
+  })
+
   it("imports a native path as a snapshot and discards it on request", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()

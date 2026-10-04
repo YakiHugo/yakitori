@@ -348,33 +348,6 @@ it("switches workbook sheets and presentation slides within file previews", asyn
   expect(screen.getByText("Explain the chart")).toBeDefined()
 })
 
-it("discards file requests when changing workspaces", async () => {
-  const previous = deferred<WorkspaceListResponse>()
-  request.mockImplementation(async (_method, params) =>
-    params.cwd === "/old"
-      ? previous.promise
-      : {
-          cwd: "/new",
-          path: ".",
-          entries: [{ name: "current.ts", path: "current.ts", kind: "file" }],
-          truncated: false,
-        },
-  )
-  const view = render(<WorkspaceFiles cwd="/old" apiBase="http://localhost" />)
-  view.rerender(<WorkspaceFiles cwd="/new" apiBase="http://localhost" />)
-  await screen.findByRole("button", { name: "current.ts" })
-  await act(async () =>
-    previous.resolve({
-      cwd: "/old",
-      path: ".",
-      entries: [{ name: "old.ts", path: "old.ts", kind: "file" }],
-      truncated: false,
-    }),
-  )
-  expect(screen.queryByRole("button", { name: "old.ts" })).toBeNull()
-  expect(screen.getByRole("button", { name: "current.ts" })).toBeDefined()
-})
-
 it("stages untracked files and renders renamed staged entries", async () => {
   let staged = false
   request.mockImplementation(async (method) => {

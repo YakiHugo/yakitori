@@ -65,7 +65,9 @@ export function SubscriptionPanelButton() {
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [])
 
-  const openSection = (section: "general" | "subscriptions" | "usage") => {
+  const openSection = (
+    section: "general" | "subscriptions" | "usage" | "providers",
+  ) => {
     setOpen(false)
     openSettings(section)
   }
@@ -97,6 +99,15 @@ export function SubscriptionPanelButton() {
               </small>
             </span>
           </div>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("providers")}
+          >
+            <Unplug size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Providers</span>
+          </button>
           <button
             type="button"
             role="menuitem"

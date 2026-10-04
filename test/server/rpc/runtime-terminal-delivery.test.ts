@@ -342,10 +342,7 @@ describe("runtime terminal delivery", () => {
     }
   })
 
-  it.each([
-    "legacy",
-    "items",
-  ] as const)("discards failed attempt output after flushing and starts fresh display items on retry (%s)", async (format) => {
+  it("discards failed attempt output after flushing and starts fresh display items on retry", async () => {
     const store = new MemoryThreadStore()
     const mayResume = deferred<void>()
     const mayFinish = deferred<void>()
@@ -366,9 +363,7 @@ describe("runtime terminal delivery", () => {
             code: "model.retry",
             message: "Stream disconnected",
             details: {
-              ...(format === "legacy"
-                ? { discardedResponseItemId: "answer" }
-                : { discardedResponseItemIds: ["answer"] }),
+              discardedResponseItemIds: ["answer"],
               kind: "stream_disconnected",
               nextAttempt: 2,
               maxAttempts: 3,
@@ -464,6 +459,7 @@ describe("runtime terminal delivery", () => {
         }),
         expect.objectContaining({
           type: "assistant.delta",
+          offset: 0,
           itemId: "answer",
           delta: " resumed",
         }),
@@ -473,6 +469,7 @@ describe("runtime terminal delivery", () => {
         }),
         expect.objectContaining({
           type: "reasoning.delta",
+          offset: 0,
           itemId: "answer_reasoning",
           delta: " resumed",
         }),

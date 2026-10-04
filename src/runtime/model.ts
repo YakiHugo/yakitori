@@ -52,6 +52,7 @@ export type ModelTarget = {
 export type ModelWireApi =
   | "anthropic_messages"
   | "faux"
+  | "openai_chat_completions"
   | "openai_responses"
   | "unknown"
 

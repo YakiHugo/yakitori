@@ -1,7 +1,9 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { once } from "node:events"
+import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { expect, type Page } from "@playwright/test"
+import { expect, type Page, type TestInfo } from "@playwright/test"
 
 export async function createSmokeEnvironment(): Promise<
   Readonly<{
@@ -13,8 +15,16 @@ export async function createSmokeEnvironment(): Promise<
   const root = await mkdtemp(join(tmpdir(), "yakitori-smoke-"))
   const home = join(root, "home")
   const workspace = join(root, "workspace")
+  const bin = join(root, "bin")
   try {
-    await Promise.all([mkdir(home), mkdir(workspace)])
+    await Promise.all([mkdir(home), mkdir(workspace), mkdir(bin)])
+    // The subscription flow must never launch the developer's real CLI or
+    // open an external browser. This owned process exposes a URL until canceled.
+    await writeFile(
+      join(bin, "codex"),
+      `#!${process.execPath}\nconsole.log('Sign in: https://auth.openai.com/authorize?state=smoke');\nsetInterval(() => {}, 1000);\n`,
+      { mode: 0o700 },
+    )
   } catch (error) {
     await rm(root, { recursive: true, force: true })
     throw error
@@ -37,6 +47,7 @@ export async function createSmokeEnvironment(): Promise<
     ),
   )
   Object.assign(env, {
+    PATH: `${bin}:${env.PATH ?? ""}`,
     HOME: home,
     XDG_CONFIG_HOME: join(home, ".config"),
     CODEX_HOME: join(home, ".codex"),
@@ -96,4 +107,311 @@ export async function runBudgetedGoal(page: Page): Promise<void> {
   ).toBeVisible()
   await page.getByRole("button", { name: "Clear goal", exact: true }).click()
   await expect(page.getByText("Goal limited", { exact: true })).toHaveCount(0)
+}
+
+// One process-boundary flow shared by browser and packaged Electron. All model
+// traffic stays on this local endpoint, including the explicit connection test.
+export async function runProviderFlow(
+  page: Page,
+  testInfo: TestInfo,
+): Promise<void> {
+  const requests: {
+    method: string | undefined
+    path: string | undefined
+    authorization: string | undefined
+    body: string
+  }[] = []
+  const endpoint = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({ data: [{ id: "smoke-model" }] }))
+      return
+    }
+    let body = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      body += chunk
+    })
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        authorization: request.headers.authorization,
+        body,
+      })
+      response.writeHead(200, { "content-type": "text/event-stream" })
+      const completion = {
+        id: `chatcmpl_smoke_${requests.length}`,
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "smoke-model",
+      }
+      response.write(
+        `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: { role: "assistant", content: "Mock provider reply" }, finish_reason: null }] })}\n\n`,
+      )
+      response.write(
+        `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+      )
+      response.write(
+        `data: ${JSON.stringify({ ...completion, choices: [], usage: { prompt_tokens: 4, completion_tokens: 4, total_tokens: 8 } })}\n\n`,
+      )
+      response.end("data: [DONE]\n\n")
+    })
+  })
+  try {
+    endpoint.listen(0, "127.0.0.1")
+    await once(endpoint, "listening")
+    const address = endpoint.address()
+    if (address === null || typeof address === "string")
+      throw new Error("Provider mock TCP address is missing.")
+
+    await openProviderSettings(page)
+    await expect(
+      page.getByRole("button", { name: "OpenAI", exact: true }),
+    ).toBeVisible()
+    const catalogPath = testInfo.outputPath("provider-catalog.png")
+    await page.screenshot({ path: catalogPath, animations: "disabled" })
+    await testInfo.attach("provider-catalog", {
+      path: catalogPath,
+      contentType: "image/png",
+    })
+    await page.getByRole("button", { name: "ChatGPT", exact: true }).click()
+    const subscription = page.getByRole("dialog", {
+      name: "ChatGPT",
+      exact: true,
+    })
+    await expect(subscription.getByRole("status")).toHaveText(
+      "Waiting for browser sign-in…",
+    )
+    await expect(
+      subscription.getByRole("link", { name: "Open sign-in page ↗" }),
+    ).toHaveAttribute("href", "https://auth.openai.com/authorize?state=smoke")
+    await subscription
+      .getByRole("button", { name: "Import existing account…" })
+      .click()
+    const accountImport = page.getByRole("dialog", {
+      name: "Import ChatGPT account",
+      exact: true,
+    })
+    await accountImport
+      .getByRole("button", { name: "Use local CLI account" })
+      .click()
+    await expect(accountImport.getByRole("alert")).toContainText(
+      "No ChatGPT account found",
+    )
+    const chooser = page.waitForEvent("filechooser")
+    await accountImport.getByRole("button", { name: "Choose file…" }).click()
+    await (await chooser).setFiles({
+      name: "auth.json",
+      mimeType: "application/json",
+      buffer: Buffer.from('{"OPENAI_API_KEY":"smoke-key"}'),
+    })
+    await expect(
+      accountImport.getByRole("textbox", { name: "Account JSON" }),
+    ).toHaveValue('{"OPENAI_API_KEY":"smoke-key"}')
+    await accountImport
+      .getByRole("button", { name: "Import account", exact: true })
+      .click()
+    await expect(accountImport.getByRole("alert")).toContainText(
+      "API keys belong under OpenAI",
+    )
+    await accountImport
+      .getByRole("textbox", { name: "Account JSON" })
+      .fill('"secret-that-must-not-be-echoed')
+    await accountImport
+      .getByRole("button", { name: "Import account", exact: true })
+      .click()
+    await expect(accountImport.getByRole("alert")).toHaveText(
+      "The account file is invalid JSON.",
+    )
+    const importPath = testInfo.outputPath("provider-account-import.png")
+    await page.screenshot({ path: importPath, animations: "disabled" })
+    await testInfo.attach("provider-account-import", {
+      path: importPath,
+      contentType: "image/png",
+    })
+    await page.keyboard.press("Escape")
+    await expect(accountImport).toHaveCount(0)
+    const search = page.getByRole("searchbox", { name: "Find a provider" })
+    await search.fill("DeepSeek")
+    await expect(
+      page.getByRole("button", { name: "OpenAI", exact: true }),
+    ).toHaveCount(0)
+    await page.getByRole("button", { name: "DeepSeek", exact: true }).click()
+    const editor = page.getByRole("dialog", { name: "DeepSeek", exact: true })
+    await expect(
+      editor.getByRole("textbox", { name: "API key", exact: true }),
+    ).toBeFocused()
+    await expect(
+      editor.getByRole("textbox", { name: "API base URL", exact: true }),
+    ).toBeHidden()
+    const editorPath = testInfo.outputPath("provider-preset-editor.png")
+    await page.screenshot({ path: editorPath, animations: "disabled" })
+    await testInfo.attach("provider-preset-editor", {
+      path: editorPath,
+      contentType: "image/png",
+    })
+    await page.keyboard.press("Escape")
+    await expect(editor).toHaveCount(0)
+    await expect(search).toHaveValue("DeepSeek")
+    await search.focus()
+    await page.keyboard.press("Escape")
+    await expect(search).toHaveValue("")
+    await page.getByRole("button", { name: /^Custom provider/ }).click()
+    await page.getByText("Advanced settings", { exact: true }).click()
+    await page
+      .getByRole("textbox", { name: "Connection name", exact: true })
+      .fill("Smoke API")
+    await page
+      .getByRole("textbox", { name: "API key", exact: true })
+      .fill("smoke-test-key")
+    await page
+      .getByRole("textbox", { name: "API base URL", exact: true })
+      .fill(`http://127.0.0.1:${address.port}/v1`)
+    await page
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("status")
+        .filter({ hasText: "Connection test succeeded." }),
+    ).toBeVisible()
+    expect(requests).toHaveLength(1)
+    await page
+      .getByRole("button", { name: "Add provider", exact: true })
+      .click()
+    await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
+    await expect(
+      page.getByRole("form", { name: "New provider", exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeEnabled()
+    const enabled = page.getByRole("switch", { name: "Enable Smoke API" })
+    await enabled.click()
+    await expect(enabled).toHaveAttribute("aria-checked", "false")
+    await page.getByRole("button", { name: "Undo", exact: true }).click()
+    await expect(enabled).toHaveAttribute("aria-checked", "true")
+    const screenshotPath = testInfo.outputPath("provider-connection.png")
+    await page.screenshot({ path: screenshotPath })
+    await testInfo.attach("provider-connection", {
+      path: screenshotPath,
+      contentType: "image/png",
+    })
+
+    await page.getByRole("button", { name: "Back to app", exact: true }).click()
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "Untitled session", exact: true }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Select model and effort", exact: true })
+      .click()
+    await page.getByRole("button", { name: "smoke-model", exact: true }).click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate", exact: true })
+      .fill("Verify the configured provider turn.")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByRole("main").getByText("Mock provider reply", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("button", { name: "Interrupt", exact: true }),
+    ).toHaveCount(0)
+    await page.reload()
+    await expect(
+      page.getByRole("main").getByText("Mock provider reply", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("button", {
+        name: "Select model and effort",
+        exact: true,
+      }),
+    ).toContainText("smoke-model")
+
+    await openProviderSettings(page)
+    await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
+    await page.getByRole("tab", { name: "Usage", exact: true }).click()
+    const usage = page.getByRole("region", { name: "Provider usage" })
+    await expect(
+      usage.getByRole("cell").filter({ hasText: "Smoke API" }),
+    ).toContainText("smoke-model")
+    await expect(
+      usage
+        .getByRole("row")
+        .filter({ hasText: "Smoke API" })
+        .getByRole("cell", { name: "—", exact: true }),
+    ).toBeVisible()
+    await page.getByRole("tab", { name: "Providers", exact: true }).click()
+    await page.getByRole("button", { name: /^Smoke API/ }).click()
+    await expect(
+      page.getByRole("textbox", { name: "API key", exact: true }),
+    ).toHaveValue("")
+    await page
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click()
+    await expect(
+      page.getByRole("form", { name: "Edit provider", exact: true }),
+    ).toHaveCount(0)
+    await page.getByRole("button", { name: /^Smoke API/ }).click()
+    await expect(
+      page.getByRole("textbox", { name: "API key", exact: true }),
+    ).toHaveValue("")
+    await page
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("status")
+        .filter({ hasText: "Connection test succeeded." }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Remove provider", exact: true })
+      .click()
+    await page.getByRole("button", { name: "Remove", exact: true }).click()
+    await expect(page.getByRole("button", { name: /^Smoke API/ })).toHaveCount(
+      0,
+    )
+    await expect(page.getByText("Add provider", { exact: true })).toBeVisible()
+    await page.getByRole("button", { name: "Back to app", exact: true }).click()
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "Untitled session", exact: true }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Select model and effort", exact: true })
+      .click()
+    await expect(
+      page.getByRole("button", { name: "smoke-model", exact: true }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole("button", { name: "scripted", exact: true }),
+    ).toBeVisible()
+    await page.keyboard.press("Escape")
+    expect(requests.length).toBeGreaterThanOrEqual(3)
+    for (const request of requests) {
+      expect(request).toMatchObject({
+        method: "POST",
+        path: "/v1/chat/completions",
+        authorization: "Bearer smoke-test-key",
+      })
+      expect(JSON.parse(request.body)).toMatchObject({
+        model: "smoke-model",
+        stream: true,
+      })
+    }
+  } finally {
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      endpoint.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+}
+
+async function openProviderSettings(page: Page): Promise<void> {
+  await page
+    .getByRole("button", { name: "Open account menu", exact: true })
+    .click()
+  await page.getByRole("menuitem", { name: /^Providers/ }).click()
+  await expect(
+    page.getByRole("region", { name: "Provider settings", exact: true }),
+  ).toBeVisible()
 }
