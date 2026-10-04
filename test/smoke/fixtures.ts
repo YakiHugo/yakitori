@@ -261,8 +261,10 @@ export async function runProviderFlow(
       }),
     ).not.toBeChecked()
     await page.keyboard.press("Escape")
+    await expect(openAIEditor).toHaveCount(0)
     const search = page.getByRole("searchbox", { name: "Find a provider" })
     await search.fill("DeepSeek")
+    await expect(search).toHaveValue("DeepSeek")
     await expect(
       page.getByRole("button", { name: "OpenAI", exact: true }),
     ).toHaveCount(0)
