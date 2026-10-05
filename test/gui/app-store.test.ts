@@ -2656,6 +2656,54 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptAttachments).toEqual([])
   })
 
+  it.each([
+    "requires_login",
+    "catalog_error",
+    "missing",
+  ])("keeps an explicit ChatGPT account on admission when it is %s", async (failure) => {
+    fakeRef.current.respond = admissionResponder()
+    const selected = { provider: "chatgpt-personal", model: "account-model" }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      modelSelections: { session_1: selected },
+      defaultProvider: "openai",
+      defaultModel: "paid-model",
+      userPreference: { provider: "openai", model: "paid-model" },
+      providers: [
+        ...(failure === "missing"
+          ? []
+          : [
+              {
+                name: "chatgpt-personal",
+                availability:
+                  failure === "requires_login"
+                    ? ("requires_login" as const)
+                    : ("available" as const),
+                models: [],
+                ...(failure === "catalog_error"
+                  ? { catalogError: "Unavailable" }
+                  : {}),
+              },
+            ]),
+        {
+          name: "openai",
+          models: [
+            {
+              id: "paid-model",
+              displayName: "Paid model",
+              instructionProfileId: "default",
+            },
+          ],
+        },
+      ],
+    })
+    await useAppStore.getState().admitInput("keep this account")
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({ modelSelection: selected })
+    expect(useAppStore.getState().modelSelections.session_1).toEqual(selected)
+  })
+
   it("uses a picker choice immediately for the pill, admission, and user preference", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
@@ -3115,6 +3163,56 @@ describe("new session drafts", () => {
       modelSelection: { provider: "faux", model: "scripted" },
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("keeps an unavailable ChatGPT draft account on its first admission instead of the API default", async () => {
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) =>
+      method === "session/create"
+        ? {
+            session: sessionDetail,
+            event: createEventEnvelope({
+              sessionId: "session_1",
+              seq: 1,
+              event: { type: EventType.SessionCreated, data: {} },
+            }),
+          }
+        : respond(method, params)
+    useAppStore.setState({
+      defaultProvider: "openai",
+      defaultModel: "paid-model",
+      userPreference: { provider: "openai", model: "paid-model" },
+      providers: [
+        {
+          name: "chatgpt-personal",
+          availability: "requires_login",
+          models: [],
+        },
+        {
+          name: "openai",
+          models: [
+            {
+              id: "paid-model",
+              displayName: "Paid model",
+              instructionProfileId: "default",
+            },
+          ],
+        },
+      ],
+    })
+    useAppStore.getState().startNewSession()
+    useAppStore
+      .getState()
+      .setModelSelection(undefined, {
+        provider: "chatgpt-personal",
+        model: "account-model",
+      })
+    await useAppStore.getState().admitInput("same account please")
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      modelSelection: { provider: "chatgpt-personal", model: "account-model" },
+    })
   })
 
   it("keeps creation out of busy while tracking concurrent work", async () => {

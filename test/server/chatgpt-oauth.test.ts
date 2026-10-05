@@ -347,3 +347,39 @@ describe("direct ChatGPT authorization", () => {
     expect([...f.requests, ...g.requests]).toHaveLength(0)
   })
 })
+
+describe("issued registration recovery barrier", () => {
+  it("does not exchange or activate after cancellation while persisting a registration", async () => {
+    const f = await fixture()
+    let release: (() => void) | undefined
+    let entered: (() => void) | undefined
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const seen = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const completing = f.attempt.complete(f.callback(), async (clientId) => {
+      expect(clientId).toBe("oaiapp_fake")
+      entered?.()
+      await barrier
+    })
+    await seen
+    f.attempt.cancel()
+    release?.()
+    await expect(completing).rejects.toMatchObject({ code: "expired_attempt" })
+    expect(f.requests).toEqual([])
+    expect(f.attempt.registration).toBeUndefined()
+  })
+  it("does not exchange when registration persistence fails", async () => {
+    const f = await fixture()
+    await expect(
+      f.attempt.complete(f.callback(), async () => {
+        throw new Error("Fixture disk full")
+      }),
+    ).rejects.toThrow("Fixture disk full")
+    expect(f.requests).toEqual([])
+    expect(f.attempt.issuedClientId).toBe("oaiapp_fake")
+    expect(f.attempt.registration).toBeUndefined()
+  })
+})

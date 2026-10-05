@@ -7,6 +7,8 @@ import type {
 } from "../../server/provider-configuration.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { ChatGPTConnections } from "./chatgpt-connections.tsx"
+import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { ProviderCatalog } from "./provider-catalog.tsx"
 import { ProviderSubscription } from "./provider-subscription.tsx"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
@@ -399,6 +401,7 @@ function ProviderConnections({
   return (
     <>
       <div hidden={view !== "providers"}>
+        <ChatGPTConnections apiBase={apiBase} active={view === "providers"} />
         {!showCatalog ? (
           <div className="provider-page-heading">
             <div>
@@ -508,7 +511,15 @@ function ProviderConnections({
           </div>
         ) : null}
       </div>
-      {view === "usage" ? <ProviderUsage providers={providers ?? []} /> : null}
+      {view === "usage" ? (
+        <>
+          <div className="chatgpt-usage-summary">
+            <strong>ChatGPT plan usage</strong>
+            <ChatGPTUsageLink />
+          </div>
+          <ProviderUsage providers={providers ?? []} />
+        </>
+      ) : null}
       {subscriptions
         .filter((entry) => entry.id === subscriptionId)
         .map((entry) => (

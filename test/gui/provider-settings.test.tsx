@@ -34,7 +34,10 @@ const { request, loadProviders, providerChanges } = vi.hoisted(() => ({
 
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
   getAppRpcClient: () => ({
-    request,
+    request: (method: string, params: Record<string, unknown>) =>
+      method === "chatgpt/read"
+        ? Promise.resolve({ accounts: [], welcomeRequired: false })
+        : request(method, params),
     subscribeToProviderChanges: (listener: () => void) => {
       providerChanges.add(listener)
       return () => providerChanges.delete(listener)
@@ -92,7 +95,7 @@ afterEach(() => {
 it("starts subscription sign-in from the catalog and opens a working account import form", async () => {
   const user = userEvent.setup()
   let subscriptions: readonly SubscriptionConnection[] = [
-    { id: "codex", name: "ChatGPT", available: false },
+    { id: "codex", name: "Codex CLI", available: false },
   ]
   let finish: ((result: readonly SubscriptionConnection[]) => void) | undefined
   request.mockImplementation(async (method) => {
@@ -100,7 +103,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
       subscriptions = [
         {
           id: "codex",
-          name: "ChatGPT",
+          name: "Codex CLI",
           available: false,
           login: { state: "running", url: "https://auth.openai.com/authorize" },
         },
@@ -108,7 +111,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
       return subscriptions
     }
     if (method === "provider/subscription/cancel") {
-      subscriptions = [{ id: "codex", name: "ChatGPT", available: false }]
+      subscriptions = [{ id: "codex", name: "Codex CLI", available: false }]
       return subscriptions
     }
     if (method === "provider/subscription/import")
@@ -118,7 +121,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
     return { providers: [], presets: [preset], subscriptions }
   })
   render(<ProviderSettings />)
-  await user.click(await screen.findByRole("button", { name: "ChatGPT" }))
+  await user.click(await screen.findByRole("button", { name: "Codex CLI" }))
   expect(request).toHaveBeenCalledWith("provider/subscription/login", {
     id: "codex",
   })
@@ -130,7 +133,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
     id: "codex",
   })
   const dialog = await screen.findByRole("dialog", {
-    name: "Import ChatGPT account",
+    name: "Import Codex CLI account",
   })
   expect(
     within(dialog).getByRole("button", { name: "Choose file…" }),
@@ -153,7 +156,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
   expect(
     within(dialog).getByRole("button", { name: "Import account" }),
   ).toHaveProperty("disabled", true)
-  subscriptions = [{ id: "codex", name: "ChatGPT", available: true }]
+  subscriptions = [{ id: "codex", name: "Codex CLI", available: true }]
   await act(async () => finish?.(subscriptions))
   expect(
     await screen.findByText(
@@ -167,7 +170,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
 it("shows why a local subscription account could not be imported and allows retrying", async () => {
   const user = userEvent.setup()
   const subscriptions: readonly SubscriptionConnection[] = [
-    { id: "codex", name: "ChatGPT", available: false },
+    { id: "codex", name: "Codex CLI", available: false },
   ]
   request.mockImplementation(async (method) => {
     if (
@@ -182,7 +185,7 @@ it("shows why a local subscription account could not be imported and allows retr
     return { providers: [], presets: [preset], subscriptions }
   })
   render(<ProviderSettings />)
-  await user.click(await screen.findByRole("button", { name: "ChatGPT" }))
+  await user.click(await screen.findByRole("button", { name: "Codex CLI" }))
   await user.click(
     screen.getByRole("button", { name: "Import existing account…" }),
   )
@@ -549,7 +552,7 @@ it("offers every source category and connects local services without a key or mo
       { ...preset, id: "openrouter", name: "OpenRouter", kind: "relay" },
       local,
     ],
-    subscriptions: [{ id: "codex", name: "ChatGPT", available: false }],
+    subscriptions: [{ id: "codex", name: "Codex CLI", available: false }],
   })
   render(<ProviderSettings />)
   for (const name of ["Subscriptions", "Vendors", "Relays", "On this machine"])

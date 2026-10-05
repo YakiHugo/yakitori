@@ -3188,10 +3188,18 @@ export function resolveEffectiveModel(input: {
   readonly defaultModel: string | undefined
   readonly providers: readonly ApiProviderSummary[]
 }): ModelSelection | undefined {
-  if (isAvailableModel(input.sessionCurrent, input.providers)) {
+  // A ChatGPT selection names a billing/account boundary. Losing its grant or
+  // catalog must never silently send the next input through another provider.
+  if (
+    input.sessionCurrent?.provider.startsWith("chatgpt-") ||
+    isAvailableModel(input.sessionCurrent, input.providers)
+  ) {
     return input.sessionCurrent
   }
-  if (isAvailableModel(input.userPreference, input.providers)) {
+  if (
+    input.userPreference?.provider.startsWith("chatgpt-") ||
+    isAvailableModel(input.userPreference, input.providers)
+  ) {
     return input.userPreference
   }
   if (input.defaultProvider === undefined || input.defaultModel === undefined) {
@@ -3201,7 +3209,10 @@ export function resolveEffectiveModel(input: {
     provider: input.defaultProvider,
     model: input.defaultModel,
   }
-  return isAvailableModel(fallback, input.providers) ? fallback : undefined
+  return fallback.provider.startsWith("chatgpt-") ||
+    isAvailableModel(fallback, input.providers)
+    ? fallback
+    : undefined
 }
 
 function isAvailableModel(

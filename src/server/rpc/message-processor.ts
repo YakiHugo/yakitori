@@ -1,3 +1,4 @@
+import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import { ConfigurationError } from "../config-errors.ts"
 import { createSessionEventHub, type SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
@@ -61,6 +62,7 @@ import {
 // Injection mirrors createYakitoriHttpServer so the production wiring stage
 // stays mechanical.
 export type MessageProcessorOptions = Readonly<{
+  chatgpt?: ChatGPTConnections
   providerConfiguration?: ProviderService
   mcp?: McpService
   interactions?: SessionInteractions
@@ -109,6 +111,7 @@ export class MessageProcessor {
   private readonly handlers: ServerHandlers
   private readonly sideChats: SideChatService | undefined
   private readonly interactions: SessionInteractions | undefined
+  private readonly chatgpt: ChatGPTConnections | undefined
   private readonly providerConfiguration: ProviderService | undefined
   private readonly mcp: McpService | undefined
   private readonly projectStore: ProjectStore | undefined
@@ -138,6 +141,7 @@ export class MessageProcessor {
     this.sideChats = options.sideChats
     this.interactions = options.interactions
     this.providerConfiguration = options.providerConfiguration
+    this.chatgpt = options.chatgpt
     this.mcp = options.mcp
     this.projectStore = options.projectStore
     this.providers = options.providers
@@ -307,6 +311,7 @@ export class MessageProcessor {
         ? {}
         : { interactions: this.interactions }),
       ...(this.mcp === undefined ? {} : { mcp: this.mcp }),
+      ...(this.chatgpt === undefined ? {} : { chatgpt: this.chatgpt }),
       ...(this.providerConfiguration === undefined
         ? {}
         : { providerConfiguration: this.providerConfiguration }),

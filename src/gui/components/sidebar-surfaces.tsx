@@ -14,12 +14,14 @@ export function SidebarDialog({
   onClose,
   children,
   dismissible = true,
+  dismissImmediately = false,
   className,
 }: Readonly<{
   title: string
   onClose(): void
   children: ReactNode
   dismissible?: boolean
+  dismissImmediately?: boolean
   className?: string
 }>) {
   const ref = useRef<HTMLDialogElement>(null)
@@ -37,7 +39,10 @@ export function SidebarDialog({
     return () => window.clearTimeout(timer)
   }, [closing])
   const close = () => {
-    if (dismissible) setClosing(true)
+    if (!dismissible) return
+    // Authentication cancellation cannot wait for a visual exit animation.
+    if (dismissImmediately) closeCallback.current()
+    else setClosing(true)
   }
   useEffect(() => {
     const previous = document.activeElement
@@ -67,7 +72,9 @@ export function SidebarDialog({
         }
       }}
       onClick={(event) => {
-        if (event.target !== event.currentTarget) return
+        // Opening a native modal retargets the rest of a trigger double-click
+        // to its backdrop. That repeated click must not dismiss the new dialog.
+        if (event.target !== event.currentTarget || event.detail > 1) return
         const rect = event.currentTarget.getBoundingClientRect()
         if (
           event.clientX < rect.left ||

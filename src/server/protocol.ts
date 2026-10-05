@@ -215,14 +215,16 @@ export type ApiRateLimits =
       }>[]
     }>
 
-export type ApiProviderSummary = {
-  readonly name: string
-  readonly availability?: "available" | "requires_login"
-  readonly credentialKind?: "api_key" | "oauth"
-  readonly rateLimits?: ApiRateLimits
-  readonly defaultModel?: string
-  readonly models: readonly ApiProviderModel[]
-}
+export type ApiProviderSummary = Readonly<{
+  name: string
+  displayName?: string
+  catalogError?: string
+  availability?: "available" | "requires_login"
+  credentialKind?: "api_key" | "oauth"
+  rateLimits?: ApiRateLimits
+  defaultModel?: string
+  models: readonly ApiProviderModel[]
+}>
 
 export type ApiSubscriptionProvider = "codex" | "grok" | "kimi"
 

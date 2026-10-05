@@ -71,6 +71,7 @@ export function createChatGPTOAuth(input: {
       redirectUri: string,
       selected?: ChatGPTRegistration,
       pendingClientId?: string,
+      options: { requestPlanConsent?: boolean } = {},
     ) {
       if (
         pendingClientId !== undefined &&
@@ -111,6 +112,7 @@ export function createChatGPTOAuth(input: {
         ...(selected || pendingClientId ? {} : { agent_name_hint: "Yakitori" }),
         ext_agent_host_id: input.hostId,
         response_type: "code",
+        ...(options.requestPlanConsent ? { prompt: "consent" } : {}),
         redirect_uri: redirectUri,
         scope: SCOPES,
         resource: CHATGPT_RESOURCE,
@@ -140,7 +142,10 @@ export function createChatGPTOAuth(input: {
           cancelled = true
           controller.abort()
         },
-        async complete(callbackUrl: string): Promise<ChatGPTCredentials> {
+        async complete(
+          callbackUrl: string,
+          persistRegistration?: (clientId: string) => Promise<void>,
+        ): Promise<ChatGPTCredentials> {
           if (consumed || now() >= expiresAt)
             throw new ChatGPTAuthError("expired_attempt")
           let callback: URL
@@ -184,6 +189,9 @@ export function createChatGPTOAuth(input: {
           )
             throw new ChatGPTAuthError("invalid_callback")
           callbackIssuedClientId = clientId
+          await persistRegistration?.(clientId)
+          if (cancelled || now() >= expiresAt)
+            throw new ChatGPTAuthError("expired_attempt")
           let response: Response
           try {
             response = await fetchFn(CHATGPT_TOKEN_URL, {

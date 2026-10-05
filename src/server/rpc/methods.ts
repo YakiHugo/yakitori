@@ -1,3 +1,9 @@
+import type { ChatGPTConnections } from "../chatgpt-connections.ts"
+import {
+  chatGPTMethods,
+  type ChatGPTRpcParams,
+  type ChatGPTRpcResponses,
+} from "./chatgpt-methods.ts"
 import { realpath, stat } from "node:fs/promises"
 import { basename, dirname, isAbsolute, normalize } from "node:path"
 import type { ThreadGoal } from "../../core/goal.ts"
@@ -252,6 +258,7 @@ export type RpcMethodOutcome = Readonly<{
 export type RpcMethodContext = Readonly<{
   mcp?: McpService
   providerConfiguration?: ProviderService
+  chatgpt?: ChatGPTConnections
   interactions?: SessionInteractions
   sideChats?: SideChatService
   connectionId: number
@@ -693,6 +700,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...interactionMethods,
   ...mcpMethods,
   ...providerMethods,
+  ...chatGPTMethods,
   ...workspaceRpcMethods,
   ...computerMethods,
   {
@@ -1338,7 +1346,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
 // table passes through unchanged reuse the protocol.ts request DTOs; the
 // handlers own their validation.
 export type RpcMethodParams = Readonly<
-  ProviderRpcParams &
+  ChatGPTRpcParams &
+    ProviderRpcParams &
     WorkspaceRpcParams &
     InteractionRpcParams &
     McpRpcParams &
@@ -1404,7 +1413,8 @@ export type RpcMethodParams = Readonly<
 >
 
 export type RpcMethodResponses = Readonly<
-  ProviderRpcResponses &
+  ChatGPTRpcResponses &
+    ProviderRpcResponses &
     WorkspaceRpcResponses &
     InteractionRpcResponses &
     McpRpcResponses &
