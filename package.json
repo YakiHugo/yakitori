@@ -75,6 +75,7 @@
     "clsx": "^2.1.1",
     "codemirror": "^6.0.2",
     "fs-ext": "^2.1.1",
+    "jose": "6.2.12",
     "lucide-react": "^1.27.0",
     "node-pty": "1.2.0-beta.15",
     "openai": "^6.48.0",
