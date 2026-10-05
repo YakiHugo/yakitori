@@ -172,7 +172,7 @@ describe("anthropic provider conversion", () => {
       {
         role: "tool",
         toolCallId: "tool_1",
-        content: "file body",
+        content: [{ type: "text", text: "file body" }],
       },
     ])
 
@@ -286,7 +286,9 @@ describe("anthropic provider conversion", () => {
         {
           role: "tool",
           toolCallId: "search_1",
-          content: JSON.stringify({ tools: [deferred] }),
+          content: [
+            { type: "text", text: JSON.stringify({ tools: [deferred] }) },
+          ],
           toolSearch: { tools: [deferred] },
         },
       ]),
@@ -331,7 +333,7 @@ describe("anthropic provider conversion", () => {
         {
           role: "tool",
           toolCallId: "search_empty",
-          content: "No matching tools were found.",
+          content: [{ type: "text", text: "No matching tools were found." }],
           toolSearch: { tools: [] },
         },
       ]),
@@ -384,7 +386,9 @@ describe("anthropic provider conversion", () => {
       {
         role: "tool",
         toolCallId: "search_1",
-        content: JSON.stringify({ tools: [deferred] }),
+        content: [
+          { type: "text", text: JSON.stringify({ tools: [deferred] }) },
+        ],
         toolSearch: { tools: [deferred] },
       },
     ]
@@ -543,7 +547,9 @@ describe("anthropic provider conversion", () => {
           {
             role: "tool",
             toolCallId: "search_old",
-            content: JSON.stringify({ tools: [deferred] }),
+            content: [
+              { type: "text", text: JSON.stringify({ tools: [deferred] }) },
+            ],
             toolSearch: { tools: [deferred] },
           },
         ],
@@ -1045,7 +1051,7 @@ describe("anthropic provider conversion", () => {
         {
           role: "tool",
           toolCallId: "tool_1",
-          content: "file body",
+          content: [{ type: "text", text: "file body" }],
         },
       ],
       tools: [],

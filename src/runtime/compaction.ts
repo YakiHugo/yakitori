@@ -80,10 +80,14 @@ export function trimRemoteCompactionToolTail(
   ) {
     const item = result[index]
     if (item?.role !== "tool") break
-    const { images: _images, documents: _documents, ...textResult } = item
     const replacement: ModelMessage = {
-      ...textResult,
-      content: "Tool output omitted to fit the context window.",
+      ...item,
+      content: [
+        {
+          type: "text",
+          text: "Tool output omitted to fit the context window.",
+        },
+      ],
       ...(item.toolSearch === undefined ? {} : { toolSearch: { tools: [] } }),
     }
     tokens +=

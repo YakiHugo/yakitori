@@ -714,7 +714,11 @@ describe("live Session actor", () => {
             id: "late_result",
             turnId: "turn_stuck",
             createdAt: new Date().toISOString(),
-            item: { role: "tool", toolCallId: "late_call", content: "late" },
+            item: {
+              role: "tool",
+              toolCallId: "late_call",
+              content: [{ type: "text", text: "late" }],
+            },
           },
           {
             type: "dynamic_tool_call",

@@ -87,7 +87,10 @@ describe("Turn recovery", () => {
         expect(
           request.messages.filter((message) => message.role === "tool"),
         ).toEqual([
-          expect.objectContaining({ toolCallId: "early", content: "saved" }),
+          expect.objectContaining({
+            toolCallId: "early",
+            content: [{ type: "text", text: "saved" }],
+          }),
         ])
         yield {
           type: "response",
@@ -187,7 +190,10 @@ describe("Turn recovery", () => {
           expect.objectContaining({ toolCallId: "wait", isError: true }),
         )
         expect(results).toContainEqual(
-          expect.objectContaining({ toolCallId: "read", content: "known" }),
+          expect.objectContaining({
+            toolCallId: "read",
+            content: [{ type: "text", text: "known" }],
+          }),
         )
         yield {
           type: "response",
@@ -286,7 +292,9 @@ describe("Turn recovery", () => {
             expect.objectContaining({
               role: "tool",
               toolCallId: "read",
-              content: expect.stringContaining("original"),
+              content: [
+                { type: "text", text: expect.stringContaining("original") },
+              ],
             }),
           )
           yield {
@@ -328,7 +336,9 @@ describe("Turn recovery", () => {
     else
       expect(results[1]).toMatchObject({
         isError: true,
-        content: expect.stringContaining("file_not_observed"),
+        content: [
+          { type: "text", text: expect.stringContaining("file_not_observed") },
+        ],
       })
   })
 
@@ -581,7 +591,9 @@ describe("Turn recovery", () => {
         item: {
           role: "tool",
           toolCallId: "read",
-          content: expect.stringContaining("known content"),
+          content: [
+            { type: "text", text: expect.stringContaining("known content") },
+          ],
         },
       },
     })

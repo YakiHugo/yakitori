@@ -665,36 +665,34 @@ export function toOpenAIInput(
         })
         continue
       }
-      const text = message.isError
-        ? `[tool_error]\n${message.content}`
-        : message.content
-      // Responses supports file inputs; do not assume every compatible backend does.
-      const documentsSupported = provider === "openai"
-      const media = [
-        ...(message.images ?? []).map((image) => ({
-          type: "input_image" as const,
-          image_url: `data:${image.mediaType};base64,${requireModelImageData(image)}`,
-          detail: image.detail ?? ("high" as const),
-        })),
-        ...(message.documents ?? []).map((document) => {
-          if (!documentsSupported)
-            return {
-              type: "input_text" as const,
-              text: `[Document ${document.name} was not sent: native PDF input is not enabled for this provider.]`,
-            }
-          if (document.data === undefined)
-            throw new Error("Unresolved document asset.")
+      const blocks = message.content.map((block) => {
+        if (block.type === "text")
+          return { type: "input_text" as const, text: block.text }
+        if (block.type === "image")
           return {
-            type: "input_file" as const,
-            filename: document.name,
-            file_data: `data:application/pdf;base64,${document.data}`,
+            type: "input_image" as const,
+            image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+            detail: block.detail ?? ("high" as const),
           }
-        }),
-      ]
-      const output =
-        media.length === 0
-          ? text
-          : [{ type: "input_text" as const, text }, ...media]
+        // Responses supports files; compatible backends are separately gated.
+        if (provider !== "openai")
+          return {
+            type: "input_text" as const,
+            text: `[Document ${block.name} was not sent: native PDF input is not enabled for this provider.]`,
+          }
+        if (block.data === undefined)
+          throw new Error("Unresolved document asset.")
+        return {
+          type: "input_file" as const,
+          filename: block.name,
+          file_data: `data:application/pdf;base64,${block.data}`,
+        }
+      })
+      if (message.isError)
+        blocks.unshift({ type: "input_text", text: "[tool_error]" })
+      const output = blocks.every((block) => block.type === "input_text")
+        ? blocks.map((block) => block.text).join("\n")
+        : blocks
       input.push(
         customCallIds.has(message.toolCallId)
           ? {

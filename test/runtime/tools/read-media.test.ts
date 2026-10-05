@@ -49,8 +49,12 @@ describe("PDF document reading", () => {
     expect(result.content).toContain("--- Page 3 ---\nThird page")
     expect(result.content).not.toContain("First page")
     const projected = await finalizeToolOutput(result, budget, ctx)
-    expect(projected.documents).toBeUndefined()
-    expect(projected.images).toBeUndefined()
+    expect(
+      projected.content.filter((block) => block.type === "document"),
+    ).toEqual([])
+    expect(projected.content.filter((block) => block.type === "image")).toEqual(
+      [],
+    )
   })
 
   it("renders selected pages as durable images for image-capable providers", async () => {
@@ -68,9 +72,15 @@ describe("PDF document reading", () => {
     })
     const projected = await finalizeToolOutput(result, budget, ctx)
     await rm(join(ctx.workspaceRoot, "document.pdf"))
-    expect(projected.images).toHaveLength(2)
-    expect(projected.documents).toBeUndefined()
-    const image = projected.images?.[0]
+    expect(
+      projected.content.filter((block) => block.type === "image"),
+    ).toHaveLength(2)
+    expect(
+      projected.content.filter((block) => block.type === "document"),
+    ).toEqual([])
+    const image = projected.content.filter(
+      (block) => block.type === "image",
+    )?.[0]
     if (image?.file === undefined) throw new Error("Missing page snapshot")
     const bytes = await ctx.rolloutAssets.read(image.file)
     expect(await sharp(bytes).metadata()).toMatchObject({
@@ -91,7 +101,9 @@ describe("PDF document reading", () => {
     const tool = createReadDocumentTool()
     const native = await tool.execute({ path: "document.pdf" }, ctx)
     expect(
-      (await finalizeToolOutput(native, budget, ctx)).documents,
+      (await finalizeToolOutput(native, budget, ctx)).content.filter(
+        (block) => block.type === "document",
+      ),
     ).toHaveLength(1)
     const text = await tool.execute(
       { path: "document.pdf", format: "text" },

@@ -72,17 +72,6 @@ describe("live file observations", () => {
           ],
         },
         {
-          assertRequest(request) {
-            expect(request.messages).toEqual(
-              expect.arrayContaining([
-                expect.objectContaining({
-                  role: "tool",
-                  toolCallId: "tool_edit_after_restart",
-                  isError: undefined,
-                }),
-              ]),
-            )
-          },
           content: [{ type: "text", text: "edited" }],
         },
       ])
@@ -99,6 +88,23 @@ describe("live file observations", () => {
           }),
         )
         await waitForThreadIdle(second, sessionId)
+        // Provider callback failures are runtime failures, not test failures.
+        // Assert the completed request outside that exception boundary.
+        expect(secondProvider.callCount).toBe(2)
+        const toolResult = secondProvider.requests
+          .at(-1)
+          ?.messages.find(
+            (message) =>
+              message.role === "tool" &&
+              message.toolCallId === "tool_edit_after_restart",
+          )
+        expect(toolResult).toMatchObject({
+          role: "tool",
+          toolCallId: "tool_edit_after_restart",
+        })
+        expect(
+          toolResult?.role === "tool" ? toolResult.isError : true,
+        ).toBeUndefined()
         expect(await readFile(path, "utf8")).toBe("value = 2\n")
       } finally {
         await second.close()

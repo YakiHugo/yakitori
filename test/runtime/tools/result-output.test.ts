@@ -1,8 +1,9 @@
+import { toolContentText } from "../../../src/runtime/model-tool-content.ts"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   isModelMessage,
   type ModelToolResultMessage,
@@ -50,6 +51,80 @@ const png = Buffer.from(
 )
 
 describe("tool result persistence and model projection", () => {
+  it("keeps MCP text/image/PDF/text order and offloads the combined text only once", async () => {
+    const ctx = await context()
+    const pdf = pdfFixture(["Document content"])
+    const first = "before 😀\n".repeat(200)
+    const result = await mcpResult(
+      {
+        content: [
+          { type: "text", text: first },
+          {
+            type: "image",
+            mimeType: "image/png",
+            data: png.toString("base64"),
+          },
+          { type: "text", text: "between" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///report.pdf",
+              mimeType: "application/pdf",
+              blob: pdf.toString("base64"),
+            },
+          },
+          { type: "text", text: "after" },
+        ],
+        _meta: { privateState: "host-only" },
+      },
+      ctx,
+    )
+    const saves = vi.spyOn(ctx.rolloutAssets, "saveToolFile")
+    const full = await finalizeToolOutput(
+      result,
+      { maxBytes: 20_000, maxLines: 1000 },
+      ctx,
+    )
+    expect(full.content).toEqual([
+      { type: "text", text: first },
+      { type: "text", text: "[Image attached]" },
+      expect.objectContaining({
+        type: "image",
+        file: {
+          rolloutId: ctx.rolloutId,
+          path: "tools/call_output/media-1.png",
+        },
+      }),
+      { type: "text", text: "between" },
+      { type: "text", text: "[Document attached]" },
+      expect.objectContaining({
+        type: "document",
+        file: {
+          rolloutId: ctx.rolloutId,
+          path: "tools/call_output/media-3.pdf",
+        },
+      }),
+      { type: "text", text: "after" },
+    ])
+    expect(saves).not.toHaveBeenCalled()
+    const bounded = await finalizeToolOutput(result, budget, ctx)
+    expect(saves).toHaveBeenCalledTimes(1)
+    expect(saves.mock.calls[0]?.[2]).toBe("result.txt")
+    expect(saves.mock.calls[0]?.[3].toString()).toBe(
+      `${first}\n[Image attached]\nbetween\n[Document attached]\nafter`,
+    )
+    expect(bounded.content.filter((part) => part.type !== "text")).toEqual(
+      full.content.filter((part) => part.type !== "text"),
+    )
+    expect(
+      Buffer.byteLength(toolContentText(bounded.content)),
+    ).toBeLessThanOrEqual(budget.maxBytes)
+    expect(
+      toolContentText(bounded.content).split("\n").length,
+    ).toBeLessThanOrEqual(budget.maxLines)
+    expect(JSON.stringify(bounded)).not.toContain("host-only")
+  })
+
   it("projects structured MCP results with text and keeps metadata host-only", async () => {
     const ctx = await context()
     const result = await mcpResult(
@@ -64,7 +139,9 @@ describe("tool result persistence and model projection", () => {
       _meta: { privateState: "host-only" },
     })
     const projected = await finalizeToolOutput(result, budget, ctx)
-    expect(projected.content).toBe('Found one item\n{"items":["item-1"]}')
+    expect(toolContentText(projected.content)).toBe(
+      'Found one item\n{"items":["item-1"]}',
+    )
     expect(JSON.stringify(projected)).not.toContain("host-only")
     const empty = await mcpResult(
       { content: [], _meta: { privateState: "host-only" } },
@@ -115,7 +192,7 @@ describe("tool result persistence and model projection", () => {
     }
     const result = await mcpResult(input, ctx)
     const projected = await finalizeToolOutput(result, budget, ctx)
-    expect(projected.content).toBe(text)
+    expect(toolContentText(projected.content)).toBe(text)
     expect(JSON.stringify(projected)).not.toContain("host-only")
     expect(result.output).toEqual(input)
   })
@@ -145,9 +222,9 @@ describe("tool result persistence and model projection", () => {
       },
       ctx,
     )
-    expect((await finalizeToolOutput(result, budget, ctx)).content).toBe(
-      expected,
-    )
+    expect(
+      toolContentText((await finalizeToolOutput(result, budget, ctx)).content),
+    ).toBe(expected)
   })
 
   it("retains full text for a second read while bounding the model preview", async () => {
@@ -160,8 +237,12 @@ describe("tool result persistence and model projection", () => {
       budget,
       ctx,
     )
-    expect(Buffer.byteLength(result.content)).toBeLessThanOrEqual(1024)
-    const path = result.content.match(/saved to (.+?)\. Use/)?.[1]
+    expect(
+      Buffer.byteLength(toolContentText(result.content)),
+    ).toBeLessThanOrEqual(1024)
+    const path = toolContentText(result.content).match(
+      /saved to (.+?)\. Use/,
+    )?.[1]
     if (path === undefined) throw new Error("Missing recovery path")
     expect(await readFile(path, "utf8")).toBe(full)
     const later = await createReadFileTool().execute(
@@ -190,10 +271,14 @@ describe("tool result persistence and model projection", () => {
         output_file: string
       }
       const projected = await finalizeToolOutput(result, budget, ctx)
-      expect(projected.content).toContain(`session ID ${output.session_id}`)
-      expect(projected.content).toContain(output.output_file)
-      expect(projected.content).toContain("TAIL")
-      expect(Buffer.byteLength(projected.content)).toBeLessThanOrEqual(1024)
+      expect(toolContentText(projected.content)).toContain(
+        `session ID ${output.session_id}`,
+      )
+      expect(toolContentText(projected.content)).toContain(output.output_file)
+      expect(toolContentText(projected.content)).toContain("TAIL")
+      expect(
+        Buffer.byteLength(toolContentText(projected.content)),
+      ).toBeLessThanOrEqual(1024)
       expect(await readFile(output.output_file, "utf8")).toContain("MIDDLE")
       const finished = await stdin.execute(
         { session_id: output.session_id },
@@ -226,14 +311,15 @@ describe("tool result persistence and model projection", () => {
     }
     expect(isModelMessage(JSON.parse(JSON.stringify(stored)))).toBe(true)
     await rm(path)
-    const image = stored.images?.[0]
+    const image = stored.content.filter((block) => block.type === "image")?.[0]
     if (image === undefined) throw new Error("Missing image")
     if (image.file === undefined) throw new Error("Missing image snapshot")
     const recovered = await ctx.rolloutAssets.read(image.file)
     expect(recovered).toEqual(png)
     const request: ModelToolResultMessage = {
       ...stored,
-      images: [
+      content: [
+        ...stored.content.filter((block) => block.type !== "image"),
         {
           type: "image",
           mediaType: image.mediaType,
@@ -287,13 +373,19 @@ describe("tool result persistence and model projection", () => {
       ctx,
     )
     const projected = await finalizeToolOutput(result, budget, ctx)
-    expect(projected.images).toHaveLength(1)
-    const file = projected.images?.[0]?.file
+    expect(
+      projected.content.filter((block) => block.type === "image"),
+    ).toHaveLength(1)
+    const file = projected.content.filter(
+      (block) => block.type === "image",
+    )?.[0]?.file
     if (!file) throw new Error("Missing MCP image snapshot")
     expect(await ctx.rolloutAssets.read(file)).toEqual(png)
-    expect(projected.content).toContain("Full text saved")
+    expect(toolContentText(projected.content)).toContain("Full text saved")
     expect(JSON.stringify(result.output)).not.toContain(png.toString("base64"))
-    expect(Buffer.byteLength(projected.content)).toBeLessThanOrEqual(1024)
+    expect(
+      Buffer.byteLength(toolContentText(projected.content)),
+    ).toBeLessThanOrEqual(1024)
   })
 
   it("keeps PDF snapshots and uses provider-native document inputs", async () => {
@@ -309,7 +401,9 @@ describe("tool result persistence and model projection", () => {
       },
     )
     const projected = await finalizeToolOutput(result, budget, ctx)
-    const document = projected.documents?.[0]
+    const document = projected.content.filter(
+      (block) => block.type === "document",
+    )?.[0]
     if (document === undefined) throw new Error("Missing document")
     await rm(path)
     const bytes = await ctx.rolloutAssets.read(document.file)
@@ -318,7 +412,11 @@ describe("tool result persistence and model projection", () => {
       role: "tool",
       toolCallId: "call_output",
       ...projected,
-      documents: [{ ...document, data: bytes.toString("base64") }],
+      content: projected.content.map((block) =>
+        block.type === "document"
+          ? { ...block, data: bytes.toString("base64") }
+          : block,
+      ),
     }
     expect(toOpenAIInput([message])).toMatchObject([
       {
@@ -355,11 +453,17 @@ describe("tool result persistence and model projection", () => {
         maxTextCharacters: 500,
       }).execute({ url: `http://127.0.0.1:${address.port}` }, ctx)
       const projected = await finalizeToolOutput(result, budget, ctx)
-      const path = projected.content.match(/saved to (.+?)\. Use/)?.[1]
+      const path = toolContentText(projected.content).match(
+        /saved to (.+?)\. Use/,
+      )?.[1]
       if (path === undefined) throw new Error("Missing recovery path")
       expect(await readFile(path, "utf8")).toContain("UNIQUE_PAGE_END")
-      expect(projected.content).not.toContain("UNIQUE_PAGE_END")
-      expect(Buffer.byteLength(projected.content)).toBeLessThanOrEqual(1024)
+      expect(toolContentText(projected.content)).not.toContain(
+        "UNIQUE_PAGE_END",
+      )
+      expect(
+        Buffer.byteLength(toolContentText(projected.content)),
+      ).toBeLessThanOrEqual(1024)
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -382,7 +486,9 @@ describe("tool result persistence and model projection", () => {
       { maxBytes: 512, maxLines: 1 },
       ctx,
     )
-    expect(projected.content).toContain("Read preview truncated")
-    expect(projected.content).not.toContain("saved to")
+    expect(toolContentText(projected.content)).toContain(
+      "Read preview truncated",
+    )
+    expect(toolContentText(projected.content)).not.toContain("saved to")
   })
 })

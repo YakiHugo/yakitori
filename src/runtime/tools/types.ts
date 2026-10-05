@@ -58,10 +58,7 @@ export type ToolPermissionRequest = Readonly<{
 export type ToolPermissionContext = Readonly<{ workspaceRoot: string }>
 
 export type ToolOutputBudget = Readonly<{ maxBytes: number; maxLines: number }>
-export type ToolModelContent = Pick<
-  ModelToolResultMessage,
-  "content" | "images" | "documents"
-> &
+export type ToolModelContent = Pick<ModelToolResultMessage, "content"> &
   Readonly<{
     // Projection-only metadata; hook additions do not change body completeness.
     toolContentTruncated?: boolean

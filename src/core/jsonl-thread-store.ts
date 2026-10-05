@@ -1899,7 +1899,7 @@ async function readRolloutRecords(
       start = index + 1
       continue
     }
-    const value = normalizeStoredUserContent(
+    const value = normalizeStoredModelContent(
       JSON.parse(bytes.subarray(start, index).toString("utf8")),
     )
     if (!isStoredRolloutItem(value)) {
@@ -1917,7 +1917,7 @@ async function repairTrailingJsonLine(path: string): Promise<void> {
   const completeLength = bytes.lastIndexOf(10) + 1
   const trailing = bytes.subarray(completeLength)
   try {
-    const value = normalizeStoredUserContent(
+    const value = normalizeStoredModelContent(
       JSON.parse(trailing.toString("utf8")),
     )
     if (!isStoredRolloutItem(value)) throw new Error("invalid rollout item")
@@ -1951,7 +1951,7 @@ async function reconcilePendingTail(
   }
   let value: unknown
   try {
-    value = normalizeStoredUserContent(JSON.parse(trailing.toString("utf8")))
+    value = normalizeStoredModelContent(JSON.parse(trailing.toString("utf8")))
   } catch {
     await truncate(path, completeLength)
     return false
@@ -2122,14 +2122,44 @@ function isGitInfo(value: unknown): boolean {
   )
 }
 
-// Existing rollouts stored user text and images in separate arrays. Normalize
+// Existing rollouts stored user/tool text and media in separate arrays. Normalize
 // only that shipped shape on read; all new writes and runtime IR are ordered.
-function normalizeStoredUserContent(value: unknown): unknown {
+function normalizeStoredModelContent(value: unknown): unknown {
   if (!isRecord(value) || !isRecord(value.item)) return value
   const rollout = value.item
   const normalize = (envelope: unknown): unknown => {
     if (!isRecord(envelope) || !isRecord(envelope.item)) return envelope
     const message = envelope.item
+    if (message.role === "tool" && typeof message.content === "string") {
+      const { images, documents, ...tool } = message
+      if (
+        (images !== undefined && !Array.isArray(images)) ||
+        (documents !== undefined && !Array.isArray(documents))
+      )
+        return envelope
+      if (
+        (images ?? []).some(
+          (block: unknown) => !isRecord(block) || block.type !== "image",
+        ) ||
+        (documents ?? []).some(
+          (block: unknown) => !isRecord(block) || block.type !== "document",
+        )
+      )
+        return envelope
+      // The old format already lost interleaving; preserve its actual text,
+      // images, documents order without guessing or rewriting stored bytes.
+      const canonical = {
+        ...tool,
+        content: [
+          { type: "text", text: message.content },
+          ...(images ?? []),
+          ...(documents ?? []),
+        ],
+      }
+      return isModelMessage(canonical)
+        ? { ...envelope, item: canonical }
+        : envelope
+    }
     if (
       message.role !== "user" ||
       !Array.isArray(message.images) ||

@@ -281,17 +281,22 @@ async function buildResult(
             toModelContent(budget) {
               const notice = `[Page preview truncated. Full received text saved to ${saved.path}. Use read_file with offset and limit, or a bounded command for long lines.${body.truncated ? " Response reception limit reached; saved text is incomplete." : ""}]`
               return {
-                content: textPreview(
-                  fullContent,
+                content: [
                   {
-                    maxBytes: Math.min(
-                      budget.maxBytes,
-                      Buffer.byteLength(content),
+                    type: "text",
+                    text: textPreview(
+                      fullContent,
+                      {
+                        maxBytes: Math.min(
+                          budget.maxBytes,
+                          Buffer.byteLength(content),
+                        ),
+                        maxLines: budget.maxLines,
+                      },
+                      notice,
                     ),
-                    maxLines: budget.maxLines,
                   },
-                  notice,
-                ),
+                ],
               }
             },
           },

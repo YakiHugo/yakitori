@@ -229,23 +229,27 @@ export type FileObservation = {
   readonly optimisticRebase?: boolean
 }
 
-export type ModelToolResultMessage = {
-  readonly role: "tool"
-  readonly toolCallId: string
-  readonly images?: readonly ModelImageBlock[]
-  readonly documents?: readonly ModelDocumentBlock[]
-  readonly content: string
-  readonly isError?: boolean
+// Tool content is data, not an assistant continuation or a host/UI metadata channel.
+export type ModelToolContentBlock =
+  | Readonly<{ type: "text"; text: string }>
+  | ModelImageBlock
+  | ModelDocumentBlock
+
+export type ModelToolResultMessage = Readonly<{
+  role: "tool"
+  toolCallId: string
+  content: readonly ModelToolContentBlock[]
+  isError?: boolean
   // A structural discovery result. Provider adapters encode this as an
   // OpenAI tool_search_output or Anthropic tool_reference blocks instead of
   // degrading it to ordinary tool-result text.
-  readonly toolSearch?: Readonly<{
+  toolSearch?: Readonly<{
     tools: readonly ModelToolDefinition[]
   }>
   // Execution-only metadata. Providers receive content; the actor retains this
   // grant so later model-visible Turns can safely authorize file mutations.
-  readonly fileObservations?: readonly FileObservation[]
-}
+  fileObservations?: readonly FileObservation[]
+}>
 
 export type ModelMessage =
   | ModelUserMessage
@@ -1294,18 +1298,19 @@ export function isModelMessage(value: unknown): value is ModelMessage {
         "content",
         "isError",
         "toolSearch",
-        "images",
-        "documents",
         "fileObservations",
       ]) &&
-      (value.images === undefined ||
-        (Array.isArray(value.images) &&
-          value.images.every(isModelImageBlock))) &&
-      (value.documents === undefined ||
-        (Array.isArray(value.documents) &&
-          value.documents.every(isModelDocumentBlock))) &&
       isString(value.toolCallId) &&
-      isString(value.content) &&
+      Array.isArray(value.content) &&
+      value.content.every(
+        (block) =>
+          (isRecord(block) &&
+            onlyKeys(block, ["type", "text"]) &&
+            block.type === "text" &&
+            isString(block.text)) ||
+          isModelImageBlock(block) ||
+          isModelDocumentBlock(block),
+      ) &&
       (value.isError === undefined || typeof value.isError === "boolean") &&
       (value.toolSearch === undefined ||
         (isRecord(value.toolSearch) &&

@@ -525,7 +525,7 @@ describe("OpenAI Responses provider", () => {
         {
           role: "tool",
           toolCallId: "call_1",
-          content: "not found",
+          content: [{ type: "text", text: "not found" }],
           isError: true,
         },
       ]),
@@ -625,7 +625,9 @@ describe("OpenAI Responses provider", () => {
         {
           role: "tool",
           toolCallId: "search_1",
-          content: JSON.stringify({ tools: [deferred] }),
+          content: [
+            { type: "text", text: JSON.stringify({ tools: [deferred] }) },
+          ],
           toolSearch: { tools: [deferred] },
         },
       ]),
@@ -698,7 +700,11 @@ describe("OpenAI Responses provider", () => {
             },
           ],
         },
-        { role: "tool", toolCallId: "patch_1", content: "Done" },
+        {
+          role: "tool",
+          toolCallId: "patch_1",
+          content: [{ type: "text", text: "Done" }],
+        },
       ]),
     ).toEqual([
       {
@@ -796,7 +802,9 @@ describe("OpenAI Responses provider", () => {
       {
         role: "tool",
         toolCallId: "search_1",
-        content: JSON.stringify({ tools: [historical] }),
+        content: [
+          { type: "text", text: JSON.stringify({ tools: [historical] }) },
+        ],
         toolSearch: { tools: [historical] },
       },
     ]
@@ -1178,7 +1186,9 @@ describe("OpenAI Responses provider", () => {
       {
         role: "tool",
         toolCallId: "search_1",
-        content: JSON.stringify({ tools: [deferred] }),
+        content: [
+          { type: "text", text: JSON.stringify({ tools: [deferred] }) },
+        ],
         toolSearch: { tools: [deferred] },
       },
     ]

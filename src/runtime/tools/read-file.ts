@@ -231,11 +231,16 @@ export function createReadFileTool(
         presentation: {
           toModelContent(budget) {
             return {
-              content: textPreview(
-                visibleContent,
-                budget,
-                `[Read preview truncated. Read ${resolved.displayPath} with a smaller limit or use a bounded command for long lines.]`,
-              ),
+              content: [
+                {
+                  type: "text",
+                  text: textPreview(
+                    visibleContent,
+                    budget,
+                    `[Read preview truncated. Read ${resolved.displayPath} with a smaller limit or use a bounded command for long lines.]`,
+                  ),
+                },
+              ],
             }
           },
         },

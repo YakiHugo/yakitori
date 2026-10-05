@@ -497,10 +497,30 @@ describe("structured context and ephemeral forks", () => {
     expect(await context.app.threadStore.listThreadIds()).toEqual([id])
   })
 
-  it("keeps inherited images model-visible after closing an intermediate side chat", async () => {
+  it.each([
+    "user",
+    "tool",
+  ] as const)("keeps inherited %s images model-visible after closing an intermediate side chat", async (origin) => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
+      if (origin === "tool" && requests.length === 1) {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "parent_image",
+                name: "view_image",
+                input: { path: "parent.png" },
+              },
+            ],
+          },
+        }
+        return
+      }
       yield {
         type: "response",
         response: {
@@ -515,16 +535,24 @@ describe("structured context and ephemeral forks", () => {
     })
       .png()
       .toBuffer()
-    const attachments = await context.app.rolloutAssets.importImageBytes(
-      parentId,
-      "parent_image_draft",
-      [{ name: "parent.png", data: bytes }],
-    )
+    await writeFile(join(context.root, "parent.png"), bytes)
+    const attachments =
+      origin === "user"
+        ? await context.app.rolloutAssets.importImageBytes(
+            parentId,
+            "parent_image_draft",
+            [{ name: "parent.png", data: bytes }],
+          )
+        : undefined
     const admitted = await context.app.handlers.admitInput({
       sessionId: parentId,
       requestId: "parent_image_turn",
       modelSelection: { provider: "openai", model: "gpt-5" },
-      content: { kind: "text", text: "Describe the parent image", attachments },
+      content: {
+        kind: "text",
+        text: "Describe the parent image",
+        ...(attachments === undefined ? {} : { attachments }),
+      },
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await until(
@@ -532,11 +560,12 @@ describe("structured context and ephemeral forks", () => {
     )
     const stored = await context.app.threadStore.readThread(parentId)
     const parentImage = stored?.rollout.flatMap(({ item }) =>
-      item.type === "response_item" && item.item.item.role === "user"
+      item.type === "response_item" && item.item.item.role === origin
         ? item.item.item.content.filter((block) => block.type === "image")
         : [],
     )[0]
-    if (!parentImage?.file) throw new Error("Missing stored parent image")
+    if (parentImage?.type !== "image" || !parentImage.file)
+      throw new Error("Missing stored parent image")
     const side = await context.app.sideChats.create({
       sourceSessionId: parentId,
     })
@@ -561,7 +590,7 @@ describe("structured context and ephemeral forks", () => {
     await until(
       () => context.app.sideChats.read(nested.id).activeTurnId === undefined,
     )
-    for (const request of requests.slice(1)) {
+    for (const request of requests.slice(origin === "tool" ? 2 : 1)) {
       const images = request.messages.flatMap((message) =>
         message.role === "user"
           ? message.content.filter((block) => block.type === "image")

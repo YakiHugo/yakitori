@@ -1,3 +1,5 @@
+import { toolContentText } from "./model-tool-content.ts"
+import type { ModelToolContentBlock } from "../kernel/index.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
@@ -2755,26 +2757,28 @@ function completeToolItem(
     resultItemId,
     content: {
       kind: "text",
-      text: modelContent.content,
-      ...(modelContent.images === undefined
+      text: toolContentText(modelContent.content),
+      ...(!modelContent.content.some((block) => block.type === "image")
         ? {}
         : {
-            attachments: modelContent.images.flatMap((image) =>
-              image.file === undefined
-                ? []
-                : [
-                    {
-                      name:
-                        image.name ??
-                        image.file.path.split("/").at(-1) ??
-                        "image",
-                      mediaType: image.mediaType,
-                      sizeBytes: image.sizeBytes,
-                      detail: image.detail ?? "high",
-                      file: image.file,
-                    },
-                  ],
-            ),
+            attachments: modelContent.content
+              .filter((block) => block.type === "image")
+              .flatMap((image) =>
+                image.file === undefined
+                  ? []
+                  : [
+                      {
+                        name:
+                          image.name ??
+                          image.file.path.split("/").at(-1) ??
+                          "image",
+                        mediaType: image.mediaType,
+                        sizeBytes: image.sizeBytes,
+                        detail: image.detail ?? "high",
+                        file: image.file,
+                      },
+                    ],
+              ),
           }),
     },
     ...(result.output === undefined ? {} : { output: result.output }),
@@ -2992,12 +2996,17 @@ async function executePreparedTool(
             const body = await finalizeToolOutput(
               result,
               {
-                maxBytes: budget.maxBytes - utf8Bytes(hook.content) - 1,
-                maxLines: budget.maxLines - hook.content.split("\n").length,
+                maxBytes:
+                  budget.maxBytes -
+                  utf8Bytes(toolContentText(hook.content)) -
+                  1,
+                maxLines:
+                  budget.maxLines -
+                  toolContentText(hook.content).split("\n").length,
               },
               projectionContext,
             )
-            return { ...body, content: `${body.content}\n${hook.content}` }
+            return { ...body, content: [...body.content, ...hook.content] }
           },
         },
       }
@@ -3211,23 +3220,25 @@ async function resolveRolloutAssetMedia(
       })
       continue
     }
-    const images = await Promise.all((message.images ?? []).map(resolveImage))
-    const { documents, ...tool } = message
-    const projected = await prepareModelDocuments(
-      documents ?? [],
-      rolloutAssets,
-      documentReading,
-      signal,
-    )
-    const combinedImages = [...images, ...projected.images]
-    resolved.push({
-      ...tool,
-      content: tool.content + projected.content,
-      ...(combinedImages.length === 0 ? {} : { images: combinedImages }),
-      ...(projected.documents.length === 0
-        ? {}
-        : { documents: projected.documents }),
-    })
+    const content: ModelToolContentBlock[] = []
+    // PDF raster/text fallback expands at its source slot, not after later text
+    // or other assets. Keep the existing sequential PDF cache/budget boundary.
+    for (const block of message.content) {
+      if (block.type === "image") content.push(await resolveImage(block))
+      else if (block.type === "text") content.push(block)
+      else {
+        const projected = await prepareModelDocuments(
+          [block],
+          rolloutAssets,
+          documentReading,
+          signal,
+        )
+        if (projected.content !== "")
+          content.push({ type: "text", text: projected.content })
+        content.push(...projected.images, ...projected.documents)
+      }
+    }
+    resolved.push({ ...message, content })
   }
   return resolved
 }
@@ -3266,7 +3277,7 @@ function completeToolCallHistory(
       ...pending.map(({ id: toolCallId, toolKind }) => ({
         role: "tool" as const,
         toolCallId,
-        content: MISSING_TOOL_RESULT_TEXT,
+        content: [{ type: "text" as const, text: MISSING_TOOL_RESULT_TEXT }],
         isError: true,
         ...(toolKind === "tool_search" ? { toolSearch: { tools: [] } } : {}),
       })),

@@ -1,3 +1,4 @@
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import { execFileSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -933,7 +934,7 @@ describe("Turn processor", () => {
             request.messages.some(
               (message) =>
                 message.role === "tool" &&
-                message.content.includes("post-hook context"),
+                toolContentText(message.content).includes("post-hook context"),
             ),
           ).toBe(true)
         },
@@ -1055,7 +1056,8 @@ describe("Turn processor", () => {
           expect(
             request.messages.some(
               (message) =>
-                message.role === "tool" && message.content === "work completed",
+                message.role === "tool" &&
+                toolContentText(message.content) === "work completed",
             ),
           ).toBe(true)
         },
@@ -1228,7 +1230,7 @@ describe("Turn processor", () => {
             {
               role: "tool",
               toolCallId: "call_2",
-              content: "exact fresh result",
+              content: [{ type: "text", text: "exact fresh result" }],
             },
           ],
         )
@@ -2127,7 +2129,7 @@ describe("Turn processor", () => {
           expect(request.messages.at(-1)).toMatchObject({
             role: "tool",
             toolCallId: "calendar_1",
-            content: "planning",
+            content: [{ type: "text", text: "planning" }],
           })
         },
         content: [{ type: "text", text: "found it" }],
@@ -2220,7 +2222,7 @@ describe("Turn processor", () => {
         expect(request.messages.at(-1)).toMatchObject({
           role: "tool",
           toolCallId: "calendar_pinned",
-          content: "version two",
+          content: [{ type: "text", text: "version two" }],
         })
         yield {
           type: "response",
@@ -2241,7 +2243,12 @@ describe("Turn processor", () => {
             message.role === "tool" && message.toolCallId === "search_pinned",
         ),
       ).toMatchObject({
-        content: expect.stringContaining("version one"),
+        content: expect.arrayContaining([
+          expect.objectContaining({
+            type: "text",
+            text: expect.stringContaining("version one"),
+          }),
+        ]),
         toolSearch: {
           tools: [expect.objectContaining({ description: "version one" })],
         },
@@ -2312,7 +2319,7 @@ describe("Turn processor", () => {
       expect(request.messages.at(-1)).toMatchObject({
         role: "tool",
         toolCallId: "meta_1",
-        content: "meta result",
+        content: [{ type: "text", text: "meta result" }],
       })
       yield {
         type: "response",
@@ -2672,9 +2679,14 @@ describe("Turn processor", () => {
                 role: "tool",
                 toolCallId: "tool_stale_edit",
                 isError: true,
-                content: expect.stringContaining(
-                  "file_changed_since_observation",
-                ),
+                content: [
+                  {
+                    type: "text",
+                    text: expect.stringContaining(
+                      "file_changed_since_observation",
+                    ),
+                  },
+                ],
               }),
             ]),
           )
@@ -2742,7 +2754,12 @@ describe("Turn processor", () => {
               expect.objectContaining({
                 role: "tool",
                 toolCallId: "tool_same_edit",
-                content: expect.stringContaining("Updated same-call.txt"),
+                content: [
+                  {
+                    type: "text",
+                    text: expect.stringContaining("Updated same-call.txt"),
+                  },
+                ],
               }),
             ]),
           )
@@ -2784,7 +2801,12 @@ describe("Turn processor", () => {
           )
           expect(read).toMatchObject({
             role: "tool",
-            content: expect.stringContaining("Read preview truncated"),
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("Read preview truncated"),
+              }),
+            ]),
           })
           expect(read).not.toHaveProperty("fileObservations")
         },
@@ -2811,7 +2833,12 @@ describe("Turn processor", () => {
           )
           expect(edit).toMatchObject({
             role: "tool",
-            content: expect.stringContaining("Updated truncated.txt"),
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("Updated truncated.txt"),
+              }),
+            ]),
           })
           expect(edit).not.toHaveProperty("isError", true)
         },
@@ -3856,8 +3883,12 @@ describe("Turn processor", () => {
               message.role === "tool" &&
               message.toolCallId === "tool_large_result",
           )
-          expect(result?.content).toContain("Output truncated")
-          expect(result?.content).not.toContain(hiddenTail)
+          expect(
+            result?.role === "tool" && toolContentText(result.content),
+          ).toContain("Output truncated")
+          expect(
+            result?.role === "tool" && toolContentText(result.content),
+          ).not.toContain(hiddenTail)
         },
         content: [{ type: "text", text: oldText }],
         usage: { activeContextTokens: 40_000 },
@@ -4274,7 +4305,12 @@ it.each([
         )
         expect(image).toMatchObject({
           role: "tool",
-          images: [{ type: "image", data: png.toString("base64") }],
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: "image",
+              data: png.toString("base64"),
+            }),
+          ]),
         })
       },
       content: [{ type: "text", text: "Image inspected" }],
@@ -4317,17 +4353,27 @@ it.each([
   )
     throw new Error("Missing durable image result")
   const toolResult = record.item.item.item
-  expect(Buffer.byteLength(toolResult.content)).toBeLessThanOrEqual(50 * 1024)
-  expect(toolResult.content.split("\n").length).toBeLessThanOrEqual(2000)
-  expect(toolResult.content).toContain("Read image: screen.png")
+  expect(
+    Buffer.byteLength(toolContentText(toolResult.content)),
+  ).toBeLessThanOrEqual(50 * 1024)
+  expect(
+    toolContentText(toolResult.content).split("\n").length,
+  ).toBeLessThanOrEqual(2000)
+  expect(toolContentText(toolResult.content)).toContain(
+    "Read image: screen.png",
+  )
   if (hookText !== undefined) {
-    const path = toolResult.content.match(/saved to (.+?)\. Use/)?.[1]
+    const path = toolContentText(toolResult.content).match(
+      /saved to (.+?)\. Use/,
+    )?.[1]
     if (path === undefined) throw new Error("Missing hook recovery path")
     expect(await readFile(path, "utf8")).toBe(
       `<hook_context>\n${hookText}\n</hook_context>`,
     )
   }
-  const image = toolResult.images?.[0]
+  const image = toolResult.content.filter(
+    (block) => block.type === "image",
+  )?.[0]
   if (image?.file === undefined) throw new Error("Missing durable image asset")
   expect(image.data).toBeUndefined()
   const reopened = createRolloutAssets(assetsRoot, {
@@ -4356,6 +4402,7 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
       mcpResult(
         {
           content: [
+            { type: "text", text: "before PDF" },
             {
               type: "resource",
               resource: {
@@ -4364,6 +4411,7 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
                 blob: bytes.toString("base64"),
               },
             },
+            { type: "text", text: "after PDF" },
           ],
         },
         context,
@@ -4381,14 +4429,17 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
         expect(
           request.messages.find((message) => message.role === "tool"),
         ).toMatchObject({
-          images: [
+          content: [
+            { type: "text", text: "before PDF" },
+            { type: "text", text: "[Document attached]" },
+            { type: "text", text: expect.stringContaining("Rendered pages 1") },
             {
               type: "image",
               mediaType: "image/jpeg",
               data: expect.any(String),
             },
+            { type: "text", text: "after PDF" },
           ],
-          content: expect.stringContaining("Rendered pages 1"),
         })
       },
       content: [{ type: "text", text: "Image inspected" }],
@@ -4399,10 +4450,13 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
           (message) => message.role === "tool",
         )
         expect(result).toMatchObject({
-          content: expect.stringContaining("Retained PDF"),
+          content: [
+            { type: "text", text: "before PDF" },
+            { type: "text", text: "[Document attached]" },
+            { type: "text", text: expect.stringContaining("Retained PDF") },
+            { type: "text", text: "after PDF" },
+          ],
         })
-        expect(result).not.toHaveProperty("images")
-        expect(result).not.toHaveProperty("documents")
       },
       content: [{ type: "text", text: "Text inspected" }],
     },
@@ -4411,7 +4465,12 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
         expect(
           request.messages.find((message) => message.role === "tool"),
         ).toMatchObject({
-          documents: [{ type: "document", data: bytes.toString("base64") }],
+          content: [
+            { type: "text", text: "before PDF" },
+            { type: "text", text: "[Document attached]" },
+            { type: "document", data: bytes.toString("base64") },
+            { type: "text", text: "after PDF" },
+          ],
         })
       },
       content: [{ type: "text", text: "Native PDF inspected" }],
@@ -4494,12 +4553,18 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
     )?.item
   expect(durable).toMatchObject({
     role: "tool",
-    content: "[Document attached]",
-    documents: [{ file: expect.any(Object) }],
+    content: [
+      { type: "text", text: "before PDF" },
+      { type: "text", text: "[Document attached]" },
+      { type: "document", file: expect.any(Object) },
+      { type: "text", text: "after PDF" },
+    ],
   })
   if (durable?.role !== "tool") throw new Error("Missing durable PDF")
-  expect(durable.documents?.[0]?.data).toBeUndefined()
-  expect(durable.images).toBeUndefined()
+  expect(
+    durable.content.filter((block) => block.type === "document")?.[0]?.data,
+  ).toBeUndefined()
+  expect(durable.content.filter((block) => block.type === "image")).toEqual([])
 })
 
 it("uses the Turn's native PDF capability for tool reads, retries, history, and compaction", async () => {
@@ -4589,9 +4654,15 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
     .context.history.find(
       ({ item }) => item.role === "tool" && item.toolCallId === "call_pdf",
     )?.item
-  expect(result).toMatchObject({ documents: [{ file: expect.any(Object) }] })
+  expect(result).toMatchObject({
+    content: expect.arrayContaining([
+      expect.objectContaining({ file: expect.any(Object) }),
+    ]),
+  })
   if (result?.role !== "tool") throw new Error("Missing retained PDF")
-  expect(result.documents?.[0]?.data).toBeUndefined()
+  expect(
+    result.content.filter((block) => block.type === "document")?.[0]?.data,
+  ).toBeUndefined()
   await thread.compact("compact-pdf")
   expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
   const completed = await nextLifecycleEvent(thread)
@@ -4605,10 +4676,20 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
     expect(request.target.provider).toBe(provider)
     const result = request.messages.find((message) => message.role === "tool")
     expect(result).toMatchObject({
-      content: expect.stringContaining("(11 pages)"),
-      documents: [{ type: "document", data: bytes.toString("base64") }],
+      content: expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          text: expect.stringContaining("(11 pages)"),
+        }),
+        expect.objectContaining({
+          type: "document",
+          data: bytes.toString("base64"),
+        }),
+      ]),
     })
-    expect(result).not.toHaveProperty("images")
+    expect(result?.content.filter((block) => block.type === "image")).toEqual(
+      [],
+    )
   }
   expect(JSON.stringify(thread.snapshot().context.history)).toContain(
     "PDF checkpoint",
@@ -4720,8 +4801,13 @@ it("keeps a Turn's model directory and transport together across provider replac
       (message) => message.role === "tool",
     ),
   ).toMatchObject({
-    documents: [{ data: bytes.toString("base64") }],
-    content: expect.stringContaining("(11 pages)"),
+    content: expect.arrayContaining([
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("(11 pages)"),
+      }),
+      expect.objectContaining({ data: bytes.toString("base64") }),
+    ]),
   })
   await thread.startIfIdle({ content: { kind: "text", text: "Continue" } })
   await expect
@@ -4731,8 +4817,10 @@ it("keeps a Turn's model directory and transport together across provider replac
   const result = newTransport.requests[0]?.messages.find(
     (message) => message.role === "tool",
   )
-  expect(result).not.toHaveProperty("documents")
-  expect(result).not.toHaveProperty("images")
+  expect(result?.content.filter((block) => block.type === "document")).toEqual(
+    [],
+  )
+  expect(result?.content.filter((block) => block.type === "image")).toEqual([])
 })
 
 it("closes the captured Turn when its model directory cannot refresh", async () => {

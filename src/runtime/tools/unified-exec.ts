@@ -941,7 +941,11 @@ function success(output: UnifiedExecOutput): ToolExecutionResult {
           maxBytes: budget.maxBytes - Buffer.byteLength(header) - 1,
           maxLines: budget.maxLines - header.split("\n").length,
         })
-        return { content: body === "" ? header : `${header}\n${body}` }
+        return {
+          content: [
+            { type: "text", text: body === "" ? header : `${header}\n${body}` },
+          ],
+        }
       },
     },
   }

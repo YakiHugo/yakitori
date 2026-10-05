@@ -259,7 +259,7 @@ describe("kernel facts", () => {
       isModelMessage({
         role: "tool",
         toolCallId: "search_1",
-        content: "search result",
+        content: [{ type: "text", text: "search result" }],
         toolSearch: { tools: [definition] },
       })
     const customDefinition = {
@@ -298,7 +298,7 @@ describe("kernel facts", () => {
       isModelMessage({
         role: "tool",
         toolCallId: "search_1",
-        content: "search result",
+        content: [{ type: "text", text: "search result" }],
         toolSearch: { tools: [customDefinition], extra: true },
       }),
     ).toBe(false)

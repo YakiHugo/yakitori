@@ -191,8 +191,8 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
           file: saved.reference,
         },
         presentation: mediaPresentation({
-          content,
-          images: [
+          content: [
+            { type: "text", text: content },
             {
               type: "image",
               mediaType,
@@ -259,8 +259,8 @@ async function readDocument(
       content: summary,
       output,
       presentation: mediaPresentation({
-        content: summary,
-        documents: [
+        content: [
+          { type: "text", text: summary },
           {
             type: "document",
             mediaType: "application/pdf",
@@ -297,7 +297,9 @@ async function readDocument(
     ok: true,
     content: summary,
     output: { ...output, images },
-    presentation: mediaPresentation({ content: summary, images }),
+    presentation: mediaPresentation({
+      content: [{ type: "text", text: summary }, ...images],
+    }),
   }
 }
 

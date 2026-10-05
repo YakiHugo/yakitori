@@ -1,4 +1,11 @@
-import type { ModelMessage, ModelTarget } from "./model.ts"
+import type {
+  ModelMessage,
+  ModelTarget,
+  ModelUserContentBlock,
+  ModelToolContentBlock,
+  ModelImageBlock,
+  ModelTextBlock,
+} from "./model.ts"
 import {
   catalogModelCapabilities,
   type ModelCapabilities,
@@ -24,63 +31,48 @@ export function adaptImagesForModel(
   let omittedImageCount = 0
   let downgradedOriginalCount = 0
 
+  const adaptContent = <
+    T extends ModelUserContentBlock | ModelToolContentBlock,
+  >(
+    blocks: readonly T[],
+  ): readonly (T | ModelImageBlock | ModelTextBlock)[] => {
+    let changed = false
+    const content = blocks.map((block) => {
+      if (block.type !== "image") return block
+      if (!supportsImages) {
+        omittedImageCount += 1
+        changed = true
+        return {
+          type: "text" as const,
+          text: `[Attached image was not sent because ${target.provider}/${target.model} does not support image input. The user should switch to a vision-capable model if visual inspection is required.]`,
+        }
+      }
+      if (!shouldDowngradeOriginal || block.detail !== "original") return block
+      downgradedOriginalCount += 1
+      changed = true
+      return { ...block, detail: "high" as const }
+    })
+    if (!changed) return blocks
+    return supportsImages
+      ? [
+          ...content,
+          {
+            type: "text",
+            text: `[Original image detail is not available for ${target.provider}/${target.model}; the image was sent using high detail.]`,
+          },
+        ]
+      : content
+  }
   const adapted = messages.map((message): ModelMessage => {
     if (message.role === "user") {
-      let changed = false
-      const content = message.content.map((block) => {
-        if (block.type !== "image") return block
-        if (!supportsImages) {
-          omittedImageCount += 1
-          changed = true
-          return {
-            type: "text" as const,
-            text: `[Attached image was not sent because ${target.provider}/${target.model} does not support image input. The user should switch to a vision-capable model if visual inspection is required.]`,
-          }
-        }
-        if (!shouldDowngradeOriginal || block.detail !== "original")
-          return block
-        downgradedOriginalCount += 1
-        changed = true
-        return { ...block, detail: "high" as const }
-      })
-      if (!changed) return message
-      return {
-        ...message,
-        content: supportsImages
-          ? [
-              ...content,
-              {
-                type: "text",
-                text: `[Original image detail is not available for ${target.provider}/${target.model}; the image was sent using high detail.]`,
-              },
-            ]
-          : content,
-      }
+      const content = adaptContent(message.content)
+      return content === message.content ? message : { ...message, content }
     }
-    if (message.role !== "tool" || (message.images?.length ?? 0) === 0)
-      return message
-    if (!supportsImages) {
-      omittedImageCount += message.images?.length ?? 0
-      const { images: _images, ...withoutImages } = message
-      return {
-        ...withoutImages,
-        content: `${withoutImages.content}\n[Images omitted: ${target.provider}/${target.model} does not support image input.]`,
-      }
+    if (message.role === "tool") {
+      const content = adaptContent(message.content)
+      return content === message.content ? message : { ...message, content }
     }
-    if (!shouldDowngradeOriginal) return message
-    let messageDowngradedOriginalCount = 0
-    const images = (message.images ?? []).map((image) => {
-      if (image.detail !== "original") return image
-      downgradedOriginalCount += 1
-      messageDowngradedOriginalCount += 1
-      return { ...image, detail: "high" as const }
-    })
-    if (messageDowngradedOriginalCount === 0) return message
-    return {
-      ...message,
-      images,
-      content: `${message.content}\n[Original image detail unavailable; using high detail.]`,
-    }
+    return message
   })
 
   return {
