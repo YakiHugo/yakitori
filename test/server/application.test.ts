@@ -3506,6 +3506,21 @@ describe("provider login registration", () => {
     }
     process.env.CODEX_HOME = codexHome
     process.env.GROK_CREDENTIALS = join(codexHome, "missing-grok-auth.json")
+    // Synthetic logins can be stale. Keep renewal and background discovery
+    // in memory through application.close(), never through the real issuer.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = input instanceof Request ? input.url : String(input)
+        if (url === "https://auth.openai.com/oauth/token")
+          return Response.json({ error: "fixture_offline" }, { status: 503 })
+        if (url.startsWith("https://chatgpt.com/backend-api/codex/models?"))
+          return Response.json(
+            { error: "fixture_catalog_unavailable" },
+            { status: 503 },
+          )
+        throw new Error("Unexpected network request in provider-login fixture.")
+      })
     const application = await createYakitoriApplication(
       testApplicationOptions({ rootDir, workspace }),
     )
@@ -3531,6 +3546,7 @@ describe("provider login registration", () => {
         server.closeAllConnections()
       })
       await application.close()
+      fetchMock.mockRestore()
     }
   }
 
@@ -3545,7 +3561,7 @@ describe("provider login registration", () => {
           refresh_token: "refresh",
           account_id: "account-1",
         },
-        last_refresh: "2026-08-10T00:00:00.000Z",
+        last_refresh: "2000-01-01T00:00:00.000Z",
       })
 
       const codex = body.providers.find((provider) => provider.name === "codex")
