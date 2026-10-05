@@ -721,8 +721,15 @@ async function runOrderedInputFlow(
       }),
     ).toBeVisible()
     await page.getByRole("button", { name: "Send", exact: true }).click()
+    // Wide viewports also contain hidden navigation previews of each answer.
+    // Count actual response regions, retaining the duplicate-reply check.
+    const responses = page.getByRole("region", {
+      name: "Response",
+      exact: true,
+    })
+    await expect(responses).toHaveCount(2)
     await expect(
-      page.getByRole("main").getByText("Mock provider reply", { exact: true }),
+      responses.getByText("Mock provider reply", { exact: true }),
     ).toHaveCount(2)
     await expect(
       page.getByRole("button", { name: "Interrupt", exact: true }),
