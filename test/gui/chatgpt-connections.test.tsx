@@ -99,6 +99,34 @@ it("starts sign-in once and cancels the exact attempt on dismissal without rende
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
 })
 
+it("keeps sign-in open when the opening double-click lands on the new native backdrop", async () => {
+  const user = userEvent.setup()
+  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  await user.click(
+    await screen.findByRole("button", { name: "Continue with ChatGPT" }),
+  )
+  const dialog = await screen.findByRole("dialog", { name: "Connect ChatGPT" })
+  // Chromium retargets the second click to the modal backdrop, outside its box.
+  fireEvent.click(dialog, { clientX: -1, clientY: -1, detail: 2 })
+  expect(
+    await screen.findByText("Waiting for sign-in in your system browser…"),
+  ).toBeDefined()
+  expect(
+    request.mock.calls.filter(([method]) => method === "chatgpt/signIn"),
+  ).toHaveLength(1)
+  expect(
+    request.mock.calls.some(([method]) => method === "chatgpt/cancel"),
+  ).toBe(false)
+  // A fresh, deliberate backdrop click still cancels the exact active attempt.
+  fireEvent.click(dialog, { clientX: -1, clientY: -1, detail: 1 })
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("chatgpt/cancel", {
+      attemptId: "attempt-one",
+    }),
+  )
+  expect(screen.queryByRole("dialog")).toBeNull()
+})
+
 it("cancels a browser launch that resolves after its panel was closed", async () => {
   let finish: ((value: ChatGPTConnectionState) => void) | undefined
   request.mockImplementation(async (method) => {

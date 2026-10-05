@@ -138,11 +138,14 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
   })
   await page.keyboard.press("Escape")
   await expect(page.getByRole("dialog")).toHaveCount(0)
-  expect(
-    calls.find((call) => call.method === "chatgpt/cancel")?.params,
-  ).toEqual({ attemptId: firstAttempt })
+  await expect
+    .poll(() => calls.find((call) => call.method === "chatgpt/cancel")?.params)
+    .toEqual({ attemptId: firstAttempt })
   expect(page.url()).toBe(originalURL)
   await page.getByRole("button", { name: "Continue with ChatGPT" }).click()
+  await expect(
+    page.getByText("Waiting for sign-in in your system browser…"),
+  ).toBeVisible()
   state = {
     accounts: [
       {
@@ -165,6 +168,9 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
   await page.getByRole("button", { name: "Add account" }).click()
   await page.getByRole("textbox", { name: "Account label" }).fill("Work")
   await page.getByRole("button", { name: "Continue with ChatGPT" }).click()
+  await expect(
+    page.getByText("Waiting for sign-in in your system browser…"),
+  ).toBeVisible()
   state = {
     accounts: [
       ...state.accounts,
@@ -197,6 +203,9 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
     page.getByRole("link", { name: "Manage usage ↗" }).first(),
   ).toHaveAttribute("href", "https://chatgpt.com/settings/usage")
   await page.getByRole("button", { name: "Enable plan usage for Work" }).click()
+  await expect(
+    page.getByText("Waiting for sign-in in your system browser…"),
+  ).toBeVisible()
   const navigatingAttempt = state.attempt?.id
   await page.getByRole("button", { name: "Cancel sign-in" }).click()
   await page.getByRole("button", { name: "Back to app" }).click()

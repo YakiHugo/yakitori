@@ -72,7 +72,9 @@ export function SidebarDialog({
         }
       }}
       onClick={(event) => {
-        if (event.target !== event.currentTarget) return
+        // Opening a native modal retargets the rest of a trigger double-click
+        // to its backdrop. That repeated click must not dismiss the new dialog.
+        if (event.target !== event.currentTarget || event.detail > 1) return
         const rect = event.currentTarget.getBoundingClientRect()
         if (
           event.clientX < rect.left ||
