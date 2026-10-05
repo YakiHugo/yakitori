@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import {
   createServer,
   type IncomingMessage,
@@ -7,6 +7,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
@@ -708,48 +709,149 @@ describe("Chat Completions provider", () => {
     )
   })
 
-  it("sends user images and states unsupported tool media without changing message order", () => {
+  it.each([
+    "end",
+    "assistant",
+    "user",
+    "developer",
+  ] as const)("projects tool images after all results before %s without mutating history", (boundary) => {
     const image = {
       type: "image" as const,
       mediaType: "image/png" as const,
       data: "YWJj",
       detail: "original" as const,
     }
-    expect(
-      toChatCompletionsMessages(
-        [
-          {
-            role: "user",
-            content: [{ type: "text", text: "Inspect" }],
-            images: [image],
-          },
-          {
-            role: "tool",
-            toolCallId: "call_image",
-            content: "Image result",
-            images: [image],
-          },
-        ],
-        "custom_1",
-      ),
-    ).toEqual([
+    const messages: ModelMessage[] = [
       {
         role: "user",
+        content: [{ type: "text", text: "Inspect" }],
+        images: [image],
+      },
+      {
+        role: "assistant",
         content: [
-          { type: "text", text: "Inspect" },
-          {
-            type: "image_url",
-            image_url: { url: "data:image/png;base64,YWJj", detail: "high" },
-          },
+          { type: "tool_call", id: "first", name: "inspect", input: {} },
+          { type: "tool_call", id: "plain", name: "inspect", input: {} },
+          { type: "tool_call", id: "last", name: "inspect", input: {} },
         ],
       },
       {
         role: "tool",
-        tool_call_id: "call_image",
+        toolCallId: "first",
+        content: "First result",
+        images: [image, image],
+      },
+      { role: "tool", toolCallId: "plain", content: "No image" },
+      {
+        role: "tool",
+        toolCallId: "last",
+        content: "Partial result",
+        isError: true,
+        images: [{ ...image, data: "ZGVm" }],
+        documents: [
+          {
+            type: "document",
+            name: "report.pdf",
+            mediaType: "application/pdf",
+            file: { rolloutId: "rollout_test", path: "report.pdf" },
+            sizeBytes: 10,
+          },
+        ],
+      },
+      ...(boundary === "end"
+        ? []
+        : [
+            {
+              role: boundary,
+              content: [{ type: "text" as const, text: "Next" }],
+            },
+          ]),
+    ]
+    const original = structuredClone(messages)
+    const converted = toChatCompletionsMessages(messages, "custom_1")
+    const wireImage = {
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,YWJj", detail: "high" },
+    }
+    expect(converted[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "Inspect" }, wireImage],
+    })
+    expect(converted.slice(2, 6)).toEqual([
+      { role: "tool", tool_call_id: "first", content: "First result" },
+      { role: "tool", tool_call_id: "plain", content: "No image" },
+      {
+        role: "tool",
+        tool_call_id: "last",
         content:
-          "Image result\n[Tool image was not sent: Chat Completions tool results support text only.]",
+          "[tool_error]\nPartial result\n[Document report.pdf was not sent: native PDF input is not enabled for Chat Completions.]",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: 'Images from tool result "first":' },
+          wireImage,
+          wireImage,
+          { type: "text", text: 'Images from tool result "last":' },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,ZGVm", detail: "high" },
+          },
+        ],
       },
     ])
+    expect(converted).toHaveLength(boundary === "end" ? 6 : 7)
+    if (boundary !== "end")
+      expect(converted[6]).toEqual({
+        role: boundary === "developer" ? "system" : boundary,
+        content: "Next",
+      })
+    expect(messages).toEqual(original)
+    expect(toChatCompletionsMessages(messages, "custom_1")).toEqual(converted)
+  })
+
+  it("keeps images with their own tool batch and leaves text-only batches unchanged", () => {
+    const call: ModelMessage = {
+      role: "assistant",
+      content: [{ type: "tool_call", id: "call", name: "inspect", input: {} }],
+    }
+    const result: ModelMessage = {
+      role: "tool",
+      toolCallId: "call",
+      content: "",
+    }
+    const image = {
+      type: "image" as const,
+      mediaType: "image/png" as const,
+      data: "YWJj",
+    }
+    const messages = toChatCompletionsMessages(
+      [
+        call,
+        { ...result, images: [image] },
+        call,
+        result,
+        call,
+        { ...result, images: [image] },
+      ],
+      "custom_1",
+    )
+    expect(messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "tool",
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "user",
+    ])
+    expect(messages[2]).toEqual(messages[7])
+    expect(messages[4]).toEqual({
+      role: "tool",
+      tool_call_id: "call",
+      content: "",
+    })
   })
 
   it.each([
@@ -914,6 +1016,212 @@ describe("Chat Completions provider", () => {
     )
   })
 
+  it("rejects unresolved tool image references before sending a request", async () => {
+    let requests = 0
+    await withServer(
+      (_incoming, outgoing) => {
+        requests += 1
+        send(outgoing, [chunk({ content: "Unexpected" }, "stop")])
+      },
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(
+            request({
+              messages: [
+                {
+                  role: "tool",
+                  toolCallId: "image",
+                  content: "Screenshot",
+                  images: [
+                    {
+                      type: "image",
+                      mediaType: "image/png",
+                      sizeBytes: 10,
+                      file: { rolloutId: "rollout_test", path: "image.png" },
+                    },
+                  ],
+                },
+              ],
+            }),
+          ),
+        )
+        expect(events).toMatchObject([
+          { type: "failure", failure: { stage: "request_build" } },
+        ])
+        expect(requests).toBe(0)
+      },
+    )
+  })
+
+  it("rehydrates persisted tool images into wire-only messages after reopening a thread", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+      "base64",
+    )
+    const bodies: Record<string, unknown>[] = []
+    await withServer(
+      async (incoming, outgoing) => {
+        bodies.push(await requestBody(incoming))
+        send(
+          outgoing,
+          bodies.length === 1
+            ? [
+                chunk(
+                  {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_image",
+                        type: "function",
+                        function: {
+                          name: "view_image",
+                          arguments: JSON.stringify({ path: "screen.png" }),
+                        },
+                      },
+                    ],
+                  },
+                  "tool_calls",
+                ),
+              ]
+            : [chunk({ content: "Inspected" }, "stop")],
+        )
+      },
+      async (baseURL) => {
+        const root = await mkdtemp(join(tmpdir(), "yakitori-chat-images-"))
+        await writeFile(join(root, "screen.png"), png)
+        const tools = createToolRegistry()
+        const openManager = () => {
+          const store = new JsonlThreadStore({ root })
+          const assets = createRolloutAssets(root, {
+            withMutationLease: async (id, mutate) => {
+              await mkdir(join(root, "rollouts", id), { recursive: true })
+              return mutate()
+            },
+          })
+          const manager = new ThreadManager({
+            store,
+            createTurnProcessor: () =>
+              createTurnProcessor({
+                modelClient: createProviderRegistry({
+                  custom_1: createModelProvider({
+                    info: {
+                      id: "custom_1",
+                      wireApi: "openai_chat_completions",
+                      capabilities: { remoteCompaction: false },
+                    },
+                    models: createConfiguredModelsManager({
+                      provider: "custom_1",
+                      wireApi: "openai_chat_completions",
+                      models: [
+                        {
+                          id: "configured-model",
+                          inputModalities: ["text", "image"],
+                        },
+                      ],
+                    }),
+                    stream: provider(baseURL),
+                  }),
+                }).createClient(),
+                provider: "custom_1",
+                model: "configured-model",
+                toolRegistry: tools,
+                rolloutAssets: assets,
+                baseInstructions: "Image test",
+                loadProjectInstructions: async () => undefined,
+              }),
+          })
+          return { manager, store, assets }
+        }
+        let runtime = openManager()
+        try {
+          const thread = await runtime.manager.createThread({
+            workingDirectory: root,
+            mateId: "mate_test",
+            mateRevisionId: "revision_test",
+          })
+          await thread.startIfIdle({
+            content: { kind: "text", text: "Inspect" },
+          })
+          await expect
+            .poll(() => thread.agentStatus)
+            .toEqual({ completed: "Inspected" })
+          const expectedImageMessage = {
+            role: "user",
+            content: [
+              { type: "text", text: 'Images from tool result "call_image":' },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/png;base64,${png.toString("base64")}`,
+                  detail: "high",
+                },
+              },
+            ],
+          }
+          const second = bodies[1]?.messages
+          if (!Array.isArray(second)) throw new Error("Missing image request")
+          expect(second.slice(-2)).toEqual([
+            {
+              role: "tool",
+              tool_call_id: "call_image",
+              content: "Read image: screen.png",
+            },
+            expectedImageMessage,
+          ])
+          const canonicalHistory = thread
+            .snapshot()
+            .context.history.map((entry) => entry.item)
+          await runtime.manager.shutdown()
+          runtime = openManager()
+          const stored = await runtime.store.readThread(thread.id)
+          if (stored === undefined)
+            throw new Error("Missing durable image history")
+          const history = ContextManager.fromStoredThread(stored)
+            .snapshot()
+            .history.map((entry) => entry.item)
+          expect(history).toEqual(canonicalHistory)
+          expect(
+            history.filter(
+              (message) =>
+                message.role === "user" && message.context === undefined,
+            ),
+          ).toHaveLength(1)
+          expect(JSON.stringify(history)).not.toContain(
+            "Images from tool result",
+          )
+          const tool = history.find((message) => message.role === "tool")
+          if (tool?.role !== "tool" || tool.images?.[0]?.file === undefined)
+            throw new Error("Missing stored image reference")
+          expect(tool.images[0].data).toBeUndefined()
+          expect(await runtime.assets.read(tool.images[0].file)).toEqual(png)
+          const resumed = await runtime.manager.resumeThread(thread.id)
+          if (resumed === undefined) throw new Error("Missing resumed thread")
+          await resumed.startIfIdle({
+            content: { kind: "text", text: "Continue" },
+          })
+          await expect
+            .poll(() => resumed.agentStatus)
+            .toEqual({ completed: "Inspected" })
+          const third = bodies[2]?.messages
+          if (!Array.isArray(third)) throw new Error("Missing resumed request")
+          expect(third).toContainEqual(expectedImageMessage)
+          expect(
+            third.filter(
+              (message) =>
+                JSON.stringify(message) ===
+                JSON.stringify(expectedImageMessage),
+            ),
+          ).toHaveLength(1)
+          expect(bodies).toHaveLength(3)
+        } finally {
+          await runtime.manager.shutdown()
+          await tools.dispose()
+          await rm(root, { recursive: true, force: true })
+        }
+      },
+    )
+  })
+
   it("reports HTTP errors and retry hints without an SDK retry", async () => {
     let count = 0
     await withServer(
@@ -1003,42 +1311,48 @@ describe("Chat Completions provider", () => {
     )
   })
 
-  it.each(["cancel", "timeout"])(
-    "retains usage while the request wrapper wins a stalled stream with %s",
-    async (ending) => {
-      await withServer(
-        (_incoming, outgoing) => {
-          outgoing.writeHead(200, { "content-type": "text/event-stream" })
-          outgoing.write(`data: ${JSON.stringify(usageChunk())}\n\n`)
-        },
-        async (baseURL) => {
-          const controller = new AbortController()
-          const stream = createModelRequestStream(provider(baseURL), {
-            wireApi: "openai_chat_completions",
-            maxAttempts: 1,
-            streamIdleTimeoutMs: 200,
-          })
-          const events = await collect(stream(request({
-            signal: controller.signal,
-            onUsageSnapshot() {
-              if (ending === "cancel") controller.abort()
-            },
-          })))
-          expect(events).toHaveLength(1)
-          expect(events[0]).toMatchObject({
-            type: ending === "cancel" ? "cancelled" : "failure",
-            usage: {
-              inputTokens: 11,
-              outputTokens: 7,
-              activeContextTokens: 18,
-              cacheReadInputTokens: 3,
-            },
-            ...(ending === "timeout" ? { failure: { kind: "idle_timeout" } } : {}),
-          })
-        },
-      )
-    },
-  )
+  it.each([
+    "cancel",
+    "timeout",
+  ])("retains usage while the request wrapper wins a stalled stream with %s", async (ending) => {
+    await withServer(
+      (_incoming, outgoing) => {
+        outgoing.writeHead(200, { "content-type": "text/event-stream" })
+        outgoing.write(`data: ${JSON.stringify(usageChunk())}\n\n`)
+      },
+      async (baseURL) => {
+        const controller = new AbortController()
+        const stream = createModelRequestStream(provider(baseURL), {
+          wireApi: "openai_chat_completions",
+          maxAttempts: 1,
+          streamIdleTimeoutMs: 200,
+        })
+        const events = await collect(
+          stream(
+            request({
+              signal: controller.signal,
+              onUsageSnapshot() {
+                if (ending === "cancel") controller.abort()
+              },
+            }),
+          ),
+        )
+        expect(events).toHaveLength(1)
+        expect(events[0]).toMatchObject({
+          type: ending === "cancel" ? "cancelled" : "failure",
+          usage: {
+            inputTokens: 11,
+            outputTokens: 7,
+            activeContextTokens: 18,
+            cacheReadInputTokens: 3,
+          },
+          ...(ending === "timeout"
+            ? { failure: { kind: "idle_timeout" } }
+            : {}),
+        })
+      },
+    )
+  })
 
   it("does not connect after caller cancellation or for unsupported remote compaction", async () => {
     let count = 0

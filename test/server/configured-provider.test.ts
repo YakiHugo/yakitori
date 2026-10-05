@@ -168,10 +168,6 @@ it.each([
         { data: bytes.toString("base64") },
       ])
       expect(media.images).toEqual([])
-    } else if (connection.wireApi === "openai_chat_completions") {
-      expect(media.documents).toEqual([])
-      expect(media.images).toEqual([])
-      expect(media.content).toContain("Persisted report")
     } else {
       expect(media.documents).toEqual([])
       expect(media.images).toMatchObject([
@@ -211,7 +207,7 @@ it.each([
     preset: "openai",
     wireApi: "openai_chat_completions",
     modalities: ["text", "image"],
-    block: "text",
+    block: "image_url",
   },
   {
     id: "text-openai",
@@ -340,13 +336,19 @@ it.each([
       }
       const tool = createReadDocumentTool()
       const read = await tool.execute({ path: "report.pdf" }, context)
-      expect(read).toMatchObject({ ok: true, output: { format: "text" } })
-      expect(read.content).toContain("Persisted report")
+      expect(read).toMatchObject({ ok: true, output: { format: "image" } })
+      expect(read.content).toContain("selected pages: 1")
+      const text = await tool.execute(
+        { path: "report.pdf", format: "text" },
+        context,
+      )
+      expect(text).toMatchObject({ ok: true, output: { format: "text" } })
+      expect(text.content).toContain("Persisted report")
       await expect(
         tool.execute({ path: "report.pdf", format: "image" }, context),
       ).resolves.toMatchObject({
-        ok: false,
-        code: "unsupported_document_format",
+        ok: true,
+        output: { format: "image" },
       })
     }
     const media = await prepareModelDocuments(
@@ -420,7 +422,7 @@ it.each([
     if (connection.block === "text")
       expect(bodies[0]).toContain("Persisted report")
     if (connection.wireApi === "openai_chat_completions") {
-      expect(bodies[0]).not.toContain("Rendered pages")
+      expect(bodies[0]).toContain("Rendered pages")
       expect(bodies[0]).not.toContain("tool results support text only")
       expect(JSON.parse(bodies[0] ?? "").messages).toEqual(
         expect.arrayContaining([
@@ -439,8 +441,21 @@ it.each([
           },
           expect.objectContaining({
             role: "tool",
-            content: expect.stringContaining("Persisted report"),
+            content: expect.stringContaining("Rendered pages"),
           }),
+          {
+            role: "user",
+            content: [
+              { type: "text", text: 'Images from tool result "call_pdf":' },
+              {
+                type: "image_url",
+                image_url: {
+                  url: expect.stringMatching(/^data:image\/jpeg;base64,/),
+                  detail: "high",
+                },
+              },
+            ],
+          },
         ]),
       )
     }

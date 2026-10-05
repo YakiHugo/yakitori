@@ -83,9 +83,8 @@ describe("Step tool planning", () => {
       step.toolRouter.modelDefinitions.map((entry) => entry.name),
     ).toContain(tool)
     const toolNames = step.toolRouter.modelDefinitions.map(({ name }) => name)
-    if (wireApi === "openai_chat_completions")
-      expect(toolNames).not.toContain("view_image")
-    else expect(toolNames).toContain("view_image")
+    expect(toolNames).toContain("view_image")
+    expect(step.documentReading.images).toBe(true)
     if (protocol === "openai_deferred")
       expect(
         step.toolRouter.modelDefinitions.find((entry) => entry.name === tool)
@@ -93,6 +92,37 @@ describe("Step tool planning", () => {
       ).toBe("custom")
     await step.toolRouter.release()
     await client.close()
+  })
+
+  it("keeps image tools disabled for text-only Chat models", async () => {
+    const models = createConfiguredModelsManager({
+      provider: "text-only",
+      wireApi: "openai_chat_completions",
+      models: [{ id: "model", inputModalities: ["text"] }],
+    })
+    const registry = createToolRegistry()
+    const selection = { provider: "text-only", model: "model" }
+    const config = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: registry.trustedToolNames(),
+        approvalPolicy: "always_approve",
+        promptCacheKey: "text-only",
+      },
+      models,
+    )
+    const step = captureStepContext({
+      registry,
+      configuration: config.resolveStep(selection, models),
+      wireApi: "openai_chat_completions",
+    })
+    expect(step.documentReading).toEqual({ nativePdf: false, images: false })
+    expect(
+      step.toolRouter.modelDefinitions.map(({ name }) => name),
+    ).not.toContain("view_image")
+    await step.toolRouter.release()
+    await registry.dispose()
   })
 
   it.each([

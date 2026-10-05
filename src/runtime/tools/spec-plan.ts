@@ -68,11 +68,9 @@ export function captureStepContext(
   const documentReading = Object.freeze({
     nativePdf:
       input.nativePdf === true && model.inputModalities.includes("image"),
-    // Standard Chat tool messages accept text only; user messages still
-    // project images through the provider's separate user-content adapter.
-    images:
-      model.inputModalities.includes("image") &&
-      input.wireApi !== "openai_chat_completions",
+    // Each wire adapter owns image placement, including Chat's synthetic user
+    // content after tool results. Only the selected model gates image tools.
+    images: model.inputModalities.includes("image"),
   })
   const enabledTrustedTools = new Set(
     input.configuration.enabledTools.filter(
