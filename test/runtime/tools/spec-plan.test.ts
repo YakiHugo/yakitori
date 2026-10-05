@@ -10,6 +10,29 @@ import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
 describe("Step tool planning", () => {
   it.each([
+    target("openai", "gpt-5", "codex"),
+    target("anthropic", "claude-sonnet-4-6", "anthropic"),
+    target("faux", "model", "default"),
+  ])("uses explicit Gemini wire capabilities before legacy provider $provider defaults", async (target) => {
+    const registry = createToolRegistry()
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
+    const step = captureStepContext({
+      registry,
+      configuration: configuration(target, registry.trustedToolNames()),
+      wireApi: "gemini_generate_content",
+    })
+    expect(step.toolWireProtocol).toBe("meta_dispatch")
+    expect(step.toolRouter.modelDefinitions.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(["tool_search", "use_tool"]),
+    )
+    expect(
+      step.toolRouter.modelDefinitions.every((tool) => tool.kind !== "custom"),
+    ).toBe(true)
+    await step.toolRouter.release()
+    await registry.dispose()
+  })
+
+  it.each([
     {
       provider: "openai-work",
       catalogProvider: "openai",

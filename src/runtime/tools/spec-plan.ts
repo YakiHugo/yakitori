@@ -121,7 +121,10 @@ function providerToolCapabilities(
       supportsCustomTools: false,
       nativeDeferredProtocol: "anthropic_deferred",
     }
-  if (wireApi === "openai_chat_completions")
+  if (
+    wireApi === "openai_chat_completions" ||
+    wireApi === "gemini_generate_content"
+  )
     return { supportsCustomTools: false }
   const normalized = provider.toLowerCase()
   if (normalized === "openai" || normalized === "codex") {
