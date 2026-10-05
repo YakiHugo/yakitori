@@ -724,8 +724,7 @@ describe("Chat Completions provider", () => {
     const messages: ModelMessage[] = [
       {
         role: "user",
-        content: [{ type: "text", text: "Inspect" }],
-        images: [image],
+        content: [{ type: "text", text: "Inspect" }, image],
       },
       {
         role: "assistant",

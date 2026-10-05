@@ -111,7 +111,9 @@ it.each([
         ({ item }) =>
           item.role === "user" &&
           item.context === undefined &&
-          item.content.some((block) => block.text === userRequest),
+          item.content.some(
+            (block) => block.type === "text" && block.text === userRequest,
+          ),
       )
     expect(original).toBeDefined()
     await thread.compact("compact_skills")
@@ -126,7 +128,9 @@ it.each([
     )
     expect(
       skill?.role === "user" &&
-        skill.content.some((block) => block.text.includes(body)),
+        skill.content.some(
+          (block) => block.type === "text" && block.text.includes(body),
+        ),
     ).toBe(true)
     const stored = await runtime.store.readThread(thread.id)
     const compacted = stored?.rollout.find(

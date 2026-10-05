@@ -461,22 +461,19 @@ export function toChatCompletionsMessages(
     } else if (message.role === "user") {
       result.push({
         role: "user",
-        content:
-          (message.images?.length ?? 0) === 0
-            ? message.content.map((block) => block.text).join("")
-            : [
-                ...message.content.map((block) => ({
-                  type: "text" as const,
-                  text: block.text,
-                })),
-                ...(message.images ?? []).map((image) => ({
-                  type: "image_url" as const,
-                  image_url: {
-                    url: `data:${image.mediaType};base64,${requireModelImageData(image)}`,
-                    detail: "high" as const,
+        content: message.content.every((block) => block.type === "text")
+          ? message.content.map((block) => block.text).join("")
+          : message.content.map((block) =>
+              block.type === "text"
+                ? { type: "text" as const, text: block.text }
+                : {
+                    type: "image_url" as const,
+                    image_url: {
+                      url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                      detail: "high" as const,
+                    },
                   },
-                })),
-              ],
+            ),
       })
     } else if (message.role === "tool") {
       if ((message.images?.length ?? 0) > 0) {

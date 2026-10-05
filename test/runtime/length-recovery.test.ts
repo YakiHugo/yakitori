@@ -357,7 +357,8 @@ describe("bounded length recovery", () => {
           item.type === "response_item" &&
           item.item.item.role === "user" &&
           item.item.item.content.some(
-            (block) => block.text === "Answer my new question.",
+            (block) =>
+              block.type === "text" && block.text === "Answer my new question.",
           ),
       ),
     ).toBe(true)

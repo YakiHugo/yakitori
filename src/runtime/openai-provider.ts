@@ -636,26 +636,19 @@ export function toOpenAIInput(
       continue
     }
     if (message.role === "user") {
-      if ((message.images?.length ?? 0) === 0) {
-        input.push({
-          role: "user",
-          content: message.content.map((block) => block.text).join(""),
-        })
-        continue
-      }
       input.push({
         role: "user",
-        content: [
-          ...message.content.map((block) => ({
-            type: "input_text" as const,
-            text: block.text,
-          })),
-          ...(message.images ?? []).map((block) => ({
-            type: "input_image" as const,
-            detail: block.detail ?? "high",
-            image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-          })),
-        ],
+        content: message.content.every((block) => block.type === "text")
+          ? message.content.map((block) => block.text).join("")
+          : message.content.map((block) =>
+              block.type === "text"
+                ? { type: "input_text" as const, text: block.text }
+                : {
+                    type: "input_image" as const,
+                    detail: block.detail ?? "high",
+                    image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                  },
+            ),
       })
       continue
     }

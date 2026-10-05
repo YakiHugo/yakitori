@@ -13,6 +13,7 @@ import type {
   ModelToolInputFormat,
   ModelToolResultMessage,
   ModelUserMessage,
+  ModelUserContentBlock,
 } from "../kernel/index.ts"
 
 export type {
@@ -29,6 +30,7 @@ export type {
   ModelToolInputFormat,
   ModelToolResultMessage,
   ModelUserMessage,
+  ModelUserContentBlock,
 }
 
 export const ModelStopReason = {

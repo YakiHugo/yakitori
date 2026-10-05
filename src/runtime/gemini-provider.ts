@@ -485,18 +485,16 @@ export function toGeminiContents(
       }
       if (parts.length > 0) contents.push({ role: "model", parts })
     } else {
-      const parts: JsonObject[] = message.content.map((block) => ({
-        text: block.text,
-      }))
-      if (message.role === "user")
-        parts.push(
-          ...(message.images ?? []).map((image) => ({
-            inlineData: {
-              mimeType: image.mediaType,
-              data: requireModelImageData(image),
+      const parts: JsonObject[] = message.content.map((block) =>
+        block.type === "text"
+          ? { text: block.text }
+          : {
+              inlineData: {
+                mimeType: block.mediaType,
+                data: requireModelImageData(block),
+              },
             },
-          })),
-        )
+      )
       // Later developer messages are history instructions, not the top-level
       // system prompt; retain their position rather than hoist across turns.
       if (message.role === "developer")

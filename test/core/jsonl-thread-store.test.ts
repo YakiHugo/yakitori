@@ -34,6 +34,173 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it.each([
+    "response_item",
+    "agent_message",
+    "compacted",
+  ] as const)("normalizes saved text-plus-images in %s without rewriting media or the stored record", async (type) => {
+    const { root, store } = await createStore()
+    const id = `thread_legacy_${type}`
+    await createPersistentThread(store, metadata(id))
+    const assets = createStoreAssets(root, store)
+    const staged = await assets.importImageBytes(id, "original", [
+      { name: "saved.png", data: pngBytes() },
+    ])
+    const {
+      attachments: [attachment],
+    } = await assets.promoteImageAttachments(id, "saved", staged)
+    if (attachment === undefined) throw new Error("Missing fixture image")
+    await store.shutdownThread(id)
+    const image = {
+      type: "image",
+      mediaType: attachment.mediaType,
+      file: attachment.file,
+      sizeBytes: attachment.sizeBytes,
+      name: attachment.name,
+      detail: "original",
+    }
+    const envelope = {
+      id: "saved_user",
+      turnId: "saved_turn",
+      createdAt: "2026-09-07T00:00:00Z",
+      item: {
+        role: "user",
+        content: [{ type: "text", text: "saved request" }],
+        images: [image],
+      },
+      submissionMetadata: { metadata: { source: "user" } },
+    }
+    const item =
+      type === "compacted"
+        ? {
+            type,
+            turnId: "saved_turn",
+            summary: "saved checkpoint",
+            replacement: [envelope],
+          }
+        : {
+            type,
+            item: envelope,
+            ...(type === "agent_message" ? { messageId: "saved_message" } : {}),
+          }
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    // A complete final record without a newline exercises resume's tail repair.
+    const raw = JSON.stringify({
+      threadId: id,
+      rolloutId: id,
+      seq: 1,
+      createdAt: "2026-09-07T00:00:00Z",
+      item,
+    })
+    await appendFile(path, raw)
+    const reopened = new JsonlThreadStore({ root })
+    const restored = await reopened.resumeThread(id)
+    if (restored === undefined) throw new Error("Missing restored thread")
+    const history = ContextManager.fromStoredThread(restored).snapshot().history
+    expect(history).toEqual([
+      {
+        ...envelope,
+        item: {
+          role: "user",
+          content: [{ type: "text", text: "saved request" }, image],
+        },
+      },
+    ])
+    expect(
+      await createStoreAssets(root, reopened).read(attachment.file),
+    ).toEqual(pngBytes())
+    expect((await readFile(path, "utf8")).endsWith(`${raw}\n`)).toBe(true)
+    await reopened.shutdownThread(id)
+    const reread = await new JsonlThreadStore({ root }).readThread(id)
+    expect(
+      reread && ContextManager.fromStoredThread(reread).snapshot().history,
+    ).toEqual(history)
+  })
+
+  it("rejects non-image entries in saved image arrays without turning them into user text", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_invalid_legacy_image"
+    await createPersistentThread(store, metadata(id))
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const raw = JSON.stringify({
+      threadId: id,
+      rolloutId: id,
+      seq: 1,
+      createdAt: "2026-09-07T00:00:00Z",
+      item: {
+        type: "response_item",
+        item: {
+          id: "invalid_user",
+          turnId: "saved_turn",
+          createdAt: "2026-09-07T00:00:00Z",
+          item: {
+            role: "user",
+            content: [{ type: "text", text: "saved request" }],
+            images: [{ type: "text", text: "not an image" }],
+          },
+        },
+      },
+    })
+    await appendFile(path, `${raw}\n`)
+    await expect(new JsonlThreadStore({ root }).readThread(id)).rejects.toThrow(
+      "contains an invalid item",
+    )
+    expect((await readFile(path, "utf8")).endsWith(`${raw}\n`)).toBe(true)
+  })
+
+  it("round-trips canonical image/text/image content through reload and checkpoint replacement", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_ordered_content"
+    await createPersistentThread(store, metadata(id))
+    const images = [
+      {
+        type: "image" as const,
+        mediaType: "image/png" as const,
+        file: { rolloutId: id, path: "attachments/first.png" },
+        sizeBytes: 24,
+      },
+      {
+        type: "image" as const,
+        mediaType: "image/jpeg" as const,
+        file: { rolloutId: id, path: "attachments/second.jpg" },
+        sizeBytes: 24,
+      },
+    ] as const
+    const item: ResponseItemEnvelope = {
+      id: "ordered_user",
+      turnId: "turn_ordered",
+      createdAt: "2026-09-07T00:00:00Z",
+      item: {
+        role: "user",
+        content: [
+          images[0],
+          { type: "text", text: "between images" },
+          images[1],
+        ],
+      },
+    }
+    await store.appendItems(id, [
+      { type: "response_item", item },
+      {
+        type: "compacted",
+        turnId: "turn_ordered",
+        summary: "checkpoint",
+        replacement: [item],
+      },
+    ])
+    await store.shutdownThread(id)
+    const reopened = new JsonlThreadStore({ root })
+    const restored = await reopened.resumeThread(id)
+    expect(
+      restored && ContextManager.fromStoredThread(restored).snapshot().history,
+    ).toEqual([item])
+    expect(
+      await readFile(join(root, "rollouts", id, "rollout.jsonl"), "utf8"),
+    ).not.toContain('"images":')
+    await reopened.shutdownThread(id)
+  })
+
   it("creates child agents with their existing durable rollout lifecycle", async () => {
     const { root, store } = await createStore()
     const id = "thread_child_agent"

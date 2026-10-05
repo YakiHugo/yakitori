@@ -190,10 +190,11 @@ export type ModelHistoryContext =
       revision: string
     }>
 
+export type ModelUserContentBlock = ModelTextBlock | ModelImageBlock
+
 export type ModelUserMessage = Readonly<{
   role: "user"
-  content: readonly ModelTextBlock[]
-  images?: readonly ModelImageBlock[]
+  content: readonly ModelUserContentBlock[]
   context?: ModelHistoryContext
   contextAttachments?: readonly ContextExcerpt[]
 }>
@@ -1325,29 +1326,20 @@ export function isModelMessage(value: unknown): value is ModelMessage {
   }
   if (value.role !== "user" && value.role !== "developer") return false
   return (
-    onlyKeys(value, [
-      "role",
-      "content",
-      "images",
-      "context",
-      "contextAttachments",
-    ]) &&
+    onlyKeys(value, ["role", "content", "context", "contextAttachments"]) &&
     (value.contextAttachments === undefined ||
       (value.role === "user" && isContextExcerpts(value.contextAttachments))) &&
     Array.isArray(value.content) &&
     value.content.every(
       (block) =>
-        isRecord(block) &&
-        onlyKeys(block, ["type", "text", "providerMetadata"]) &&
-        block.type === "text" &&
-        isString(block.text) &&
-        (block.providerMetadata === undefined ||
-          isJsonObject(block.providerMetadata)),
+        (isRecord(block) &&
+          onlyKeys(block, ["type", "text", "providerMetadata"]) &&
+          block.type === "text" &&
+          isString(block.text) &&
+          (block.providerMetadata === undefined ||
+            isJsonObject(block.providerMetadata))) ||
+        (value.role === "user" && isModelImageBlock(block)),
     ) &&
-    (value.images === undefined ||
-      (value.role === "user" &&
-        Array.isArray(value.images) &&
-        value.images.every(isModelImageBlock))) &&
     (value.context === undefined || isModelHistoryContext(value.context))
   )
 }

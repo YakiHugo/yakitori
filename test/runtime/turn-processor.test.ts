@@ -1071,8 +1071,9 @@ describe("Turn processor", () => {
                 message.role === "user" &&
                 message.content.some(
                   (block) =>
+                    block.type === "text" &&
                     block.text ===
-                    "Complete the work. Do not change the public API.",
+                      "Complete the work. Do not change the public API.",
                 ),
             ),
           ).toBe(true)
@@ -1685,8 +1686,9 @@ describe("Turn processor", () => {
         (entry) =>
           entry.item.type === "agent_message" &&
           entry.item.item.item.role === "user" &&
-          entry.item.item.item.content.some((block) =>
-            block.text.includes("durable mailbox"),
+          entry.item.item.item.content.some(
+            (block) =>
+              block.type === "text" && block.text.includes("durable mailbox"),
           ),
       ),
     ).toHaveLength(1)
@@ -3343,7 +3345,8 @@ describe("Turn processor", () => {
           (message) =>
             message.role === "user" &&
             message.content.some(
-              (block) => block.text === "steer while running",
+              (block) =>
+                block.type === "text" && block.text === "steer while running",
             ),
         ),
       ).toBe(true)

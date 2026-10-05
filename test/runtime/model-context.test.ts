@@ -45,14 +45,57 @@ describe("local compaction user history", () => {
     }))
     const retained = retainRemoteCompactionMessages([
       user("old", "old request"),
-      { ...latest, item: { role: "user", content: [], images } },
+      { ...latest, item: { role: "user", content: [...images] } },
     ])
     expect(retained).toEqual([
       {
         ...latest,
-        item: { role: "user", content: [], images: images.slice(1) },
+        item: { role: "user", content: [...images.slice(1)] },
       },
     ])
+  })
+
+  it("truncates interleaved remote content at the newest atomic boundary without regrouping", () => {
+    const image = {
+      type: "image" as const,
+      mediaType: "image/png" as const,
+      data: "pixels",
+    }
+    const boundary: ResponseItemEnvelope = {
+      ...user("boundary", ""),
+      item: {
+        role: "user",
+        content: [
+          image,
+          { type: "text", text: "d".repeat(260_000) },
+          image,
+          { type: "text", text: "latest correction" },
+          image,
+        ],
+      },
+    }
+    const [retained] = retainRemoteCompactionMessages([boundary])
+    if (retained?.item.role !== "user") throw new Error("Missing boundary")
+    expect(retained.item.content.map((block) => block.type)).toEqual([
+      "text",
+      "image",
+      "text",
+      "image",
+    ])
+    expect(retained.item.content.slice(1)).toEqual([
+      image,
+      { type: "text", text: "latest correction" },
+      image,
+    ])
+    const text = retained.item.content[0]
+    expect(text?.type === "text" && text.text).toContain(
+      "user message truncated",
+    )
+    expect(retainCompactionUserMessages([boundary])[0]?.item).toMatchObject({
+      content: [
+        { type: "text", text: expect.stringContaining("latest correction") },
+      ],
+    })
   })
 
   it("retains remote text corrections outside native history and rebuilt environment", () => {
@@ -77,7 +120,10 @@ describe("local compaction user history", () => {
     expect(retained.map((entry) => entry.id)).toEqual(["correction"])
     const message = retained[0]?.item
     if (message?.role !== "user") throw new Error("missing retained request")
-    const text = message.content.map((block) => block.text).join("")
+    const text = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
     expect(text).toContain("HEAD")
     expect(text).toContain("TAIL")
     expect(text).not.toContain("\uFFFD")
@@ -111,7 +157,11 @@ describe("local compaction user history", () => {
     expect(retained.map((item) => item.id)).toEqual(["large", "latest"])
     const text = retained
       .flatMap(({ item }) =>
-        item.role === "user" ? item.content.map((block) => block.text) : [],
+        item.role === "user"
+          ? item.content
+              .filter((block) => block.type === "text")
+              .map((block) => block.text)
+          : [],
       )
       .join("")
     expect(text).toContain("HEAD")

@@ -130,7 +130,9 @@ describe("compaction request", () => {
     ])
     const instruction = request.messages.at(-1)
     if (instruction?.role !== "user") throw new Error("missing instruction")
-    expect(instruction.content[0]?.text).not.toContain("Previous checkpoint")
+    expect(
+      instruction.content.find((block) => block.type === "text")?.text,
+    ).not.toContain("Previous checkpoint")
   })
 
   it("folds a previous checkpoint from the replacement history", () => {

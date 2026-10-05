@@ -445,7 +445,10 @@ function applyEntries(
           envelope.id,
           "user",
           markdownVisibleText(
-            message.content.map((block) => block.text).join("\n"),
+            message.content
+              .filter((block) => block.type === "text")
+              .map((block) => block.text)
+              .join("\n"),
           ),
         )
       } else if (message.role === "tool") {

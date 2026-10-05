@@ -1799,7 +1799,9 @@ describe("thread server handlers", () => {
       const image = stored?.rollout.flatMap((record) =>
         record.item.type === "response_item" &&
         record.item.item.item.role === "user"
-          ? (record.item.item.item.images ?? [])
+          ? record.item.item.item.content.filter(
+              (block) => block.type === "image",
+            )
           : [],
       )[0]
       expect(image).toMatchObject({ file: { rolloutId } })

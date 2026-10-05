@@ -512,7 +512,10 @@ describe("application composition", () => {
           const isChild = request.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.some((block) => block.text === "inspect child"),
+              message.content.some(
+                (block) =>
+                  block.type === "text" && block.text === "inspect child",
+              ),
           )
           if (isChild) await childMayFinish.promise
           const hasToolResult = request.messages.some(
@@ -665,7 +668,9 @@ describe("application composition", () => {
           const isChild = request.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.some((block) => block.text === "child task"),
+              message.content.some(
+                (block) => block.type === "text" && block.text === "child task",
+              ),
           )
           if (isChild) {
             yield { type: "delta", text: "child " }
@@ -835,7 +840,10 @@ describe("application composition", () => {
           const child = request.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.some((block) => block.text === "initial child"),
+              message.content.some(
+                (block) =>
+                  block.type === "text" && block.text === "initial child",
+              ),
           )
           yield {
             type: "response",
@@ -900,7 +908,10 @@ describe("application composition", () => {
           const child = request.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.some((block) => block.text === "resume child"),
+              message.content.some(
+                (block) =>
+                  block.type === "text" && block.text === "resume child",
+              ),
           )
           if (child) {
             yield { type: "delta", text: `live followup ${turn}` }
@@ -1062,14 +1073,19 @@ describe("application composition", () => {
             )
           const taskText =
             lastTask?.role === "user"
-              ? lastTask.content.map((block) => block.text).join("")
+              ? lastTask.content
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text)
+                  .join("")
               : ""
           if (
             request.messages.some(
               (message) =>
                 message.role === "user" &&
-                message.content.some((block) =>
-                  block.text.includes("use child result"),
+                message.content.some(
+                  (block) =>
+                    block.type === "text" &&
+                    block.text.includes("use child result"),
                 ),
             )
           ) {
@@ -1188,8 +1204,10 @@ describe("application composition", () => {
             (entry) =>
               entry.item.type === "agent_message" &&
               entry.item.item.item.role === "user" &&
-              entry.item.item.item.content.some((block) =>
-                block.text.includes("<subagent_notification"),
+              entry.item.item.item.content.some(
+                (block) =>
+                  block.type === "text" &&
+                  block.text.includes("<subagent_notification"),
               ),
           ),
         ).toBe(true)
@@ -1217,7 +1235,9 @@ describe("application composition", () => {
           const isChild = request.messages.some(
             (message) =>
               message.role === "user" &&
-              message.content.some((block) => block.text === "child task"),
+              message.content.some(
+                (block) => block.type === "text" && block.text === "child task",
+              ),
           )
           const hasToolResult = request.messages.some(
             (message) => message.role === "tool",
@@ -1433,8 +1453,8 @@ describe("application composition", () => {
         ).rejects.toMatchObject({ code: "ENOENT" })
         expect(captured?.messages).toContainEqual({
           role: "user",
-          content: [{ type: "text", text: "inspect" }],
-          images: [
+          content: [
+            { type: "text", text: "inspect" },
             {
               type: "image",
               mediaType: "image/png",
@@ -1541,7 +1561,8 @@ describe("application composition", () => {
         expect(childInput).toMatchObject({
           item: {
             item: {
-              images: [
+              content: [
+                { type: "text", text: "inspect more closely" },
                 {
                   file: {
                     rolloutId: forked.body.session.id,
@@ -1557,7 +1578,9 @@ describe("application composition", () => {
         const childImagePath =
           childInput?.type === "response_item" &&
           childInput.item.item.role === "user"
-            ? childInput.item.item.images?.[0]?.file?.path
+            ? childInput.item.item.content.filter(
+                (block) => block.type === "image",
+              )[0]?.file?.path
             : undefined
         if (childImagePath === undefined) {
           throw new Error("Expected the forked input to retain its image.")

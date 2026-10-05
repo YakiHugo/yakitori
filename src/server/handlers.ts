@@ -2206,25 +2206,27 @@ function mapRolloutEvent(
             ...(item.item.item.contextAttachments === undefined
               ? {}
               : { contextAttachments: item.item.item.contextAttachments }),
-            ...(item.item.item.images === undefined
+            ...(!item.item.item.content.some((block) => block.type === "image")
               ? {}
               : {
-                  attachments: item.item.item.images.flatMap((image) =>
-                    "file" in image && typeof image.sizeBytes === "number"
-                      ? [
-                          {
-                            name:
-                              image.name ??
-                              image.file.path.split("/").at(-1) ??
-                              "image",
-                            mediaType: image.mediaType,
-                            sizeBytes: image.sizeBytes,
-                            detail: image.detail ?? "high",
-                            file: image.file,
-                          },
-                        ]
-                      : [],
-                  ),
+                  attachments: item.item.item.content
+                    .filter((block) => block.type === "image")
+                    .flatMap((image) =>
+                      "file" in image && typeof image.sizeBytes === "number"
+                        ? [
+                            {
+                              name:
+                                image.name ??
+                                image.file.path.split("/").at(-1) ??
+                                "image",
+                              mediaType: image.mediaType,
+                              sizeBytes: image.sizeBytes,
+                              detail: image.detail ?? "high",
+                              file: image.file,
+                            },
+                          ]
+                        : [],
+                    ),
                 }),
           },
           ...(item.item.submissionMetadata?.modelSelection === undefined
@@ -2371,20 +2373,22 @@ function inputAttachments(
   )
   if (input?.item.type !== "response_item") return []
   const message = input.item.item.item
-  if (message.role !== "user" || message.images === undefined) return []
-  return message.images.flatMap((image) =>
-    "file" in image && typeof image.sizeBytes === "number"
-      ? [
-          {
-            name: image.name ?? image.file.path.split("/").at(-1) ?? "image",
-            mediaType: image.mediaType,
-            sizeBytes: image.sizeBytes,
-            detail: image.detail ?? "high",
-            file: image.file,
-          },
-        ]
-      : [],
-  )
+  if (message.role !== "user") return []
+  return message.content
+    .filter((block) => block.type === "image")
+    .flatMap((image) =>
+      "file" in image && typeof image.sizeBytes === "number"
+        ? [
+            {
+              name: image.name ?? image.file.path.split("/").at(-1) ?? "image",
+              mediaType: image.mediaType,
+              sizeBytes: image.sizeBytes,
+              detail: image.detail ?? "high",
+              file: image.file,
+            },
+          ]
+        : [],
+    )
 }
 
 function requireRolloutAssets(

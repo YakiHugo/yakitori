@@ -3,8 +3,8 @@ import { adaptImagesForModel } from "../../src/runtime/model-images.ts"
 
 const imageMessage = {
   role: "user" as const,
-  content: [{ type: "text" as const, text: "inspect" }],
-  images: [
+  content: [
+    { type: "text" as const, text: "inspect" },
     {
       type: "image" as const,
       mediaType: "image/png" as const,
@@ -46,7 +46,8 @@ describe("model image adaptation", () => {
     expect(grok.downgradedOriginalCount).toBe(1)
     expect(
       grok.messages[0]?.role === "user"
-        ? grok.messages[0].images?.[0]?.detail
+        ? grok.messages[0].content.filter((block) => block.type === "image")[0]
+            ?.detail
         : undefined,
     ).toBe("high")
 
@@ -58,7 +59,8 @@ describe("model image adaptation", () => {
     expect(kimi.downgradedOriginalCount).toBe(1)
     expect(
       kimi.messages[0]?.role === "user"
-        ? kimi.messages[0].images?.[0]?.detail
+        ? kimi.messages[0].content.filter((block) => block.type === "image")[0]
+            ?.detail
         : undefined,
     ).toBe("high")
   })

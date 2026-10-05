@@ -1068,8 +1068,10 @@ describe("live Session actor", () => {
       item: {
         item: {
           role: "user",
-          images: [
+          content: [
+            { type: "text", text: "inspect" },
             {
+              type: "image",
               mediaType: "image/png",
               detail: "original",
               file: {

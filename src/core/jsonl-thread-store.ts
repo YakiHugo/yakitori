@@ -1899,8 +1899,8 @@ async function readRolloutRecords(
       start = index + 1
       continue
     }
-    const value: unknown = JSON.parse(
-      bytes.subarray(start, index).toString("utf8"),
+    const value = normalizeStoredUserContent(
+      JSON.parse(bytes.subarray(start, index).toString("utf8")),
     )
     if (!isStoredRolloutItem(value)) {
       throw new Error(`Rollout ${path} contains an invalid item.`)
@@ -1917,7 +1917,9 @@ async function repairTrailingJsonLine(path: string): Promise<void> {
   const completeLength = bytes.lastIndexOf(10) + 1
   const trailing = bytes.subarray(completeLength)
   try {
-    const value: unknown = JSON.parse(trailing.toString("utf8"))
+    const value = normalizeStoredUserContent(
+      JSON.parse(trailing.toString("utf8")),
+    )
     if (!isStoredRolloutItem(value)) throw new Error("invalid rollout item")
     await appendFileNewline(path)
   } catch {
@@ -1949,7 +1951,7 @@ async function reconcilePendingTail(
   }
   let value: unknown
   try {
-    value = JSON.parse(trailing.toString("utf8"))
+    value = normalizeStoredUserContent(JSON.parse(trailing.toString("utf8")))
   } catch {
     await truncate(path, completeLength)
     return false
@@ -2118,6 +2120,47 @@ function isGitInfo(value: unknown): boolean {
       value.branch !== undefined ||
       value.originUrl !== undefined)
   )
+}
+
+// Existing rollouts stored user text and images in separate arrays. Normalize
+// only that shipped shape on read; all new writes and runtime IR are ordered.
+function normalizeStoredUserContent(value: unknown): unknown {
+  if (!isRecord(value) || !isRecord(value.item)) return value
+  const rollout = value.item
+  const normalize = (envelope: unknown): unknown => {
+    if (!isRecord(envelope) || !isRecord(envelope.item)) return envelope
+    const message = envelope.item
+    if (
+      message.role !== "user" ||
+      !Array.isArray(message.images) ||
+      !message.images.every(
+        (block) => isRecord(block) && block.type === "image",
+      ) ||
+      !Array.isArray(message.content) ||
+      !message.content.every(
+        (block) => isRecord(block) && block.type === "text",
+      )
+    )
+      return envelope
+    const { images, ...user } = message
+    // Validate the original text-only portion as well as the combined result.
+    // Mixed new content plus a legacy side array is ambiguous and stays invalid.
+    if (!isModelMessage(user)) return envelope
+    const canonical = { ...user, content: [...message.content, ...images] }
+    return isModelMessage(canonical)
+      ? { ...envelope, item: canonical }
+      : envelope
+  }
+  if (rollout.type === "response_item" || rollout.type === "agent_message") {
+    return { ...value, item: { ...rollout, item: normalize(rollout.item) } }
+  }
+  if (rollout.type === "compacted" && Array.isArray(rollout.replacement)) {
+    return {
+      ...value,
+      item: { ...rollout, replacement: rollout.replacement.map(normalize) },
+    }
+  }
+  return value
 }
 
 function isStoredRolloutItem(value: unknown): value is StoredRolloutItem {

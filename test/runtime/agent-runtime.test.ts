@@ -293,7 +293,9 @@ describe("agent runtime", () => {
       const notification = (await store.readThread(root.id))?.rollout
         .flatMap(({ item }) =>
           item.type === "agent_message" && item.item.item.role === "user"
-            ? item.item.item.content.map((block) => block.text)
+            ? item.item.item.content
+                .filter((block) => block.type === "text")
+                .map((block) => block.text)
             : [],
         )
         .find((text) => text.includes("<subagent_notification"))
@@ -629,7 +631,9 @@ describe("agent runtime", () => {
       .flatMap((record) =>
         record.item.type === "agent_message" &&
         record.item.item.item.role === "user"
-          ? record.item.item.item.content.map((block) => block.text)
+          ? record.item.item.item.content
+              .filter((block) => block.type === "text")
+              .map((block) => block.text)
           : [],
       )
       .join("\n")
@@ -641,8 +645,9 @@ describe("agent runtime", () => {
       (record) =>
         record.item.type === "agent_message" &&
         record.item.item.item.role === "user" &&
-        record.item.item.item.content.some((block) =>
-          block.text.includes('/root/interrupted"'),
+        record.item.item.item.content.some(
+          (block) =>
+            block.type === "text" && block.text.includes('/root/interrupted"'),
         ),
     )
     expect(
@@ -717,8 +722,10 @@ async function notificationCount(
       (record) =>
         record.item.type === "agent_message" &&
         record.item.item.item.role === "user" &&
-        record.item.item.item.content.some((block) =>
-          block.text.includes("<subagent_notification"),
+        record.item.item.item.content.some(
+          (block) =>
+            block.type === "text" &&
+            block.text.includes("<subagent_notification"),
         ),
     ).length ?? 0
   )
