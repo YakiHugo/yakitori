@@ -73,6 +73,7 @@ export default defineConfig(({ mode }) => {
       include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
       setupFiles: [
         "test/server/setup-provider-env.ts",
+        "test/server/setup-network.ts",
         "test/gui/setup-localstorage.ts",
         "test/gui/setup-app-store.ts",
       ],
