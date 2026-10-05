@@ -284,11 +284,11 @@ describe("application composition", () => {
             },
           }),
         )
-        await vi.waitFor(() =>
-          expect(
-            application?.threadManager.getThread(sessionId)?.agentStatus,
-          ).toEqual({ completed: "Endpoint verified" }),
-        )
+        await expect
+          .poll(
+            () => application?.threadManager.getThread(sessionId)?.agentStatus,
+          )
+          .toEqual({ completed: "Endpoint verified" })
         expect(requests).toEqual([connection.endpoint])
       } finally {
         await application?.close()
