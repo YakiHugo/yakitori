@@ -176,7 +176,10 @@ describe("kernel facts", () => {
             requestId: "request-1",
             inputId: "input_1",
             role: InputRole.User,
-            content: { kind: "text", text: "hello" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "hello" }],
+            },
             extra: true,
           },
         } as never,
@@ -305,14 +308,20 @@ describe("kernel facts", () => {
   })
 
   it("accepts rollout image references and rejects inline image data", () => {
-    const event = (attachment: unknown) =>
+    const event = (attachment: Record<string, unknown>) =>
       isKernelEvent({
         type: EventType.InputAdmitted,
         data: {
           requestId: "request-1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "text", text: "image", attachments: [attachment] },
+          content: {
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "image" },
+              { type: "image" as const, ...attachment },
+            ],
+          },
         },
       })
 
@@ -378,7 +387,10 @@ describe("kernel facts", () => {
           requestId: "request-1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "text", text: "hello" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "hello" }],
+          },
           modelSelection,
         },
       })

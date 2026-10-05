@@ -38,7 +38,10 @@ describe("pre-sampling model switches", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Original task." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Original task." }],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -50,7 +53,12 @@ describe("pre-sampling model switches", () => {
       ]),
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Continue with the available model." },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "Continue with the available model." },
+        ],
+      },
       modelSelection: { provider: "work", model: "model-b" },
     })
     await expect
@@ -121,12 +129,20 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 1" })
     await thread.startIfIdle({
-      content: { kind: "text", text: "create checkpoint" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "create checkpoint" }],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -142,7 +158,10 @@ describe("pre-sampling model switches", () => {
     })
     const callsBeforeSwitch = requests.length
     await thread.startIfIdle({
-      content: { kind: "text", text: "continue" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
       modelSelection: { provider, model: "model-b" },
     })
     await expect
@@ -172,12 +191,20 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
     await thread.startIfIdle({
-      content: { kind: "text", text: "switch provider" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "switch provider" }],
+      },
       modelSelection: { provider: "kimi", model: "new" },
     })
     await expect
@@ -260,14 +287,25 @@ describe("pre-sampling model switches", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Original task." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Original task." }],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
     await thread.startIfIdle({
       modelSelection: { provider: "codex", model: "new" },
-      content: { kind: "text", text: "Fresh correction: keep the public API." },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          {
+            type: "text" as const,
+            text: "Fresh correction: keep the public API.",
+          },
+        ],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -305,7 +343,12 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
@@ -316,7 +359,12 @@ describe("pre-sampling model switches", () => {
     expect(resumed.snapshot().context.previousModel?.compactionHash).toBe(
       "first",
     )
-    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "done old" })
@@ -362,12 +410,20 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
     await thread.startIfIdle({
-      content: { kind: "text", text: "continue" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
       modelSelection: { provider: "codex", model: "new" },
     })
     await expect
@@ -431,13 +487,21 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
 
     await thread.startIfIdle({
-      content: { kind: "text", text: "switch" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "switch" }],
+      },
       modelSelection: { provider: "codex", model: "new" },
     })
 
@@ -480,12 +544,20 @@ describe("pre-sampling model switches", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done old" })
     await thread.startIfIdle({
-      content: { kind: "text", text: "switch" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "switch" }],
+      },
       modelSelection: { provider: "codex", model: "new" },
     })
     await expect.poll(() => thread.agentStatus).toHaveProperty("errored")
@@ -500,7 +572,10 @@ describe("pre-sampling model switches", () => {
     if (resumed === undefined) throw new Error("missing resumed thread")
     expect(resumed.snapshot().context.previousModel?.model).toBe("old")
     await resumed.startIfIdle({
-      content: { kind: "text", text: "retry switch" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "retry switch" }],
+      },
     })
     await expect
       .poll(() => resumed.agentStatus)

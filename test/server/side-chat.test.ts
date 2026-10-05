@@ -119,7 +119,14 @@ describe("temporary side conversations", () => {
       const first = await rpc<SideChatSnapshot>(
         context.connection,
         "sideChat/send",
-        { sideChatId: created.id, requestId: "first", text: "hello" },
+        {
+          sideChatId: created.id,
+          requestId: "first",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "hello" }],
+          },
+        },
       )
       expect(first.expiresAt).toBe("2026-01-02T23:59:59.999Z")
       await until(
@@ -130,7 +137,10 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: unused.id,
           requestId: "too-late",
-          text: "hello",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "hello" }],
+          },
         }),
       ).toMatchObject({
         error: {
@@ -141,7 +151,14 @@ describe("temporary side conversations", () => {
       const second = await rpc<SideChatSnapshot>(
         context.connection,
         "sideChat/send",
-        { sideChatId: created.id, requestId: "second", text: "follow-up" },
+        {
+          sideChatId: created.id,
+          requestId: "second",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "follow-up" }],
+          },
+        },
       )
       expect(second.expiresAt).toBe("2026-01-03T23:59:59.998Z")
       await until(
@@ -154,12 +171,15 @@ describe("temporary side conversations", () => {
         { sideChatId: created.id },
       )
       expect(expired.expiresAt).toBe(second.expiresAt)
-      expect(expired.messages.map(({ text }) => text)).toEqual([
-        "hello",
-        "reply 1",
-        "follow-up",
-        "reply 2",
-      ])
+      expect(
+        expired.messages.map((message) =>
+          message.role === "assistant"
+            ? message.text
+            : message.content.parts
+                .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                .join(""),
+        ),
+      ).toEqual(["hello", "reply 1", "follow-up", "reply 2"])
       await expect(
         context.service.importImagePaths(created.id, "owner", []),
       ).rejects.toMatchObject({
@@ -169,21 +189,34 @@ describe("temporary side conversations", () => {
       const replay = await rpc<SideChatSnapshot>(
         context.connection,
         "sideChat/send",
-        { sideChatId: created.id, requestId: "first", text: "hello" },
+        {
+          sideChatId: created.id,
+          requestId: "first",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "hello" }],
+          },
+        },
       )
       expect(replay).toEqual(expired)
       expect(
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "first",
-          text: "changed",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "changed" }],
+          },
         }),
       ).toMatchObject({ error: { data: { code: "conflict" } } })
       expect(
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "third",
-          text: "new message",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "new message" }],
+          },
         }),
       ).toMatchObject({
         error: {
@@ -222,7 +255,10 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "active",
-        text: "question",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "question" }],
+        },
       })
       await until(() => finish !== undefined)
       const deadline = context.service.read(created.id).expiresAt
@@ -231,7 +267,10 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "later",
-          text: "follow-up",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "follow-up" }],
+          },
         }),
       ).toMatchObject({
         error: {
@@ -243,12 +282,21 @@ describe("temporary side conversations", () => {
       await until(
         () =>
           context.service.read(created.id).activeTurnId === undefined &&
-          context.service.read(created.id).messages.at(-1)?.text === "finished",
+          context.service
+            .read(created.id)
+            .messages.filter((message) => message.role === "assistant")
+            .at(-1)?.text === "finished",
       )
       expect(context.service.read(created.id)).toMatchObject({
         expiresAt: deadline,
         messages: [
-          { role: "user", text: "question" },
+          {
+            role: "user",
+            content: {
+              kind: "parts",
+              parts: [{ type: "text", text: "question" }],
+            },
+          },
           { role: "assistant", text: "finished", streaming: false },
         ],
       })
@@ -278,12 +326,19 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "cancel-after-expiry",
-        text: "question",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "question" }],
+        },
       })
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some((message) => message.text === "unfinished answer"),
+          .messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.text === "unfinished answer",
+          ),
       )
       time = Date.parse(context.service.read(created.id).expiresAt)
       await context.service.cancel(created.id, "cancel-after-expiry")
@@ -331,15 +386,22 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "context_only",
-        text: "",
-        contextAttachments: [attachment],
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "" }],
+          contextAttachments: [attachment],
+        },
       })
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
       expect(context.service.read(created.id).messages[0]).toMatchObject({
-        text: "",
-        contextAttachments: [attachment],
+        role: "user",
+        content: {
+          kind: "parts",
+          parts: [{ type: "text", text: "" }],
+          contextAttachments: [attachment],
+        },
       })
       expect(JSON.stringify(requests[0]?.messages)).toContain(
         "quoted source text",
@@ -348,14 +410,17 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "bad_context",
-          text: "",
-          contextAttachments: [
-            {
-              ...attachment,
-              kind: "annotation",
-              anchor: { startOffset: 8, endOffset: 2 },
-            },
-          ],
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "" }],
+            contextAttachments: [
+              {
+                ...attachment,
+                kind: "annotation",
+                anchor: { startOffset: 8, endOffset: 2 },
+              },
+            ],
+          },
         }),
       ).toMatchObject({ error: { code: -32602 } })
       expect(requests).toHaveLength(1)
@@ -390,24 +455,47 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
-        text: "Selected excerpt: independent context",
+        content: {
+          kind: "parts" as const,
+          parts: [
+            {
+              type: "text" as const,
+              text: "Selected excerpt: independent context",
+            },
+          ],
+        },
       })
       await until(
         () =>
           context.service
             .read(created.id)
-            .messages.some((message) => message.text === "answer 1") &&
-          context.service.read(created.id).activeTurnId === undefined,
+            .messages.some(
+              (message) =>
+                message.role === "assistant" && message.text === "answer 1",
+            ) && context.service.read(created.id).activeTurnId === undefined,
       )
       const first = context.service.read(created.id)
-      expect(first.messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      expect(
+        first.messages.map((message) => ({
+          role: message.role,
+          text:
+            message.role === "assistant"
+              ? message.text
+              : message.content.parts
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .join(""),
+        })),
+      ).toEqual([
         { role: "user", text: "Selected excerpt: independent context" },
         { role: "assistant", text: "answer 1" },
       ])
       expect(
         context.changes.some((change) =>
           change.messages.some(
-            (message) => message.text === "partial" && message.streaming,
+            (message) =>
+              message.role === "assistant" &&
+              message.text === "partial" &&
+              message.streaming,
           ),
         ),
       ).toBe(true)
@@ -417,19 +505,24 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "second-turn",
-        text: "Follow-up",
         modelSelection: {
           provider: "faux",
           model: "second-model",
           effort: "high",
+        },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Follow-up" }],
         },
       })
       await until(
         () =>
           context.service
             .read(created.id)
-            .messages.some((message) => message.text === "answer 2") &&
-          context.service.read(created.id).activeTurnId === undefined,
+            .messages.some(
+              (message) =>
+                message.role === "assistant" && message.text === "answer 2",
+            ) && context.service.read(created.id).activeTurnId === undefined,
       )
       expect(requests[1]?.target).toMatchObject({
         provider: "faux",
@@ -447,21 +540,40 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
-        text: "Selected excerpt: independent context",
+        content: {
+          kind: "parts" as const,
+          parts: [
+            {
+              type: "text" as const,
+              text: "Selected excerpt: independent context",
+            },
+          ],
+        },
       })
       expect(requests).toHaveLength(2)
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
-        text: "Selected excerpt: independent context",
         modelSelection: { model: "first-model", provider: "faux" },
+        content: {
+          kind: "parts" as const,
+          parts: [
+            {
+              type: "text" as const,
+              text: "Selected excerpt: independent context",
+            },
+          ],
+        },
       })
       expect(requests).toHaveLength(2)
       expect(
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "first-turn",
-          text: "different",
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "different" }],
+          },
         }),
       ).toMatchObject({ error: { data: { code: "conflict" } } })
       const revisions = context.changes.map((change) => change.revision)
@@ -518,12 +630,18 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "retry",
-        text: "recover",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "recover" }],
+        },
       })
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some((message) => message.text === "fresh answer"),
+          .messages.some(
+            (message) =>
+              message.role === "assistant" && message.text === "fresh answer",
+          ),
       )
       expect(
         context.service
@@ -567,12 +685,18 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "cancel-me",
-        text: "first",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "first" }],
+        },
       })
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some((message) => message.text === "prefix 1"),
+          .messages.some(
+            (message) =>
+              message.role === "assistant" && message.text === "prefix 1",
+          ),
       )
       await context.service.cancel(created.id, "cancel-me")
       await until(
@@ -585,7 +709,10 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "fail-me",
-        text: "second",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "second" }],
+        },
       })
       await until(() => context.service.read(created.id).error !== undefined)
       expect(context.service.read(created.id)).toMatchObject({
@@ -598,12 +725,18 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "close-me",
-        text: "third",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "third" }],
+        },
       })
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some((message) => message.text === "prefix 3"),
+          .messages.some(
+            (message) =>
+              message.role === "assistant" && message.text === "prefix 3",
+          ),
       )
       await context.service.remove(created.id)
       expect(aborted).toEqual([1, 3])
@@ -645,13 +778,20 @@ describe("temporary side conversations", () => {
       await application.sideChats.send({
         sideChatId: created.id,
         requestId: "ephemeral-turn",
-        text: "temporary secret",
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "temporary secret" }],
+        },
       })
       await until(
         () =>
           application.sideChats
             .read(created.id)
-            .messages.some((message) => message.text === "temporary answer") &&
+            .messages.some(
+              (message) =>
+                message.role === "assistant" &&
+                message.text === "temporary answer",
+            ) &&
           application.sideChats.read(created.id).activeTurnId === undefined,
       )
       expect(await application.threadStore.listThreadIds()).toEqual([])

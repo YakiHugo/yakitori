@@ -12,6 +12,7 @@ import type {
   ApiSessionSummary,
   ApiSubscriptionSummary,
 } from "../../src/server/protocol.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 function project(
   id: string,
@@ -211,9 +212,7 @@ describe("sidebar", () => {
     const user = userEvent.setup()
     render(<App />)
     await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(
-      screen.getByRole("menuitem", { name: "Usage" }),
-    )
+    await user.click(screen.getByRole("menuitem", { name: "Usage" }))
     expect(
       screen.getByRole("region", { name: "Usage dashboard" }),
     ).toBeDefined()
@@ -599,7 +598,7 @@ it("cancelling the native folder picker leaves the current conversation untouche
   useAppStore.setState({
     addProject,
     selection: { sessionId: "session_current" },
-    promptDraft: "keep my draft",
+    promptDraft: inputParts("keep my draft"),
   })
   try {
     const user = userEvent.setup()
@@ -614,7 +613,9 @@ it("cancelling the native folder picker leaves the current conversation untouche
     expect(pickProjectFolder).toHaveBeenCalledOnce()
     expect(addProject).not.toHaveBeenCalled()
     expect(useAppStore.getState().selection.sessionId).toBe("session_current")
-    expect(useAppStore.getState().promptDraft).toBe("keep my draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("keep my draft"),
+    )
     expect(screen.getByRole("dialog", { name: "Create project" })).toBeDefined()
   } finally {
     Object.defineProperty(window, "yakitoriDesktop", {

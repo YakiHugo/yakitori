@@ -101,7 +101,12 @@ it.each([
       mateId: "mate_test",
       mateRevisionId: "revision_test",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: userRequest } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: userRequest }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "reviewed" })
@@ -154,7 +159,12 @@ it.each([
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Missing restored thread")
     expect(resumed.snapshot().context.history).toContainEqual(original)
-    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "continued" })

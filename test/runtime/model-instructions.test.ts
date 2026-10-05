@@ -81,7 +81,10 @@ it("persists discovered model instructions before sampling and updates them acro
     })
     threadId = thread.id
     await thread.startIfIdle({
-      content: { kind: "text", text: "first request" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "first request" }],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(JSON.stringify(requests[0]?.messages)).toContain(
@@ -89,7 +92,12 @@ it("persists discovered model instructions before sampling and updates them acro
     )
     const pinnedBase = requests[0]?.system
 
-    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(
       JSON.stringify(requests[1]?.messages).match(
@@ -104,7 +112,10 @@ it("persists discovered model instructions before sampling and updates them acro
     if (resumed === undefined) throw new Error("Stored thread was not resumed")
     thread = resumed
     await thread.startIfIdle({
-      content: { kind: "text", text: "resumed request" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "resumed request" }],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(requests[2]?.system).toEqual(pinnedBase)
@@ -117,7 +128,10 @@ it("persists discovered model instructions before sampling and updates them acro
     // The background revalidation kicked off by the resumed Turn has landed,
     // so the next Turn samples with the refreshed instructions.
     await thread.startIfIdle({
-      content: { kind: "text", text: "continue after resume" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue after resume" }],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(JSON.stringify(requests[3]?.messages)).toContain(
@@ -125,7 +139,10 @@ it("persists discovered model instructions before sampling and updates them acro
     )
 
     await thread.startIfIdle({
-      content: { kind: "text", text: "switch model" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "switch model" }],
+      },
       modelSelection: { provider: "codex", model: "gpt-5.6-sol" },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
@@ -206,7 +223,10 @@ it.each([
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Read rules.txt" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Read rules.txt" }],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(requests).toHaveLength(2)
@@ -219,7 +239,12 @@ it.each([
           ),
       ),
     ).toBe(true)
-    await thread.startIfIdle({ content: { kind: "text", text: "Continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     const threadId = thread.id
     await manager.shutdown()
@@ -228,7 +253,10 @@ it.each([
     if (resumed === undefined) throw new Error("Thread was not resumed")
     thread = resumed
     await thread.startIfIdle({
-      content: { kind: "text", text: "Continue after restart" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue after restart" }],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(requests).toHaveLength(4)

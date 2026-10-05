@@ -1,3 +1,4 @@
+import { inputContentToModelMessage } from "../kernel/input-content.ts"
 import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import type {
   CompletedExecutionItem,
@@ -12,10 +13,7 @@ import type {
 } from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
-import {
-  fingerprintInputAdmission,
-  fingerprintOperation,
-} from "../kernel/operation.ts"
+import { matchesStoredLegacyInputFingerprint } from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ModelContextSettings,
@@ -38,6 +36,7 @@ import {
   type SessionPermissionEvent,
   SessionStatus,
   type TurnInput,
+  fingerprintTurnInput,
   type TurnInputSubmission,
 } from "./session-io.ts"
 import { PersistContext, type SessionRolloutStore } from "./thread-store.ts"
@@ -149,6 +148,7 @@ type ActiveTurn = {
   readonly context: TurnContextItem
   readonly abort: AbortController
   readonly steering: TurnInput[]
+  readonly steeringFingerprints: Map<string, string>
   acceptingSteering: boolean
   finishing: boolean
   usage: TokenUsage | undefined
@@ -190,9 +190,14 @@ export class Session {
   readonly #metadata: ThreadMetadata
   readonly #contextManager: ContextManager
   #configuration: SessionConfigurationSnapshot | undefined
-  readonly #submittedTurns = new Map<
+  readonly #submittedInputs = new Map<
     string,
-    { readonly fingerprint: string; readonly inputItemId: string }
+    Readonly<{
+      fingerprint: string | undefined
+      inputItemId: string
+      turnId: string
+      restored?: boolean
+    }>
   >()
   #pendingTurnStart: PendingTurnStart | undefined
   // Resolves when the pending Turn's recording has either launched or failed,
@@ -228,17 +233,27 @@ export class Session {
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
     this.#configuration = latestConfiguration(input.stored)
     this.#agentStatus = agentStatusFromStoredThread(input.stored)
+    let recordedTurnId: string | undefined
     for (const record of input.stored.rollout) {
       if (record.item.type === "agent_message") {
         this.#receivedAgentMessageIds.add(record.item.messageId)
       }
+      if (record.item.type === "turn_started")
+        recordedTurnId = record.item.turnId
+      if (record.item.type === "response_item")
+        this.#rememberRecordedSteer(
+          record.item.item,
+          recordedTurnId ?? record.item.item.turnId,
+        )
       if (
         record.item.type === "turn_started" &&
         record.item.requestFingerprint !== undefined
       ) {
-        this.#submittedTurns.set(record.item.turnId, {
+        this.#submittedInputs.set(record.item.turnId, {
           fingerprint: record.item.requestFingerprint,
+          restored: true,
           inputItemId: record.item.inputItemId,
+          turnId: record.item.turnId,
         })
       }
     }
@@ -342,7 +357,10 @@ export class Session {
           await this.#routeTurnInput(
             {
               submissionId: operation.requestId,
-              content: { kind: "text", text: "/compact" },
+              content: {
+                kind: "parts",
+                parts: [{ type: "text", text: "/compact" }],
+              },
               manualCompact: true,
             },
             { type: "start_if_idle" },
@@ -398,19 +416,54 @@ export class Session {
     }
   }
 
+  #rememberRecordedSteer(item: ResponseItemEnvelope, turnId: string): void {
+    if (
+      !item.id.startsWith("message_") ||
+      item.item.role !== "user" ||
+      item.item.context !== undefined
+    )
+      return
+    // Older steering envelopes identify their request but did not persist its
+    // fingerprint; reserve that ID and report a conflict rather than guessing
+    // intent from lossy legacy model content and repeating its effects.
+    this.#submittedInputs.set(item.turnId, {
+      fingerprint: item.submissionMetadata?.requestFingerprint,
+      inputItemId: item.id,
+      turnId,
+    })
+  }
+
   async #routeTurnInput(
     input: TurnInput,
     mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
   ): Promise<TurnInputSubmission> {
-    const fingerprint = turnInputFingerprint(input)
-    const submitted = this.#submittedTurns.get(input.submissionId)
+    const fingerprint = fingerprintTurnInput(input)
+    const submitted = this.#submittedInputs.get(input.submissionId)
     if (submitted !== undefined) {
-      if (submitted.fingerprint !== fingerprint) {
+      if (
+        submitted.fingerprint !== fingerprint &&
+        !(
+          submitted.restored === true &&
+          submitted.fingerprint !== undefined &&
+          matchesStoredLegacyInputFingerprint(
+            submitted.fingerprint,
+            {
+              role:
+                input.goalId === undefined ? InputRole.User : InputRole.Runtime,
+              content: input.content,
+              modelSelection: input.modelSelection,
+              metadata: input.metadata,
+              parentInputId: input.parentInputId,
+            },
+            input,
+          )
+        )
+      ) {
         return notSubmitted(Reason.RequestConflict)
       }
       return {
         type: "replayed",
-        turnId: input.submissionId,
+        turnId: submitted.turnId,
         inputItemId: submitted.inputItemId,
       }
     }
@@ -426,7 +479,14 @@ export class Session {
     if (active.input.submissionId !== mode.expectedTurnId) {
       return notSubmitted(Reason.TurnMismatch)
     }
+    const previousSteering = active.steeringFingerprints.get(input.submissionId)
+    if (previousSteering !== undefined) {
+      return previousSteering === fingerprint
+        ? { type: "steered", turnId: active.input.submissionId }
+        : notSubmitted(Reason.RequestConflict)
+    }
     await this.#acceptSteering(active, input)
+    active.steeringFingerprints.set(input.submissionId, fingerprint)
     return { type: "steered", turnId: active.input.submissionId }
   }
 
@@ -478,7 +538,7 @@ export class Session {
     }
     this.#configuration = structuredClone(context.configuration)
     const inputItem = buildInputItem(input)
-    const requestFingerprint = turnInputFingerprint(input)
+    const requestFingerprint = fingerprintTurnInput(input)
     const items: readonly RolloutItem[] = [
       {
         type: "turn_started",
@@ -496,9 +556,10 @@ export class Session {
       requestFingerprint,
     }
     this.#pendingTurnStart = pending
-    this.#submittedTurns.set(input.submissionId, {
+    this.#submittedInputs.set(input.submissionId, {
       fingerprint: requestFingerprint,
       inputItemId: inputItem.id,
+      turnId: input.submissionId,
     })
     const abort = new AbortController()
     const aborted = deferred<void>()
@@ -511,6 +572,7 @@ export class Session {
       context,
       abort,
       steering: [],
+      steeringFingerprints: new Map(),
       acceptingSteering: true,
       usage: undefined,
       lastRequestStartedAt: undefined,
@@ -1059,6 +1121,8 @@ export class Session {
           await this.#appendRollout(
             items.map((item): RolloutItem => ({ type: "response_item", item })),
           )
+          for (const item of items)
+            this.#rememberRecordedSteer(item, active.input.submissionId)
           this.#contextManager.record(items)
           active.assistantItems.push(
             ...items.filter((item) => item.item.role === "assistant"),
@@ -1441,61 +1505,13 @@ function answerText(
   return text.length === 0 ? null : text
 }
 
-function turnInputFingerprint(input: TurnInput): string {
-  const fingerprint = fingerprintInputAdmission({
-    role: input.goalId === undefined ? InputRole.User : InputRole.Runtime,
-    content: input.content,
-    ...(input.modelSelection === undefined
-      ? {}
-      : { modelSelection: input.modelSelection }),
-    ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-    ...(input.parentInputId === undefined
-      ? {}
-      : { parentInputId: input.parentInputId }),
-  })
-  if (input.goalId !== undefined)
-    return fingerprintOperation({ goalId: input.goalId, input: fingerprint })
-  return input.manualCompact === true ? `compact:${fingerprint}` : fingerprint
-}
-
 function buildInputItem(input: TurnInput): ResponseItemEnvelope {
   const submissionMetadata = turnInputSubmissionMetadata(input)
-  if (input.goalId !== undefined) {
-    return {
-      id: createInputId(),
-      turnId: input.submissionId,
-      createdAt: new Date().toISOString(),
-      item: {
-        role: "developer",
-        content: [{ type: "text", text: input.content.text }],
-        context: { type: "goal", goalId: input.goalId },
-      },
-      ...submissionMetadata,
-    }
-  }
   return {
     id: createInputId(),
     turnId: input.submissionId,
     createdAt: new Date().toISOString(),
-    item: {
-      role: "user",
-      content: [
-        ...(input.content.text.length === 0
-          ? []
-          : [{ type: "text" as const, text: input.content.text }]),
-        ...(input.content.attachments ?? []).map((attachment) => ({
-          type: "image" as const,
-          mediaType: attachment.mediaType,
-          detail: attachment.detail ?? "high",
-          file: attachment.file,
-          sizeBytes: attachment.sizeBytes,
-          name: attachment.name,
-        })),
-      ],
-      ...(input.content.contextAttachments === undefined
-        ? {}
-        : { contextAttachments: input.content.contextAttachments }),
-    },
+    item: inputContentToModelMessage(input.content, input.goalId),
     ...submissionMetadata,
   }
 }

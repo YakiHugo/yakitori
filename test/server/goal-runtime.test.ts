@@ -426,7 +426,10 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_fork_source",
-        content: { kind: "text", text: "Original task" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Original task" }],
+        },
       }),
     )
     await first.entered.promise
@@ -680,7 +683,10 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_fork_active",
-        content: { kind: "text", text: "Original user task" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Original user task" }],
+        },
       }),
     )
     await first.entered.promise
@@ -707,7 +713,10 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId: forkId,
         requestId: "request_fork_continue",
-        content: { kind: "text", text: "Continue this branch" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Continue this branch" }],
+        },
       }),
     )
     await wrap.entered.promise
@@ -852,7 +861,15 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_create_next_goal",
-        content: { kind: "text", text: "Create and complete the next goal" },
+        content: {
+          kind: "parts" as const,
+          parts: [
+            {
+              type: "text" as const,
+              text: "Create and complete the next goal",
+            },
+          ],
+        },
       }),
     )
     await secondWrap.entered.promise

@@ -11,6 +11,7 @@ import type {
   ApiSetGoalRequest,
 } from "../../src/server/protocol.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -88,6 +89,7 @@ describe("session goal", () => {
           inputId: "input_1",
           text: goal.objective,
           at: goal.createdAt,
+          parts: inputParts(goal.objective),
         }}
         queued={false}
       />,

@@ -1,8 +1,15 @@
+import type { ImageAttachment, InputPart } from "../../src/kernel/events.ts"
+import { inputImageOwnership } from "../../src/gui/input-image-ownership.ts"
+import { textInputParts } from "../../src/gui/input-parts.ts"
+import { inputContentText } from "../../src/kernel/input-content.ts"
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { useState } from "react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { createRef, useState } from "react"
 import { afterEach, expect, it, vi } from "vitest"
-import { PromptEditor } from "../../src/gui/components/prompt-editor.tsx"
+import {
+  PromptEditor,
+  type PromptEditorHandle,
+} from "../../src/gui/components/prompt-editor.tsx"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
 afterEach(cleanup)
@@ -11,7 +18,14 @@ function Fixture() {
   const [text, setText] = useState("Replace this draft")
   return (
     <>
-      <PromptEditor label="Prompt" value={text} onChange={setText} />
+      <PromptEditor
+        apiBase="http://localhost"
+        label="Prompt"
+        value={textInputParts(text)}
+        onChange={(parts) =>
+          setText(inputContentText({ kind: "parts", parts }))
+        }
+      />
       <output data-testid="serialized">{text}</output>
     </>
   )
@@ -102,7 +116,14 @@ function ExternalFixture() {
   const [text, setText] = useState("Replace this draft")
   return (
     <>
-      <PromptEditor label="Prompt" value={text} onChange={setText} />
+      <PromptEditor
+        apiBase="http://localhost"
+        label="Prompt"
+        value={textInputParts(text)}
+        onChange={(parts) =>
+          setText(inputContentText({ kind: "parts", parts }))
+        }
+      />
       <output data-testid="serialized">{text}</output>
       <button type="button" onClick={() => setText("Restored draft")}>
         restore
@@ -135,8 +156,9 @@ it("does not delegate Enter to onKeyDown during IME composition", () => {
   const onKeyDown = vi.fn(() => false)
   render(
     <PromptEditor
+      apiBase="http://localhost"
       label="Prompt"
-      value="Draft"
+      value={textInputParts("Draft")}
       onChange={() => {}}
       onKeyDown={onKeyDown}
     />,
@@ -157,8 +179,9 @@ it("blocks editing while disabled", () => {
   const onChange = vi.fn()
   render(
     <PromptEditor
+      apiBase="http://localhost"
       label="Prompt"
-      value="Locked draft"
+      value={textInputParts("Locked draft")}
       onChange={onChange}
       disabled
     />,
@@ -179,7 +202,14 @@ function SkillFixture() {
   const [text, setText] = useState("Use [$review](/skills/review/SKILL.md)")
   return (
     <>
-      <PromptEditor label="Prompt" value={text} onChange={setText} />
+      <PromptEditor
+        apiBase="http://localhost"
+        label="Prompt"
+        value={textInputParts(text)}
+        onChange={(parts) =>
+          setText(inputContentText({ kind: "parts", parts }))
+        }
+      />
       <output data-testid="serialized">{text}</output>
     </>
   )
@@ -213,4 +243,178 @@ it("opens a skill chip in the workspace without changing the prompt", () => {
   expect(screen.getByTestId("serialized").textContent).toBe(
     "Use [$review](/skills/review/SKILL.md)",
   )
+})
+
+const stagedImage: ImageAttachment = {
+  name: "placed.png",
+  mediaType: "image/png",
+  sizeBytes: 10,
+  detail: "original",
+  file: {
+    rolloutId: "rollout_editor",
+    path: "attachments/staging/draft_editor/placed.png",
+  },
+}
+function OrderedFixture({
+  initial,
+  handle,
+  discard,
+  preview,
+  apiBase = "http://ordered-editor.test/",
+}: {
+  initial: readonly InputPart[]
+  handle: React.RefObject<PromptEditorHandle | null>
+  discard?: (images: readonly ImageAttachment[]) => void
+  preview?: (image: ImageAttachment) => void
+  apiBase?: string
+}) {
+  const [parts, setParts] = useState(initial)
+  return (
+    <>
+      <PromptEditor
+        ref={handle}
+        label="Ordered prompt"
+        apiBase={apiBase}
+        value={parts}
+        onChange={setParts}
+        {...(discard ? { onDiscardImages: discard } : {})}
+        {...(preview ? { onPreviewImage: preview } : {})}
+      />
+      <output data-testid="parts">{JSON.stringify(parts)}</output>
+      <button type="button" onClick={() => setParts([])}>
+        clear ordered draft
+      </button>
+    </>
+  )
+}
+function editedParts(): unknown {
+  return JSON.parse(screen.getByTestId("parts").textContent ?? "null")
+}
+function pasteText(text: string) {
+  fireEvent.paste(screen.getByRole("textbox", { name: "Ordered prompt" }), {
+    clipboardData: {
+      files: [],
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
+  })
+}
+
+it("inserts images between authored text and preserves mapped placement during asynchronous import", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(
+    <OrderedFixture
+      handle={handle}
+      initial={[{ type: "text", text: "before" }]}
+    />,
+  )
+  const insertion = handle.current?.captureImageInsertion()
+  pasteText(" after")
+  act(() => {
+    expect(insertion?.insert([stagedImage])).toBe(true)
+  })
+  expect(editedParts()).toEqual([
+    { type: "text", text: "before" },
+    { ...stagedImage, type: "image" },
+    { type: "text", text: " after" },
+  ])
+  expect(
+    screen.getByRole("button", { name: "Preview attached image placed.png" }),
+  ).toBeTruthy()
+})
+
+it("invalidates pending image insertion when the draft is externally replaced", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(
+    <OrderedFixture
+      handle={handle}
+      initial={[{ type: "text", text: "old" }]}
+    />,
+  )
+  const insertion = handle.current?.captureImageInsertion()
+  fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
+  act(() => {
+    expect(insertion?.insert([stagedImage])).toBe(false)
+  })
+  expect(editedParts()).toEqual([])
+})
+
+it("retains removed image bytes for Undo and releases only unused staging assets when history resets", () => {
+  const handle = createRef<PromptEditorHandle>()
+  const discard = vi.fn()
+  render(
+    <OrderedFixture
+      handle={handle}
+      discard={discard}
+      initial={[
+        { type: "text", text: "before" },
+        { ...stagedImage, type: "image" },
+        { type: "text", text: "after" },
+      ]}
+    />,
+  )
+  act(() => handle.current?.removeImage(0))
+  expect(editedParts()).toEqual([{ type: "text", text: "beforeafter" }])
+  expect(discard).not.toHaveBeenCalled()
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
+  expect(editedParts()).toEqual([
+    { type: "text", text: "before" },
+    { ...stagedImage, type: "image" },
+    { type: "text", text: "after" },
+  ])
+  act(() => handle.current?.removeImage(0))
+  fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
+  expect(discard).toHaveBeenCalledExactlyOnceWith([stagedImage])
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
+  expect(editedParts()).toEqual([])
+})
+
+it("resolves image atoms restored by Undo after their staging bytes were promoted", () => {
+  const apiBase = "http://promoted-editor.test/"
+  const preview = vi.fn()
+  const handle = createRef<PromptEditorHandle>()
+  const original = [{ ...stagedImage, type: "image" as const }]
+  const accepted = [
+    {
+      ...stagedImage,
+      type: "image" as const,
+      file: {
+        rolloutId: "rollout_editor",
+        path: "attachments/requests/accepted/placed.png",
+      },
+    },
+  ]
+  render(
+    <OrderedFixture
+      handle={handle}
+      apiBase={apiBase}
+      initial={original}
+      preview={preview}
+    />,
+  )
+  act(() => handle.current?.removeImage(0))
+  inputImageOwnership.promote(
+    apiBase,
+    { kind: "parts", parts: original },
+    { kind: "parts", parts: accepted },
+  )
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
+  expect(editedParts()).toEqual(accepted)
+  const image = screen.getByRole("button", {
+    name: "Preview attached image placed.png",
+  })
+  fireEvent.click(image)
+  expect(preview).toHaveBeenLastCalledWith(
+    expect.objectContaining({ file: accepted[0]?.file }),
+  )
+  fireEvent.keyDown(image, { key: "Enter" })
+  expect(preview).toHaveBeenCalledTimes(2)
+  expect(preview).toHaveBeenLastCalledWith(
+    expect.objectContaining({ file: accepted[0]?.file }),
+  )
+  fireEvent.keyDown(screen.getByRole("textbox"), {
+    key: "z",
+    ctrlKey: true,
+    shiftKey: true,
+  })
+  expect(editedParts()).toEqual([])
 })

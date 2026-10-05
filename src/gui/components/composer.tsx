@@ -1,3 +1,12 @@
+import {
+  inputContentImages,
+  inputContentText,
+} from "../../kernel/input-content.ts"
+import {
+  sameInputParts,
+  textInputParts,
+  trimInputParts,
+} from "../input-parts.ts"
 import { useCallback, useContext, useRef, useState } from "react"
 import { GOAL_DIRECTIVE } from "../../kernel/events.ts"
 import {
@@ -24,8 +33,7 @@ import { SessionCommandPanel } from "./session-command-panel.tsx"
 
 export function Composer() {
   const conversationScroll = useContext(ConversationScrollContext)
-  const draft = useAppStore((state) => state.promptDraft) ?? ""
-  const attachments = useAppStore((state) => state.promptAttachments)
+  const draft = useAppStore((state) => state.promptDraft) ?? []
   const excerpts = useAppStore((state) => state.promptExcerpts)
   const removePromptExcerpt = useAppStore((state) => state.removePromptExcerpt)
   const updatePromptExcerpt = useAppStore((state) => state.updatePromptExcerpt)
@@ -55,9 +63,6 @@ export function Composer() {
       : state.modelSelections[state.selection.sessionId],
   )
   const setPromptDraft = useAppStore((state) => state.setPromptDraft)
-  const setPromptAttachments = useAppStore(
-    (state) => state.setPromptAttachments,
-  )
   const admitInput = useAppStore((state) => state.admitInput)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
@@ -186,10 +191,10 @@ export function Composer() {
             current.selection.sessionId !== undefined
           ))
       ) {
-        await discardDraftImages(next.slice(attachments.length))
+        await discardDraftImages(next)
         return
       }
-      setPromptAttachments(next)
+      return next
     } catch (error) {
       const current = useAppStore.getState()
       const stillSelected =
@@ -222,8 +227,8 @@ export function Composer() {
   return (
     <ComposerSurface
       sessionId={sessionId}
+      editorKey={selectionRevision}
       draft={draft}
-      attachments={attachments}
       excerpts={excerpts}
       sessionSkills={sessionSkills}
       sessionSkillsError={sessionSkillsError}
@@ -251,45 +256,46 @@ export function Composer() {
       activeTurnId={activeTurnId}
       supportsImages={supportsImages}
       supportsOriginal={supportsOriginal}
-      historyTexts={view.entries.flatMap((entry) =>
-        entry.kind === "user_input" ? [entry.text] : [],
+      historyParts={view.entries.flatMap((entry) =>
+        entry.kind === "user_input" ? [entry.parts] : [],
       )}
       setPromptDraft={setPromptDraft}
-      setPromptAttachments={setPromptAttachments}
       removePromptExcerpt={removePromptExcerpt}
       updatePromptExcerpt={updatePromptExcerpt}
-      onSubmit={(text, images, mode) => {
+      onSubmit={(parts, mode) => {
+        const text = inputContentText({ kind: "parts", parts })
+        const images = inputContentImages({ kind: "parts", parts })
         conversationScroll?.jumpToBottom()
         if (images.length === 0 && excerpts.length === 0) {
           if (text === "/status" || text === "/mcp") {
             useAppStore
               .getState()
               .openCommandPanel(text.slice(1) as "status" | "mcp")
-            setPromptDraft("")
+            setPromptDraft([])
             return
           }
           if (text === "/model") {
             useAppStore.getState().openModelPicker()
-            setPromptDraft("")
+            setPromptDraft([])
             return
           }
           if (text === "/skills") {
-            setPromptDraft("$")
+            setPromptDraft(textInputParts("$"))
             return
           }
           if (text === "/rename" && sessionId) {
             useAppStore.getState().openRenameDialog()
-            setPromptDraft("")
+            setPromptDraft([])
             return
           }
           if (text === "/usage") {
             useAppStore.getState().openSettings("subscriptions")
-            setPromptDraft("")
+            setPromptDraft([])
             return
           }
           if (text === "/side") {
             useWorkspaceStore.getState().addTab("chat", sessionId)
-            setPromptDraft("")
+            setPromptDraft([])
             return
           }
           if (sessionId && (text === "/archive" || text === "/pin")) {
@@ -305,8 +311,14 @@ export function Composer() {
                       selected.sectionId === "pinned" ? null : "pinned",
                   }),
             }).then((changed) => {
-              if (changed && useAppStore.getState().promptDraft === text)
-                setPromptDraft("")
+              if (
+                changed &&
+                sameInputParts(
+                  trimInputParts(useAppStore.getState().promptDraft ?? []),
+                  parts,
+                )
+              )
+                setPromptDraft([])
             })
             return
           }
@@ -327,8 +339,8 @@ export function Composer() {
             }
             const prompt =
               "Create an AGENTS.md file for this project. Inspect the repository and its existing instructions first, then write concise guidance that reflects how this project actually works."
-            setPromptDraft(prompt)
-            void admitInput(prompt)
+            setPromptDraft(textInputParts(prompt))
+            void admitInput(textInputParts(prompt))
             return
           }
         }
@@ -344,7 +356,7 @@ export function Composer() {
               sessionId ?? (await useAppStore.getState().createSession())
             if (goalSessionId === undefined) return
             if (goalCommand === "") {
-              setPromptDraft("")
+              setPromptDraft(parts.filter((part) => part.type === "image"))
               openGoalDialog()
               return
             }
@@ -357,19 +369,16 @@ export function Composer() {
             if (
               saved &&
               useAppStore.getState().selection.sessionId === goalSessionId &&
-              useAppStore.getState().promptDraft?.trim() === text
+              sameInputParts(
+                trimInputParts(useAppStore.getState().promptDraft ?? []),
+                parts,
+              )
             )
-              setPromptDraft("")
+              setPromptDraft(parts.filter((part) => part.type === "image"))
           })()
           return
         }
-        if (mode === "queue") {
-          void admitInput(text, images, "queue")
-        } else if (images.length === 0) {
-          void admitInput(text)
-        } else {
-          void admitInput(text, images)
-        }
+        void admitInput(parts, mode)
       }}
       onCancel={() => {
         if (activeTurnId) void cancelTurn(activeTurnId)

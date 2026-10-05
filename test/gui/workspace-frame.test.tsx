@@ -12,6 +12,7 @@ import {
 } from "../../src/gui/store/app-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import type { ApiProject, ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const browserSelections = vi.hoisted(
   () => new Map<string, BrowserPanelProps["onSelection"]>(),
@@ -681,7 +682,7 @@ it("routes side selections to their own draft, focuses that composer, and remove
         }
       : { skills: [] },
   )
-  useAppStore.setState({ promptDraft: "Keep main draft" })
+  useAppStore.setState({ promptDraft: inputParts("Keep main draft") })
   const tabId = useWorkspaceStore.getState().addTab("chat")
   render(
     <WorkspaceFrame>
@@ -695,7 +696,7 @@ it("routes side selections to their own draft, focuses that composer, and remove
   selectQuote(response)
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
   expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(useAppStore.getState().promptDraft).toBe(mainDraft)
+  expect(useAppStore.getState().promptDraft).toEqual(mainDraft)
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message side chat" }),
   )

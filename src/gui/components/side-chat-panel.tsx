@@ -1,7 +1,15 @@
+import { PromptEditor } from "./prompt-editor.tsx"
+import { inputContentImages } from "../../kernel/input-content.ts"
+import { inputImageOwnership } from "../input-image-ownership.ts"
+import { sameInputParts, trimInputParts } from "../input-parts.ts"
 import { LoaderCircle, MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { ImageAttachment, ModelSelection } from "../../kernel/events.ts"
-import type { ContextExcerpt } from "../../kernel/input-context.ts"
+import type {
+  ImageAttachment,
+  ModelSelection,
+  InputContent,
+  InputPart,
+} from "../../kernel/events.ts"
 import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import {
   discardDraftImages,
@@ -83,9 +91,7 @@ export function SideChatPanel({
   const pinned = useRef(true)
   const attempt = useRef<
     | {
-        text: string
-        contextAttachments: readonly ContextExcerpt[]
-        attachments: readonly ImageAttachment[]
+        content: InputContent
         requestId: string
         modelSelection: ModelSelection | undefined
       }
@@ -105,21 +111,42 @@ export function SideChatPanel({
     return current?.kind === "chat" ? current : undefined
   }
 
-  const applySnapshot = useCallback((next: SideChatSnapshot) => {
-    if (disposed.current) return
-    if (chatRef.current && next.revision < chatRef.current.revision) return
-    const previousExpiry = chatRef.current?.expiresAt
-    chatRef.current = next
-    // A server rejection remains authoritative when the local clock lags.
-    // Only another admitted message extending the lease can reopen this chat.
-    if (
-      previousExpiry !== undefined &&
-      Date.parse(next.expiresAt) > Date.parse(previousExpiry) &&
-      Date.now() < Date.parse(next.expiresAt)
-    )
-      setExpiredByServer(false)
-    setChat(next)
-  }, [])
+  const applySnapshot = useCallback(
+    (next: SideChatSnapshot) => {
+      if (disposed.current) return
+      if (chatRef.current && next.revision < chatRef.current.revision) return
+      const sent = attempt.current
+      const accepted =
+        sent &&
+        next.messages.find(
+          (message) => message.role === "user" && message.id === sent.requestId,
+        )
+      if (sent && accepted?.role === "user") {
+        inputImageOwnership.promote(apiBase, sent.content, accepted.content)
+        const current = useWorkspaceStore
+          .getState()
+          .tabs.find((candidate) => candidate.id === tab.id)
+        if (current?.kind === "chat")
+          updateDraft(
+            tab.id,
+            inputImageOwnership.resolveParts(apiBase, current.draft),
+            current.excerpts,
+          )
+      }
+      const previousExpiry = chatRef.current?.expiresAt
+      chatRef.current = next
+      // A server rejection remains authoritative when the local clock lags.
+      // Only another admitted message extending the lease can reopen this chat.
+      if (
+        previousExpiry !== undefined &&
+        Date.parse(next.expiresAt) > Date.parse(previousExpiry) &&
+        Date.now() < Date.parse(next.expiresAt)
+      )
+        setExpiredByServer(false)
+      setChat(next)
+    },
+    [apiBase, tab.id, updateDraft],
+  )
   useEffect(() => {
     disposed.current = false
     const unsubscribe = client.subscribeToSideChatChanges((next) => {
@@ -247,7 +274,7 @@ export function SideChatPanel({
       if (!current || isExpired(current)) return
       const images = await prepared.collect(current.id)
       const latest = latestTab()
-      const added = images.slice(tab.attachments.length)
+      const added = images
       if (
         disposed.current ||
         !latest ||
@@ -257,10 +284,7 @@ export function SideChatPanel({
         await discardDraftImages(added)
         return
       }
-      updateDraft(tab.id, latest.draft, latest.excerpts, [
-        ...latest.attachments,
-        ...added,
-      ])
+      return added
     } catch (cause) {
       if (!disposed.current)
         setAttachmentError(
@@ -279,31 +303,34 @@ export function SideChatPanel({
     }
   }
 
-  const send = async (text = tab.draft.trim(), images = tab.attachments) => {
+  const send = async (
+    parts: readonly InputPart[] = trimInputParts(tab.draft),
+  ) => {
     if (
       sending.current ||
       chatRef.current?.activeTurnId ||
       expiredByServer ||
       (chatRef.current !== undefined && isExpired(chatRef.current)) ||
-      (!text && tab.excerpts.length === 0 && images.length === 0)
+      (parts.length === 0 && tab.excerpts.length === 0)
     )
       return
     const originalDraft = tab.draft
     const originalExcerpts = tab.excerpts
-    const originalAttachments = tab.attachments
     const modelSelection = selection ?? chatRef.current?.modelSelection
     const payload = {
-      text,
-      contextAttachments: originalExcerpts,
-      attachments: images,
+      content: {
+        kind: "parts" as const,
+        parts,
+        ...(originalExcerpts.length
+          ? { contextAttachments: originalExcerpts }
+          : {}),
+      },
       modelSelection,
     }
     const request =
       attempt.current &&
       JSON.stringify({
-        text: attempt.current.text,
-        contextAttachments: attempt.current.contextAttachments,
-        attachments: attempt.current.attachments,
+        content: attempt.current.content,
         modelSelection: attempt.current.modelSelection,
       }) === JSON.stringify(payload)
         ? attempt.current
@@ -330,16 +357,32 @@ export function SideChatPanel({
         modelSelection: request.modelSelection ?? current.modelSelection,
       })
       if (disposed.current) return
+      const accepted = response.messages.find(
+        (message) =>
+          message.id === request.requestId && message.role === "user",
+      )
+      if (accepted?.role !== "user")
+        throw new Error("Side chat acknowledgement omitted its accepted input.")
+      inputImageOwnership.promote(apiBase, request.content, accepted.content)
       applySnapshot(response)
       const latest = latestTab()
       // An ACK only consumes the exact draft that was submitted. Selection
       // actions and uploads may have staged new input while it was in flight.
       if (
-        latest?.draft === originalDraft &&
-        latest.excerpts === originalExcerpts &&
-        latest.attachments === originalAttachments
+        latest !== undefined &&
+        sameInputParts(
+          inputImageOwnership.resolveParts(apiBase, latest.draft),
+          inputImageOwnership.resolveParts(apiBase, originalDraft),
+        ) &&
+        latest.excerpts === originalExcerpts
       )
-        updateDraft(tab.id, "", [], [])
+        updateDraft(tab.id, [], [])
+      else if (latest)
+        updateDraft(
+          tab.id,
+          inputImageOwnership.resolveParts(apiBase, latest.draft),
+          latest.excerpts,
+        )
       attempt.current = undefined
     } catch (cause) {
       if (!disposed.current) {
@@ -442,37 +485,47 @@ export function SideChatPanel({
                 messageId: message.id,
               })}
             >
-              {message.contextAttachments?.length ? (
-                <ContextExcerptChips excerpts={message.contextAttachments} />
-              ) : null}
-              {message.attachments?.length ? (
-                <div className="flex flex-wrap gap-2 pb-2">
-                  {message.attachments.map((image) => (
-                    <button
-                      type="button"
-                      key={`${image.file.rolloutId}:${image.file.path}`}
-                      aria-label={`Preview ${image.name}`}
-                      onClick={() => setPreviewImage(image)}
-                      className="cursor-zoom-in"
-                    >
-                      <img
-                        src={imageAttachmentUrl(image, apiBase)}
-                        alt={image.name}
-                        className="max-h-40 rounded-lg object-contain"
+              {message.role === "user" ? (
+                <>
+                  {message.content.contextAttachments?.length ? (
+                    <ContextExcerptChips
+                      excerpts={message.content.contextAttachments}
+                    />
+                  ) : null}
+                  {message.content.parts.map((part, index) =>
+                    part.type === "text" ? (
+                      <MarkdownView
+                        // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
+                        key={`${message.id}:${index}`}
+                        text={part.text}
+                        className="markdown side-chat-user-bubble"
+                        workspaceRoot={chat.cwd}
                       />
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              <MarkdownView
-                text={message.text}
-                className={
-                  message.role === "user"
-                    ? "markdown side-chat-user-bubble"
-                    : "markdown"
-                }
-                workspaceRoot={chat.cwd}
-              />
+                    ) : (
+                      <button
+                        type="button"
+                        // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
+                        key={`${message.id}:${index}`}
+                        aria-label={`Preview ${part.name}`}
+                        onClick={() => setPreviewImage(part)}
+                        className="cursor-zoom-in"
+                      >
+                        <img
+                          src={imageAttachmentUrl(part, apiBase)}
+                          alt={part.name}
+                          className="max-h-40 rounded-lg object-contain"
+                        />
+                      </button>
+                    ),
+                  )}
+                </>
+              ) : (
+                <MarkdownView
+                  text={message.text}
+                  className="markdown"
+                  workspaceRoot={chat.cwd}
+                />
+              )}
             </article>
           ))
         ) : (
@@ -509,21 +562,28 @@ export function SideChatPanel({
       {expired ? (
         <div className="side-chat-expired" role="status">
           <p>Side chat expired. Start a new side chat to continue.</p>
-          {tab.draft ? (
-            <textarea
-              aria-label="Unsent side chat draft"
+          {tab.draft.length > 0 ? (
+            <PromptEditor
+              label="Unsent side chat draft"
+              apiBase={apiBase}
               value={tab.draft}
-              readOnly
-              rows={Math.min(tab.draft.split("\n").length + 1, 5)}
+              disabled
+              onChange={() => {}}
+              onPreviewImage={setPreviewImage}
             />
           ) : null}
-          {tab.excerpts.length > 0 || tab.attachments.length > 0 ? (
+          {tab.excerpts.length > 0 ||
+          inputContentImages({ kind: "parts", parts: tab.draft }).length > 0 ? (
             <p>
               {tab.excerpts.length} context excerpt
               {tab.excerpts.length === 1 ? "" : "s"} and{" "}
-              {tab.attachments.length} image attachment
-              {tab.attachments.length === 1 ? "" : "s"} remain in this side
-              chat.
+              {inputContentImages({ kind: "parts", parts: tab.draft }).length}{" "}
+              image attachment
+              {inputContentImages({ kind: "parts", parts: tab.draft })
+                .length === 1
+                ? ""
+                : "s"}{" "}
+              remain in this side chat.
             </p>
           ) : null}
           <div className="side-chat-expired-actions">
@@ -551,9 +611,9 @@ export function SideChatPanel({
       ) : (
         <ComposerSurface
           sessionId={tab.id}
+          editorKey={tab.id}
           draft={tab.draft}
           excerpts={tab.excerpts}
-          attachments={tab.attachments}
           sessionSkills={sessionSkills}
           apiBase={apiBase}
           focusRevision={active ? (tab.composerFocusRevision ?? 0) + 1 : 0}
@@ -569,15 +629,12 @@ export function SideChatPanel({
             modelEntry === undefined ||
             (modelEntry.imageDetailModes?.includes("original") ?? false)
           }
-          historyTexts={
+          historyParts={
             chat?.messages.flatMap((message) =>
-              message.role === "user" ? [message.text] : [],
+              message.role === "user" ? [message.content.parts] : [],
             ) ?? []
           }
           setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}
-          setPromptAttachments={(images) =>
-            updateDraft(tab.id, tab.draft, tab.excerpts, images)
-          }
           removePromptExcerpt={(id) =>
             updateDraft(
               tab.id,
@@ -594,7 +651,7 @@ export function SideChatPanel({
               ),
             )
           }
-          onSubmit={(text, images) => void send(text, images)}
+          onSubmit={(parts) => void send(parts)}
           onCancel={() => void cancel()}
           importImages={importImages}
           readingImages={readingImages}

@@ -1,6 +1,7 @@
+import { inputContentText } from "../kernel/input-content.ts"
 import { citationSources, type CitationSource } from "./citation-sources.ts"
 import {
-  type ImageAttachment,
+  type InputPart,
   type ModelToolContentBlock,
   isKernelEvent,
   type RuntimeEventEnvelope,
@@ -27,7 +28,7 @@ export type ExecutionEntry =
       readonly questionId?: string
       readonly steered?: boolean
       readonly text: string
-      readonly attachments?: readonly ImageAttachment[]
+      readonly parts: readonly InputPart[]
       readonly at: string
     }
   | {
@@ -724,8 +725,8 @@ function applyDurable(
                   ...(typeof event.data.metadata?.userQuestionId === "string"
                     ? { questionId: event.data.metadata.userQuestionId }
                     : {}),
-                  text: event.data.content.text,
-                  attachments: event.data.content.attachments ?? [],
+                  text: inputContentText(event.data.content),
+                  parts: event.data.content.parts,
                   ...(event.data.content.contextAttachments === undefined
                     ? {}
                     : {

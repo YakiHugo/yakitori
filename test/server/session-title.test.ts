@@ -277,7 +277,10 @@ describe("admitInput title trigger", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: `request_${text.split(" ")[0]}`,
-        content: { kind: "text", text },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       if (text === "first request") {

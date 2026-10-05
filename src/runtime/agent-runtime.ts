@@ -130,7 +130,10 @@ export function createAgentRuntime(input: {
         request.sessionId,
       )
       const submission = await thread.startIfIdle({
-        content: { kind: "text", text: request.message },
+        content: {
+          kind: "parts",
+          parts: [{ type: "text", text: request.message }],
+        },
         modelSelection: toModelSelection(request.target),
       })
       if (submission.type !== "started" && submission.type !== "replayed") {

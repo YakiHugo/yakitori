@@ -141,13 +141,18 @@ export function createSessionInteractions(
         requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
         role: "user",
         content: {
-          kind: "text",
-          text: questions.questions
-            .map(
-              (question, index) =>
-                `${question.title}\n${request.answers[index]}`,
-            )
-            .join("\n\n"),
+          kind: "parts",
+          parts: [
+            {
+              type: "text",
+              text: questions.questions
+                .map(
+                  (question, index) =>
+                    `${question.title}\n${request.answers[index]}`,
+                )
+                .join("\n\n"),
+            },
+          ],
         },
         metadata: {
           userQuestionId: request.toolCallId,

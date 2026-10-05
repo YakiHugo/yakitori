@@ -1,3 +1,15 @@
+import type { ApiAdmitInputResponse } from "../../server/protocol.ts"
+import { inputImageOwnership } from "../input-image-ownership.ts"
+import {
+  inputContentImages,
+  inputContentText,
+} from "../../kernel/input-content.ts"
+import type { InputContent, InputPart } from "../../kernel/events.ts"
+import {
+  joinInputDrafts,
+  sameInputParts,
+  trimInputParts,
+} from "../input-parts.ts"
 import { useMemo } from "react"
 import { create } from "zustand"
 import type { ThreadGoal } from "../../core/goal.ts"
@@ -56,8 +68,7 @@ type SessionSelection = {
 const firstInputDraftSessionId = "draft_first_input"
 
 export type SessionDraft = Readonly<{
-  text: string | undefined
-  attachments: readonly ImageAttachment[]
+  parts: readonly InputPart[] | undefined
   excerpts: readonly ContextExcerpt[]
 }>
 
@@ -125,10 +136,9 @@ export type AppStoreData = {
   // park in sessionDrafts and are restored on selection; neither is a
   // persistence or attachment-lifecycle authority.
   draftModelSelection: ModelSelection | undefined
-  newSessionPrompt: string | undefined
+  newSessionPrompt: readonly InputPart[] | undefined
   newSessionExcerpts: readonly ContextExcerpt[]
-  promptDraft: string | undefined
-  promptAttachments: readonly ImageAttachment[]
+  promptDraft: readonly InputPart[] | undefined
   promptExcerpts: readonly ContextExcerpt[]
   queuedItems: readonly QueuedInput[]
   recoveredAdmission: PendingAdmission | undefined
@@ -200,7 +210,7 @@ export type AppStoreActions = {
   forkSession(
     atInputId: string,
     reason: "undo" | "edit",
-    content?: string,
+    content?: InputContent,
   ): Promise<void>
   toggleProject(projectId: string): Promise<void>
   addProject(path: string, name?: string): Promise<boolean>
@@ -217,8 +227,7 @@ export type AppStoreActions = {
   ): Promise<boolean>
   selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
-    text: string,
-    attachments?: readonly ImageAttachment[],
+    parts: readonly InputPart[],
     // "queue" skips steering: the input joins the durable pending queue and
     // dispatches as the next Turn when the Session goes idle.
     mode?: "auto" | "queue",
@@ -226,7 +235,7 @@ export type AppStoreActions = {
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   refreshQueuedInputs(): Promise<void>
-  updateQueuedInput(inputId: string, text: string): Promise<void>
+  updateQueuedInput(inputId: string, parts: readonly InputPart[]): Promise<void>
   reorderQueuedInputs(inputIds: readonly string[]): Promise<void>
   startQueuedInput(inputId: string): Promise<void>
   resolvePermission(
@@ -234,8 +243,7 @@ export type AppStoreActions = {
     permissionRequestId: string,
     behavior: "allow" | "deny",
   ): Promise<void>
-  setPromptDraft(text: string): void
-  setPromptAttachments(attachments: readonly ImageAttachment[]): void
+  setPromptDraft(parts: readonly InputPart[]): void
   addPromptExcerpt(excerpt: ContextExcerpt): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
@@ -303,7 +311,6 @@ export function createInitialAppState(): AppStoreData {
     newSessionPrompt: undefined,
     newSessionExcerpts: [],
     promptDraft: undefined,
-    promptAttachments: [],
     promptExcerpts: [],
     queuedItems: [],
     recoveredAdmission: undefined,
@@ -583,6 +590,47 @@ export const useAppStore = create<AppStore>()((set, get) => {
     get().sessionSelectionIntentRevision === selection.revision &&
     get().selection.sessionId === selection.sessionId
 
+  const sameDraftParts = (
+    left: readonly InputPart[],
+    right: readonly InputPart[],
+  ) =>
+    sameInputParts(
+      inputImageOwnership.resolveParts(get().apiBase, left),
+      inputImageOwnership.resolveParts(get().apiBase, right),
+    )
+  const recordPromotedContent = (
+    original: InputContent,
+    accepted: InputContent,
+  ) => {
+    if (!original.parts.some((part) => part.type === "image")) return
+    inputImageOwnership.promote(get().apiBase, original, accepted)
+    set((state) => ({
+      promptDraft:
+        state.promptDraft === undefined
+          ? undefined
+          : inputImageOwnership.resolveParts(state.apiBase, state.promptDraft),
+      newSessionPrompt:
+        state.newSessionPrompt === undefined
+          ? undefined
+          : inputImageOwnership.resolveParts(
+              state.apiBase,
+              state.newSessionPrompt,
+            ),
+      sessionDrafts: Object.fromEntries(
+        Object.entries(state.sessionDrafts).map(([id, draft]) => [
+          id,
+          {
+            ...draft,
+            parts:
+              draft.parts === undefined
+                ? undefined
+                : inputImageOwnership.resolveParts(state.apiBase, draft.parts),
+          },
+        ]),
+      ),
+    }))
+  }
+
   const restoreUncommittedSteers = (
     sessionId: string,
     turnId?: string,
@@ -613,13 +661,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
         ? {
-            text: state.promptDraft,
-            attachments: state.promptAttachments,
+            parts: state.promptDraft,
             excerpts: state.promptExcerpts,
           }
         : (state.sessionDrafts[sessionId] ?? {
-            text: undefined,
-            attachments: [],
+            parts: undefined,
             excerpts: [],
           })
       // A reply can arrive after replay has already restored its pending
@@ -627,22 +673,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const last = restoring.at(-1)
       const alreadyInDraft =
         last !== undefined &&
-        (draft.text ?? "").trim() === last.text &&
-        sameAttachments(draft.attachments, last.attachments)
+        sameDraftParts(trimInputParts(draft.parts ?? []), last.content.parts)
       const toPrepend = alreadyInDraft ? restoring.slice(0, -1) : restoring
       const restored: SessionDraft = {
-        text: [...toPrepend.map((steer) => steer.text), draft.text]
-          .filter(
-            (text): text is string => text !== undefined && text.length > 0,
-          )
-          .join("\n"),
-        attachments: [
-          ...toPrepend.flatMap((steer) => steer.attachments),
-          ...draft.attachments,
-        ],
+        parts: inputImageOwnership.resolveParts(
+          state.apiBase,
+          joinInputDrafts([
+            ...toPrepend.map((steer) => steer.content.parts),
+            draft.parts,
+          ]),
+        ),
         excerpts: [
           ...restoring.flatMap((steer) =>
-            steer.excerpts.filter(
+            (steer.content.contextAttachments ?? []).filter(
               (excerpt) =>
                 !draft.excerpts.some((current) => current.id === excerpt.id),
             ),
@@ -654,8 +697,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ? {
             pendingSteers,
             restoredSteerRequestIds,
-            promptDraft: restored.text,
-            promptAttachments: restored.attachments,
+            promptDraft: restored.parts,
             promptExcerpts: restored.excerpts,
           }
         : {
@@ -683,31 +725,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
         ? {
-            text: state.promptDraft,
-            attachments: state.promptAttachments,
+            parts: state.promptDraft,
             excerpts: state.promptExcerpts,
           }
         : (state.sessionDrafts[sessionId] ?? {
-            text: undefined,
-            attachments: [],
+            parts: undefined,
             excerpts: [],
           })
-      const alreadyInDraft =
-        (draft.text ?? "").trim() === admission.text &&
-        sameAttachments(draft.attachments, admission.attachments ?? [])
+      const alreadyInDraft = sameDraftParts(
+        trimInputParts(draft.parts ?? []),
+        admission.content.parts,
+      )
       const restored: SessionDraft = {
-        text: alreadyInDraft
-          ? draft.text
-          : [admission.text, draft.text]
-              .filter(
-                (text): text is string => text !== undefined && text.length > 0,
-              )
-              .join("\n"),
-        attachments: alreadyInDraft
-          ? draft.attachments
-          : [...(admission.attachments ?? []), ...draft.attachments],
+        parts: alreadyInDraft
+          ? draft.parts
+          : inputImageOwnership.resolveParts(
+              state.apiBase,
+              joinInputDrafts([admission.content.parts, draft.parts]),
+            ),
         excerpts: [
-          ...(admission.contextAttachments ?? []).filter(
+          ...(admission.content.contextAttachments ?? []).filter(
             (excerpt) =>
               !draft.excerpts.some((current) => current.id === excerpt.id),
           ),
@@ -716,8 +753,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
       return selected
         ? {
-            promptDraft: restored.text,
-            promptAttachments: restored.attachments,
+            promptDraft: restored.parts,
             promptExcerpts: restored.excerpts,
           }
         : {
@@ -906,6 +942,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 queuedRequestIds = new Set(
                   queue.items.map((item) => item.input.submissionId),
                 )
+                for (const item of queue.items) {
+                  const pending = inputRecoveryMemory.readAdmissionByRequestId(
+                    get().apiBase,
+                    selection.sessionId,
+                    item.input.submissionId,
+                  )
+                  if (pending)
+                    recordPromotedContent(pending.content, item.input.content)
+                }
               } catch {
                 // A failed queue lookup leaves the in-memory snapshot available
                 // for retry. Restoring it favors recovery over deduplication.
@@ -952,9 +997,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 selection.sessionId,
                 event.data.requestId,
               )
-              if (admission !== undefined) {
+              const steer = inputRecoveryMemory
+                .readSteers(get().apiBase, selection.sessionId)
+                .find(
+                  (candidate) => candidate.requestId === event.data.requestId,
+                )
+              const original = admission?.content ?? steer?.content
+              if (original !== undefined)
+                recordPromotedContent(original, event.data.content)
+              if (admission !== undefined)
                 inputRecoveryMemory.acknowledgeAdmission(admission)
-              }
               inputRecoveryMemory.updateSteers(
                 get().apiBase,
                 selection.sessionId,
@@ -1228,9 +1280,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
             selection: {},
             selectedSession: undefined,
             execution: createExecutionViewState(),
-            promptDraft: pending.text,
-            promptAttachments: pending.attachments ?? [],
-            promptExcerpts: pending.contextAttachments ?? [],
+            promptDraft: inputImageOwnership.resolveParts(
+              get().apiBase,
+              pending.content.parts,
+            ),
+            promptExcerpts: pending.content.contextAttachments ?? [],
             recoveredAdmission: pending,
           })
           return
@@ -1572,7 +1626,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSkills: [],
         commandPanel: undefined,
         settingsSection: undefined,
-        promptAttachments: [],
         promptExcerpts:
           state.selection.sessionId === undefined
             ? state.promptExcerpts
@@ -1670,10 +1723,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
               : undefined
           const excerptsAtCreation =
             get().selection.sessionId === undefined ? get().promptExcerpts : []
-          const attachmentsAtCreation =
-            get().selection.sessionId === undefined
-              ? get().promptAttachments
-              : []
           const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
@@ -1687,7 +1736,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(draftAtCreation === undefined
               ? {}
               : { promptDraft: draftAtCreation }),
-            promptAttachments: attachmentsAtCreation,
             promptExcerpts: excerptsAtCreation,
           })
           connectEvents(selection, response.event.seq)
@@ -1735,10 +1783,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ...(content === undefined
                 ? {}
                 : {
-                    content: {
-                      kind: "text" as const,
-                      text: content,
-                    },
+                    content,
                   }),
               ...(reason !== "edit" || sourceModelSelection === undefined
                 ? {}
@@ -1818,7 +1863,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
               selectedSession: undefined,
               execution: createExecutionViewState(),
               promptDraft: undefined,
-              promptAttachments: [],
               promptExcerpts: [],
               sessionSkills: [],
               sessionDrafts,
@@ -2080,8 +2124,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
       loadSessionSkills(sessionId)
     },
 
-    admitInput: async (text, attachments = [], mode = "auto") => {
+    admitInput: async (parts, mode = "auto") => {
       const excerpts = get().promptExcerpts
+      const content: InputContent = {
+        kind: "parts",
+        parts,
+        ...(excerpts.length ? { contextAttachments: excerpts } : {}),
+      }
+      const text = inputContentText(content)
+      const attachments = inputContentImages(content)
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       let queuedModelSelection: ModelSelection | undefined
       let queuedForCreation = false
@@ -2119,16 +2170,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
             inputRecoveryMemory.reserveAdmission({
               apiBase: state.apiBase,
               sessionId: firstInputDraftSessionId,
-              text,
-              ...(attachments.length === 0 ? {} : { attachments }),
-              ...(excerpts.length === 0
-                ? {}
-                : { contextAttachments: excerpts }),
+              content,
               ...(queuedModelSelection === undefined
                 ? {}
                 : { modelSelection: queuedModelSelection }),
             })
-          if (state.promptDraft === undefined) set({ promptDraft: text })
+          if (state.promptDraft === undefined) set({ promptDraft: parts })
           const creation = pendingCreation ?? get().createSession()
           sessionId = await creation
         } finally {
@@ -2171,7 +2218,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         await runTask(
           async () => {
             let reserved = false
-            let promotedAttachments: readonly ImageAttachment[] | undefined
+            let promotedContent: InputContent | undefined
             try {
               inputRecoveryMemory.reserveSteer(
                 get().apiBase,
@@ -2179,9 +2226,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 {
                   requestId,
                   turnId: activeTurnId,
-                  text,
-                  attachments,
-                  excerpts,
+                  content,
                   restored: false,
                 },
               )
@@ -2192,14 +2237,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   sessionId: selection.sessionId,
                   requestId,
                   expectedTurnId: activeTurnId,
-                  content: {
-                    kind: "text",
-                    text,
-                    ...(attachments.length === 0 ? {} : { attachments }),
-                    ...(excerpts.length === 0
-                      ? {}
-                      : { contextAttachments: excerpts }),
-                  },
+                  content,
                 },
               )
               if (
@@ -2208,7 +2246,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ) {
                 throw new Error("Steer response did not match the request.")
               }
-              promotedAttachments = response.attachments
+              promotedContent = response.content
             } catch (error) {
               inFlightSteerRequests.delete(requestId)
               committedSteerRequests.delete(requestId)
@@ -2237,15 +2275,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 get().execution.admittedRequestIds[requestId] === true)
             inFlightSteerRequests.delete(requestId)
             committedSteerRequests.delete(requestId)
-            const acceptedAttachments = promotedAttachments
-            if (acceptedAttachments !== undefined) {
+            const acceptedContent = promotedContent
+            if (acceptedContent !== undefined) {
+              recordPromotedContent(content, acceptedContent)
               inputRecoveryMemory.updateSteers(
                 get().apiBase,
                 selection.sessionId,
                 (steers) =>
                   steers.map((steer) =>
                     steer.requestId === requestId
-                      ? { ...steer, attachments: acceptedAttachments }
+                      ? { ...steer, content: acceptedContent }
                       : steer,
                   ),
               )
@@ -2256,7 +2295,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                     state.pendingSteers[selection.sessionId] ?? []
                   ).map((steer) =>
                     steer.requestId === requestId
-                      ? { ...steer, attachments: acceptedAttachments }
+                      ? { ...steer, content: acceptedContent }
                       : steer,
                   ),
                 },
@@ -2279,63 +2318,60 @@ export const useAppStore = create<AppStore>()((set, get) => {
                     {
                       requestId,
                       turnId: activeTurnId,
-                      text,
-                      attachments: acceptedAttachments ?? attachments,
-                      excerpts,
+                      content: acceptedContent ?? content,
                       restored: false,
                     },
                   ],
                 },
               }))
             }
-            if (alreadyRestored && acceptedAttachments !== undefined) {
-              const replaceAttachments = (
-                current: readonly ImageAttachment[],
-              ): readonly ImageAttachment[] =>
-                current.map((attachment) => {
+            if (alreadyRestored && acceptedContent !== undefined) {
+              const acceptedImages = inputContentImages(acceptedContent)
+              const replaceParts = (
+                current: readonly InputPart[],
+              ): readonly InputPart[] =>
+                current.map((part) => {
+                  if (part.type !== "image") return part
                   const index = attachments.findIndex((original) =>
-                    sameAttachments([original], [attachment]),
+                    sameAttachments([original], [part]),
                   )
-                  return index < 0
-                    ? attachment
-                    : (acceptedAttachments[index] ?? attachment)
+                  const replacement = acceptedImages[index]
+                  return replacement === undefined
+                    ? part
+                    : { type: "image", ...replacement }
                 })
               set((state) =>
                 state.selection.sessionId === selection.sessionId
-                  ? {
-                      promptAttachments: replaceAttachments(
-                        state.promptAttachments,
-                      ),
-                    }
+                  ? { promptDraft: replaceParts(state.promptDraft ?? []) }
                   : {
                       sessionDrafts: {
                         ...state.sessionDrafts,
                         [selection.sessionId]: {
                           ...(state.sessionDrafts[selection.sessionId] ?? {
-                            text: undefined,
-                            attachments: [],
+                            parts: undefined,
                             excerpts: [],
                           }),
-                          attachments: replaceAttachments(
-                            state.sessionDrafts[selection.sessionId]
-                              ?.attachments ?? [],
+                          parts: replaceParts(
+                            state.sessionDrafts[selection.sessionId]?.parts ??
+                              [],
                           ),
                         },
                       },
                     },
               )
             }
+
             if (!alreadyRestored) retireRestoredSteers(selection.sessionId)
             if (!isCurrentSelection(selection)) {
               if (alreadyRestored) return
               set((state) => {
                 if (state.selection.sessionId === selection.sessionId) {
-                  const clear =
-                    (state.promptDraft ?? "").trim() === text &&
-                    sameAttachments(state.promptAttachments, attachments)
+                  const clear = sameDraftParts(
+                    trimInputParts(state.promptDraft ?? []),
+                    parts,
+                  )
                   return {
                     promptDraft: clear ? undefined : state.promptDraft,
-                    promptAttachments: clear ? [] : state.promptAttachments,
                     promptExcerpts: state.promptExcerpts.filter(
                       (excerpt) => !excerpts.includes(excerpt),
                     ),
@@ -2343,16 +2379,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 }
                 const draft = state.sessionDrafts[selection.sessionId]
                 if (draft === undefined) return state
-                const clear =
-                  (draft.text ?? "").trim() === text &&
-                  sameAttachments(draft.attachments, attachments)
+                const clear = sameDraftParts(
+                  trimInputParts(draft.parts ?? []),
+                  parts,
+                )
                 return {
                   sessionDrafts: {
                     ...state.sessionDrafts,
                     [selection.sessionId]: {
                       ...draft,
-                      text: clear ? undefined : draft.text,
-                      attachments: clear ? [] : draft.attachments,
+                      parts: clear ? undefined : draft.parts,
                       excerpts: draft.excerpts.filter(
                         (excerpt) => !excerpts.includes(excerpt),
                       ),
@@ -2374,10 +2410,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }))
             if (
               !alreadyRestored &&
-              (get().promptDraft ?? "").trim() === text &&
-              sameAttachments(get().promptAttachments, attachments)
+              sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)
             ) {
-              set({ promptDraft: undefined, promptAttachments: [] })
+              set({ promptDraft: undefined })
             }
             if (
               get().execution.turnTimings[activeTurnId]?.completedAt !==
@@ -2420,10 +2455,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             if (!isCurrentSelection(selection)) return
             if (
-              (get().promptDraft ?? "").trim() === text &&
-              sameAttachments(get().promptAttachments, attachments)
+              sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)
             ) {
-              set({ promptDraft: undefined, promptAttachments: [] })
+              set({ promptDraft: undefined })
             }
           },
           () => isCurrentSelection(selection),
@@ -2452,9 +2486,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const pendingAdmission = inputRecoveryMemory.reserveAdmission({
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
-            text,
-            ...(attachments.length === 0 ? {} : { attachments }),
-            ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
+            content,
             ...(admittedModelSelection === undefined
               ? {}
               : { modelSelection: admittedModelSelection }),
@@ -2463,7 +2495,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               : { supersedesRequestId: firstInputAdmission.requestId }),
           })
           inFlightAdmissions.add(pendingAdmission.requestId)
-          let response: Awaited<ReturnType<AppRpcClient["request"]>>
+          let response: ApiAdmitInputResponse
           try {
             if (firstInputAdmission !== undefined) {
               inputRecoveryMemory.acknowledgeAdmission(firstInputAdmission)
@@ -2476,18 +2508,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               {
                 sessionId: selection.sessionId,
                 requestId: pendingAdmission.requestId,
-                content: {
-                  kind: "text",
-                  text: pendingAdmission.text,
-                  ...(pendingAdmission.attachments === undefined
-                    ? {}
-                    : { attachments: pendingAdmission.attachments }),
-                  ...(pendingAdmission.contextAttachments === undefined
-                    ? {}
-                    : {
-                        contextAttachments: pendingAdmission.contextAttachments,
-                      }),
-                },
+                content: pendingAdmission.content,
                 ...(pendingAdmission.modelSelection === undefined
                   ? {}
                   : { modelSelection: pendingAdmission.modelSelection }),
@@ -2499,6 +2520,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
+          recordPromotedContent(pendingAdmission.content, response.content)
           if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
           retireRestoredSteers(selection.sessionId)
           // Queue storage has committed before its response. Direct starts
@@ -2517,13 +2539,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
               (excerpt) => !excerpts.includes(excerpt),
             ),
           }))
-          if (
-            (get().promptDraft ?? "").trim() === text &&
-            sameAttachments(get().promptAttachments, attachments)
-          ) {
+          if (sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)) {
             set({
               promptDraft: undefined,
-              promptAttachments: [],
             })
           }
           set((state) => {
@@ -2596,7 +2614,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           return
         const pendingInputs = items.map((item) => ({
           id: item.id,
-          text: item.input.content.text,
+          text: inputContentText(item.input.content),
           admittedAt: item.createdAt,
         }))
         set((state) => ({
@@ -2615,6 +2633,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             item.input.submissionId,
           )
           if (admission === undefined) continue
+          recordPromotedContent(admission.content, item.input.content)
           inputRecoveryMemory.acknowledgeAdmission(admission)
         }
       } catch (error) {
@@ -2623,7 +2642,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
     },
 
-    updateQueuedInput: async (inputId, text) => {
+    updateQueuedInput: async (inputId, parts) => {
       const selection = currentSelection()
       if (!selection) return
       const item = get().queuedItems.find((entry) => entry.id === inputId)
@@ -2635,7 +2654,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             sessionId: selection.sessionId,
             inputId,
             requestId,
-            content: { ...item.input.content, text },
+            content: { ...item.input.content, parts },
             ...(item.input.modelSelection === undefined
               ? {}
               : { modelSelection: item.input.modelSelection }),
@@ -2764,14 +2783,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    setPromptDraft: (text) => {
-      set({ promptDraft: text })
+    setPromptDraft: (parts) => {
+      set({ promptDraft: parts })
     },
-
-    setPromptAttachments: (attachments) => {
-      set({ promptAttachments: [...attachments] })
-    },
-
     addPromptExcerpt: (excerpt) => {
       set((state) => ({
         promptExcerpts: [
@@ -3372,14 +3386,12 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
   const sessionId = state.selection.sessionId
   if (sessionId === undefined) return state.sessionDrafts
   const hasContent =
-    (state.promptDraft ?? "").trim().length > 0 ||
-    state.promptAttachments.length > 0 ||
+    trimInputParts(state.promptDraft ?? []).length > 0 ||
     state.promptExcerpts.length > 0
   const sessionDrafts = { ...state.sessionDrafts }
   if (hasContent) {
     sessionDrafts[sessionId] = {
-      text: state.promptDraft,
-      attachments: state.promptAttachments,
+      parts: state.promptDraft,
       excerpts: state.promptExcerpts,
     }
   } else {
@@ -3391,17 +3403,13 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
 function takeSessionDraft(
   sessionDrafts: Record<string, SessionDraft>,
   sessionId: string,
-): Pick<
-  AppStoreData,
-  "sessionDrafts" | "promptDraft" | "promptAttachments" | "promptExcerpts"
-> {
+): Pick<AppStoreData, "sessionDrafts" | "promptDraft" | "promptExcerpts"> {
   const next = { ...sessionDrafts }
   const draft = next[sessionId]
   delete next[sessionId]
   return {
     sessionDrafts: next,
-    promptDraft: draft?.text,
-    promptAttachments: draft?.attachments ?? [],
+    promptDraft: draft?.parts,
     promptExcerpts: draft?.excerpts ?? [],
   }
 }

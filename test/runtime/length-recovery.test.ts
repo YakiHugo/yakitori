@@ -106,7 +106,10 @@ describe("bounded length recovery", () => {
       },
     )
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Original request." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Original request." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -114,7 +117,10 @@ describe("bounded length recovery", () => {
         completed: "Old assistant state",
       })
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Continue." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -177,7 +183,10 @@ describe("bounded length recovery", () => {
       },
     )
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Original request." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Original request." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -185,7 +194,10 @@ describe("bounded length recovery", () => {
         completed: "Old assistant state",
       })
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Continue." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -238,7 +250,10 @@ describe("bounded length recovery", () => {
       }
     })
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Explain." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -281,7 +296,10 @@ describe("bounded length recovery", () => {
       { modelContextWindowTokens: 1_000 },
     )
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Explain." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -331,14 +349,24 @@ describe("bounded length recovery", () => {
       { modelContextWindowTokens: 1_000 },
     )
     const started = await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Explain." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
     await terminalYielded.promise
     try {
       await expect(
         runtime.thread.steer(
-          { content: { kind: "text", text: "Answer my new question." } },
+          {
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "Answer my new question." },
+              ],
+            },
+          },
           started.turnId,
         ),
       ).resolves.toMatchObject({ type: "steered" })
@@ -416,7 +444,10 @@ describe("bounded length recovery", () => {
       { toolRegistry },
     )
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Read and explain." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Read and explain." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -460,7 +491,10 @@ describe("bounded length recovery", () => {
       }
     })
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Explain." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
     })
     await continuationEntered.promise
     await runtime.thread.interrupt("Cancel continuation")
@@ -475,7 +509,10 @@ describe("bounded length recovery", () => {
       "Saved partial text",
     )
     await runtime.thread.startIfIdle({
-      content: { kind: "text", text: "Continue." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
     })
     await expect
       .poll(() => runtime.thread.agentStatus)

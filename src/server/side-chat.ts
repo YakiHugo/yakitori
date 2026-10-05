@@ -1,3 +1,8 @@
+import {
+  inputContentText,
+  inputContentImages,
+  replaceInputImages,
+} from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
 import { AgentThread } from "../core/agent-thread.ts"
@@ -8,17 +13,13 @@ import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
   type ImageAttachment,
-  isImageAttachment,
+  isInputContent,
   type ModelMessage,
   type ModelImageBlock,
   type ModelSelection,
-  type TextContent,
+  type InputContent,
 } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import {
-  type ContextExcerpt,
-  isContextExcerpts,
-} from "../kernel/input-context.ts"
 import type { RolloutAssets } from "../kernel/rollout-assets.ts"
 import type {
   PermissionGate,
@@ -28,12 +29,11 @@ import type {
 export type SideChatMessage = {
   id: string
   turnId: string
-  role: "user" | "assistant"
-  text: string
   streaming: boolean
-  contextAttachments?: readonly ContextExcerpt[]
-  attachments?: readonly ImageAttachment[]
-}
+} & (
+  | { role: "user"; content: InputContent }
+  | { role: "assistant"; text: string }
+)
 
 export const sideChatInstructions =
   "This is a temporary side conversation. Answer the new side-chat user's request. Do not spawn or delegate to subagents. You may inspect the workspace to answer questions. Make changes only when the user explicitly asks for those changes in this side conversation."
@@ -57,10 +57,8 @@ export type SideChatCreate = {
 }
 
 export type SideChatSend = {
-  contextAttachments?: readonly ContextExcerpt[]
-  attachments?: readonly ImageAttachment[]
+  content: InputContent
   sideChatId: string
-  text: string
   requestId: string
   modelSelection?: ModelSelection
 }
@@ -109,7 +107,7 @@ type LiveChat = {
   closing: boolean
   requests: Map<
     string,
-    { content: TextContent; modelSelection: ModelSelection }
+    { content: InputContent; modelSelection: ModelSelection }
   >
 }
 
@@ -441,40 +439,21 @@ export function createSideChatService(options: {
     },
     async send(input) {
       const chat = requireChat(input.sideChatId)
-      if (
-        input.contextAttachments !== undefined &&
-        !isContextExcerpts(input.contextAttachments)
-      )
+      if (!isInputContent(input.content))
         throw new SideChatError(
-          "contextAttachments must contain valid context excerpts.",
+          "content must contain valid ordered input parts.",
         )
+      const attachments = inputContentImages(input.content)
       if (
-        input.attachments !== undefined &&
-        (!Array.isArray(input.attachments) ||
-          !input.attachments.every(isImageAttachment))
-      )
-        throw new SideChatError(
-          "attachments must contain valid image attachments.",
-        )
-      if (
-        (!input.text.trim() &&
-          !input.contextAttachments?.length &&
-          !input.attachments?.length) ||
+        (!inputContentText(input.content).trim() &&
+          !input.content.contextAttachments?.length &&
+          attachments.length === 0) ||
         !input.requestId.trim()
       )
         throw new SideChatError(
           "A message or attachment and requestId are required.",
         )
-      const originalContent: TextContent = {
-        kind: "text",
-        text: input.text,
-        ...(input.contextAttachments === undefined
-          ? {}
-          : { contextAttachments: structuredClone(input.contextAttachments) }),
-        ...(input.attachments === undefined
-          ? {}
-          : { attachments: structuredClone(input.attachments) }),
-      }
+      const originalContent = structuredClone(input.content)
       const selection = input.modelSelection ?? chat.snapshot.modelSelection
       const previous = chat.requests.get(input.requestId)
       if (previous !== undefined) {
@@ -500,21 +479,20 @@ export function createSideChatService(options: {
           "conflict",
         )
       const operation = (async () => {
-        const promotion = !input.attachments?.length
-          ? undefined
-          : await options.rolloutAssets?.promoteImageAttachments(
-              chat.snapshot.id,
-              input.requestId,
-              input.attachments,
-            )
-        if (input.attachments?.length && promotion === undefined)
+        const promotion =
+          attachments.length === 0
+            ? undefined
+            : await options.rolloutAssets?.promoteImageAttachments(
+                chat.snapshot.id,
+                input.requestId,
+                attachments,
+              )
+        if (attachments.length !== 0 && promotion === undefined)
           throw new SideChatError("Image attachment storage is unavailable.")
-        const content: TextContent = {
-          ...originalContent,
-          ...(promotion === undefined
-            ? {}
-            : { attachments: promotion.attachments }),
-        }
+        const content =
+          promotion === undefined
+            ? originalContent
+            : replaceInputImages(originalContent, promotion.attachments)
         // Promotion may outlive the deadline; admission must still happen before it.
         if (now() >= Date.parse(chat.snapshot.expiresAt)) {
           await promotion?.rollback()
@@ -544,9 +522,7 @@ export function createSideChatService(options: {
           modelSelection: structuredClone(selection),
         })
         if (promotion !== undefined)
-          await options.rolloutAssets?.discardDraftImageAttachments(
-            input.attachments ?? [],
-          )
+          await options.rolloutAssets?.discardDraftImageAttachments(attachments)
         chat.snapshot.modelSelection = structuredClone(selection)
         if (
           !chat.snapshot.messages.some(
@@ -557,13 +533,7 @@ export function createSideChatService(options: {
             id: input.requestId,
             turnId: result.turnId,
             role: "user",
-            text: input.text,
-            ...(content.contextAttachments === undefined
-              ? {}
-              : { contextAttachments: content.contextAttachments }),
-            ...(content.attachments === undefined
-              ? {}
-              : { attachments: content.attachments }),
+            content,
             streaming: false,
           }
           const responseIndex = chat.snapshot.messages.findIndex(
@@ -692,7 +662,7 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
     const existing = state.messages.find(
       (message) => message.id === event.itemId,
     )
-    if (existing) {
+    if (existing?.role === "assistant") {
       existing.text += event.delta
       existing.streaming = true
     } else
@@ -728,7 +698,7 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
       const existing = state.messages.find(
         (message) => message.id === item.item.id,
       )
-      if (existing) {
+      if (existing?.role === "assistant") {
         existing.text = text
         existing.streaming = false
       } else

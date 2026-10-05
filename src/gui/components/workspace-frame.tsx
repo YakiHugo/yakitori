@@ -1,3 +1,4 @@
+import { trimInputParts } from "../input-parts.ts"
 import {
   Files,
   GitCompareArrows,
@@ -127,9 +128,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       tab.kind === "chat" &&
       (tab.hasMessages ||
         tab.activeTurnId ||
-        tab.draft.trim() ||
-        tab.excerpts.length ||
-        tab.attachments.length)
+        trimInputParts(tab.draft).length ||
+        tab.excerpts.length)
     )
       setClosing(tab)
     else closeTab(tab.id)

@@ -53,11 +53,13 @@ export type ResponseItemEnvelope = {
   readonly createdAt: string
   readonly item: ModelMessage
   readonly providerMetadata?: JsonObject
-  readonly submissionMetadata?: {
-    readonly modelSelection?: ModelSelection
-    readonly parentInputId?: string
-    readonly metadata?: EventMetadata
-  }
+  readonly submissionMetadata?: Readonly<{
+    modelSelection?: ModelSelection
+    parentInputId?: string
+    metadata?: EventMetadata
+    // Admission identity belongs to the host, never model-visible content.
+    requestFingerprint?: string
+  }>
 }
 
 export type TurnContextItem = {

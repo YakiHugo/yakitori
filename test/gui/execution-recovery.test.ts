@@ -9,6 +9,7 @@ import {
   type TurnOutcome,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const session: ApiSessionDetail = {
   id: "session_recovery",
@@ -58,7 +59,7 @@ describe("execution recovery", () => {
               requestId: `request_${index}`,
               inputId: `input_${index}`,
               role: "user",
-              content: { kind: "text", text: `Message ${index}` },
+              content: { kind: "parts", parts: inputParts(`Message ${index}`) },
               ...(steered ? { steered: true } : {}),
             },
           },
@@ -168,7 +169,7 @@ describe("execution recovery", () => {
             requestId: "request_1",
             inputId: "input_1",
             role: "user",
-            content: { kind: "text", text: "Check" },
+            content: { kind: "parts", parts: inputParts("Check") },
           },
         },
       }),
@@ -215,7 +216,7 @@ describe("execution recovery", () => {
             requestId: "request_2",
             inputId: "input_2",
             role: "user",
-            content: { kind: "text", text: "Continue" },
+            content: { kind: "parts", parts: inputParts("Continue") },
           },
         },
       }),

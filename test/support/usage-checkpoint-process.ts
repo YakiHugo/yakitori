@@ -60,7 +60,12 @@ const thread = await manager.createThread({
   mateId: "fixture",
   mateRevisionId: "fixture",
 })
-await thread.startIfIdle({ content: { kind: "text", text: "Checkpoint test" } })
+await thread.startIfIdle({
+  content: {
+    kind: "parts" as const,
+    parts: [{ type: "text" as const, text: "Checkpoint test" }],
+  },
+})
 await started
 // Exit without shutting down the manager or flushing the store: the completed
 // model request's accounting barrier must already have made usage durable.

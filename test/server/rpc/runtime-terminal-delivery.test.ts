@@ -78,7 +78,10 @@ describe("runtime terminal delivery", () => {
           const admitted = await handlers.admitInput({
             sessionId,
             requestId: turnId,
-            content: { kind: "text", text: "finish" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "finish" }],
+            },
           })
           if (!admitted.ok) throw new Error(admitted.body.error.message)
           store.failNextAppend = failure !== "flush"
@@ -225,7 +228,10 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "child_request",
-        content: { kind: "text", text: "Child task" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Child task" }],
+        },
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -281,7 +287,10 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: turnId,
-        content: { kind: "text", text: "finish" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "finish" }],
+        },
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -406,7 +415,10 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "request_retry",
-        content: { kind: "text", text: "retry" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "retry" }],
+        },
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -529,7 +541,10 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "request_active",
-        content: { kind: "text", text: "start" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "start" }],
+        },
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -541,7 +556,10 @@ describe("runtime terminal delivery", () => {
       const queued = await handlers.queueInput({
         sessionId,
         requestId: "request_queued",
-        content: { kind: "text", text: "later" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "later" }],
+        },
       })
       if (!queued.ok) throw new Error(queued.body.error.message)
       continueOutput.resolve()

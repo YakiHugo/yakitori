@@ -221,7 +221,10 @@ describe("native Gemini provider", () => {
             mateRevisionId: "revision_test",
           })
           await thread.startIfIdle({
-            content: { kind: "text", text: "Inspect" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "Inspect" }],
+            },
           })
           await expect
             .poll(() => thread.agentStatus)

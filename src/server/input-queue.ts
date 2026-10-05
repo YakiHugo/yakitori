@@ -1,3 +1,4 @@
+import { readStoredInputContent } from "../kernel/input-content.ts"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -222,10 +223,11 @@ export class InputQueue {
 }
 
 function fromRow(row: QueueRow): QueuedInput {
+  const input = JSON.parse(row.input_json) as TurnInput
   return {
     id: row.id,
     sessionId: row.session_id,
-    input: JSON.parse(row.input_json) as TurnInput,
+    input: { ...input, content: readStoredInputContent(input.content) },
     createdAt: row.created_at,
   }
 }
