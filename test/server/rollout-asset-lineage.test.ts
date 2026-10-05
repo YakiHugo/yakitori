@@ -164,11 +164,11 @@ describe("rollout asset lineage", () => {
             expect.arrayContaining([
               expect.objectContaining({
                 role: "user",
-                images: [
+                content: expect.arrayContaining([
                   expect.objectContaining({
                     data: imageBytes.toString("base64"),
                   }),
-                ],
+                ]),
               }),
             ]),
           )
@@ -443,7 +443,9 @@ async function durableImageFile(
     ) {
       return []
     }
-    return record.item.item.item.images ?? []
+    return record.item.item.item.content.filter(
+      (block) => block.type === "image",
+    )
   })[0]
   if (image === undefined || !("file" in image)) {
     throw new Error("Durable source image was not found.")

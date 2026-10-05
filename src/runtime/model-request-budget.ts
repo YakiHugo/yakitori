@@ -48,7 +48,10 @@ export function estimateModelRequestBudget(
       message.role !== "user" && message.role !== "tool"
         ? total
         : total +
-          (message.images ?? []).reduce(
+          (message.role === "user"
+            ? message.content.filter((block) => block.type === "image")
+            : (message.images ?? [])
+          ).reduce(
             (subtotal, image) => subtotal + estimateImageTokens(image),
             0,
           ),
@@ -87,10 +90,10 @@ export function estimateHistoryTokens(
       total +
       estimateMessageTextTokens(message) +
       (message.role === "user" || message.role === "tool"
-        ? (message.images ?? []).reduce(
-            (tokens, image) => tokens + estimateImageTokens(image),
-            0,
-          )
+        ? (message.role === "user"
+            ? message.content.filter((block) => block.type === "image")
+            : (message.images ?? [])
+          ).reduce((tokens, image) => tokens + estimateImageTokens(image), 0)
         : 0),
     0,
   )

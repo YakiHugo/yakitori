@@ -605,7 +605,8 @@ describe("goal runtime", () => {
           message.role === "user" &&
           message.context === undefined &&
           message.content.some(
-            (part) => part.text === "Inspect the child task",
+            (part) =>
+              part.type === "text" && part.text === "Inspect the child task",
           ),
       )
       if (child) {

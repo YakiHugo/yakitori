@@ -71,8 +71,8 @@ describe("native Gemini provider", () => {
               messages: [
                 {
                   role: "user",
-                  content: [{ type: "text", text: "Look" }],
-                  images: [
+                  content: [
+                    { type: "text", text: "Look" },
                     { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
                   ],
                 },

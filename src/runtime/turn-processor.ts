@@ -3096,25 +3096,21 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
       input.goalId === undefined
         ? {
             role: "user",
-            content:
-              input.content.text.length === 0
+            content: [
+              ...(input.content.text.length === 0
                 ? []
-                : [{ type: "text", text: input.content.text }],
+                : [{ type: "text" as const, text: input.content.text }]),
+              ...(input.content.attachments ?? []).map((attachment) => ({
+                type: "image" as const,
+                mediaType: attachment.mediaType,
+                detail: attachment.detail ?? "high",
+                file: attachment.file,
+                sizeBytes: attachment.sizeBytes,
+              })),
+            ],
             ...(input.content.contextAttachments === undefined
               ? {}
               : { contextAttachments: input.content.contextAttachments }),
-            ...(input.content.attachments === undefined ||
-            input.content.attachments.length === 0
-              ? {}
-              : {
-                  images: input.content.attachments.map((attachment) => ({
-                    type: "image" as const,
-                    mediaType: attachment.mediaType,
-                    detail: attachment.detail ?? "high",
-                    file: attachment.file,
-                    sizeBytes: attachment.sizeBytes,
-                  })),
-                }),
           }
         : {
             role: "developer",
@@ -3172,39 +3168,41 @@ async function resolveRolloutAssetMedia(
       resolved.push(message)
       continue
     }
-    const images = await Promise.all(
-      (message.images ?? []).map(async (image) => {
-        if ("data" in image && image.data !== undefined)
-          return prepareModelImage(
-            Buffer.from(image.data, "base64"),
-            image.detail ?? "high",
-          )
-        if (rolloutAssets === undefined) {
-          throw new Error("Rollout image storage is unavailable.")
-        }
-        const bytes = await rolloutAssets.read(image.file)
-        if (bytes.byteLength !== image.sizeBytes) {
-          throw new Error(
-            "Rollout image size does not match its recorded size.",
-          )
-        }
-        return prepareModelImage(bytes, image.detail ?? "high")
-      }),
-    )
+    const resolveImage = async (
+      image: import("./model.ts").ModelImageBlock,
+    ) => {
+      if ("data" in image && image.data !== undefined)
+        return prepareModelImage(
+          Buffer.from(image.data, "base64"),
+          image.detail ?? "high",
+        )
+      if (rolloutAssets === undefined)
+        throw new Error("Rollout image storage is unavailable.")
+      const bytes = await rolloutAssets.read(image.file)
+      if (bytes.byteLength !== image.sizeBytes) {
+        throw new Error("Rollout image size does not match its recorded size.")
+      }
+      return prepareModelImage(bytes, image.detail ?? "high")
+    }
     if (message.role === "user") {
       const { contextAttachments, ...user } = message
+      const content = await Promise.all(
+        user.content.map((block) =>
+          block.type === "image" ? resolveImage(block) : block,
+        ),
+      )
       resolved.push({
         ...user,
         content: contextAttachments?.length
           ? [
-              ...user.content,
+              ...content,
               { type: "text", text: formatInputContext(contextAttachments) },
             ]
-          : user.content,
-        ...(images.length === 0 ? {} : { images }),
+          : content,
       })
       continue
     }
+    const images = await Promise.all((message.images ?? []).map(resolveImage))
     const { documents, ...tool } = message
     const projected = await prepareModelDocuments(
       documents ?? [],

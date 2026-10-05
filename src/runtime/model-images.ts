@@ -25,29 +25,46 @@ export function adaptImagesForModel(
   let downgradedOriginalCount = 0
 
   const adapted = messages.map((message): ModelMessage => {
-    if (
-      (message.role !== "user" && message.role !== "tool") ||
-      (message.images?.length ?? 0) === 0
-    ) {
-      return message
+    if (message.role === "user") {
+      let changed = false
+      const content = message.content.map((block) => {
+        if (block.type !== "image") return block
+        if (!supportsImages) {
+          omittedImageCount += 1
+          changed = true
+          return {
+            type: "text" as const,
+            text: `[Attached image was not sent because ${target.provider}/${target.model} does not support image input. The user should switch to a vision-capable model if visual inspection is required.]`,
+          }
+        }
+        if (!shouldDowngradeOriginal || block.detail !== "original")
+          return block
+        downgradedOriginalCount += 1
+        changed = true
+        return { ...block, detail: "high" as const }
+      })
+      if (!changed) return message
+      return {
+        ...message,
+        content: supportsImages
+          ? [
+              ...content,
+              {
+                type: "text",
+                text: `[Original image detail is not available for ${target.provider}/${target.model}; the image was sent using high detail.]`,
+              },
+            ]
+          : content,
+      }
     }
+    if (message.role !== "tool" || (message.images?.length ?? 0) === 0)
+      return message
     if (!supportsImages) {
       omittedImageCount += message.images?.length ?? 0
       const { images: _images, ...withoutImages } = message
-      if (withoutImages.role === "tool")
-        return {
-          ...withoutImages,
-          content: `${withoutImages.content}\n[Images omitted: ${target.provider}/${target.model} does not support image input.]`,
-        }
       return {
         ...withoutImages,
-        content: [
-          ...withoutImages.content,
-          {
-            type: "text",
-            text: `[${message.images?.length ?? 0} attached image(s) were not sent because ${target.provider}/${target.model} does not support image input. The user should switch to a vision-capable model if visual inspection is required.]`,
-          },
-        ],
+        content: `${withoutImages.content}\n[Images omitted: ${target.provider}/${target.model} does not support image input.]`,
       }
     }
     if (!shouldDowngradeOriginal) return message
@@ -59,22 +76,10 @@ export function adaptImagesForModel(
       return { ...image, detail: "high" as const }
     })
     if (messageDowngradedOriginalCount === 0) return message
-    if (message.role === "tool")
-      return {
-        ...message,
-        images,
-        content: `${message.content}\n[Original image detail unavailable; using high detail.]`,
-      }
     return {
       ...message,
-      content: [
-        ...message.content,
-        {
-          type: "text",
-          text: `[Original image detail is not available for ${target.provider}/${target.model}; the image was sent using high detail.]`,
-        },
-      ],
       images,
+      content: `${message.content}\n[Original image detail unavailable; using high detail.]`,
     }
   })
 

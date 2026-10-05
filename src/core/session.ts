@@ -1479,26 +1479,22 @@ function buildInputItem(input: TurnInput): ResponseItemEnvelope {
     createdAt: new Date().toISOString(),
     item: {
       role: "user",
-      content:
-        input.content.text.length === 0
+      content: [
+        ...(input.content.text.length === 0
           ? []
-          : [{ type: "text", text: input.content.text }],
+          : [{ type: "text" as const, text: input.content.text }]),
+        ...(input.content.attachments ?? []).map((attachment) => ({
+          type: "image" as const,
+          mediaType: attachment.mediaType,
+          detail: attachment.detail ?? "high",
+          file: attachment.file,
+          sizeBytes: attachment.sizeBytes,
+          name: attachment.name,
+        })),
+      ],
       ...(input.content.contextAttachments === undefined
         ? {}
         : { contextAttachments: input.content.contextAttachments }),
-      ...(input.content.attachments === undefined ||
-      input.content.attachments.length === 0
-        ? {}
-        : {
-            images: input.content.attachments.map((attachment) => ({
-              type: "image" as const,
-              mediaType: attachment.mediaType,
-              detail: attachment.detail ?? "high",
-              file: attachment.file,
-              sizeBytes: attachment.sizeBytes,
-              name: attachment.name,
-            })),
-          }),
     },
     ...submissionMetadata,
   }

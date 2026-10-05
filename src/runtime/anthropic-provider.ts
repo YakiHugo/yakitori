@@ -426,20 +426,21 @@ export function toAnthropicMessages(
       continue
     }
     if (message.role === "user") {
-      appendAnthropicUserContent(converted, [
-        ...message.content.map((block) => ({
-          type: "text" as const,
-          text: block.text,
-        })),
-        ...(message.images ?? []).map((block) => ({
-          type: "image" as const,
-          source: {
-            type: "base64" as const,
-            media_type: block.mediaType,
-            data: requireModelImageData(block),
-          },
-        })),
-      ])
+      appendAnthropicUserContent(
+        converted,
+        message.content.map((block) =>
+          block.type === "text"
+            ? { type: "text" as const, text: block.text }
+            : {
+                type: "image" as const,
+                source: {
+                  type: "base64" as const,
+                  media_type: block.mediaType,
+                  data: requireModelImageData(block),
+                },
+              },
+        ),
+      )
       continue
     }
     if (message.role === "assistant") {

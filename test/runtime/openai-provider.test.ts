@@ -863,8 +863,8 @@ describe("OpenAI Responses provider", () => {
       toOpenAIInput([
         {
           role: "user",
-          content: [{ type: "text", text: "Inspect this" }],
-          images: [
+          content: [
+            { type: "text", text: "Inspect this" },
             { type: "image", mediaType: "image/webp", data: "aGVsbG8=" },
           ],
         },
@@ -888,8 +888,7 @@ describe("OpenAI Responses provider", () => {
     const input = toOpenAIInput([
       {
         role: "user",
-        content: [],
-        images: [
+        content: [
           {
             type: "image",
             mediaType: "image/png",

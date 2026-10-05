@@ -9,8 +9,8 @@ describe("complete model request budgeting", () => {
   it("estimates newly added images without counting their base64 transport bytes", () => {
     const message = {
       role: "user" as const,
-      content: [{ type: "text" as const, text: "inspect" }],
-      images: [
+      content: [
+        { type: "text" as const, text: "inspect" },
         {
           type: "image" as const,
           mediaType: "image/png" as const,
@@ -20,10 +20,14 @@ describe("complete model request budgeting", () => {
     }
     const largeTransport = {
       ...message,
-      images: message.images.map((image) => ({
-        ...image,
-        data: "AAAA".repeat(100_000),
-      })),
+      content: message.content.map((block) =>
+        block.type === "image"
+          ? {
+              ...block,
+              data: "AAAA".repeat(100_000),
+            }
+          : block,
+      ),
     }
     expect(estimateHistoryTokens([message])).toBeGreaterThanOrEqual(2_000)
     expect(estimateHistoryTokens([largeTransport])).toBe(
@@ -180,8 +184,8 @@ function requestWithImage(detail: "high" | "original"): ModelRequest {
     messages: [
       {
         role: "user",
-        content: [{ type: "text", text: "inspect" }],
-        images: [
+        content: [
+          { type: "text", text: "inspect" },
           {
             type: "image",
             mediaType: "image/png",

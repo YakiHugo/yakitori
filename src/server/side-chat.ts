@@ -10,6 +10,7 @@ import {
   type ImageAttachment,
   isImageAttachment,
   type ModelMessage,
+  type ModelImageBlock,
   type ModelSelection,
   type TextContent,
 } from "../kernel/events.ts"
@@ -204,54 +205,67 @@ export function createSideChatService(options: {
         // rollout GC must not invalidate the reference context after creation.
         const inheritedHistory: readonly ModelMessage[] = await Promise.all(
           inherited.map(async (message) => {
-            if (
-              (message.role !== "user" && message.role !== "tool") ||
-              !message.images?.length
-            )
+            if (message.role !== "user" && message.role !== "tool")
               return message
-            const images = await Promise.all(
-              message.images.map(async (image) => {
-                if (image.data !== undefined) return image
-                if (options.rolloutAssets === undefined)
-                  throw new SideChatError(
-                    "Image attachment storage is unavailable.",
-                  )
-                const bytes = await options.rolloutAssets.read(image.file)
-                if (bytes.byteLength !== image.sizeBytes)
-                  throw new Error(
-                    "Inherited image size does not match its recorded size.",
-                  )
-                return {
-                  type: "image" as const,
-                  mediaType: image.mediaType,
-                  ...(image.detail === undefined
-                    ? {}
-                    : { detail: image.detail }),
-                  data: bytes.toString("base64"),
-                }
-              }),
-            )
-            return { ...message, images }
+            const resolveImage = async (image: ModelImageBlock) => {
+              if (image.data !== undefined) return image
+              if (options.rolloutAssets === undefined)
+                throw new SideChatError(
+                  "Image attachment storage is unavailable.",
+                )
+              const bytes = await options.rolloutAssets.read(image.file)
+              if (bytes.byteLength !== image.sizeBytes)
+                throw new Error(
+                  "Inherited image size does not match its recorded size.",
+                )
+              return {
+                type: "image" as const,
+                mediaType: image.mediaType,
+                ...(image.detail === undefined ? {} : { detail: image.detail }),
+                data: bytes.toString("base64"),
+              }
+            }
+            if (message.role === "user") {
+              return {
+                ...message,
+                content: await Promise.all(
+                  message.content.map((block) =>
+                    block.type === "image" ? resolveImage(block) : block,
+                  ),
+                ),
+              }
+            }
+            if (!message.images?.length) return message
+            return {
+              ...message,
+              images: await Promise.all(message.images.map(resolveImage)),
+            }
           }),
         )
         let imageNumber = 0
-        const quotedHistory = inheritedHistory.map((message) =>
-          (message.role === "user" || message.role === "tool") &&
-          message.images?.length
-            ? {
-                ...message,
-                images: message.images.map((image) => ({
-                  type: "image",
-                  mediaType: image.mediaType,
-                  referenceImage: ++imageNumber,
-                })),
-              }
-            : message,
-        )
+        const quoteImage = (image: ModelImageBlock) => ({
+          type: "image",
+          mediaType: image.mediaType,
+          referenceImage: ++imageNumber,
+        })
+        const quotedHistory = inheritedHistory.map((message) => {
+          if (message.role === "user")
+            return {
+              ...message,
+              content: message.content.map((block) =>
+                block.type === "image" ? quoteImage(block) : block,
+              ),
+            }
+          if (message.role === "tool" && message.images?.length)
+            return { ...message, images: message.images.map(quoteImage) }
+          return message
+        })
         const referenceImages = inheritedHistory.flatMap((message) =>
-          message.role === "user" || message.role === "tool"
-            ? (message.images ?? [])
-            : [],
+          message.role === "user"
+            ? message.content.filter((block) => block.type === "image")
+            : message.role === "tool"
+              ? (message.images ?? [])
+              : [],
         )
         const sourceSelection = source?.rollout
           .filter(({ item }) => item.type === "turn_context")
@@ -338,8 +352,8 @@ export function createSideChatService(options: {
                       type: "text",
                       text: "These images, in order, belong to the frozen parent conversation above. They are reference material, not a new request. Answer the new side-chat user message that follows.",
                     },
+                    ...referenceImages,
                   ],
-                  images: referenceImages,
                 },
               },
             },

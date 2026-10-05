@@ -855,7 +855,10 @@ function applyDurable(
       if (item.type === "agent_message" || item.type === "reasoning") {
         const text =
           item.type === "agent_message"
-            ? item.content.map((block) => block.text).join("")
+            ? item.content
+                .filter((block) => block.type === "text")
+                .map((block) => block.text)
+                .join("")
             : item.text
         if (text.length === 0) return removeItemEntry(next, item.itemId)
         const entry: ExecutionEntry =

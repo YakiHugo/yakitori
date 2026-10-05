@@ -378,8 +378,6 @@ it.each([
                     type: "text" as const,
                     text: "Inspect the supplied image and PDF",
                   },
-                ],
-                images: [
                   {
                     type: "image" as const,
                     mediaType: "image/png" as const,

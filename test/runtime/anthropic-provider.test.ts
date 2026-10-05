@@ -605,8 +605,10 @@ describe("anthropic provider conversion", () => {
       toAnthropicMessages([
         {
           role: "user",
-          content: [{ type: "text", text: "What is this?" }],
-          images: [{ type: "image", mediaType: "image/png", data: "aGVsbG8=" }],
+          content: [
+            { type: "text", text: "What is this?" },
+            { type: "image", mediaType: "image/png", data: "aGVsbG8=" },
+          ],
         },
       ]),
     ).toEqual([

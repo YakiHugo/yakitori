@@ -80,11 +80,16 @@ async function fixture(waitForFirstAbort = false) {
       .find(
         (message) =>
           message.role === "user" &&
-          message.content.some((block) => labels.has(block.text)),
+          message.content.some(
+            (block) => block.type === "text" && labels.has(block.text),
+          ),
       )
     if (user?.role !== "user")
       throw new Error("Fixture requires a labeled user input.")
-    const label = user.content.map((block) => block.text).join("")
+    const label = user.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
     const searched = request.messages.some(
       (message) =>
         message.role === "tool" && message.toolCallId === `${label}:search`,

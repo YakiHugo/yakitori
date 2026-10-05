@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { StoredRolloutItem } from "../../src/core/rollout.ts"
 import type { ContextExcerpt } from "../../src/kernel/input-context.ts"
 import {
   ModelStopReason,
@@ -49,8 +50,9 @@ async function fixture(stream: StreamFn) {
     get app() {
       return application
     },
-    async restart() {
+    async restart(beforeReopen?: () => Promise<void>) {
       await application.close()
+      await beforeReopen?.()
       application = await createYakitoriApplication(options)
     },
   }
@@ -106,6 +108,172 @@ const excerpts: readonly ContextExcerpt[] = [
 ]
 
 describe("structured context and ephemeral forks", () => {
+  it.each([
+    "saved-separate-images",
+    "ordered",
+  ] as const)("resumes %s user media into the same request order and attachment projection", async (shape) => {
+    const requests: ModelRequest[] = []
+    const context = await fixture(async function* (request) {
+      requests.push(request)
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "done" }],
+        },
+      }
+    })
+    const id = await createMain(context.app)
+    const first = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "#112233" },
+    })
+      .png()
+      .toBuffer()
+    const second = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "#445566" },
+    })
+      .png()
+      .toBuffer()
+    const attachments = await context.app.rolloutAssets.importImageBytes(
+      id,
+      "ordered_images",
+      [
+        { name: "first.png", data: first },
+        { name: "second.png", data: second },
+      ],
+    )
+    const admitted = await context.app.handlers.admitInput({
+      sessionId: id,
+      requestId: "ordered_first",
+      modelSelection: { provider: "openai", model: "gpt-5" },
+      content: { kind: "text", text: "between images", attachments },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await until(
+      () => context.app.threadManager.getThread(id)?.status === "idle",
+    )
+    await context.restart(async () => {
+      const path = join(
+        context.app.sessionStoreRoot,
+        "rollouts",
+        id,
+        "rollout.jsonl",
+      )
+      const entries = (await readFile(path, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line): StoredRolloutItem => JSON.parse(line))
+      const rewritten = entries.map((entry) => {
+        if (
+          entry.item.type !== "response_item" ||
+          entry.item.item.id !== admitted.body.inputId ||
+          entry.item.item.item.role !== "user"
+        )
+          return entry
+        const message = entry.item.item.item
+        const images = message.content.filter((block) => block.type === "image")
+        const [firstImage, secondImage] = images
+        if (firstImage === undefined || secondImage === undefined)
+          throw new Error("Missing saved images")
+        const text = { type: "text", text: "between images" }
+        return {
+          ...entry,
+          item: {
+            ...entry.item,
+            item: {
+              ...entry.item.item,
+              item:
+                shape === "ordered"
+                  ? { role: "user", content: [firstImage, text, secondImage] }
+                  : { role: "user", content: [text], images },
+            },
+          },
+        }
+      })
+      await writeFile(
+        path,
+        `${rewritten.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      )
+    })
+    const continued = await context.app.handlers.admitInput({
+      sessionId: id,
+      requestId: "ordered_continue",
+      modelSelection: { provider: "openai", model: "gpt-5" },
+      content: { kind: "text", text: "continue" },
+    })
+    if (!continued.ok) throw new Error(continued.body.error.message)
+    await until(
+      () => context.app.threadManager.getThread(id)?.status === "idle",
+    )
+    const original = requests
+      .at(-1)
+      ?.messages.find(
+        (message) =>
+          message.role === "user" &&
+          message.content.some(
+            (block) => block.type === "text" && block.text === "between images",
+          ),
+      )
+    if (original?.role !== "user")
+      throw new Error("Missing resumed user content")
+    expect(original.content.map((block) => block.type)).toEqual(
+      shape === "ordered"
+        ? ["image", "text", "image"]
+        : ["text", "image", "image"],
+    )
+    const imageBlocks = original.content.filter(
+      (block) => block.type === "image",
+    )
+    const pixels = await Promise.all(
+      imageBlocks.map(async (block) => {
+        if (block.data === undefined)
+          throw new Error("Unresolved resumed image")
+        const bytes = await sharp(Buffer.from(block.data, "base64"))
+          .removeAlpha()
+          .raw()
+          .toBuffer()
+        return [...bytes.subarray(0, 3)]
+      }),
+    )
+    expect(pixels).toEqual([
+      [17, 34, 51],
+      [68, 85, 102],
+    ])
+    const events = await context.app.handlers.readSessionEvents({
+      sessionId: id,
+    })
+    if (!events.ok) throw new Error(events.body.error.message)
+    expect(
+      events.body.events.find(
+        (entry) =>
+          entry.type === "input.admitted" &&
+          entry.data.inputId === admitted.body.inputId,
+      ),
+    ).toMatchObject({
+      data: {
+        content: {
+          text: "between images",
+          attachments: [
+            {
+              name: "first.png",
+              file: {
+                rolloutId: id,
+                path: expect.stringContaining("attachments/requests/"),
+              },
+            },
+            {
+              name: "second.png",
+              file: {
+                rolloutId: id,
+                path: expect.stringContaining("attachments/requests/"),
+              },
+            },
+          ],
+        },
+      },
+    })
+  })
+
   it("keeps user text clean across model hydration, restart, replay, and edit forks", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
@@ -220,7 +388,8 @@ describe("structured context and ephemeral forks", () => {
         .at(-1)
       if (
         latestUser?.role === "user" &&
-        latestUser.content[0]?.text === "unfinished parent task"
+        latestUser.content.find((block) => block.type === "text")?.text ===
+          "unfinished parent task"
       ) {
         yield { type: "delta", text: "unfinished parent answer" }
         if (!request.signal) throw new Error("Missing abort signal")
@@ -364,7 +533,7 @@ describe("structured context and ephemeral forks", () => {
     const stored = await context.app.threadStore.readThread(parentId)
     const parentImage = stored?.rollout.flatMap(({ item }) =>
       item.type === "response_item" && item.item.item.role === "user"
-        ? (item.item.item.images ?? [])
+        ? item.item.item.content.filter((block) => block.type === "image")
         : [],
     )[0]
     if (!parentImage?.file) throw new Error("Missing stored parent image")
@@ -394,7 +563,9 @@ describe("structured context and ephemeral forks", () => {
     )
     for (const request of requests.slice(1)) {
       const images = request.messages.flatMap((message) =>
-        message.role === "user" ? (message.images ?? []) : [],
+        message.role === "user"
+          ? message.content.filter((block) => block.type === "image")
+          : [],
       )
       expect(images).toHaveLength(1)
       const image = images[0]
