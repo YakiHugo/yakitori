@@ -4,7 +4,7 @@ import {
   parseSessionPlan,
   parseUserQuestions,
 } from "../../../kernel/user-interaction.ts"
-import { imageAttachmentUrl } from "../../composer-attachments.ts"
+import { ToolResultParts } from "./tool-result-parts.tsx"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import {
   fileActionLabel,
@@ -172,24 +172,23 @@ export function ToolCell({
       )}
       <CollapsibleContent className="pt-1 pb-2">
         <div className="rounded-md bg-muted/35 px-3 py-2.5">
-          {(entry.attachments ?? []).map((attachment) => (
-            <img
-              key={`${attachment.file.rolloutId}:${attachment.file.path}`}
-              src={imageAttachmentUrl(attachment, apiBase)}
-              alt={attachment.name}
-              loading="lazy"
-              className="mb-2 max-h-96 max-w-full rounded object-contain"
-            />
-          ))}
           {collaboration?.request === undefined ? null : (
             <p className="mb-3 text-xs leading-5 whitespace-pre-wrap text-foreground/85">
               {collaboration.request}
             </p>
           )}
-          <ToolDetailView
-            detail={presentation.detail}
-            workspaceRoot={workspaceRoot}
-          />
+          {entry.resultContent?.some((part) => part.type !== "text") ? (
+            <ToolResultParts
+              parts={entry.resultContent}
+              toolCallId={entry.toolCallId}
+              apiBase={apiBase}
+            />
+          ) : (
+            <ToolDetailView
+              detail={presentation.detail}
+              workspaceRoot={workspaceRoot}
+            />
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

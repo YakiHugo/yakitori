@@ -18,6 +18,13 @@ export async function createSmokeEnvironment(): Promise<
   const bin = join(root, "bin")
   try {
     await Promise.all([mkdir(home), mkdir(workspace), mkdir(bin)])
+    await writeFile(
+      join(workspace, "smoke.png"),
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    )
     // The subscription flow must never launch the developer's real CLI or
     // open an external browser. This owned process exposes a URL until canceled.
     await writeFile(
@@ -124,7 +131,11 @@ export async function runProviderFlow(
   const endpoint = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" })
-      response.end(JSON.stringify({ data: [{ id: "smoke-model" }] }))
+      response.end(
+        JSON.stringify({
+          data: [{ id: "smoke-model", input_modalities: ["text", "image"] }],
+        }),
+      )
       return
     }
     let body = ""
@@ -145,6 +156,47 @@ export async function runProviderFlow(
         object: "chat.completion.chunk",
         created: 1,
         model: "smoke-model",
+      }
+      const sent = JSON.parse(body) as {
+        messages?: { role: string; content?: unknown }[]
+      }
+      if (
+        sent.messages?.some(
+          (message) =>
+            message.role === "user" &&
+            message.content === "Verify the configured provider turn.",
+        ) &&
+        !sent.messages.some((message) => message.role === "tool")
+      ) {
+        response.write(
+          `data: ${JSON.stringify({
+            ...completion,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "smoke_image",
+                      type: "function",
+                      function: {
+                        name: "view_image",
+                        arguments: JSON.stringify({ path: "smoke.png" }),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          })}\n\n`,
+        )
+        response.end(
+          `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`,
+        )
+        return
       }
       response.write(
         `data: ${JSON.stringify({
@@ -404,6 +456,29 @@ export async function runProviderFlow(
     await expect(
       page.getByRole("main").getByText("Mock provider reply", { exact: true }),
     ).toBeVisible()
+    const checkToolImage = async () => {
+      await page.getByRole("button", { name: /^View image smoke\.png/ }).click()
+      const parts = page.getByRole("region", {
+        name: "Ordered tool result",
+        exact: true,
+      })
+      await expect(
+        parts.getByText("Read image: smoke.png", { exact: true }),
+      ).toBeVisible()
+      const image = parts.getByRole("img")
+      await expect(image).toBeVisible()
+      await expect
+        .poll(() =>
+          image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+        )
+        .toBeGreaterThan(0)
+      expect(
+        await parts
+          .locator(":scope > *")
+          .evaluateAll((nodes) => nodes.map((node) => node.tagName)),
+      ).toEqual(["PRE", "IMG"])
+    }
+    await checkToolImage()
     const sources = page.getByRole("region", { name: "Sources", exact: true })
     await expect(
       sources.getByRole("link", { name: "Provider source", exact: true }),
@@ -436,6 +511,7 @@ export async function runProviderFlow(
         .getByRole("region", { name: "Sources", exact: true })
         .getByRole("link", { name: "Unavailable source", exact: true }),
     ).toHaveCount(0)
+    await checkToolImage()
     const sourcesPath = testInfo.outputPath("citation-sources.png")
     await page.screenshot({ path: sourcesPath, animations: "disabled" })
     await testInfo.attach("citation-sources", {

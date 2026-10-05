@@ -1,6 +1,7 @@
 import { citationSources, type CitationSource } from "./citation-sources.ts"
 import {
   type ImageAttachment,
+  type ModelToolContentBlock,
   isKernelEvent,
   type RuntimeEventEnvelope,
   type StoredEventEnvelope,
@@ -59,7 +60,7 @@ export type ExecutionEntry =
       readonly execution: ToolExecutionItem
       readonly state: string
       readonly output?: unknown
-      readonly attachments?: readonly ImageAttachment[]
+      readonly resultContent?: readonly ModelToolContentBlock[]
       readonly resultText?: string
       readonly resultError?: boolean
       readonly resultErrorMessage?: string
@@ -894,14 +895,28 @@ function applyDurable(
         execution: item,
         state: item.error === undefined ? "completed" : "failed",
         ...(item.output === undefined ? {} : { output: item.output }),
-        ...(item.content.kind === "text" &&
-        item.content.attachments !== undefined
-          ? { attachments: item.content.attachments }
-          : {}),
+        ...(item.content.kind === "tool_result"
+          ? { resultContent: item.content.parts }
+          : item.content.kind === "text" && item.content.attachments?.length
+            ? {
+                resultContent: [
+                  { type: "text" as const, text: item.content.text },
+                  ...item.content.attachments.map((image) => ({
+                    ...image,
+                    type: "image" as const,
+                  })),
+                ],
+              }
+            : {}),
         resultText:
-          item.content.kind === "text"
-            ? item.content.text
-            : JSON.stringify(item.content.value),
+          item.content.kind === "tool_result"
+            ? item.content.parts
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n")
+            : item.content.kind === "text"
+              ? item.content.text
+              : JSON.stringify(item.content.value),
         ...(item.error === undefined
           ? {}
           : { resultError: true, resultErrorMessage: item.error.message }),

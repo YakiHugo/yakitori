@@ -2755,32 +2755,7 @@ function completeToolItem(
   return {
     ...completed,
     resultItemId,
-    content: {
-      kind: "text",
-      text: toolContentText(modelContent.content),
-      ...(!modelContent.content.some((block) => block.type === "image")
-        ? {}
-        : {
-            attachments: modelContent.content
-              .filter((block) => block.type === "image")
-              .flatMap((image) =>
-                image.file === undefined
-                  ? []
-                  : [
-                      {
-                        name:
-                          image.name ??
-                          image.file.path.split("/").at(-1) ??
-                          "image",
-                        mediaType: image.mediaType,
-                        sizeBytes: image.sizeBytes,
-                        detail: image.detail ?? "high",
-                        file: image.file,
-                      },
-                    ],
-              ),
-          }),
-    },
+    content: { kind: "tool_result", parts: modelContent.content },
     ...(result.output === undefined ? {} : { output: result.output }),
     ...(result.ok
       ? {}

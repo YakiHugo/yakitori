@@ -18,14 +18,25 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
         entry &&
         entry.kind === "tool" &&
         entry.execution.name.includes("cua_repl") &&
-        (entry.attachments?.length ?? 0) > 0
+        entry.resultContent?.some(
+          (part) => part.type === "image" && part.file !== undefined,
+        )
       )
         return entry
     }
     return undefined
   })
+  const part =
+    screenshot?.kind === "tool"
+      ? screenshot.resultContent?.filter((part) => part.type === "image").at(-1)
+      : undefined
   const image =
-    screenshot?.kind === "tool" ? screenshot.attachments?.at(-1) : undefined
+    part?.type === "image" && part.file !== undefined
+      ? {
+          ...part,
+          name: part.name ?? part.file.path.split("/").at(-1) ?? "Screenshot",
+        }
+      : undefined
   const run = useCallback(
     async (
       method: "computer/status" | "computer/connect" | "computer/disconnect",

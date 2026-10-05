@@ -92,7 +92,12 @@ export type JsonContent = {
   readonly value: JsonValue
 }
 
-export type ItemContent = TextContent | JsonContent
+export type ToolResultContent = Readonly<{
+  kind: "tool_result"
+  parts: readonly ModelToolContentBlock[]
+}>
+
+export type ItemContent = TextContent | JsonContent | ToolResultContent
 
 // Provider-neutral, model-visible history IR. The kernel owns this contract so
 // durable checkpoints and forks do not depend on runtime request assembly.
@@ -1288,6 +1293,19 @@ function isCollaborationAction(value: unknown): value is CollaborationAction {
   )
 }
 
+function isModelToolContentBlock(
+  value: unknown,
+): value is ModelToolContentBlock {
+  return (
+    (isRecord(value) &&
+      onlyKeys(value, ["type", "text"]) &&
+      value.type === "text" &&
+      isString(value.text)) ||
+    isModelImageBlock(value) ||
+    isModelDocumentBlock(value)
+  )
+}
+
 export function isModelMessage(value: unknown): value is ModelMessage {
   if (!isRecord(value) || !isString(value.role)) return false
   if (value.role === "tool") {
@@ -1302,15 +1320,7 @@ export function isModelMessage(value: unknown): value is ModelMessage {
       ]) &&
       isString(value.toolCallId) &&
       Array.isArray(value.content) &&
-      value.content.every(
-        (block) =>
-          (isRecord(block) &&
-            onlyKeys(block, ["type", "text"]) &&
-            block.type === "text" &&
-            isString(block.text)) ||
-          isModelImageBlock(block) ||
-          isModelDocumentBlock(block),
-      ) &&
+      value.content.every(isModelToolContentBlock) &&
       (value.isError === undefined || typeof value.isError === "boolean") &&
       (value.toolSearch === undefined ||
         (isRecord(value.toolSearch) &&
@@ -1875,6 +1885,17 @@ export function isModelSelection(value: unknown): value is ModelSelection {
 function isItemContent(value: unknown): value is ItemContent {
   if (!isRecord(value)) return false
   if (value.kind === "text") return isTextContent(value)
+  if (value.kind === "tool_result")
+    return (
+      onlyKeys(value, ["kind", "parts"]) &&
+      Array.isArray(value.parts) &&
+      value.parts.every(
+        (part) =>
+          isModelToolContentBlock(part) &&
+          // Completion facts retain asset ownership, never request-time PDF bytes.
+          (part.type !== "document" || part.data === undefined),
+      )
+    )
   if (value.kind === "json")
     return isJsonValue(value.value) && onlyKeys(value, ["kind", "value"])
   return false
