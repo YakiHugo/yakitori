@@ -722,7 +722,7 @@ describe("Chat Completions provider", () => {
     "assistant",
     "user",
     "developer",
-  ] as const)("projects tool images after all results before %s without mutating history", (boundary) => {
+  ] as const)("projects tool media after all results before %s without mutating history", (boundary) => {
     const image = {
       type: "image" as const,
       mediaType: "image/png" as const,
@@ -764,6 +764,7 @@ describe("Chat Completions provider", () => {
             mediaType: "application/pdf",
             file: { rolloutId: "rollout_test", path: "report.pdf" },
             sizeBytes: 10,
+            data: "JVBERi0x",
           },
         ],
         isError: true,
@@ -799,7 +800,7 @@ describe("Chat Completions provider", () => {
         role: "tool",
         tool_call_id: "last",
         content:
-          '[tool_error]\nPartial result\n[Image from tool result "last", content part 2; image follows the tool-result batch.]\n[Document report.pdf was not sent: native PDF input is not enabled for Chat Completions.]',
+          '[tool_error]\nPartial result\n[Image from tool result "last", content part 2; image follows the tool-result batch.]\n[PDF from tool result "last", content part 3; PDF follows the tool-result batch.]',
       },
       {
         role: "user",
@@ -822,6 +823,17 @@ describe("Chat Completions provider", () => {
             type: "image_url",
             image_url: { url: "data:image/png;base64,ZGVm", detail: "high" },
           },
+          {
+            type: "text",
+            text: 'PDF from tool result "last", content part 3:',
+          },
+          {
+            type: "file",
+            file: {
+              filename: "report.pdf",
+              file_data: "data:application/pdf;base64,JVBERi0x",
+            },
+          },
         ],
       },
     ])
@@ -833,6 +845,105 @@ describe("Chat Completions provider", () => {
       })
     expect(messages).toEqual(original)
     expect(toChatCompletionsMessages(messages, "custom_1")).toEqual(converted)
+  })
+
+  it("serializes mixed tool PDFs and images once after the complete parallel batch", async () => {
+    const pdf = {
+      type: "document" as const,
+      name: "résumé.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 6,
+      file: { rolloutId: "rollout_test", path: "report.pdf" },
+      data: "JVBERi0x",
+    }
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: ["a", "b"].map((id) => ({
+          type: "tool_call",
+          id,
+          name: "inspect",
+          input: {},
+        })),
+      },
+      {
+        role: "tool",
+        toolCallId: "a",
+        content: [
+          { type: "text", text: "Before" },
+          pdf,
+          { type: "text", text: "Between" },
+          { type: "image", mediaType: "image/png", data: "YWJj" },
+          { type: "text", text: "After" },
+        ],
+      },
+      { role: "tool", toolCallId: "b", content: [pdf] },
+    ]
+    const original = structuredClone(messages)
+    let body: Record<string, unknown> | undefined
+    await withServer(
+      async (incoming, outgoing) => {
+        body = await requestBody(incoming)
+        send(outgoing, [chunk({ content: "Read" }, "stop")])
+      },
+      async (baseURL) => {
+        expect(
+          terminal(await collect(provider(baseURL)(request({ messages }))))
+            .content,
+        ).toEqual([{ type: "text", text: "Read" }])
+      },
+    )
+    expect(body?.messages).toEqual([
+      { role: "system", content: "System instruction" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: ["a", "b"].map((id) => ({
+          id,
+          type: "function",
+          function: { name: "inspect", arguments: "{}" },
+        })),
+      },
+      {
+        role: "tool",
+        tool_call_id: "a",
+        content:
+          'Before\n[PDF from tool result "a", content part 2; PDF follows the tool-result batch.]\nBetween\n[Image from tool result "a", content part 4; image follows the tool-result batch.]\nAfter',
+      },
+      {
+        role: "tool",
+        tool_call_id: "b",
+        content:
+          '[PDF from tool result "b", content part 1; PDF follows the tool-result batch.]',
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: 'PDF from tool result "a", content part 2:' },
+          {
+            type: "file",
+            file: {
+              filename: "résumé.pdf",
+              file_data: "data:application/pdf;base64,JVBERi0x",
+            },
+          },
+          { type: "text", text: 'Image from tool result "a", content part 4:' },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,YWJj", detail: "high" },
+          },
+          { type: "text", text: 'PDF from tool result "b", content part 1:' },
+          {
+            type: "file",
+            file: {
+              filename: "résumé.pdf",
+              file_data: "data:application/pdf;base64,JVBERi0x",
+            },
+          },
+        ],
+      },
+    ])
+    expect(messages).toEqual(original)
   })
 
   it("keeps images with their own tool batch and leaves text-only batches unchanged", () => {
@@ -1044,7 +1155,10 @@ describe("Chat Completions provider", () => {
     )
   })
 
-  it("rejects unresolved tool image references before sending a request", async () => {
+  it.each([
+    "image",
+    "document",
+  ] as const)("rejects unresolved tool %s references before sending a request", async (type) => {
     let requests = 0
     await withServer(
       (_incoming, outgoing) => {
@@ -1062,8 +1176,13 @@ describe("Chat Completions provider", () => {
                   content: [
                     { type: "text", text: "Screenshot" },
                     {
-                      type: "image",
-                      mediaType: "image/png",
+                      ...(type === "image"
+                        ? { type, mediaType: "image/png" as const }
+                        : {
+                            type,
+                            mediaType: "application/pdf" as const,
+                            name: "report.pdf",
+                          }),
                       sizeBytes: 10,
                       file: { rolloutId: "rollout_test", path: "image.png" },
                     },

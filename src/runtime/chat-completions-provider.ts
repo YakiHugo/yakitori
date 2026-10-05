@@ -444,14 +444,14 @@ export function toChatCompletionsMessages(
   flavor: Flavor = "generic",
 ): ChatCompletionMessageParam[] {
   const result: ChatCompletionMessageParam[] = []
-  let toolImages: ChatCompletionContentPart[] = []
+  let toolMedia: ChatCompletionContentPart[] = []
   for (const message of messages) {
-    // Chat only accepts image parts on user messages. Keep this projection out
-    // of durable history and after ALL adjacent results, never between a call
-    // and its results (including parallel tools).
-    if (message.role !== "tool" && toolImages.length > 0) {
-      result.push({ role: "user", content: toolImages })
-      toolImages = []
+    // Chat only accepts image and file parts on user messages. Keep this out of
+    // durable history and after ALL adjacent results, never between a call and
+    // its results (including parallel tools).
+    if (message.role !== "tool" && toolMedia.length > 0) {
+      result.push({ role: "user", content: toolMedia })
+      toolMedia = []
     }
     if (message.role === "developer") {
       result.push({
@@ -479,10 +479,27 @@ export function toChatCompletionsMessages(
       const text = message.content
         .map((block, index) => {
           if (block.type === "text") return block.text
-          if (block.type === "document")
-            return `[Document ${block.name} was not sent: native PDF input is not enabled for Chat Completions.]`
+          if (block.type === "document") {
+            // Request preparation owns endpoint/model PDF capability admission.
+            if (block.data === undefined)
+              throw new ChatCompletionsProtocolError(
+                "Model request contains an unresolved Session PDF.",
+              )
+            const label = `PDF from tool result ${JSON.stringify(message.toolCallId)}, content part ${index + 1}`
+            toolMedia.push(
+              { type: "text", text: `${label}:` },
+              {
+                type: "file",
+                file: {
+                  filename: block.name,
+                  file_data: `data:application/pdf;base64,${block.data}`,
+                },
+              },
+            )
+            return `[${label}; PDF follows the tool-result batch.]`
+          }
           const label = `Image from tool result ${JSON.stringify(message.toolCallId)}, content part ${index + 1}`
-          toolImages.push(
+          toolMedia.push(
             { type: "text", text: `${label}:` },
             {
               type: "image_url",
@@ -556,7 +573,7 @@ export function toChatCompletionsMessages(
       result.push(converted)
     }
   }
-  if (toolImages.length > 0) result.push({ role: "user", content: toolImages })
+  if (toolMedia.length > 0) result.push({ role: "user", content: toolMedia })
   return result
 }
 

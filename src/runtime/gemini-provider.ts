@@ -20,6 +20,10 @@ import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
+import {
+  GEMINI_INLINE_REQUEST_MAX_BYTES,
+  supportsGeminiToolPdf,
+} from "./native-pdf-capabilities.ts"
 import { parseRetryAfterMs } from "./retry-after.ts"
 
 export type GeminiProviderOptions = Readonly<{
@@ -32,6 +36,13 @@ export type GeminiProviderOptions = Readonly<{
 type GeminiContent = { role: "user" | "model"; parts: JsonObject[] }
 class GeminiProtocolError extends Error {}
 class GeminiIncompleteStreamError extends Error {}
+class GeminiInlineRequestSizeError extends Error {
+  constructor() {
+    super(
+      "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages or smaller tool results.",
+    )
+  }
+}
 
 // GenerateContent owns complete parts, unlike OpenAI argument deltas. Keep each
 // returned part intact: signatures can be attached even to an empty text part.
@@ -88,6 +99,38 @@ async function* streamGemini(
       `${options.baseURL.replace(/\/$/, "")}/models/${modelId}:streamGenerateContent`,
     )
     url.searchParams.set("alt", "sse")
+    const body = JSON.stringify({
+      contents,
+      ...(system === ""
+        ? {}
+        : { systemInstruction: { parts: [{ text: system }] } }),
+      generationConfig,
+      ...(request.tools.length === 0
+        ? {}
+        : {
+            tools: [
+              {
+                functionDeclarations: request.tools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parametersJsonSchema: tool.inputSchema,
+                })),
+              },
+            ],
+          }),
+    })
+    // Check the complete serialized UTF-8 request, including text, tools and
+    // base64 expansion. Per-document raw limits alone do not bound this body.
+    if (
+      supportsGeminiToolPdf(model) &&
+      request.messages.some(
+        (message) =>
+          message.role === "tool" &&
+          message.content.some((block) => block.type === "document"),
+      ) &&
+      Buffer.byteLength(body, "utf8") > GEMINI_INLINE_REQUEST_MAX_BYTES
+    )
+      throw new GeminiInlineRequestSizeError()
     stage = "connect"
     response = await (options.fetchFn ?? fetch)(url, {
       method: "POST",
@@ -96,26 +139,7 @@ async function* streamGemini(
         "content-type": "application/json",
         "x-goog-api-key": options.apiKey,
       },
-      body: JSON.stringify({
-        contents,
-        ...(system === ""
-          ? {}
-          : { systemInstruction: { parts: [{ text: system }] } }),
-        generationConfig,
-        ...(request.tools.length === 0
-          ? {}
-          : {
-              tools: [
-                {
-                  functionDeclarations: request.tools.map((tool) => ({
-                    name: tool.name,
-                    description: tool.description,
-                    parametersJsonSchema: tool.inputSchema,
-                  })),
-                },
-              ],
-            }),
-      }),
+      body,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     })
     stage = "response_headers"
@@ -356,6 +380,19 @@ async function* streamGemini(
       yield { type: "cancelled", ...(usage === undefined ? {} : { usage }) }
       return
     }
+    if (error instanceof GeminiInlineRequestSizeError) {
+      yield {
+        type: "failure",
+        failure: {
+          provider: request.target.provider,
+          wireApi: "gemini_generate_content",
+          stage: "request_build",
+          kind: "invalid_request",
+          message: error.message,
+        },
+      }
+      return
+    }
     const status =
       response !== undefined && !response.ok ? response.status : undefined
     const retryAfterMs = parseRetryAfterMs(response?.headers)
@@ -399,6 +436,7 @@ export function toGeminiContents(
   // Do not infer this capability for aliases or older/future model families.
   // https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal
   const nativeToolImages = /^(?:models\/)?gemini-3(?:[.-]|$)/.test(model ?? "")
+  const nativeToolPdfs = supportsGeminiToolPdf(model ?? "")
   let toolResultIndex = 0
   for (const message of messages) {
     if (message.role === "tool") {
@@ -407,14 +445,31 @@ export function toGeminiContents(
         throw new GeminiProtocolError("Unmatched Gemini tool result.")
       calls.delete(message.toolCallId)
       const resultIndex = toolResultIndex++
-      const images: JsonObject[] = []
+      const media: JsonObject[] = []
+      let imageIndex = 0
+      let pdfIndex = 0
       const fallbackImages: JsonObject[] = []
       const ordered = message.content.map((block, index): JsonValue => {
         if (block.type === "text") return { text: block.text }
-        if (block.type === "document")
-          return {
-            text: `[Document ${block.name} was not sent: native PDF input is not enabled for Gemini.]`,
-          }
+        if (block.type === "document") {
+          if (!nativeToolPdfs)
+            return {
+              text: `[Document ${block.name} was not sent: native PDF input is not enabled for Gemini.]`,
+            }
+          if (block.data === undefined)
+            throw new GeminiProtocolError(
+              "Model request contains an unresolved Session PDF.",
+            )
+          const displayName = `tool_${resultIndex}_pdf_${pdfIndex++}`
+          media.push({
+            inlineData: {
+              mimeType: "application/pdf",
+              displayName,
+              data: block.data,
+            },
+          })
+          return { $ref: displayName }
+        }
         if (!nativeToolImages) {
           const label = `Image from tool ${call.name}, call ${message.toolCallId}, content part ${index + 1}`
           fallbackImages.push(
@@ -436,8 +491,8 @@ export function toGeminiContents(
           throw new GeminiProtocolError(
             `Gemini 3 function responses do not support ${block.mediaType}; use PNG, JPEG or WebP.`,
           )
-        const displayName = `tool_${resultIndex}_image_${images.length}`
-        images.push({
+        const displayName = `tool_${resultIndex}_image_${imageIndex++}`
+        media.push({
           inlineData: {
             mimeType: block.mediaType,
             displayName,
@@ -456,7 +511,7 @@ export function toGeminiContents(
           functionResponse: {
             ...call,
             response: message.isError ? { error: output } : { output },
-            ...(images.length === 0 ? {} : { parts: images }),
+            ...(media.length === 0 ? {} : { parts: media }),
           },
         },
         ...fallbackImages,

@@ -4,7 +4,10 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
-import { prepareModelDocuments } from "../../src/runtime/prepare-model-document.ts"
+import {
+  createNativePdfBudget,
+  prepareModelDocuments,
+} from "../../src/runtime/prepare-model-document.ts"
 import { mcpResult } from "../../src/runtime/tools/mcp-result.ts"
 import { finalizeToolOutput } from "../../src/runtime/tools/result-output.ts"
 import { pdfFixture } from "./tools/pdf-fixture.ts"
@@ -145,5 +148,127 @@ describe("stored PDF model projection", () => {
     )
     expect(projection.content).toContain("Unable to read PDF")
     expect(projection.content).toContain(saved.path)
+  })
+})
+
+describe("native PDF request limits", () => {
+  it("counts raw file bytes across Chat results and does not charge rejected reservations", () => {
+    const budget = createNativePdfBudget({
+      maxFileBytes: 50_000_000,
+      fileLimitExclusive: true,
+      maxRequestBytes: 50_000_000,
+    })
+    expect(budget.reserve(50_000_000, 1)).toContain("per-file")
+    expect(budget.reserve(49_000_000, 1)).toBeUndefined()
+    expect(budget.reserve(2_000_000, 1)).toContain("combined PDF request size")
+    expect(budget.reserve(1_000_000, 1)).toBeUndefined()
+    expect(budget.reserve(1, 1)).toContain("combined PDF request size")
+  })
+
+  it("counts Gemini page occurrences and base64 padding across the request", () => {
+    const pages = createNativePdfBudget({
+      maxFileBytes: 50_000_000,
+      maxRequestPages: 1_000,
+    })
+    expect(pages.reserve(1, 1_001)).toContain("page limit")
+    expect(pages.reserve(50_000_000, 500)).toBeUndefined()
+    expect(pages.reserve(1, 500)).toBeUndefined()
+    expect(pages.reserve(1, 1)).toContain("page limit")
+    const inline = createNativePdfBudget({
+      maxFileBytes: 50_000_000,
+      maxInlineBytes: 12,
+    })
+    expect(inline.reserve(1, 1)).toBeUndefined()
+    expect(inline.reserve(6, 1)).toBeUndefined()
+    expect(inline.reserve(1, 1)).toContain("inline PDF payload")
+  })
+
+  it("shares page limits across separate history projections, retaining originals for retry or fallback", async () => {
+    const ctx = await context()
+    const pdf = pdfFixture(Array.from({ length: 500 }, () => "Native page"))
+    const saved = await ctx.rolloutAssets.saveToolFile(
+      ctx.rolloutId,
+      "large_pdf",
+      "report.pdf",
+      pdf,
+    )
+    const document = {
+      type: "document" as const,
+      mediaType: "application/pdf" as const,
+      name: "report.pdf",
+      file: saved.reference,
+      sizeBytes: pdf.length,
+    }
+    const original = JSON.stringify(document)
+    const capabilities = {
+      nativePdf: true,
+      images: true,
+      nativePdfLimits: {
+        maxFileBytes: 50_000_000,
+        maxRequestPages: 1_000,
+        maxInlineBytes: 100_000_000,
+      },
+    }
+    const budget = createNativePdfBudget(capabilities.nativePdfLimits)
+    for (let index = 0; index < 2; index++) {
+      const result = await prepareModelDocuments(
+        [document],
+        ctx.rolloutAssets,
+        capabilities,
+        undefined,
+        budget,
+      )
+      expect(result.documents[0]?.data).toBe(pdf.toString("base64"))
+    }
+    const rejected = await prepareModelDocuments(
+      [document],
+      ctx.rolloutAssets,
+      capabilities,
+      undefined,
+      budget,
+    )
+    expect(rejected.documents).toEqual([])
+    expect(rejected.content).toContain("combined PDF request page limit")
+    expect(rejected.content).toContain('"pages":"1-5"')
+    const retried = await prepareModelDocuments(
+      [document],
+      ctx.rolloutAssets,
+      capabilities,
+    )
+    expect(retried.documents[0]?.data).toBe(pdf.toString("base64"))
+    expect(JSON.stringify(document)).toBe(original)
+    expect(await ctx.rolloutAssets.read(saved.reference)).toEqual(pdf)
+  })
+
+  it("does not send malformed PDF bytes under a native capability", async () => {
+    const ctx = await context()
+    const bytes = Buffer.from("This is not a PDF")
+    const saved = await ctx.rolloutAssets.saveToolFile(
+      ctx.rolloutId,
+      "bad_pdf",
+      "invalid.pdf",
+      bytes,
+    )
+    const result = await prepareModelDocuments(
+      [
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          name: "invalid.pdf",
+          file: saved.reference,
+          sizeBytes: bytes.length,
+        },
+      ],
+      ctx.rolloutAssets,
+      {
+        nativePdf: true,
+        images: true,
+        nativePdfLimits: { maxFileBytes: 50_000_000 },
+      },
+    )
+    expect(result.documents).toEqual([])
+    expect(result.content).toContain("was not sent natively")
+    expect(result.content).toContain("Original PDF retained")
+    expect(await ctx.rolloutAssets.read(saved.reference)).toEqual(bytes)
   })
 })
