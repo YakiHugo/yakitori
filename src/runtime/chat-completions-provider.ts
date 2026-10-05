@@ -3,6 +3,7 @@ import type {
   ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
   ChatCompletionMessageParam,
+  ChatCompletionContentPart,
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
@@ -71,7 +72,7 @@ async function* streamChatCompletions(
   }
   let stage: "request_build" | "connect" | "response_body" = "request_build"
   let usage: ModelUsage | undefined
-  const usageFields = () => usage === undefined ? {} : { usage }
+  const usageFields = () => (usage === undefined ? {} : { usage })
   let providerRequestId: string | undefined
   try {
     if (request.compaction === "remote_v2")
@@ -415,7 +416,15 @@ export function toChatCompletionsMessages(
   flavor: Flavor = "generic",
 ): ChatCompletionMessageParam[] {
   const result: ChatCompletionMessageParam[] = []
+  let toolImages: ChatCompletionContentPart[] = []
   for (const message of messages) {
+    // Chat only accepts image parts on user messages. Keep this projection out
+    // of durable history and after ALL adjacent results, never between a call
+    // and its results (including parallel tools).
+    if (message.role !== "tool" && toolImages.length > 0) {
+      result.push({ role: "user", content: toolImages })
+      toolImages = []
+    }
     if (message.role === "developer") {
       result.push({
         role: "system",
@@ -442,13 +451,22 @@ export function toChatCompletionsMessages(
               ],
       })
     } else if (message.role === "tool") {
-      // Chat Completions tool results are text. Preserve media context explicitly
-      // without adding a synthetic user turn or sending unsupported tool content.
+      if ((message.images?.length ?? 0) > 0) {
+        toolImages.push(
+          {
+            type: "text",
+            text: `Images from tool result ${JSON.stringify(message.toolCallId)}:`,
+          },
+          ...(message.images ?? []).map((image) => ({
+            type: "image_url" as const,
+            image_url: {
+              url: `data:${image.mediaType};base64,${requireModelImageData(image)}`,
+              detail: "high" as const,
+            },
+          })),
+        )
+      }
       const omissions = [
-        ...(message.images ?? []).map(
-          () =>
-            "[Tool image was not sent: Chat Completions tool results support text only.]",
-        ),
         ...(message.documents ?? []).map(
           (document) =>
             `[Document ${document.name} was not sent: native PDF input is not enabled for Chat Completions.]`,
@@ -518,6 +536,7 @@ export function toChatCompletionsMessages(
       result.push(converted)
     }
   }
+  if (toolImages.length > 0) result.push({ role: "user", content: toolImages })
   return result
 }
 
