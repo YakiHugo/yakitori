@@ -68,6 +68,9 @@ importers:
       fs-ext:
         specifier: ^2.1.1
         version: 2.1.1
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
       lucide-react:
         specifier: ^1.27.0
         version: 1.27.0(react@19.2.8)
