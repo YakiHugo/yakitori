@@ -91,6 +91,106 @@ it.each([
     nativePdf: false,
   },
   {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-5",
+    nativePdf: true,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://relay.example/v1",
+    model: "gpt-5",
+    nativePdf: false,
+  },
+  {
+    preset: "gemini",
+    wireApi: "gemini_generate_content",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-3.8-flash",
+    nativePdf: true,
+  },
+  {
+    preset: "gemini",
+    wireApi: "gemini_generate_content",
+    baseURL: "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM:443/v1beta/",
+    model: "gemini-3.1-pro-preview",
+    nativePdf: true,
+  },
+  {
+    preset: "gemini",
+    wireApi: "gemini_generate_content",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-2.5-pro",
+    nativePdf: false,
+  },
+  {
+    preset: "gemini",
+    wireApi: "gemini_generate_content",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-3-custom-alias",
+    nativePdf: false,
+  },
+  {
+    preset: "gemini",
+    wireApi: "gemini_generate_content",
+    baseURL: "https://relay.example/v1beta",
+    model: "gemini-3.8-flash",
+    nativePdf: false,
+  },
+  {
+    wireApi: "gemini_generate_content",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-3.8-flash",
+    nativePdf: false,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-6-sol",
+    effort: "none",
+    nativePdf: true,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-6-sol",
+    effort: "medium",
+    nativePdf: false,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-6-sol",
+    nativePdf: false,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-6-luna",
+    effort: "none",
+    nativePdf: true,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-6-astra",
+    nativePdf: false,
+  },
+  {
+    preset: "openai",
+    wireApi: "openai_chat_completions",
+    baseURL: "https://api.openai.com/v1",
+    model: "gpt-5.1-codex",
+    nativePdf: false,
+  },
+  {
     preset: "anthropic",
     wireApi: "openai_responses",
     baseURL: "https://api.anthropic.com",
@@ -117,6 +217,7 @@ it.each([
     "report.pdf",
     bytes,
   )
+  const model = "model" in connection ? connection.model : "pdf-model"
   // A familiar editable connection ID must not establish vendor capabilities.
   const provider = createConfiguredProvider(
     "openai",
@@ -125,14 +226,18 @@ it.each([
       ...("preset" in connection ? { preset: connection.preset } : {}),
       wireApi: connection.wireApi,
       baseURL: connection.baseURL,
-      models: [{ id: "pdf-model", inputModalities: ["text", "image"] }],
+      models: [{ id: model, inputModalities: ["text", "image"] }],
     },
     "test-key",
   )
   const client = createProviderRegistry({ openai: provider }).createClient()
   const turn = client.startTurn("openai")
   const registry = createToolRegistry([])
-  const selection = { provider: "openai", model: "pdf-model" }
+  const selection = {
+    provider: "openai",
+    model,
+    ...("effort" in connection ? { effort: connection.effort } : {}),
+  }
   const configuration = SessionConfiguration.create(
     {
       selection,

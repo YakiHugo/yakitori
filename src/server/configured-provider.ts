@@ -63,9 +63,12 @@ export function createConfiguredProvider(
         nativePdf:
           knownPresetEndpoint &&
           ((catalogProvider === "openai" &&
-            configuration.wireApi === "openai_responses") ||
+            (configuration.wireApi === "openai_responses" ||
+              configuration.wireApi === "openai_chat_completions")) ||
             (catalogProvider === "anthropic" &&
-              configuration.wireApi === "anthropic_messages")),
+              configuration.wireApi === "anthropic_messages") ||
+            (preset.id === "gemini" &&
+              configuration.wireApi === "gemini_generate_content")),
       },
     },
     models,

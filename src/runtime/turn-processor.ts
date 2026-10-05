@@ -3126,7 +3126,10 @@ async function resolveRolloutAssetMedia(
   documentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
   signal?: AbortSignal,
 ): Promise<readonly ModelMessage[]> {
-  const { prepareModelDocuments } = await import("./prepare-model-document.ts")
+  const { createNativePdfBudget, prepareModelDocuments } = await import(
+    "./prepare-model-document.ts"
+  )
+  const nativePdfBudget = createNativePdfBudget(documentReading.nativePdfLimits)
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
   // rasterization worker per message concurrently.
@@ -3181,6 +3184,7 @@ async function resolveRolloutAssetMedia(
           rolloutAssets,
           documentReading,
           signal,
+          nativePdfBudget,
         )
         if (projected.content !== "")
           content.push({ type: "text", text: projected.content })

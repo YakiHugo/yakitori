@@ -737,6 +737,291 @@ describe("native Gemini provider", () => {
   })
 
   it.each([
+    "gemini-3.8-flash",
+    "models/gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-flash-lite",
+  ])("keeps PDF and image references inside their signed owning responses for %s", async (model) => {
+    const messages = pdfToolHistory(model)
+    const original = structuredClone(messages)
+    let body: Record<string, unknown> | undefined
+    await withServer(
+      async (incoming, outgoing) => {
+        body = await requestBody(incoming)
+        send(outgoing, [chunk([{ text: "Read" }], "STOP")])
+      },
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(
+            request({
+              target: {
+                provider: "custom_gemini",
+                model,
+                instructionProfileId: "default",
+              },
+              messages,
+            }),
+          ),
+        )
+        expect(terminal(events).content).toMatchObject([
+          { type: "text", text: "Read" },
+        ])
+      },
+    )
+    expect(body?.contents).toEqual([
+      {
+        role: "model",
+        parts: ["a", "b"].map((id) => ({
+          functionCall: {
+            name: "inspect",
+            id: `native_${id}`,
+            args: { path: id },
+          },
+          thoughtSignature: `signature_${id}`,
+        })),
+      },
+      {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              name: "inspect",
+              id: "native_a",
+              response: {
+                error: [
+                  { text: "Before" },
+                  { $ref: "tool_0_pdf_0" },
+                  { text: "Between" },
+                  { $ref: "tool_0_image_0" },
+                  { text: "After" },
+                  { $ref: "tool_0_pdf_1" },
+                ],
+              },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    displayName: "tool_0_pdf_0",
+                    data: "JVBERi0x",
+                  },
+                },
+                {
+                  inlineData: {
+                    mimeType: "image/png",
+                    displayName: "tool_0_image_0",
+                    data: "YWJj",
+                  },
+                },
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    displayName: "tool_0_pdf_1",
+                    data: "JVBERi0y",
+                  },
+                },
+              ],
+            },
+          },
+          {
+            functionResponse: {
+              name: "inspect",
+              id: "native_b",
+              response: {
+                output: [
+                  { text: "Before" },
+                  { $ref: "tool_1_pdf_0" },
+                  { text: "Between" },
+                  { $ref: "tool_1_image_0" },
+                  { text: "After" },
+                  { $ref: "tool_1_pdf_1" },
+                ],
+              },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    displayName: "tool_1_pdf_0",
+                    data: "JVBERi0x",
+                  },
+                },
+                {
+                  inlineData: {
+                    mimeType: "image/png",
+                    displayName: "tool_1_image_0",
+                    data: "YWJj",
+                  },
+                },
+                {
+                  inlineData: {
+                    mimeType: "application/pdf",
+                    displayName: "tool_1_pdf_1",
+                    data: "JVBERi0y",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ])
+    expect(messages).toEqual(original)
+  })
+
+  it.each([
+    "gemini-2.5-pro",
+    "gemini-3-custom",
+    "gemini-4-pro",
+    undefined,
+  ])("does not send native PDFs for unsupported or unconfirmed model %s", (model) => {
+    const contents = toGeminiContents(
+      pdfToolHistory(model ?? "gemini-test"),
+      "custom_gemini",
+      "scope_a",
+      model,
+    )
+    const serialized = JSON.stringify(contents)
+    expect(serialized).not.toContain("application/pdf")
+    expect(serialized).not.toContain("JVBERi0")
+    expect(
+      serialized.match(/native PDF input is not enabled for Gemini/g),
+    ).toHaveLength(4)
+  })
+
+  it("rejects unhydrated native PDFs before fetch without changing history", async () => {
+    const model = "gemini-3-flash-preview"
+    const messages = pdfToolHistory(model).map((message) =>
+      message.role !== "tool"
+        ? message
+        : {
+            ...message,
+            content: message.content.map((block) => {
+              if (block.type !== "document") return block
+              const { data: _data, ...unresolved } = block
+              return unresolved
+            }),
+          },
+    )
+    const original = structuredClone(messages)
+    let requests = 0
+    const events = await collect(
+      createGeminiProvider({
+        apiKey: "fake",
+        model,
+        baseURL: "https://example.com",
+        fetchFn: async () => {
+          requests++
+          throw new Error("Unexpected fetch")
+        },
+      })(
+        request({
+          target: {
+            provider: "custom_gemini",
+            model,
+            instructionProfileId: "default",
+          },
+          messages,
+        }),
+      ),
+    )
+    expect(events).toMatchObject([
+      {
+        type: "failure",
+        failure: { kind: "protocol_error", stage: "request_build" },
+      },
+    ])
+    expect(requests).toBe(0)
+    expect(messages).toEqual(original)
+  })
+
+  it("bounds the entire PDF request at 100 MB of serialized UTF-8 before fetch", async () => {
+    const model = "gemini-3-flash-preview"
+    const document = {
+      type: "document" as const,
+      name: "report.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 1,
+      file: { rolloutId: "rollout_test", path: "report.pdf" },
+      data: "",
+    }
+    const base = request({
+      target: {
+        provider: "custom_gemini",
+        model,
+        instructionProfileId: "default",
+      },
+      system: [{ id: "system", revision: "1", text: "a" }],
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_call", id: "call", name: "inspect", input: {} },
+          ],
+        },
+        { role: "tool", toolCallId: "call", content: [document, document] },
+      ],
+    })
+    const lengths: number[] = []
+    const stream = createGeminiProvider({
+      apiKey: "fake",
+      model,
+      baseURL: "https://example.com",
+      fetchFn: async (_url, init) => {
+        lengths.push(Buffer.byteLength(String(init?.body), "utf8"))
+        return new Response(
+          `data: ${JSON.stringify(chunk([{ text: "Read" }], "STOP"))}\n\n`,
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        )
+      },
+    })
+    // Measure the fixture's non-binary wire bytes, then fill the independent
+    // documented boundary exactly with two PDFs, each below 50 MB decoded.
+    terminal(await collect(stream(base)))
+    const padding = 100_000_000 - (lengths[0] ?? 0)
+    const firstLength = Math.floor(padding / 2)
+    const secondLength = padding - firstLength
+    const boundary = {
+      ...base,
+      messages: base.messages.map((message) =>
+        message.role !== "tool"
+          ? message
+          : {
+              ...message,
+              content: [firstLength, secondLength].map((length) => ({
+                ...document,
+                data: "A".repeat(length),
+                sizeBytes: Math.ceil((length * 3) / 4),
+              })),
+            },
+      ),
+    }
+    terminal(await collect(stream(boundary)))
+    expect(lengths[1]).toBe(100_000_000)
+    // Same JS character count, two more UTF-8 bytes from the system prompt.
+    const events = await collect(
+      stream({
+        ...boundary,
+        system: [{ id: "system", revision: "1", text: "界" }],
+      }),
+    )
+    expect(lengths).toHaveLength(2)
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          provider: "custom_gemini",
+          wireApi: "gemini_generate_content",
+          stage: "request_build",
+          kind: "invalid_request",
+          message:
+            "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages or smaller tool results.",
+        },
+      },
+    ])
+  })
+
+  it.each([
     "gemini-2.5-pro",
     "gemini-test",
     "gemini-4-pro",
@@ -911,6 +1196,32 @@ function imageToolHistory(model: string): ModelMessage[] {
       ],
     },
   ]
+}
+
+function pdfToolHistory(model: string): ModelMessage[] {
+  const pdf = {
+    type: "document" as const,
+    name: "report.pdf",
+    mediaType: "application/pdf" as const,
+    sizeBytes: 6,
+    file: { rolloutId: "rollout_test", path: "report.pdf" },
+    data: "JVBERi0x",
+  }
+  return imageToolHistory(model).map((message) =>
+    message.role !== "tool"
+      ? message
+      : {
+          ...message,
+          content: [
+            { type: "text", text: "Before" },
+            pdf,
+            { type: "text", text: "Between" },
+            { type: "image", mediaType: "image/png", data: "YWJj" },
+            { type: "text", text: "After" },
+            { ...pdf, data: "JVBERi0y" },
+          ],
+        },
+  )
 }
 
 function chunk(parts: readonly unknown[], finishReason?: string) {

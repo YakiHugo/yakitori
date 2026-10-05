@@ -2,6 +2,11 @@ import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import type { ResolvedModel } from "../model-catalog.ts"
 import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
+  GEMINI_INLINE_REQUEST_MAX_BYTES,
+  supportsGeminiToolPdf,
+  supportsOpenAIChatToolPdf,
+} from "../native-pdf-capabilities.ts"
+import {
   type ResolvedStepConfiguration,
   stepExecutionLimits,
 } from "../session-configuration.ts"
@@ -65,9 +70,39 @@ export function captureStepContext(
         ? ["edit_file"]
         : []),
   ])
-  const documentReading = Object.freeze({
-    nativePdf:
-      input.nativePdf === true && model.inputModalities.includes("image"),
+  const nativePdfModel =
+    input.wireApi === "openai_chat_completions"
+      ? !model.usedFallbackModelMetadata &&
+        supportsOpenAIChatToolPdf(model.model, target.effort)
+      : input.wireApi === "gemini_generate_content"
+        ? supportsGeminiToolPdf(model.model)
+        : true
+  const nativePdf =
+    input.nativePdf === true &&
+    nativePdfModel &&
+    model.inputModalities.includes("image")
+  const documentReading: DocumentReadingCapabilities = Object.freeze({
+    nativePdf,
+    // These are first-party PDF transport limits, not model context estimates.
+    // https://developers.openai.com/api/docs/guides/file-inputs
+    // https://ai.google.dev/gemini-api/docs/generate-content/document-processing
+    ...(nativePdf && input.wireApi === "openai_chat_completions"
+      ? {
+          nativePdfLimits: {
+            maxFileBytes: 50_000_000,
+            fileLimitExclusive: true,
+            maxRequestBytes: 50_000_000,
+          },
+        }
+      : nativePdf && input.wireApi === "gemini_generate_content"
+        ? {
+            nativePdfLimits: {
+              maxFileBytes: 50_000_000,
+              maxRequestPages: 1_000,
+              maxInlineBytes: GEMINI_INLINE_REQUEST_MAX_BYTES,
+            },
+          }
+        : {}),
     // Each wire adapter owns image placement, including Chat's synthetic user
     // content after tool results. Only the selected model gates image tools.
     images: model.inputModalities.includes("image"),

@@ -4983,7 +4983,31 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
   expect(durable.content.filter((block) => block.type === "image")).toEqual([])
 })
 
-it("uses the Turn's native PDF capability for tool reads, retries, history, and compaction", async () => {
+it.each([
+  {
+    provider: "anthropic-work",
+    model: "claude-sonnet-4-6",
+    wireApi: "anthropic_messages",
+    catalogProvider: "anthropic",
+  },
+  {
+    provider: "openai-chat-work",
+    model: "gpt-5",
+    wireApi: "openai_chat_completions",
+    catalogProvider: "openai",
+  },
+  {
+    provider: "gemini-work",
+    model: "gemini-3.8-flash",
+    wireApi: "gemini_generate_content",
+    catalogProvider: undefined,
+  },
+] as const)("uses $wireApi native PDF capability for tool reads, retries, history, and compaction", async ({
+  provider,
+  model,
+  wireApi,
+  catalogProvider,
+}) => {
   const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-native-pdf-"))
   cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
   const assets = createRolloutAssets(assetsRoot, {
@@ -4995,8 +5019,6 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
   const bytes = pdfFixture(
     Array.from({ length: 11 }, (_, page) => `Page ${page + 1}`),
   )
-  const provider = "anthropic-work"
-  const model = "claude-sonnet-4-6"
   const requests: ModelRequest[] = []
   const stream: StreamFn = async function* (request) {
     requests.push(request)
@@ -5019,7 +5041,7 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
           kind: "stream_disconnected",
           stage: "response_body",
           provider,
-          wireApi: "anthropic_messages",
+          wireApi,
           message: "Disconnected after the completed tool call",
         },
       }
@@ -5033,15 +5055,15 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
     [provider]: createModelProvider({
       info: {
         id: provider,
-        wireApi: "anthropic_messages",
+        wireApi,
         capabilities: { remoteCompaction: false, nativePdf: true },
         retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
       },
       models: createConfiguredModelsManager({
         provider,
-        catalogProvider: "anthropic",
-        wireApi: "anthropic_messages",
-        models: [{ id: model }],
+        ...(catalogProvider === undefined ? {} : { catalogProvider }),
+        wireApi,
+        models: [{ id: model, inputModalities: ["text", "image"] }],
       }),
       stream,
     }),
@@ -5573,3 +5595,103 @@ function identifiedDeferredTool(content: string): RuntimeTool {
     },
   }
 }
+
+it("shares Gemini's PDF page budget across parallel tool results and retains both original assets", async () => {
+  const assetsRoot = await mkdtemp(
+    join(tmpdir(), "yakitori-pdf-request-pages-"),
+  )
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(
+    Array.from({ length: 501 }, () => "Retained original"),
+  )
+  const provider = "gemini-pages"
+  const model = "gemini-3.8-flash"
+  const faux = createFauxProvider([
+    {
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        {
+          type: "tool_call",
+          id: "pdf_first",
+          name: "read_document",
+          input: { path: "report.pdf" },
+        },
+        {
+          type: "tool_call",
+          id: "pdf_second",
+          name: "read_document",
+          input: { path: "report.pdf" },
+        },
+      ],
+    },
+    { content: [{ type: "text", text: "bounded PDFs" }] },
+  ])
+  const models = createConfiguredModelsManager({
+    provider,
+    wireApi: "gemini_generate_content",
+    models: [{ id: model, inputModalities: ["text", "image"] }],
+  })
+  const client = createProviderRegistry({
+    [provider]: createModelProvider({
+      info: {
+        id: provider,
+        wireApi: "gemini_generate_content",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
+      models,
+      stream: faux.stream,
+    }),
+  }).createClient()
+  const runtime = await createRuntime(
+    faux.stream,
+    createToolRegistry([createReadDocumentTool()]),
+    { provider, model, modelClient: client, rolloutAssets: assets },
+  )
+  await writeFile(join(runtime.root, "report.pdf"), bytes)
+  const thread = await runtime.createThread()
+  await thread.startIfIdle({
+    content: {
+      kind: "parts",
+      parts: [{ type: "text", text: "Read both copies" }],
+    },
+  })
+  expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+  expect(await nextLifecycleEvent(thread)).toMatchObject({
+    type: "turn.completed",
+  })
+  expect(faux.callCount).toBe(2)
+  const projected =
+    faux.requests[1]?.messages.filter((message) => message.role === "tool") ??
+    []
+  expect(projected.map((message) => message.toolCallId)).toEqual([
+    "pdf_first",
+    "pdf_second",
+  ])
+  expect(
+    projected[0]?.content.filter((part) => part.type === "document"),
+  ).toMatchObject([{ data: bytes.toString("base64") }])
+  expect(
+    projected[1]?.content.filter((part) => part.type === "document"),
+  ).toEqual([])
+  expect(projected[1] && toolContentText(projected[1].content)).toContain(
+    "combined PDF request page limit",
+  )
+  const retained = thread
+    .snapshot()
+    .context.history.flatMap(({ item }) =>
+      item.role === "tool"
+        ? item.content.filter((part) => part.type === "document")
+        : [],
+    )
+  expect(retained).toHaveLength(2)
+  for (const document of retained) {
+    expect(document.data).toBeUndefined()
+    expect(await assets.read(document.file)).toEqual(bytes)
+  }
+})
