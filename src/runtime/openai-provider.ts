@@ -9,6 +9,10 @@ import type {
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
+import {
+  toChatGPTPlanRequest,
+  requireChatGPTPlanNamespace,
+} from "./chatgpt-plan-request.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
   flattenModelSystem,
@@ -32,6 +36,7 @@ import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type OpenAIProviderOptions = {
+  readonly requestProfile?: "chatgpt-plan"
   readonly apiKey: string
   readonly model: string
   readonly client?: OpenAI
@@ -47,18 +52,26 @@ export type OpenAIProviderOptions = {
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
   const client = openAIClient(options)
   return (request) =>
-    streamOpenAI(client, options.model, request, options.onResponseHeaders)
+    streamOpenAI(
+      client,
+      options.model,
+      request,
+      options.onResponseHeaders,
+      undefined,
+      false,
+      options.requestProfile,
+    )
 }
 
 // Opt-in API-only transport. Unsupported endpoints retain ordinary HTTP and
 // expose no warmup capability; never probe subscription or compatible backends.
 export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
   const client = openAIClient(options)
-  const transport = supportsOpenAIRequestWarmup(
-    options.baseURL ?? client.baseURL,
-  )
-    ? createOpenAIResponsesTransport(client)
-    : undefined
+  const transport =
+    options.requestProfile === undefined &&
+    supportsOpenAIRequestWarmup(options.baseURL ?? client.baseURL)
+      ? createOpenAIResponsesTransport(client)
+      : undefined
   const stream: StreamFn = (request) =>
     streamOpenAI(
       client,
@@ -66,6 +79,8 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
       request,
       options.onResponseHeaders,
       transport,
+      false,
+      options.requestProfile,
     )
   return {
     stream,
@@ -109,6 +124,7 @@ async function* streamOpenAI(
   onResponseHeaders?: (headers: Headers) => void,
   transport?: ReturnType<typeof createOpenAIResponsesTransport>,
   warmup = false,
+  requestProfile?: "chatgpt-plan",
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -122,13 +138,14 @@ async function* streamOpenAI(
     | undefined
   try {
     const nativeDeferredLoading =
+      requestProfile !== "chatgpt-plan" &&
       nativeDeferredToolProtocol(request) === "openai"
     const customFallbackKeys = customFallbackKeysForRequest(
       request,
       nativeDeferredLoading,
     )
     const effort = resolveModelWireEffort(request.target)
-    const body: ResponseCreateParamsStreaming = {
+    let body: ResponseCreateParamsStreaming = {
       model: request.target.model || defaultModel,
       instructions: flattenModelSystem(request.system),
       input: [
@@ -174,6 +191,7 @@ async function* streamOpenAI(
         ? { service_tier: "priority" as const }
         : {}),
     }
+    if (requestProfile === "chatgpt-plan") body = toChatGPTPlanRequest(body)
     const warmed = warmup
       ? transport?.warmup(body, request.signal, request.continuationScope)
       : transport?.take(body, request.signal, request.continuationScope)
@@ -214,6 +232,19 @@ async function* streamOpenAI(
     >()
     let nextOutputIndex = 0
     for await (const event of stream) {
+      if (requestProfile === "chatgpt-plan") {
+        if (
+          event.type === "response.output_item.added" ||
+          event.type === "response.output_item.done"
+        )
+          requireChatGPTPlanNamespace(event.item)
+        if (
+          event.type === "response.completed" ||
+          event.type === "response.incomplete" ||
+          event.type === "response.failed"
+        )
+          event.response.output.forEach(requireChatGPTPlanNamespace)
+      }
       // Cancellation suppresses content, not accounting already delivered by
       // the provider. Tool completion may abort a queued warmup terminal event.
       // Never replace the first terminal sample with contradictory tail data.
@@ -520,6 +551,20 @@ async function* streamOpenAI(
     // exposing success or a Length eligible for compaction retry.
     if (request.signal?.aborted) {
       yield abortedResponse(terminalUsage)
+      return
+    }
+    if (requestProfile === "chatgpt-plan" && terminalEvent === undefined) {
+      yield {
+        type: "failure",
+        failure: modelFailureFromUnknown(undefined, {
+          provider: request.target.provider,
+          wireApi: "openai_responses",
+          stage: "response_body",
+          kind: "stream_disconnected",
+          fallbackMessage: "ChatGPT stream ended without a terminal response.",
+        }),
+        ...(terminalUsage === undefined ? {} : { usage: terminalUsage }),
+      }
       return
     }
     if (terminalEvent !== undefined) yield terminalEvent
