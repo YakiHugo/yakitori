@@ -20,6 +20,7 @@ import {
   openTestConnection,
 } from "../server/rpc/testkit.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -89,7 +90,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
     const started = await handlers.admitInput({
       sessionId,
       requestId: "request_active",
-      content: { kind: "text", text: "Keep working" },
+      content: { kind: "parts", parts: inputParts("Keep working") },
     })
     if (!started.ok) throw new Error(started.body.error.message)
 
@@ -119,7 +120,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
       ...createInitialAppState(),
       apiBase: "http://api.test",
       selection: { sessionId },
-      promptDraft: "Follow up",
+      promptDraft: inputParts("Follow up"),
       promptExcerpts: [annotation],
       execution: {
         ...createExecutionViewState(),
@@ -127,7 +128,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
       },
       modelSelections: { [sessionId]: { provider: "faux", model: "scripted" } },
     })
-    await useAppStore.getState().admitInput("Follow up", [], "queue")
+    await useAppStore.getState().admitInput(inputParts("Follow up"), "queue")
     expect(useAppStore.getState().message).toBe(
       "The connection to the server was lost.",
     )
@@ -154,7 +155,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
       ],
       modelSelections: { [sessionId]: { model: "scripted", provider: "faux" } },
     })
-    await useAppStore.getState().admitInput("Follow up", [], "queue")
+    await useAppStore.getState().admitInput(inputParts("Follow up"), "queue")
 
     expect(useAppStore.getState().message).toBeUndefined()
     expect(useAppStore.getState().queuedItems).toEqual([
@@ -163,8 +164,8 @@ it("retries a committed queued input with the original snapshot when its RPC ack
         input: expect.objectContaining({
           submissionId: first.input.submissionId,
           content: {
-            kind: "text",
-            text: "Follow up",
+            kind: "parts",
+            parts: inputParts("Follow up"),
             contextAttachments: [annotation],
           },
         }),

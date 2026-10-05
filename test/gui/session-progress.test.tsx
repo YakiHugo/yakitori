@@ -7,6 +7,7 @@ import {
   UserQuestionsCell,
 } from "../../src/gui/components/cells/session-progress-cell.tsx"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const request = vi.hoisted(() => vi.fn())
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
@@ -70,6 +71,7 @@ it("renders a restored answered question without offering another submission", (
           questionId: "ask_1",
           text: "Workspace",
           at: "2026-09-22T00:00:00Z",
+          parts: inputParts("Workspace"),
         },
       ],
     },

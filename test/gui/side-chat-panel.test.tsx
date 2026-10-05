@@ -17,8 +17,12 @@ import {
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
-import type { SideChatSnapshot } from "../../src/server/side-chat.ts"
+import type {
+  SideChatSnapshot,
+  SideChatSend,
+} from "../../src/server/side-chat.ts"
 import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const client = vi.hoisted(() => ({
   request:
@@ -50,6 +54,27 @@ function snapshot(
     messages: [],
     ...extra,
   }
+}
+
+function acceptedSnapshot(
+  revision = 1,
+  extra: Partial<SideChatSnapshot> = {},
+): SideChatSnapshot {
+  const request = requests("sideChat/send").at(-1) as SideChatSend | undefined
+  if (!request) throw new Error("Missing test side-chat send request")
+  return snapshot(revision, {
+    ...extra,
+    messages: [
+      {
+        id: request.requestId,
+        turnId: extra.activeTurnId ?? "turn",
+        role: "user",
+        content: structuredClone(request.content),
+        streaming: false,
+      },
+      ...(extra.messages ?? []),
+    ],
+  })
 }
 
 function deferred<T>() {
@@ -93,7 +118,7 @@ beforeEach(() => {
     userPreference: modelA,
     defaultProvider: "test",
     defaultModel: "a",
-    promptDraft: "Main conversation draft",
+    promptDraft: inputParts("Main conversation draft"),
     providers: [
       {
         name: "test",
@@ -111,9 +136,8 @@ beforeEach(() => {
       {
         id: "chat-tab",
         kind: "chat",
-        draft: "Explain",
+        draft: inputParts("Explain"),
         excerpts: [],
-        attachments: [],
         sourceSessionId: "main-session",
       },
     ],
@@ -157,9 +181,14 @@ describe("side chat panel", () => {
       (
         screen.getByRole("textbox", {
           name: "Unsent side chat draft",
-        }) as HTMLTextAreaElement
-      ).value,
+        }) as HTMLElement
+      ).textContent,
     ).toBe("Explain")
+    expect(
+      screen
+        .getByRole("textbox", { name: "Unsent side chat draft" })
+        .getAttribute("contenteditable"),
+    ).toBe("false")
     expect(requests("sideChat/send")).toEqual([])
     await userEvent
       .setup()
@@ -169,7 +198,7 @@ describe("side chat panel", () => {
     expect(tabs[1]).toMatchObject({
       kind: "chat",
       sourceSessionId: "main-session",
-      draft: "",
+      draft: inputParts(""),
     })
     expect(useWorkspaceStore.getState().activeId).toBe(tabs[1]?.id)
     expect(screen.getByText("An earlier answer")).toBeDefined()
@@ -307,7 +336,7 @@ describe("side chat panel", () => {
       screen.queryByRole("textbox", { name: "Message side chat" }),
     ).toBeNull()
     expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
-      draft: "Explain",
+      draft: inputParts("Explain"),
     })
   })
 
@@ -346,7 +375,7 @@ describe("side chat panel", () => {
                 id: "input",
                 turnId: "turn",
                 role: "user",
-                text: "First question",
+                content: { kind: "parts", parts: inputParts("First question") },
                 streaming: false,
               },
               {
@@ -360,7 +389,7 @@ describe("side chat panel", () => {
                 id: "followup",
                 turnId: "next-turn",
                 role: "user",
-                text: "Follow up",
+                content: { kind: "parts", parts: inputParts("Follow up") },
                 streaming: false,
               },
             ],
@@ -392,7 +421,7 @@ describe("side chat panel", () => {
     const creating = deferred<SideChatSnapshot>()
     client.request.mockImplementation(async (method) => {
       if (method === "sideChat/create") return creating.promise
-      if (method === "sideChat/send") return snapshot(1)
+      if (method === "sideChat/send") return acceptedSnapshot(1)
       return {}
     })
     const user = userEvent.setup()
@@ -406,7 +435,7 @@ describe("side chat panel", () => {
     ])
     expect(requests("sideChat/send")).toEqual([])
     expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
-      draft: "Explain",
+      draft: inputParts("Explain"),
     })
     await user.click(
       screen.getByRole("button", { name: "Send side chat message" }),
@@ -417,7 +446,7 @@ describe("side chat panel", () => {
     expect(requests("sideChat/send")).toHaveLength(1)
     expect(requests("sideChat/send")[0]).toMatchObject({
       sideChatId: "side-chat",
-      text: "Explain",
+      content: { kind: "parts", parts: inputParts("Explain") },
     })
   })
 
@@ -484,7 +513,8 @@ describe("side chat panel", () => {
     expect(
       useWorkspaceStore.getState().tabs.find((tab) => tab.id === "chat-tab"),
     ).toMatchObject({ hasMessages: true, activeTurnId: "turn" })
-    await act(async () => sending.resolve(snapshot(1)))
+    await act(async () => sending.resolve(acceptedSnapshot(1)))
+    expect(screen.queryByRole("alert")).toBeNull()
     expect(screen.getByText("Streamed prefix")).toBeDefined()
     expect(
       (
@@ -539,7 +569,10 @@ describe("side chat panel", () => {
     )
     const changed = requests("sideChat/send")[2]
     expect(changed?.requestId).not.toBe(first?.requestId)
-    expect(changed).toMatchObject({ text: "Explain", modelSelection: modelB })
+    expect(changed).toMatchObject({
+      content: { kind: "parts", parts: inputParts("Explain") },
+      modelSelection: modelB,
+    })
     await act(async () =>
       useAppStore.setState({
         modelSelections: { "main-session": { provider: "test", model: "c" } },
@@ -563,7 +596,9 @@ describe("side chat panel", () => {
     const defaultAttempt = requests("sideChat/send")[3]
     expect(defaultAttempt?.requestId).not.toBe(changed?.requestId)
     expect(defaultAttempt?.modelSelection).toEqual(modelA)
-    expect(useAppStore.getState().promptDraft).toBe("Main conversation draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
   })
 
   it("closes a chat created after its tab unmounts without sending the pending message", async () => {
@@ -606,16 +641,18 @@ describe("side chat panel", () => {
     }
     useWorkspaceStore
       .getState()
-      .updateChatDraft("chat-tab", "Explain", [original])
+      .updateChatDraft("chat-tab", inputParts("Explain"), [original])
     const user = userEvent.setup()
     render(<Panel />)
     await user.click(
       screen.getByRole("button", { name: "Send side chat message" }),
     )
     expect(requests("sideChat/send")[0]).toMatchObject({
-      text: "Explain",
-      contextAttachments: [original],
-      attachments: [],
+      content: {
+        kind: "parts",
+        parts: inputParts("Explain"),
+        contextAttachments: [original],
+      },
     })
     await act(async () =>
       useWorkspaceStore.getState().askInSideChat(
@@ -628,7 +665,8 @@ describe("side chat panel", () => {
         "main-session",
       ),
     )
-    await act(async () => sending.resolve(snapshot(1)))
+    await act(async () => sending.resolve(acceptedSnapshot(1)))
+    expect(screen.queryByRole("alert")).toBeNull()
     expect(
       useWorkspaceStore.getState().tabs.find((tab) => tab.id === "chat-tab"),
     ).toMatchObject({
@@ -641,7 +679,9 @@ describe("side chat panel", () => {
         }) as HTMLElement
       ).textContent,
     ).toBe("Explain")
-    expect(useAppStore.getState().promptDraft).toBe("Main conversation draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
   })
 
   it("uploads images to the temporary chat and retains them across a failed admission", async () => {
@@ -687,8 +727,7 @@ describe("side chat panel", () => {
     )
     await screen.findByRole("alert")
     expect(requests("sideChat/send")[0]).toMatchObject({
-      text: "Explain",
-      attachments: [image],
+      content: { kind: "parts", parts: inputParts("Explain", [image]) },
     })
     expect(
       screen.getByRole("button", { name: "Preview diagram.png" }),
@@ -697,8 +736,14 @@ describe("side chat panel", () => {
       screen.getByRole("button", { name: "Send side chat message" }),
     )
     expect(requests("sideChat/send")[1]).toEqual(requests("sideChat/send")[0])
-    expect(useAppStore.getState().promptAttachments).toEqual([])
-    expect(useAppStore.getState().promptDraft).toBe("Main conversation draft")
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toEqual(inputParts(""))
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
   })
 
   it("shares skill insertion and prompt history without crossing composer state", async () => {
@@ -711,18 +756,7 @@ describe("side chat panel", () => {
     useAppStore.setState({ sessionSkills: [skill] })
     client.request.mockImplementation(async (method) => {
       if (method === "sideChat/create") return snapshot()
-      if (method === "sideChat/send")
-        return snapshot(1, {
-          messages: [
-            {
-              id: "input",
-              turnId: "turn",
-              role: "user",
-              text: "Explain",
-              streaming: false,
-            },
-          ],
-        })
+      if (method === "sideChat/send") return acceptedSnapshot(1)
       return {}
     })
     const user = userEvent.setup()
@@ -751,10 +785,13 @@ describe("side chat panel", () => {
     const side = useWorkspaceStore
       .getState()
       .tabs.find((tab) => tab.id === "chat-tab")
-    expect(side?.kind === "chat" && side.draft).toContain(
-      "/repo/review/SKILL.md",
+    expect(side?.kind === "chat" && side.draft).toContainEqual({
+      type: "text",
+      text: expect.stringContaining("/repo/review/SKILL.md"),
+    })
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
     )
-    expect(useAppStore.getState().promptDraft).toBe("Main conversation draft")
     expect(requests("sideChat/send")).toHaveLength(1)
   })
 
@@ -772,7 +809,7 @@ describe("side chat panel", () => {
     client.request.mockImplementation(async (method) => {
       if (method === "sideChat/create") return snapshot()
       if (method === "sideChat/send")
-        return snapshot(1, {
+        return acceptedSnapshot(1, {
           activeTurnId: "turn-side",
           pendingPermissions: [permission],
         })
@@ -798,7 +835,9 @@ describe("side chat panel", () => {
       },
     ])
     expect(screen.queryByRole("button", { name: "Allow" })).toBeNull()
-    expect(useAppStore.getState().promptDraft).toBe("Main conversation draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
   })
 
   it("captures the parent on opening and changes retry identity when context changes", async () => {
@@ -832,14 +871,17 @@ describe("side chat panel", () => {
     await act(async () =>
       useWorkspaceStore
         .getState()
-        .updateChatDraft("chat-tab", "Explain", [context]),
+        .updateChatDraft("chat-tab", inputParts("Explain"), [context]),
     )
     await user.click(
       screen.getByRole("button", { name: "Send side chat message" }),
     )
     expect(requests("sideChat/send")[1]).toMatchObject({
-      text: "Explain",
-      contextAttachments: [context],
+      content: {
+        kind: "parts",
+        parts: inputParts("Explain"),
+        contextAttachments: [context],
+      },
     })
     expect(requests("sideChat/send")[1]?.requestId).not.toBe(
       original?.requestId,

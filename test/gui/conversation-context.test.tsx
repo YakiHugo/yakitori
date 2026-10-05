@@ -3,10 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
-import type {
-  ContextExcerpt,
-  ResponseAnnotation,
-} from "../../src/gui/conversation-context.ts"
+import type { ResponseAnnotation } from "../../src/gui/conversation-context.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -16,8 +13,10 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
+  type InputContent,
 } from "../../src/kernel/events.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -53,7 +52,7 @@ beforeEach(() => {
     ...createInitialAppState(),
     selection: { sessionId: "session_1" },
     apiBase: "http://api.test",
-    promptDraft: "Please review",
+    promptDraft: inputParts("Please review"),
   })
 })
 afterEach(() => {
@@ -77,15 +76,12 @@ function holdAdmission() {
       const body = fakeRef.current.requestsFor("session/input")[0]?.params as {
         sessionId: string
         requestId: string
-        content: {
-          kind: "text"
-          text: string
-          contextAttachments?: readonly ContextExcerpt[]
-        }
+        content: InputContent
       }
       resolve({
         requestId: body.requestId,
         inputId: "input_1",
+        content: body.content,
         event: createEventEnvelope({
           sessionId: body.sessionId,
           seq: 2,
@@ -118,13 +114,15 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
     {
       sessionId: "session_1",
       content: {
-        kind: "text",
-        text: "Please review",
+        kind: "parts",
+        parts: inputParts("Please review"),
         contextAttachments: [excerpt],
       },
     },
   )
-  expect(useAppStore.getState().promptDraft).toBe("Please review")
+  expect(useAppStore.getState().promptDraft).toEqual(
+    inputParts("Please review"),
+  )
   expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
   await act(async () => held.acknowledge())
   await waitFor(() =>
@@ -137,20 +135,22 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
 it("retains the draft and annotations when admission fails", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
-  const sending = useAppStore.getState().admitInput("Please review")
+  const sending = useAppStore.getState().admitInput(inputParts("Please review"))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
   held.reject(new ApiRequestError("Connection lost", "not_found"))
   await sending
-  expect(useAppStore.getState().promptDraft).toBe("Please review")
+  expect(useAppStore.getState().promptDraft).toEqual(
+    inputParts("Please review"),
+  )
   expect(useAppStore.getState().promptExcerpts).toEqual([excerpt])
 })
 
 it("preserves annotations edited or added while the submitted snapshot is pending", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
-  const sending = useAppStore.getState().admitInput("Please review")
+  const sending = useAppStore.getState().admitInput(inputParts("Please review"))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
@@ -170,7 +170,7 @@ it("preserves annotations edited or added while the submitted snapshot is pendin
 it("keeps annotations with their session when another session is selected during admission", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
-  const sending = useAppStore.getState().admitInput("Please review")
+  const sending = useAppStore.getState().admitInput(inputParts("Please review"))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
@@ -257,14 +257,14 @@ it("keeps new-conversation excerpts separate and carries them through the first 
   const held = holdAdmission()
   useAppStore.getState().startNewSession()
   expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])
-  const sending = useAppStore.getState().admitInput("")
+  const sending = useAppStore.getState().admitInput(inputParts(""))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
   expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
     {
       sessionId: "session_created",
-      content: { text: "", contextAttachments: [newExcerpt] },
+      content: { kind: "parts", parts: [], contextAttachments: [newExcerpt] },
     },
   )
   expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])

@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest"
+import type { InputContent } from "../../src/kernel/events.ts"
 import { createInputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const draft = {
   apiBase: "http://localhost:4141/",
   sessionId: "session_one",
-  text: "Continue the task",
+  content: {
+    kind: "parts",
+    parts: inputParts("Continue the task"),
+  } satisfies InputContent,
 }
 const attachment = {
   name: "screen.png",
@@ -31,8 +36,11 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(requestIds("request_first"))
     const submission = {
       ...draft,
-      attachments: [attachment],
-      contextAttachments: [annotation],
+      content: {
+        kind: "parts",
+        parts: inputParts("Continue the task", [attachment]),
+        contextAttachments: [annotation],
+      } satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5", effort: "high" },
     }
     const first = memory.reserveAdmission(submission)
@@ -89,20 +97,39 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(() => `request_${++sequence}`)
     const submission = {
       ...draft,
-      attachments: [attachment],
-      contextAttachments: [annotation],
+      content: {
+        kind: "parts",
+        parts: inputParts("Continue the task", [attachment]),
+        contextAttachments: [annotation],
+      } satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5", effort: "high" },
     }
     const submissions = [
       submission,
-      { ...submission, text: "Edited task" },
       {
         ...submission,
-        attachments: [{ ...attachment, detail: "original" as const }],
+        content: {
+          ...submission.content,
+          parts: inputParts("Edited task", [attachment]),
+        },
       },
       {
         ...submission,
-        contextAttachments: [{ ...annotation, comment: "Check this instead" }],
+        content: {
+          ...submission.content,
+          parts: inputParts("Continue the task", [
+            { ...attachment, detail: "original" as const },
+          ]),
+        },
+      },
+      {
+        ...submission,
+        content: {
+          ...submission.content,
+          contextAttachments: [
+            { ...annotation, comment: "Check this instead" },
+          ],
+        },
       },
       {
         ...submission,
@@ -113,6 +140,16 @@ describe("input recovery memory", () => {
         modelSelection: { ...submission.modelSelection, speed: "fast" },
       },
       { ...submission, supersedesRequestId: "request_replaced" },
+      {
+        ...submission,
+        content: {
+          ...submission.content,
+          parts: [
+            { ...attachment, type: "image" as const },
+            { type: "text" as const, text: "Continue the task" },
+          ],
+        },
+      },
     ]
     expect(
       submissions.map((value) => memory.reserveAdmission(value).requestId),
@@ -124,6 +161,7 @@ describe("input recovery memory", () => {
       "request_5",
       "request_6",
       "request_7",
+      "request_8",
     ])
   })
 
@@ -131,13 +169,19 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(requestIds("request_first"))
     const submission = structuredClone({
       ...draft,
-      attachments: [attachment] as const,
-      contextAttachments: [annotation] as const,
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "Continue the task" },
+          { ...attachment, type: "image" as const },
+        ] as const,
+        contextAttachments: [annotation] as const,
+      },
       modelSelection: { provider: "codex", model: "gpt-5" },
     })
     memory.reserveAdmission(submission)
-    submission.attachments[0].file.path = "edited.png"
-    submission.contextAttachments[0].anchor.endOffset = 20
+    submission.content.parts[1].file.path = "edited.png"
+    submission.content.contextAttachments[0].anchor.endOffset = 20
     submission.modelSelection.model = "another-model"
     const recovered = memory.readAdmissionByRequestId(
       draft.apiBase,
@@ -146,18 +190,23 @@ describe("input recovery memory", () => {
     )
     expect(recovered).toEqual({
       ...draft,
-      attachments: [attachment],
-      contextAttachments: [annotation],
+      content: {
+        kind: "parts",
+        parts: inputParts("Continue the task", [attachment]),
+        contextAttachments: [annotation],
+      } satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5" },
       requestId: "request_first",
     })
-    if (!recovered?.attachments?.[0]) throw new Error("Missing recovered image")
+    const recoveredImage = recovered?.content.parts[1]
+    if (recoveredImage?.type !== "image")
+      throw new Error("Missing recovered image")
     // Mutating a caller's own copy must not affect the recovery record.
-    Object.assign(recovered.attachments[0].file, { path: "caller-edit.png" })
+    Object.assign(recoveredImage.file, { path: "caller-edit.png" })
     expect(
       memory.listAdmissionsForSession(draft.apiBase, draft.sessionId)[0]
-        ?.attachments,
-    ).toEqual([attachment])
+        ?.content.parts,
+    ).toEqual(inputParts("Continue the task", [attachment]))
   })
 
   it("removes only the matching admission and ignores old acknowledgements", () => {
@@ -180,31 +229,59 @@ describe("input recovery memory", () => {
     const first = {
       requestId: "request_first",
       turnId: "turn_one",
-      text: "First steer",
-      attachments: [structuredClone(attachment)] as const,
-      excerpts: [structuredClone(annotation)] as const,
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "First steer" },
+          { ...structuredClone(attachment), type: "image" as const },
+        ] as const,
+        contextAttachments: [structuredClone(annotation)] as const,
+      },
       restored: false,
     }
     const second = {
       ...first,
       requestId: "request_second",
-      text: "Second steer",
+      content: {
+        ...first.content,
+        parts: inputParts("Second steer", [attachment]),
+      },
     }
     memory.reserveSteer(draft.apiBase, draft.sessionId, first)
     memory.reserveSteer(draft.apiBase, draft.sessionId, second)
     memory.reserveSteer("http://other.test", draft.sessionId, {
       ...first,
-      text: "Other API",
+      content: {
+        ...first.content,
+        parts: inputParts("Other API", [attachment]),
+      },
     })
     memory.reserveSteer(draft.apiBase, "session_two", {
       ...first,
-      text: "Other session",
+      content: {
+        ...first.content,
+        parts: inputParts("Other session", [attachment]),
+      },
     })
-    first.attachments[0].file.path = "edited.png"
-    first.excerpts[0].comment = "Edited comment"
+    first.content.parts[1].file.path = "edited.png"
+    first.content.contextAttachments[0].comment = "Edited comment"
     expect(memory.readSteers(draft.apiBase, draft.sessionId)).toEqual([
-      { ...first, attachments: [attachment], excerpts: [annotation] },
-      { ...second, attachments: [attachment], excerpts: [annotation] },
+      {
+        ...first,
+        content: {
+          kind: "parts",
+          parts: inputParts("First steer", [attachment]),
+          contextAttachments: [annotation],
+        },
+      },
+      {
+        ...second,
+        content: {
+          kind: "parts",
+          parts: inputParts("Second steer", [attachment]),
+          contextAttachments: [annotation],
+        },
+      },
     ])
     memory.updateSteers(draft.apiBase, draft.sessionId, (steers) =>
       steers.map((steer) => ({ ...steer, restored: true })),
@@ -223,18 +300,18 @@ describe("input recovery memory", () => {
     expect(
       memory
         .readSteers(draft.apiBase, draft.sessionId)
-        .map((steer) => steer.text),
-    ).toEqual(["Second steer"])
+        .map((steer) => steer.content.parts),
+    ).toEqual([inputParts("Second steer", [attachment])])
     expect(
       memory
         .readSteers("http://other.test", draft.sessionId)
-        .map((steer) => steer.text),
-    ).toEqual(["Other API"])
+        .map((steer) => steer.content.parts),
+    ).toEqual([inputParts("Other API", [attachment])])
     expect(
       memory
         .readSteers(draft.apiBase, "session_two")
-        .map((steer) => steer.text),
-    ).toEqual(["Other session"])
+        .map((steer) => steer.content.parts),
+    ).toEqual([inputParts("Other session", [attachment])])
   })
 })
 

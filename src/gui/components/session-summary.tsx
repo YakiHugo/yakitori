@@ -94,7 +94,9 @@ function SummaryPopover({
     const excerpts = new Map<string, ContextExcerpt>()
     for (const entry of entries) {
       if (entry.kind !== "user_input") continue
-      for (const attachment of entry.attachments ?? [])
+      for (const attachment of entry.parts.filter(
+        (part) => part.type === "image",
+      ))
         images.set(
           `${attachment.file.rolloutId}:${attachment.file.path}`,
           attachment,

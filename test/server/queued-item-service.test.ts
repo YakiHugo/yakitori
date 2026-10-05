@@ -7,7 +7,11 @@ import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
-import { QueuedItemService } from "../../src/server/queued-item-service.ts"
+import {
+  MAX_QUEUED_INPUT_TEXT_CHARS,
+  QueuedInputTooLargeError,
+  QueuedItemService,
+} from "../../src/server/queued-item-service.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
 
@@ -17,6 +21,67 @@ afterEach(async () => {
 })
 
 describe("queued item service", () => {
+  it("counts all queued text parts against one character budget", async () => {
+    const queue = new InputQueue()
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: async function* () {
+            yield { type: "cancelled" }
+          },
+          toolRegistry: createToolRegistry([]),
+        }),
+    })
+    const service = new QueuedItemService({
+      queue,
+      manager,
+      reporter: () => undefined,
+    })
+    try {
+      const image = {
+        type: "image" as const,
+        name: "image.png",
+        mediaType: "image/png" as const,
+        sizeBytes: 42,
+        file: { rolloutId: "session_one", path: "image.png" },
+      }
+      const parts = [
+        {
+          type: "text" as const,
+          text: "🦊".repeat(MAX_QUEUED_INPUT_TEXT_CHARS / 2),
+        },
+        image,
+        {
+          type: "text" as const,
+          text: "x".repeat(MAX_QUEUED_INPUT_TEXT_CHARS / 2),
+        },
+      ]
+      expect(
+        service.enqueue("session_one", {
+          submissionId: "fits",
+          content: { kind: "parts", parts },
+        }).input.content.parts,
+      ).toEqual(parts)
+      expect(() =>
+        service.enqueue("session_one", {
+          submissionId: "too_large",
+          content: {
+            kind: "parts",
+            parts: [...parts, { type: "text", text: "!" }],
+          },
+        }),
+      ).toThrow(QueuedInputTooLargeError)
+      expect(
+        queue.list("session_one").map((item) => item.input.submissionId),
+      ).toEqual(["fits"])
+    } finally {
+      await service.close()
+      await manager.shutdown()
+      queue.close()
+    }
+  })
+
   it("notices an external SQLite writer and dispatches a loaded idle thread", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-queue-external-"))
     const path = join(root, "queue.sqlite")
@@ -71,7 +136,10 @@ describe("queued item service", () => {
     const version = queue.changeVersion()
     external.enqueue(thread.id, {
       submissionId: "request_external",
-      content: { kind: "text", text: "external input" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "external input" }],
+      },
     })
     expect(queue.changeVersion()).toBeGreaterThan(version)
     expect(queue.changesSince(0, [thread.id])).toEqual([

@@ -13,6 +13,7 @@ import {
 } from "../../src/gui/store/preferences-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import { pastePrompt } from "./prompt-editor-helpers.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -28,6 +29,7 @@ const entry = {
   inputId: "input_1",
   text: "Original request",
   at: "2026-08-17T00:00:00.000Z",
+  parts: inputParts("Original request"),
 }
 
 describe("attachments", () => {
@@ -46,7 +48,7 @@ describe("attachments", () => {
     const user = userEvent.setup()
     render(
       <UserMessageCell
-        entry={{ ...entry, attachments: [image] }}
+        entry={{ ...entry, parts: inputParts("Original request", [image]) }}
         queued={false}
       />,
     )
@@ -67,7 +69,7 @@ describe("attachments", () => {
   it("replaces a failed thumbnail's loading indicator with an unavailable state", () => {
     render(
       <UserMessageCell
-        entry={{ ...entry, attachments: [image] }}
+        entry={{ ...entry, parts: inputParts("Original request", [image]) }}
         queued={false}
       />,
     )
@@ -130,6 +132,9 @@ describe("skill mentions", () => {
         entry={{
           ...entry,
           text: "Use this please [$Template Creator](/repo/.agents/skills/template/SKILL.md)",
+          parts: inputParts(
+            "Use this please [$Template Creator](/repo/.agents/skills/template/SKILL.md)",
+          ),
         }}
         queued={false}
       />,
@@ -147,6 +152,9 @@ describe("skill mentions", () => {
         entry={{
           ...entry,
           text: "Use [$Review](/repo/.agents/skills/review/SKILL.md)",
+          parts: inputParts(
+            "Use [$Review](/repo/.agents/skills/review/SKILL.md)",
+          ),
         }}
         queued={false}
       />,
@@ -178,11 +186,10 @@ describe("user message fork actions", () => {
     await user.keyboard("{Enter}")
     expect(forkSession).not.toHaveBeenCalled()
     await user.keyboard("{Control>}{Enter}{/Control}")
-    expect(forkSession).toHaveBeenCalledWith(
-      "input_1",
-      "edit",
-      "Original request",
-    )
+    expect(forkSession).toHaveBeenCalledWith("input_1", "edit", {
+      kind: "parts",
+      parts: inputParts("Original request"),
+    })
   })
   it("confirms conversation-only undo before creating a branch", async () => {
     const user = userEvent.setup()
@@ -210,11 +217,10 @@ describe("user message fork actions", () => {
     await pastePrompt(editor, "Replacement request", true)
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    expect(forkSession).toHaveBeenCalledWith(
-      "input_1",
-      "edit",
-      "Replacement request",
-    )
+    expect(forkSession).toHaveBeenCalledWith("input_1", "edit", {
+      kind: "parts",
+      parts: inputParts("Replacement request"),
+    })
   })
 
   it("disables fork actions and edit controls while the session is busy", async () => {
@@ -296,6 +302,9 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
       entry={{
         ...entry,
         text: "Original request [$review](/skills/review/SKILL.md)",
+        parts: inputParts(
+          "Original request [$review](/skills/review/SKILL.md)",
+        ),
       }}
       queued={false}
     />,
@@ -315,11 +324,10 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
     true,
   )
   await user.keyboard("{Enter}")
-  expect(forkSession).toHaveBeenCalledWith(
-    "input_1",
-    "edit",
-    "Updated request [$review](/skills/review/SKILL.md)",
-  )
+  expect(forkSession).toHaveBeenCalledWith("input_1", "edit", {
+    kind: "parts",
+    parts: inputParts("Updated request [$review](/skills/review/SKILL.md)"),
+  })
 })
 
 it("keeps the edited draft until the replacement conversation is activated", async () => {

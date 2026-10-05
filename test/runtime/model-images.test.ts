@@ -57,6 +57,7 @@ describe("model image adaptation", () => {
       instructionProfileId: "kimi",
     })
     expect(kimi.downgradedOriginalCount).toBe(1)
+    expect(imageMessage.content[1]).toMatchObject({ detail: "original" })
     expect(
       kimi.messages[0]?.role === "user"
         ? kimi.messages[0].content.filter((block) => block.type === "image")[0]

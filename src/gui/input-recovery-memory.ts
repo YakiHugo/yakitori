@@ -1,13 +1,10 @@
-import type { ImageAttachment, ModelSelection } from "../kernel/events.ts"
+import type { InputContent, ModelSelection } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
-import type { ContextExcerpt } from "../kernel/input-context.ts"
 
 export type AdmissionDraft = Readonly<{
   apiBase: string
   sessionId: string
-  text: string
-  attachments?: readonly ImageAttachment[]
-  contextAttachments?: readonly ContextExcerpt[]
+  content: InputContent
   modelSelection?: ModelSelection
   supersedesRequestId?: string
 }>
@@ -17,9 +14,7 @@ export type PendingAdmission = AdmissionDraft & Readonly<{ requestId: string }>
 export type StoredSteer = Readonly<{
   requestId: string
   turnId: string
-  text: string
-  attachments: readonly ImageAttachment[]
-  excerpts: readonly ContextExcerpt[]
+  content: InputContent
   restored: boolean
 }>
 
@@ -149,9 +144,10 @@ function admissionIdentity(draft: AdmissionDraft): string {
     [
       draft.apiBase,
       draft.sessionId,
-      draft.text,
-      draft.attachments ?? [],
-      draft.contextAttachments ?? [],
+      {
+        ...draft.content,
+        contextAttachments: draft.content.contextAttachments ?? [],
+      },
       draft.modelSelection ?? null,
       draft.supersedesRequestId ?? null,
     ],

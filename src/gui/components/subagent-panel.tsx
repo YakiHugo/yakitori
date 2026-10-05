@@ -1,3 +1,4 @@
+import { openUrlTarget } from "../lib/open-resource.ts"
 import { ArrowDown, ArrowLeft, ChevronRight } from "lucide-react"
 import {
   useCallback,
@@ -412,12 +413,50 @@ function TraceEntry({
   workspaceRoot: string | undefined
   onOpenAgent(sessionId: string): void
 }>) {
+  const [openError, setOpenError] = useState<string>()
   switch (entry.kind) {
     case "user_input":
       return (
         <article className="subagent-task">
           <h3>Task</h3>
-          <p>{entry.text}</p>
+          {entry.parts.map((part, index) =>
+            part.type === "text" ? (
+              <p // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this input ID.
+                key={`${entry.inputId}:${index}`}
+              >
+                {part.text}
+              </p>
+            ) : (
+              <a
+                // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this input ID.
+                key={`${entry.inputId}:${index}`}
+                href={imageAttachmentUrl(part, apiBase)}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => {
+                  event.preventDefault()
+                  setOpenError(undefined)
+                  void openUrlTarget({
+                    kind: "url",
+                    url: imageAttachmentUrl(part, apiBase),
+                  }).catch((error: unknown) =>
+                    setOpenError(
+                      error instanceof Error
+                        ? error.message
+                        : "Could not open image",
+                    ),
+                  )
+                }}
+              >
+                <img
+                  src={imageAttachmentUrl(part, apiBase)}
+                  alt={part.name}
+                  loading="lazy"
+                />
+              </a>
+            ),
+          )}
+          {openError === undefined ? null : <p role="alert">{openError}</p>}
           {entry.contextAttachments?.map((excerpt) => (
             <blockquote key={excerpt.id}>
               <cite>{excerpt.source.label}</cite>
@@ -426,20 +465,6 @@ function TraceEntry({
                 <p>{excerpt.comment}</p>
               ) : null}
             </blockquote>
-          ))}
-          {entry.attachments?.map((attachment) => (
-            <a
-              key={`${attachment.file.rolloutId}:${attachment.file.path}`}
-              href={imageAttachmentUrl(attachment, apiBase)}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <img
-                src={imageAttachmentUrl(attachment, apiBase)}
-                alt={attachment.name}
-                loading="lazy"
-              />
-            </a>
           ))}
         </article>
       )

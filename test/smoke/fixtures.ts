@@ -528,6 +528,26 @@ export async function runProviderFlow(
       }),
     ).toContainText("smoke-model")
 
+    await runOrderedInputFlow(page, testInfo)
+    const orderedRequest = JSON.parse(requests.at(-1)?.body ?? "{}") as {
+      messages: { role: string; content: unknown }[]
+    }
+    expect(
+      orderedRequest.messages
+        .filter((message) => message.role === "user")
+        .at(-1)?.content,
+    ).toEqual([
+      { type: "text", text: "Before attachment. " },
+      {
+        type: "image_url",
+        image_url: {
+          url: expect.stringMatching(/^data:image\/png;base64,/),
+          detail: "high",
+        },
+      },
+      { type: "text", text: "After attachment." },
+    ])
+
     await openProviderSettings(page)
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
     await page.getByRole("tab", { name: "Usage", exact: true }).click()
@@ -615,4 +635,145 @@ async function openProviderSettings(page: Page): Promise<void> {
   await expect(
     page.getByRole("region", { name: "Provider settings", exact: true }),
   ).toBeVisible()
+}
+
+// Browser smoke owns only the renderer's attachment-import boundary. Packaged
+// Electron uses its real preload/IPC importer on exactly the same pasted bytes.
+async function runOrderedInputFlow(
+  page: Page,
+  testInfo: TestInfo,
+): Promise<void> {
+  const toolImage = page
+    .getByRole("region", { name: "Ordered tool result", exact: true })
+    .getByRole("img")
+  const sourceUrl = await toolImage.getAttribute("src")
+  if (sourceUrl === null) throw new Error("Smoke tool image URL is missing.")
+  const usesDesktop = await page.evaluate(
+    () => window.yakitoriDesktop !== undefined,
+  )
+  await page.evaluate(
+    async ({ sourceUrl, usesDesktop }) => {
+      const response = await fetch(sourceUrl)
+      if (!response.ok) throw new Error("Smoke image could not be loaded.")
+      const bytes = await response.arrayBuffer()
+      if (!usesDesktop) {
+        const path = new URL(sourceUrl).pathname
+        const match = /^\/rollouts\/([^/]+)\/assets\/(.+)$/.exec(path)
+        if (!match) throw new Error("Smoke asset URL is not rollout-owned.")
+        Object.defineProperty(window, "yakitoriDesktop", {
+          configurable: true,
+          value: {
+            importImageFiles: async () => [
+              {
+                name: "ordered-smoke.png",
+                mediaType: "image/png",
+                detail: "high",
+                sizeBytes: bytes.byteLength,
+                file: {
+                  rolloutId: decodeURIComponent(match[1]!),
+                  path: match[2]!.split("/").map(decodeURIComponent).join("/"),
+                },
+              },
+            ],
+            discardDraftImages: async () => {},
+          },
+        })
+      }
+    },
+    { sourceUrl, usesDesktop },
+  )
+  try {
+    const editor = page.getByRole("textbox", {
+      name: "Message the Mate",
+      exact: true,
+    })
+    await editor.fill("Before attachment. After attachment.")
+    await editor.evaluate((node) => {
+      const text = node.querySelector("p")?.firstChild
+      if (text?.nodeType !== Node.TEXT_NODE)
+        throw new Error("Smoke editor text is missing.")
+      const selection = window.getSelection()
+      const range = document.createRange()
+      range.setStart(text, "Before attachment. ".length)
+      range.collapse(true)
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    await editor.evaluate(async (node, sourceUrl) => {
+      const response = await fetch(sourceUrl)
+      const bytes = await response.arrayBuffer()
+      const clipboardData = new DataTransfer()
+      clipboardData.items.add(
+        new File([bytes], "ordered-smoke.png", { type: "image/png" }),
+      )
+      node.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      )
+    }, sourceUrl)
+    await expect(
+      editor.getByRole("button", {
+        name: "Preview attached image ordered-smoke.png",
+      }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    // Wide viewports also contain hidden navigation previews of each answer.
+    // Count actual response regions, retaining the duplicate-reply check.
+    const responses = page.getByRole("region", {
+      name: "Response",
+      exact: true,
+    })
+    await expect(responses).toHaveCount(2)
+    await expect(
+      responses.getByText("Mock provider reply", { exact: true }),
+    ).toHaveCount(2)
+    await expect(
+      page.getByRole("button", { name: "Interrupt", exact: true }),
+    ).toHaveCount(0)
+    const checkOrder = async () => {
+      const before = page
+        .getByRole("main")
+        .locator(".message-bubble")
+        .filter({ hasText: "Before attachment." })
+      await expect(before).toBeVisible()
+      const message = before.locator("..")
+      expect(
+        await message
+          .locator(":scope > .message-bubble, :scope > .message-attachments")
+          .evaluateAll((nodes) =>
+            nodes.map((node) =>
+              node.querySelector("img") ? "image" : node.textContent,
+            ),
+          ),
+      ).toEqual(["Before attachment. ", "image", "After attachment."])
+      const image = message.getByRole("img", {
+        name: "ordered-smoke.png",
+        exact: true,
+      })
+      await expect(image).toBeVisible()
+      await expect
+        .poll(() =>
+          image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+        )
+        .toBeGreaterThan(0)
+    }
+    await checkOrder()
+    await page.reload()
+    await checkOrder()
+    const screenshot = testInfo.outputPath("ordered-user-input.png")
+    await page.screenshot({ path: screenshot, animations: "disabled" })
+    await testInfo.attach("ordered-user-input", {
+      path: screenshot,
+      contentType: "image/png",
+    })
+  } finally {
+    if (!usesDesktop)
+      await page.evaluate(() => {
+        Reflect.deleteProperty(window, "yakitoriDesktop")
+      })
+  }
 }

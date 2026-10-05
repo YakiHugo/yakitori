@@ -1,3 +1,7 @@
+import {
+  inputContentText,
+  inputContentToModelMessage,
+} from "../kernel/input-content.ts"
 import { toolContentText } from "./model-tool-content.ts"
 import type { ModelToolContentBlock } from "../kernel/index.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
@@ -8,7 +12,7 @@ import type {
   TurnProcessor,
   TurnRuntime,
 } from "../core/session.ts"
-import type { TurnInput } from "../core/session-io.ts"
+import { fingerprintTurnInput, type TurnInput } from "../core/session-io.ts"
 import {
   type CompletedExecutionItem,
   type ContextCompactionCompletedItem,
@@ -529,7 +533,7 @@ async function executeTurn(input: {
               payload: {
                 session_id: metadata.id,
                 turn_id: input.input.submissionId,
-                prompt: input.input.content.text,
+                prompt: inputContentText(input.input.content),
               },
               cwd: requireValue(metadata.workingDirectory, "Working directory"),
               signal: input.signal,
@@ -1166,7 +1170,7 @@ async function executeTurnModelLoop(
           )
         if (alreadyLoaded) continue
         const text = await loadExplicitSkillInstructions(
-          submitted.content.text,
+          inputContentText(submitted.content),
           skillSnapshot,
           (message) => input.runtime.emitWarning(message),
           instructionConfiguration.skillMcpServers === undefined
@@ -3041,7 +3045,7 @@ async function recordSteering(
             payload: {
               session_id: metadata.id,
               turn_id: input.input.submissionId,
-              prompt: item.content.text,
+              prompt: inputContentText(item.content),
             },
             cwd: requireValue(metadata.workingDirectory, "Working directory"),
             signal: input.signal,
@@ -3086,48 +3090,18 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
   return {
     ...envelope(
       turnId,
-      input.goalId === undefined
-        ? {
-            role: "user",
-            content: [
-              ...(input.content.text.length === 0
-                ? []
-                : [{ type: "text" as const, text: input.content.text }]),
-              ...(input.content.attachments ?? []).map((attachment) => ({
-                type: "image" as const,
-                mediaType: attachment.mediaType,
-                detail: attachment.detail ?? "high",
-                file: attachment.file,
-                sizeBytes: attachment.sizeBytes,
-              })),
-            ],
-            ...(input.content.contextAttachments === undefined
-              ? {}
-              : { contextAttachments: input.content.contextAttachments }),
-          }
-        : {
-            role: "developer",
-            content: [{ type: "text", text: input.content.text }],
-            context: { type: "goal", goalId: input.goalId },
-          },
+      inputContentToModelMessage(input.content, input.goalId),
     ),
-    ...(input.modelSelection === undefined &&
-    input.parentInputId === undefined &&
-    input.metadata === undefined
-      ? {}
-      : {
-          submissionMetadata: {
-            ...(input.modelSelection === undefined
-              ? {}
-              : { modelSelection: input.modelSelection }),
-            ...(input.parentInputId === undefined
-              ? {}
-              : { parentInputId: input.parentInputId }),
-            ...(input.metadata === undefined
-              ? {}
-              : { metadata: input.metadata }),
-          },
-        }),
+    submissionMetadata: {
+      requestFingerprint: fingerprintTurnInput(input),
+      ...(input.modelSelection === undefined
+        ? {}
+        : { modelSelection: input.modelSelection }),
+      ...(input.parentInputId === undefined
+        ? {}
+        : { parentInputId: input.parentInputId }),
+      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+    },
   }
 }
 

@@ -102,7 +102,12 @@ it("recovers a model request without replaying a completed tool or duplicating i
       mateRevisionId: "mate_revision_test",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Record the effect and finish." },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "Record the effect and finish." },
+        ],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     await manager.shutdown()

@@ -21,10 +21,17 @@ import {
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const at = "2026-09-12T00:00:00Z"
 const entries: ExecutionEntry[] = [
-  { kind: "user_input", inputId: "input_1", text: "First request", at },
+  {
+    kind: "user_input",
+    inputId: "input_1",
+    text: "First request",
+    at,
+    parts: inputParts("First request"),
+  },
   {
     kind: "assistant",
     itemId: "progress",
@@ -383,7 +390,13 @@ it("shows the current retry once when steering input splits the turn", () => {
       },
       entries: [
         ...entries.slice(0, 2),
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Follow-up",
+          at,
+          parts: inputParts("Follow-up"),
+        },
         ...entries.slice(2),
       ],
     },
@@ -467,7 +480,13 @@ it("shows navigation only while the centered body leaves 48 layout pixels of mar
       ...useAppStore.getState().execution,
       entries: [
         ...entries,
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Follow-up",
+          at,
+          parts: inputParts("Follow-up"),
+        },
       ],
     },
   })
@@ -513,9 +532,16 @@ it("anchors requests while keeping steering messages inside their request", () =
           text: "Steering message",
           steered: true,
           at,
+          parts: inputParts("Steering message"),
         },
         ...entries.slice(2),
-        { kind: "user_input", inputId: "input_3", text: "Second request", at },
+        {
+          kind: "user_input",
+          inputId: "input_3",
+          text: "Second request",
+          at,
+          parts: inputParts("Second request"),
+        },
       ],
     },
   })
@@ -574,7 +600,13 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
     execution: {
       ...createExecutionViewState(),
       entries: [
-        { kind: "user_input", inputId: "input_1", text: "First request", at },
+        {
+          kind: "user_input",
+          inputId: "input_1",
+          text: "First request",
+          at,
+          parts: inputParts("First request"),
+        },
         {
           kind: "assistant",
           itemId: "answer_1",
@@ -589,12 +621,14 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
           text: "Extra context",
           steered: true,
           at,
+          parts: inputParts("Extra context"),
         },
         {
           kind: "user_input",
           inputId: "input_2",
           text: "Second request",
           at,
+          parts: inputParts("Second request"),
         },
         {
           kind: "assistant",
@@ -700,7 +734,13 @@ it("promotes only the final answer of a completed turn split by another input", 
       ...useAppStore.getState().execution,
       entries: [
         ...entries.slice(0, 2),
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Follow-up",
+          at,
+          parts: inputParts("Follow-up"),
+        },
         ...entries.slice(2),
       ],
     },
@@ -804,7 +844,13 @@ it("keeps every fragment of a failed turn as activity", () => {
       ...useAppStore.getState().execution,
       entries: [
         ...entries.slice(0, 2),
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Follow-up",
+          at,
+          parts: inputParts("Follow-up"),
+        },
         ...entries.slice(2),
         {
           kind: "turn_terminal",
@@ -873,7 +919,13 @@ it("marks a queued input as pending until it is admitted", () => {
       ...useAppStore.getState().execution,
       entries: [
         ...entries.slice(0, 2),
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Follow-up",
+          at,
+          parts: inputParts("Follow-up"),
+        },
         ...entries.slice(2),
       ],
       queuedInputs: {

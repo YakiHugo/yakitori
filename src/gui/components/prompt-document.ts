@@ -1,3 +1,4 @@
+import type { InputPart, ImageAttachment } from "../../kernel/events.ts"
 import { type Node, Schema } from "prosemirror-model"
 
 export type SkillMention = Readonly<{ name: string; path: string }>
@@ -12,6 +13,7 @@ export function fileMentionText(mention: FileMention): string {
 }
 
 function mentionText(node: Node): string {
+  if (node.type.name === "image") return "\uFFFC"
   return node.type.name === "skill"
     ? skillMentionText({ name: node.attrs.name, path: node.attrs.path })
     : fileMentionText({ name: node.attrs.name, path: node.attrs.path })
@@ -28,6 +30,25 @@ export const promptSchema = new Schema({
       parseDOM: [{ tag: "p" }],
     },
     text: { group: "inline" },
+    image: {
+      group: "inline",
+      inline: true,
+      atom: true,
+      selectable: true,
+      attrs: { image: {} },
+      // No parseDOM rule: pasted HTML must never mint a local asset reference.
+      toDOM: (node) => [
+        "button",
+        {
+          class: "prompt-skill prompt-image",
+          type: "button",
+          "data-prompt-image": "true",
+          "aria-label": `Preview attached image ${node.attrs.image.name}`,
+          contenteditable: "false",
+        },
+        `▧ ${node.attrs.image.name}`,
+      ],
+    },
     skill: {
       group: "inline",
       inline: true,
@@ -91,6 +112,62 @@ export function parsePrompt(text: string): Node {
       return promptSchema.node("paragraph", null, content)
     }),
   )
+}
+
+// Images are editor atoms, not textual placeholders in a submitted request.
+// Only cursor/suggestion offsets use the one-character object representation.
+export function parsePromptParts(parts: readonly InputPart[]): Node {
+  const paragraphs: Node[] = []
+  let content: Node[] = []
+  for (const part of parts) {
+    if (part.type === "image") {
+      content.push(promptSchema.node("image", { image: part }))
+      continue
+    }
+    parsePrompt(part.text).forEach((paragraph, _offset, index) => {
+      if (index > 0) {
+        paragraphs.push(promptSchema.node("paragraph", null, content))
+        content = []
+      }
+      paragraph.forEach((node) => {
+        content.push(node)
+      })
+    })
+  }
+  paragraphs.push(promptSchema.node("paragraph", null, content))
+  return promptSchema.node("doc", null, paragraphs)
+}
+
+export function serializePromptParts(
+  doc: Node,
+  resolveImage: (image: ImageAttachment) => ImageAttachment = (image) => image,
+): readonly InputPart[] {
+  const parts: InputPart[] = []
+  const appendText = (text: string) => {
+    if (text === "") return
+    const last = parts.at(-1)
+    if (last?.type === "text")
+      parts[parts.length - 1] = { type: "text", text: last.text + text }
+    else parts.push({ type: "text", text })
+  }
+  doc.forEach((paragraph, _offset, index) => {
+    if (index > 0) appendText("\n")
+    paragraph.forEach((node) => {
+      if (node.type.name === "image")
+        parts.push({
+          ...resolveImage(node.attrs.image as ImageAttachment),
+          type: "image",
+        })
+      else appendText(node.isText ? (node.text ?? "") : mentionText(node))
+    })
+  })
+  return parts
+}
+
+export function promptPartsText(parts: readonly InputPart[]): string {
+  return parts
+    .map((part) => (part.type === "text" ? part.text : "\uFFFC"))
+    .join("")
 }
 
 export function serializePrompt(doc: Node): string {

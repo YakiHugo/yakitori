@@ -17,6 +17,7 @@ import {
   type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
@@ -1009,7 +1010,7 @@ describe("execution view", () => {
           requestId: "request:1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "text" as const, text: "run" },
+          content: { kind: "parts", parts: inputParts("run") },
           modelSelection: { provider: "faux", model: "faux-1" },
         },
       },
@@ -1053,7 +1054,11 @@ describe("execution view", () => {
     })
 
     expect(projectExecutionView(state).entries).toEqual([
-      expect.objectContaining({ kind: "user_input", text: "run" }),
+      expect.objectContaining({
+        kind: "user_input",
+        text: "run",
+        parts: inputParts("run"),
+      }),
       expect.objectContaining({
         kind: "tool",
         toolCallId: "tool_1",
@@ -1432,7 +1437,7 @@ describe("execution view", () => {
           requestId: "request:1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "text" as const, text: "run" },
+          content: { kind: "parts", parts: inputParts("run") },
         },
       },
       {
@@ -1441,7 +1446,7 @@ describe("execution view", () => {
           requestId: "request:2",
           inputId: "input_2",
           role: InputRole.User,
-          content: { kind: "text" as const, text: "queued" },
+          content: { kind: "parts", parts: inputParts("queued") },
         },
       },
       {

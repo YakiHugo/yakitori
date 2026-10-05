@@ -49,7 +49,10 @@ describe("live file observations", () => {
         await first.handlers.admitInput({
           sessionId,
           requestId: "request_read_before_restart",
-          content: { kind: "text", text: "read the file" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "read the file" }],
+          },
         }),
       )
       await waitForThreadIdle(first, sessionId)
@@ -84,7 +87,10 @@ describe("live file observations", () => {
           await second.handlers.admitInput({
             sessionId,
             requestId: "request_edit_after_restart",
-            content: { kind: "text", text: "edit the file" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "edit the file" }],
+            },
           }),
         )
         await waitForThreadIdle(second, sessionId)

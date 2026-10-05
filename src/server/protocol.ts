@@ -4,11 +4,10 @@ import type {
   EventEnvelope,
   EventMetadata,
   ForkReason,
-  ImageAttachment,
   InputRole,
   ModelSelection,
   StoredEventEnvelope,
-  TextContent,
+  InputContent,
   TokenUsage,
 } from "../kernel/index.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
@@ -62,7 +61,7 @@ export type ApiCreateSessionResponse = {
 export type ApiForkSessionRequest = {
   readonly atInputId: string
   readonly reason: ForkReason
-  readonly content?: TextContent
+  readonly content?: InputContent
   readonly modelSelection?: ModelSelection
 }
 
@@ -277,7 +276,7 @@ export type ApiServerDiagnostics = Readonly<{
 export type ApiAdmitInputRequest = {
   readonly sessionId: string
   readonly requestId: string
-  readonly content: TextContent
+  readonly content: InputContent
   readonly modelSelection?: ModelSelection
   readonly role?: InputRole
   readonly parentInputId?: string
@@ -285,6 +284,7 @@ export type ApiAdmitInputRequest = {
 }
 
 export type ApiAdmitInputResponse = {
+  readonly content: InputContent
   readonly requestId: string
   // Direct admission acknowledges a routing decision; input.admitted confirms
   // its rollout record. Queue admission acknowledges the separate queue write.
@@ -296,7 +296,7 @@ export type ApiSteerInputRequest = {
   readonly sessionId: string
   readonly requestId: string
   readonly expectedTurnId: string
-  readonly content: TextContent
+  readonly content: InputContent
   readonly modelSelection?: ModelSelection
   readonly metadata?: EventMetadata
 }
@@ -309,7 +309,7 @@ export type ApiSteerInputResponse = {
   readonly turnId: string
   // A promoted image belongs to the Session, so an uncommitted steer can be
   // restored even after its original draft attachment has been released.
-  readonly attachments?: readonly ImageAttachment[]
+  readonly content: InputContent
 }
 
 export type ApiCompactSessionResponse = {

@@ -972,7 +972,10 @@ describe("Chat Completions provider", () => {
           })
           threadId = thread.id
           await thread.startIfIdle({
-            content: { kind: "text", text: "Inspect" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "Inspect" }],
+            },
           })
           await expect
             .poll(() => thread.agentStatus)
@@ -1165,7 +1168,10 @@ describe("Chat Completions provider", () => {
             mateRevisionId: "revision_test",
           })
           await thread.startIfIdle({
-            content: { kind: "text", text: "Inspect" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "Inspect" }],
+            },
           })
           await expect
             .poll(() => thread.agentStatus)
@@ -1227,7 +1233,10 @@ describe("Chat Completions provider", () => {
           const resumed = await runtime.manager.resumeThread(thread.id)
           if (resumed === undefined) throw new Error("Missing resumed thread")
           await resumed.startIfIdle({
-            content: { kind: "text", text: "Continue" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "Continue" }],
+            },
           })
           await expect
             .poll(() => resumed.agentStatus)

@@ -2429,10 +2429,14 @@ function isSubmissionMetadata(value: unknown): boolean {
       "parentInputId",
       "metadata",
       "queuedDispatch",
+      "requestFingerprint",
     ]) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
     optionalString(value.parentInputId) &&
+    (value.requestFingerprint === undefined ||
+      (typeof value.requestFingerprint === "string" &&
+        /^[a-f0-9]{64}$/.test(value.requestFingerprint))) &&
     (value.metadata === undefined || isJsonObject(value.metadata)) &&
     (value.queuedDispatch === undefined || value.queuedDispatch === true)
   )

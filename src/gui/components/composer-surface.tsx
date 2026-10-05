@@ -1,3 +1,10 @@
+import { inputImageOwnership } from "../input-image-ownership.ts"
+import type { InputPart } from "../../kernel/events.ts"
+import {
+  inputContentImages,
+  inputContentText,
+} from "../../kernel/input-content.ts"
+import { textInputParts, trimInputParts } from "../input-parts.ts"
 import {
   Archive,
   ArrowUp,
@@ -22,6 +29,7 @@ import {
 } from "lucide-react"
 import {
   type ReactNode,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -50,7 +58,11 @@ import {
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
-import { fileMentionText, skillMentionText } from "./prompt-document.ts"
+import {
+  fileMentionText,
+  skillMentionText,
+  promptPartsText,
+} from "./prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
 import { ContextExcerptChips } from "./selection-actions.tsx"
 import { Button } from "./ui/button.tsx"
@@ -121,14 +133,14 @@ export type ComposerImageImport = (
     | undefined
   >,
   validate?: () => void,
-) => Promise<void>
+) => Promise<readonly ImageAttachment[] | undefined>
 
 // Session creation and submission belong to the caller. Editor behavior and
 // presentation are shared by the main conversation and temporary chats.
 export function ComposerSurface({
   sessionId,
-  draft,
-  attachments,
+  editorKey,
+  draft: parts,
   excerpts,
   sessionSkills,
   sessionSkillsError,
@@ -142,9 +154,8 @@ export function ComposerSurface({
   activeTurnId,
   supportsImages = true,
   supportsOriginal = true,
-  historyTexts,
+  historyParts,
   setPromptDraft,
-  setPromptAttachments,
   removePromptExcerpt,
   updatePromptExcerpt,
   onSubmit,
@@ -164,8 +175,8 @@ export function ComposerSurface({
   stopLabel = "Interrupt",
 }: Readonly<{
   sessionId?: string | undefined
-  draft: string
-  attachments: readonly ImageAttachment[]
+  editorKey?: string | number | undefined
+  draft: readonly InputPart[]
   excerpts: readonly ContextExcerpt[]
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError?: string | undefined
@@ -179,16 +190,11 @@ export function ComposerSurface({
   activeTurnId?: string | undefined
   supportsImages?: boolean
   supportsOriginal?: boolean
-  historyTexts: readonly string[]
-  setPromptDraft(text: string): void
-  setPromptAttachments(attachments: readonly ImageAttachment[]): void
+  historyParts: readonly (readonly InputPart[])[]
+  setPromptDraft(parts: readonly InputPart[]): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
-  onSubmit(
-    text: string,
-    attachments: readonly ImageAttachment[],
-    mode?: "auto" | "queue",
-  ): void
+  onSubmit(parts: readonly InputPart[], mode?: "auto" | "queue"): void
   onCancel(): void
   modelControls: ReactNode
   importImages: ComposerImageImport
@@ -215,6 +221,8 @@ export function ComposerSurface({
 }>) {
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
+  const draft = promptPartsText(parts)
+  const attachments = inputContentImages({ kind: "parts", parts })
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const contextPanelRef = useRef<HTMLDivElement>(null)
   const addContextRef = useRef<HTMLButtonElement>(null)
@@ -227,9 +235,64 @@ export function ComposerSurface({
       Readonly<{
         sessionId: string | undefined
         stepsBack: number
-        savedDraft: string
+        savedDraft: readonly InputPart[]
       }>
     >()
+  // A recalled input temporarily replaces the editor, but this surface still
+  // owns the unsent snapshot, including across session-keyed editor remounts.
+  const parkedOwner = useRef<readonly InputPart[] | undefined>(undefined)
+  const currentOwner = useRef({ parts, apiBase, onAttachmentError })
+  useLayoutEffect(() => {
+    currentOwner.current = { parts, apiBase, onAttachmentError }
+  })
+  const releaseParked = useCallback(
+    (previous: readonly InputPart[], next: readonly InputPart[] = []) => {
+      const live = new Set(
+        inputImageOwnership
+          .resolveParts(currentOwner.current.apiBase, [
+            ...currentOwner.current.parts,
+            ...next,
+          ])
+          .flatMap((part) =>
+            part.type === "image"
+              ? [`${part.file.rolloutId}\0${part.file.path}`]
+              : [],
+          ),
+      )
+      const unused = inputContentImages({
+        kind: "parts",
+        parts: inputImageOwnership.resolveParts(
+          currentOwner.current.apiBase,
+          previous,
+        ),
+      }).filter(
+        (image) =>
+          image.file.path.startsWith("attachments/staging/") &&
+          !live.has(`${image.file.rolloutId}\0${image.file.path}`),
+      )
+      if (unused.length)
+        void discardDraftImages(unused).catch((error: unknown) =>
+          currentOwner.current.onAttachmentError(
+            error instanceof Error
+              ? error.message
+              : "Unused images could not be released.",
+          ),
+        )
+    },
+    [],
+  )
+  useLayoutEffect(() => {
+    const previous = parkedOwner.current
+    const next = historyNavigation?.savedDraft
+    parkedOwner.current = next
+    if (previous && previous !== next) releaseParked(previous, next)
+  }, [historyNavigation?.savedDraft, releaseParked])
+  useEffect(
+    () => () => {
+      if (parkedOwner.current) releaseParked(parkedOwner.current)
+    },
+    [releaseParked],
+  )
   const [dismissedQuery, setDismissedQuery] = useState<string>()
   const [highlight, setHighlight] = useState<{ query: string; index: number }>()
   const [selection, setSelection] = useState({
@@ -284,7 +347,7 @@ export function ComposerSurface({
     historyNavigation?.sessionId === sessionId ? historyNavigation : undefined
 
   const prefix = draft.slice(0, cursor)
-  const token = /(?:^|\s)([/$@])([\p{L}\p{N}_:./-]*)$/u.exec(prefix)
+  const token = /(?:^|[\s\uFFFC])([/$@])([\p{L}\p{N}_:./-]*)$/u.exec(prefix)
   const query = token?.[2] ?? ""
   const trigger = token?.[1]
   const tokenStart = cursor - query.length - 1
@@ -320,7 +383,7 @@ export function ComposerSurface({
           ...(allowCommands &&
           trigger === "/" &&
           tokenStart === 0 &&
-          draft.slice(tokenEnd).trim().length === 0
+          draft.slice(tokenEnd).replaceAll("\uFFFC", "").trim().length === 0
             ? SLASH_COMMANDS.filter((command) =>
                 command.name
                   .slice(1)
@@ -384,7 +447,7 @@ export function ComposerSurface({
     }
   }, [trigger, query, queryKey, menuOpen, searchFiles])
 
-  const text = draft.trim()
+  const text = inputContentText({ kind: "parts", parts }).trim()
   const previewAttachment =
     previewIndex === undefined ? undefined : attachments[previewIndex]
   const containsInput =
@@ -398,30 +461,40 @@ export function ComposerSurface({
 
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) return
-    await importImages(
-      async () => ({
-        collect: (importSessionId) =>
-          appendImageFiles(attachments, importSessionId, files),
-      }),
-      () => validateImageFiles(files),
-    )
+    const insertion = editorRef.current?.captureImageInsertion()
+    try {
+      const added = await importImages(
+        async () => ({
+          collect: (importSessionId) =>
+            appendImageFiles([], importSessionId, files),
+        }),
+        () => validateImageFiles(files),
+      )
+      if (added?.length && !insertion?.insert(added))
+        await discardDraftImages(added)
+    } finally {
+      insertion?.cancel()
+    }
   }
 
   const pickImages = async () => {
     setAddMenuOpen(false)
-    await importImages(async () => {
-      const selection = await selectImages()
-      if (selection === undefined) return
-      return {
-        collect: (importSessionId) =>
-          appendPickedImages(
-            attachments,
-            importSessionId,
-            selection.selectionId,
-          ),
-        cleanup: () => discardPickedImages(selection.selectionId),
-      }
-    })
+    const insertion = editorRef.current?.captureImageInsertion()
+    try {
+      const added = await importImages(async () => {
+        const selection = await selectImages()
+        if (selection === undefined) return
+        return {
+          collect: (importSessionId) =>
+            appendPickedImages([], importSessionId, selection.selectionId),
+          cleanup: () => discardPickedImages(selection.selectionId),
+        }
+      })
+      if (added?.length && !insertion?.insert(added))
+        await discardDraftImages(added)
+    } finally {
+      insertion?.cancel()
+    }
   }
 
   const pickAddAction = (action: "files" | "image") => {
@@ -449,16 +522,9 @@ export function ComposerSurface({
   const submit = (mode?: "auto" | "queue") => {
     if (!canSend) return
     setHistoryNavigation(undefined)
-    onSubmit(
-      text,
-      supportsOriginal
-        ? attachments
-        : attachments.map((attachment) => ({
-            ...attachment,
-            detail: "high" as const,
-          })),
-      mode,
-    )
+    // Preserve authored detail in durable history and admission identity.
+    // Runtime projects it to the selected model before preparing image bytes.
+    onSubmit(trimInputParts(parts), mode)
   }
 
   // Selecting a command dispatches it right away, like codex: the draft
@@ -471,11 +537,16 @@ export function ComposerSurface({
     // /goal always takes an argument, so completing the text is the whole
     // interaction; the submit path in Composer interprets the directive.
     if (command.name === GOAL_DIRECTIVE) {
-      setPromptDraft(`${GOAL_DIRECTIVE} `)
+      editorRef.current?.replaceRange(
+        tokenStart,
+        tokenEnd,
+        `${GOAL_DIRECTIVE} `,
+      )
       editorRef.current?.focus()
       return
     }
     const blocked =
+      attachments.length > 0 ||
       (command.name === COMPACT_DIRECTIVE && sessionId === undefined) ||
       (command.name !== "/status" &&
         command.name !== "/mcp" &&
@@ -483,7 +554,7 @@ export function ComposerSurface({
       (command.name === COMPACT_DIRECTIVE &&
         (attachments.length > 0 || excerpts.length > 0))
     if (blocked) {
-      setPromptDraft(command.name)
+      editorRef.current?.replaceRange(tokenStart, tokenEnd, command.name)
       editorRef.current?.focus()
       return
     }
@@ -492,8 +563,8 @@ export function ComposerSurface({
     )
     // The caller clears the draft after the action succeeds. This preserves
     // the command when an asynchronous operation (notably /compact) fails.
-    setPromptDraft(command.name)
-    onSubmit(command.name, [])
+    setPromptDraft(textInputParts(command.name))
+    onSubmit(textInputParts(command.name))
   }
 
   const pickSuggestion = (item: ComposerSuggestion): void => {
@@ -575,12 +646,12 @@ export function ComposerSurface({
       if (activeHistoryNavigation === undefined && !cursorAtStart) return false
       event.preventDefault()
       const stepsBack = (activeHistoryNavigation?.stepsBack ?? 0) + 1
-      const entry = historyTexts[historyTexts.length - stepsBack]
+      const entry = historyParts[historyParts.length - stepsBack]
       if (entry === undefined) return false
       setHistoryNavigation({
         sessionId,
         stepsBack,
-        savedDraft: activeHistoryNavigation?.savedDraft ?? draft,
+        savedDraft: activeHistoryNavigation?.savedDraft ?? parts,
       })
       setPromptDraft(entry)
       return true
@@ -593,7 +664,7 @@ export function ComposerSurface({
         setHistoryNavigation(undefined)
         return true
       }
-      const entry = historyTexts[historyTexts.length - stepsBack]
+      const entry = historyParts[historyParts.length - stepsBack]
       if (entry === undefined) return false
       setHistoryNavigation({ ...activeHistoryNavigation, stepsBack })
       setPromptDraft(entry)
@@ -750,20 +821,7 @@ export function ComposerSurface({
                     type="button"
                     disabled={sending}
                     aria-label={`Remove ${attachment.name}`}
-                    onClick={() => {
-                      setPromptAttachments(
-                        attachments.filter(
-                          (_, candidate) => candidate !== index,
-                        ),
-                      )
-                      void discardDraftImages([attachment]).catch((error) => {
-                        onAttachmentError(
-                          error instanceof Error
-                            ? error.message
-                            : "Image could not be removed.",
-                        )
-                      })
-                    }}
+                    onClick={() => editorRef.current?.removeImage(index)}
                     className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full border border-white/80 bg-black/75 text-white shadow-sm transition-[transform,background-color] hover:scale-105 hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <X className="size-3" />
@@ -777,18 +835,9 @@ export function ComposerSurface({
                     }
                     disabled={!supportsOriginal || sending}
                     onClick={() =>
-                      setPromptAttachments(
-                        attachments.map((candidate, candidateIndex) =>
-                          candidateIndex === index
-                            ? {
-                                ...candidate,
-                                detail:
-                                  candidate.detail === "original"
-                                    ? "high"
-                                    : "original",
-                              }
-                            : candidate,
-                        ),
+                      editorRef.current?.setImageDetail(
+                        index,
+                        attachment.detail === "original" ? "high" : "original",
                       )
                     }
                     title={
@@ -819,10 +868,12 @@ export function ComposerSurface({
           ) : null}
 
           <PromptEditor
-            key={sessionId}
+            key={editorKey ?? sessionId}
             ref={editorRef}
             label={label}
-            value={draft}
+            value={parts}
+            parkedParts={historyNavigation?.savedDraft}
+            apiBase={apiBase}
             placeholder={placeholder}
             disabled={sending}
             onChange={(text) => {
@@ -848,6 +899,24 @@ export function ComposerSurface({
               setAddMenuOpen(false)
             }}
             onPasteImages={(images) => void addFiles(images)}
+            onPreviewImage={(image) =>
+              setPreviewIndex(
+                attachments.findIndex(
+                  (candidate) =>
+                    candidate.file.rolloutId === image.file.rolloutId &&
+                    candidate.file.path === image.file.path,
+                ),
+              )
+            }
+            onDiscardImages={(images) => {
+              void discardDraftImages(images).catch((error: unknown) =>
+                onAttachmentError(
+                  error instanceof Error
+                    ? error.message
+                    : "Unused images could not be released.",
+                ),
+              )
+            }}
             onKeyDown={handleDraftKeyDown}
           />
 

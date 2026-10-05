@@ -1,9 +1,14 @@
+import { InputRole } from "../kernel/events.ts"
+import {
+  fingerprintInputAdmission,
+  fingerprintOperation,
+} from "../kernel/operation.ts"
 import type {
   EventMetadata,
   KernelError,
   ModelSelection,
   StartedExecutionItem,
-  TextContent,
+  InputContent,
   TurnCompletion,
 } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
@@ -33,7 +38,7 @@ export type AgentStatus =
 
 export type TurnInput = Readonly<{
   submissionId: string
-  content: TextContent
+  content: InputContent
   manualCompact?: boolean
   modelSelection?: ModelSelection
   metadata?: EventMetadata
@@ -486,4 +491,21 @@ export class BoundedQueue<T> {
     this.#items.push(sender.value)
     sender.resolve()
   }
+}
+
+export function fingerprintTurnInput(input: TurnInput): string {
+  const fingerprint = fingerprintInputAdmission({
+    role: input.goalId === undefined ? InputRole.User : InputRole.Runtime,
+    content: input.content,
+    ...(input.modelSelection === undefined
+      ? {}
+      : { modelSelection: input.modelSelection }),
+    ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+    ...(input.parentInputId === undefined
+      ? {}
+      : { parentInputId: input.parentInputId }),
+  })
+  if (input.goalId !== undefined)
+    return fingerprintOperation({ goalId: input.goalId, input: fingerprint })
+  return input.manualCompact === true ? `compact:${fingerprint}` : fingerprint
 }

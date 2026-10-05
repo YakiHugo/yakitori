@@ -174,7 +174,10 @@ describe("Turn processor", () => {
       })
       const continuation = {
         submissionId: "turn_goal_continue",
-        content: { kind: "text" as const, text: "Continue the goal" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Continue the goal" }],
+        },
         goalId: "goal_continue",
       }
       const started = await thread.startIfIdle(continuation)
@@ -182,7 +185,10 @@ describe("Turn processor", () => {
       await entered.promise
       await thread.steer(
         {
-          content: { kind: "text", text: "Wrap up the goal" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "Wrap up the goal" }],
+          },
           goalId: "goal_continue",
         },
         continuation.submissionId,
@@ -239,7 +245,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "First second third." })
@@ -285,7 +296,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "One two three", reason: "truncated" })
@@ -296,7 +312,12 @@ describe("Turn processor", () => {
       outcome: "completed",
       completion: { reason: "truncated" },
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "Continue." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "Next answer." })
@@ -315,7 +336,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ errored: "Model response was truncated without usable text." })
@@ -332,7 +358,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "Partial answer", reason: "truncated" })
@@ -373,7 +404,12 @@ describe("Turn processor", () => {
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "New answer", reason: "truncated" })
@@ -423,7 +459,12 @@ describe("Turn processor", () => {
       ]),
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Work." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ errored: "Model response contained an incomplete tool call." })
@@ -477,7 +518,12 @@ describe("Turn processor", () => {
       ]),
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Work." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "Finished" })
@@ -495,7 +541,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ errored: "Connection failed" })
@@ -545,7 +596,12 @@ describe("Turn processor", () => {
       ]),
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Work." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({
@@ -597,7 +653,12 @@ describe("Turn processor", () => {
       yield responseEvent("complete.")
     })
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Explain." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "Answer complete." })
@@ -633,7 +694,12 @@ describe("Turn processor", () => {
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "Request." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Request." }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "Cannot help with that.", reason: "refused" })
@@ -696,7 +762,10 @@ describe("Turn processor", () => {
       })
       threadId = thread.id
       await thread.startIfIdle({
-        content: { kind: "text", text: "Persist after hook" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Persist after hook" }],
+        },
       })
       await expect
         .poll(() => thread.agentStatus)
@@ -712,7 +781,12 @@ describe("Turn processor", () => {
         mateRevisionId: "mate_revision_test",
       })
       threadId = blocked.id
-      await blocked.startIfIdle({ content: { kind: "text", text: "block" } })
+      await blocked.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "block" }],
+        },
+      })
       await expect.poll(() => blocked.agentStatus).toEqual({ completed: null })
       expect(sampled).toBe(false)
       expect(
@@ -752,7 +826,10 @@ describe("Turn processor", () => {
 
     await thread.startIfIdle({
       submissionId: "turn_blocked",
-      content: { kind: "text", text: "blocked" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "blocked" }],
+      },
     })
     await expect.poll(() => thread.status).toBe("idle")
     expect(sampled).toEqual([])
@@ -767,7 +844,10 @@ describe("Turn processor", () => {
 
     await thread.startIfIdle({
       submissionId: "turn_accepted",
-      content: { kind: "text", text: "accepted prompt" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "accepted prompt" }],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -793,7 +873,12 @@ describe("Turn processor", () => {
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "go" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({
@@ -820,7 +905,12 @@ describe("Turn processor", () => {
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "go" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: null })
   })
 
@@ -862,10 +952,20 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "one" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "one" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "first" })
     maxAttempts = 2
-    await thread.startIfIdle({ content: { kind: "text", text: "two" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "two" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "second" })
 
     const stored = await runtime.store.readThread(thread.id)
@@ -968,7 +1068,12 @@ describe("Turn processor", () => {
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(executingThreadId).toBe(thread.id)
     await runtime.manager.shutdown()
@@ -1028,7 +1133,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     for (const text of ["first request", "second request", "third request"]) {
-      await thread.startIfIdle({ content: { kind: "text", text } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
+      })
       await nextLifecycleEvent(thread)
       await nextLifecycleEvent(thread)
     }
@@ -1106,8 +1216,13 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
     await thread.startIfIdle({
       content: {
-        kind: "text",
-        text: "Complete the work. Do not change the public API.",
+        kind: "parts" as const,
+        parts: [
+          {
+            type: "text" as const,
+            text: "Complete the work. Do not change the public API.",
+          },
+        ],
       },
     })
     await expect
@@ -1302,7 +1417,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: { kind: "text", text: "Do not change the public API" },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "Do not change the public API" },
+        ],
+      },
     })
     await summaryReady.promise
     expect(
@@ -1431,7 +1551,12 @@ describe("Turn processor", () => {
       })
       const thread = await runtime.createThread()
       for (const text of ["First.", "Continue."]) {
-        await thread.startIfIdle({ content: { kind: "text", text } })
+        await thread.startIfIdle({
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: text }],
+          },
+        })
         await nextLifecycleEvent(thread)
         await nextLifecycleEvent(thread)
       }
@@ -1508,10 +1633,20 @@ describe("Turn processor", () => {
         }),
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "First." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "First." }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
-    await thread.startIfIdle({ content: { kind: "text", text: "Continue." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     if (limitTokens === 45) {
@@ -1570,7 +1705,10 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: { kind: "text", text: "Complete forty work items." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Complete forty work items." }],
+      },
     })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
@@ -1677,7 +1815,12 @@ describe("Turn processor", () => {
         model: "scripted",
       })
       .sendMessage({ target: thread.id, message: "durable mailbox" })
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     await firstManager.shutdown()
@@ -1725,7 +1868,10 @@ describe("Turn processor", () => {
     })
     const resumed = await resumedManager.resumeThread(thread.id)
     await resumed?.startIfIdle({
-      content: { kind: "text", text: "run after restart" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run after restart" }],
+      },
     })
     if (resumed !== undefined) {
       await nextLifecycleEvent(resumed)
@@ -1757,7 +1903,12 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
 
     await expect(
-      thread.startIfIdle({ content: { kind: "text", text: "hi" } }),
+      thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "hi" }],
+        },
+      }),
     ).resolves.toMatchObject({ type: "started" })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
@@ -1867,7 +2018,12 @@ describe("Turn processor", () => {
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "use echo" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "use echo" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(provider.callCount).toBe(2)
@@ -1967,7 +2123,12 @@ describe("Turn processor", () => {
         ]),
       )
       const thread = await runtime.createThread()
-      await thread.startIfIdle({ content: { kind: "text", text: "tick" } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "tick" }],
+        },
+      })
       await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
 
       expect(calls).toBe(2)
@@ -2005,7 +2166,12 @@ describe("Turn processor", () => {
     }
     const runtime = await createRuntime(stream)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "retry" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "retry" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
 
     const completed = (await runtime.store.readThread(thread.id))?.rollout.find(
@@ -2055,7 +2221,12 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "use it" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "use it" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     await Promise.resolve()
@@ -2140,7 +2311,12 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "find it" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "find it" }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(provider.callCount).toBe(3)
@@ -2266,10 +2442,20 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "find it" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "find it" }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
-    await thread.startIfIdle({ content: { kind: "text", text: "again" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "again" }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(callCount).toBe(4)
@@ -2335,7 +2521,10 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
 
     await thread.startIfIdle({
-      content: { kind: "text", text: "find it" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "find it" }],
+      },
       modelSelection: { provider, model },
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
@@ -2378,7 +2567,10 @@ describe("Turn processor", () => {
     ]) {
       await thread.startIfIdle({
         submissionId: turnId,
-        content: { kind: "text", text },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
         modelSelection: { provider: "future-provider", model: "future-model" },
       })
       const events: SessionEvent[] = []
@@ -2453,7 +2645,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(refresh).toHaveBeenCalled()
@@ -2467,7 +2664,12 @@ describe("Turn processor", () => {
     )
     const invalidThread = await invalid.createThread()
     await expect(
-      invalidThread.startIfIdle({ content: { kind: "text", text: "run" } }),
+      invalidThread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "run" }],
+        },
+      }),
     ).rejects.toThrow(
       "model_context_window 12346 exceeds faux/scripted maximum of 12345",
     )
@@ -2535,7 +2737,12 @@ describe("Turn processor", () => {
 
     const thread = await manager.resumeThread(threadId)
     if (thread === undefined) throw new Error("Thread was not resumed.")
-    await thread.startIfIdle({ content: { kind: "text", text: "capture" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "capture" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
@@ -2598,7 +2805,12 @@ describe("Turn processor", () => {
     const path = join(runtime.root, "value.txt")
     await writeFile(path, "value = 1\n")
 
-    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "update" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
@@ -2699,7 +2911,12 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
     const path = join(runtime.root, "resume.txt")
     await writeFile(path, "before\n")
-    await thread.startIfIdle({ content: { kind: "text", text: "read" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "read" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     await runtime.manager.shutdown()
@@ -2717,7 +2934,12 @@ describe("Turn processor", () => {
     cleanups.push(() => resumedManager.shutdown())
     const resumed = await resumedManager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Thread was not resumed.")
-    await resumed.startIfIdle({ content: { kind: "text", text: "edit" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "edit" }],
+      },
+    })
     await nextLifecycleEvent(resumed)
     await nextLifecycleEvent(resumed)
 
@@ -2772,7 +2994,12 @@ describe("Turn processor", () => {
     const path = join(runtime.root, "same-call.txt")
     await writeFile(path, "one\n")
 
-    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "update" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
@@ -2854,7 +3081,12 @@ describe("Turn processor", () => {
     const path = join(runtime.root, "truncated.txt")
     await writeFile(path, "one\ntwo\n")
 
-    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "update" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
@@ -2899,7 +3131,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "use echo" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "use echo" }],
+      },
+    })
     const events: SessionEvent[] = []
     for (;;) {
       const event = await thread.nextEvent()
@@ -2960,7 +3197,12 @@ describe("Turn processor", () => {
       { permissionGate, approvalPolicy: "auto_file_tools" },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     const pending = await waitForValue(() => permissionGate.list(thread.id)[0])
     permissionGate.resolve({
       sessionId: thread.id,
@@ -3088,7 +3330,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "observe" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "observe" }],
+      },
+    })
     await firstEntered.promise
     await secondEntered.promise
     expect(events).toEqual(["start:first", "start:second"])
@@ -3176,7 +3423,12 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "schedule" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "schedule" }],
+      },
+    })
     const pending = await waitForValue(() => permissionGate.list(thread.id)[0])
     await firstEntered.promise
     await secondEntered.promise
@@ -3238,7 +3490,12 @@ describe("Turn processor", () => {
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "schedule" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "schedule" }],
+      },
+    })
     await readerEntered.promise
     await readinessEntered.promise
     await Promise.resolve()
@@ -3283,7 +3540,12 @@ describe("Turn processor", () => {
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "wait" }],
+      },
+    })
     await readinessEntered.promise
     await thread.interrupt("test")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
@@ -3341,14 +3603,24 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "wait" }],
+      },
+    })
     await streamEntered.promise
     await thread.interrupt("test")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.interrupted")
     expect(closes).toEqual([1])
 
-    await thread.startIfIdle({ content: { kind: "text", text: "again" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "again" }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(sessions).toBe(2)
@@ -3382,13 +3654,21 @@ describe("Turn processor", () => {
     const runtime = await createRuntime(stream)
     const thread = await runtime.createThread()
     const started = await thread.startIfIdle({
-      content: { kind: "text", text: "start" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
     await firstCallEntered.promise
     await expect(
       thread.steer(
-        { content: { kind: "text", text: "steer while running" } },
+        {
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "steer while running" }],
+          },
+        },
         started.turnId,
       ),
     ).resolves.toMatchObject({ type: "steered" })
@@ -3401,7 +3681,10 @@ describe("Turn processor", () => {
     const abortRuntime = await createRuntime(aborting.stream)
     const abortThread = await abortRuntime.createThread()
     await abortThread.startIfIdle({
-      content: { kind: "text", text: "wait" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "wait" }],
+      },
     })
     await abortThread.interrupt("test")
     expect((await nextLifecycleEvent(abortThread))?.type).toBe("turn.started")
@@ -3451,12 +3734,20 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     const started = await thread.startIfIdle({
-      content: { kind: "text", text: "start" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
     await entered.promise
     await thread.steer(
-      { content: { kind: "text", text: "blocked steer" } },
+      {
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "blocked steer" }],
+        },
+      },
       started.turnId,
     )
     release.resolve()
@@ -3496,14 +3787,20 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
     const started = await thread.startIfIdle({
-      content: { kind: "text", text: "start" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
     await firstCallEntered.promise
     await expect(
       thread.steer(
         {
-          content: { kind: "text", text: "use B later" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "use B later" }],
+          },
           modelSelection: { provider: "faux", model: "model-b" },
         },
         started.turnId,
@@ -3513,7 +3810,12 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
-    await thread.startIfIdle({ content: { kind: "text", text: "next" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "next" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     expect(thread.snapshot().configuration?.defaultTarget.model).toBe("model-b")
@@ -3521,7 +3823,12 @@ describe("Turn processor", () => {
     await thread.shutdownAndWait()
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Thread did not resume.")
-    await resumed.startIfIdle({ content: { kind: "text", text: "resumed" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "resumed" }],
+      },
+    })
     await nextLifecycleEvent(resumed)
     await nextLifecycleEvent(resumed)
     expect(call).toBe(4)
@@ -3593,7 +3900,12 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "wait" }],
+      },
+    })
     await toolEntered.promise
     await thread.interrupt("stop tool")
     await nextLifecycleEvent(thread)
@@ -3608,10 +3920,20 @@ describe("Turn processor", () => {
       )?.item,
     ).toMatchObject({ usage: { inputTokens: 9, outputTokens: 2 } })
 
-    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
-    await thread.startIfIdle({ content: { kind: "text", text: "fail" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "fail" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     expect((await nextLifecycleEvent(thread))?.type).toBe("session.error")
     stored = await runtime.store.readThread(thread.id)
@@ -3663,7 +3985,12 @@ describe("Turn processor", () => {
         : stream,
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     await terminalYielded.promise
     await thread.interrupt("after terminal")
     await nextLifecycleEvent(thread)
@@ -3708,7 +4035,12 @@ describe("Turn processor", () => {
       },
     })
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await entered.promise
     await thread.interrupt("hard stop")
     await nextLifecycleEvent(thread)
@@ -3815,12 +4147,20 @@ describe("Turn processor", () => {
       await target.deliverAgentMessage(request.messageId, request.text)
     }
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "first" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "first" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
     await thread.startIfIdle({
-      content: { kind: "text", text: "second" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "second" }],
+      },
       modelSelection: { provider: "faux", model: "model-b" },
     })
     await nextLifecycleEvent(thread)
@@ -3828,7 +4168,12 @@ describe("Turn processor", () => {
     if (compactionAgentControl === undefined) {
       throw new Error("missing compaction agent control")
     }
-    await thread.startIfIdle({ content: { kind: "text", text: "third" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "third" }],
+      },
+    })
     await compactionStarted.promise
     await compactionAgentControl
       .bind(thread.id, {
@@ -3928,10 +4273,20 @@ describe("Turn processor", () => {
       }),
     })
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "first" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "first" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
-    await thread.startIfIdle({ content: { kind: "text", text: "second" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "second" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
@@ -3949,7 +4304,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: { kind: "text", text: "too large for the local estimate" },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "too large for the local estimate" },
+        ],
+      },
     })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
@@ -3977,7 +4337,12 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
 
     for (const text of ["first", "second"]) {
-      await thread.startIfIdle({ content: { kind: "text", text } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
+      })
       await nextLifecycleEvent(thread)
       await nextLifecycleEvent(thread)
     }
@@ -4032,7 +4397,12 @@ describe("Turn processor", () => {
     )
     const thread = await runtime.createThread()
     for (const text of ["first", "overflow"]) {
-      await thread.startIfIdle({ content: { kind: "text", text } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
+      })
       await nextLifecycleEvent(thread)
       await nextLifecycleEvent(thread)
     }
@@ -4042,7 +4412,12 @@ describe("Turn processor", () => {
       errored:
         failure === "code" ? "Input rejected" : "context length exceeded",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "continued" })
@@ -4084,7 +4459,12 @@ describe("Turn processor", () => {
     })
     const thread = await runtime.createThread()
     for (const text of ["one", "two", "three", "four"]) {
-      await thread.startIfIdle({ content: { kind: "text", text } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: text }],
+        },
+      })
       await nextLifecycleEvent(thread)
       await nextLifecycleEvent(thread)
     }
@@ -4187,10 +4567,20 @@ describe("Turn processor", () => {
       modelAutoCompactTokenLimit: 30_000,
     })
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "first" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "first" }],
+      },
+    })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
-    await thread.startIfIdle({ content: { kind: "text", text: "second" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "second" }],
+      },
+    })
     await compactionStalled.promise
     await thread.interrupt("stop compaction")
     await nextLifecycleEvent(thread)
@@ -4240,12 +4630,20 @@ it("injects explicit skills once per input and expands steering before the next 
   }
   const thread = await runtime.createThread()
   const started = await thread.startIfIdle({
-    content: { kind: "text", text: "$first" },
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "$first" }],
+    },
   })
   if (started.type !== "started") throw new Error("Turn did not start")
   await entered.promise
   await thread.steer(
-    { content: { kind: "text", text: "$second" } },
+    {
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "$second" }],
+      },
+    },
     started.turnId,
   )
   release.resolve()
@@ -4334,7 +4732,10 @@ it.each([
   await writeFile(join(runtime.root, "screen.png"), png)
   const thread = await runtime.createThread()
   await thread.startIfIdle({
-    content: { kind: "text", text: "inspect screenshot" },
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "inspect screenshot" }],
+    },
   })
   await nextLifecycleEvent(thread)
   const completed = await nextLifecycleEvent(thread)
@@ -4548,7 +4949,10 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
   const thread = await runtime.createThread()
   for (const { provider, model } of selections) {
     await thread.startIfIdle({
-      content: { kind: "text", text: "Read the report" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Read the report" }],
+      },
       modelSelection: { provider, model },
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
@@ -4655,7 +5059,12 @@ it("uses the Turn's native PDF capability for tool reads, retries, history, and 
   await writeFile(join(runtime.root, "report.pdf"), bytes)
   const thread = await runtime.createThread()
   for (const text of ["Read the report", "Review the same report"]) {
-    await thread.startIfIdle({ content: { kind: "text", text } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: text }],
+      },
+    })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect(await nextLifecycleEvent(thread)).toMatchObject({
       type: "turn.completed",
@@ -4778,7 +5187,10 @@ it("keeps a Turn's model directory and transport together across provider replac
   await writeFile(join(runtime.root, "report.pdf"), bytes)
   const thread = await runtime.createThread()
   await thread.startIfIdle({
-    content: { kind: "text", text: "Read the report" },
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "Read the report" }],
+    },
   })
   await refreshEntered.promise
   registry.replace({
@@ -4821,7 +5233,12 @@ it("keeps a Turn's model directory and transport together across provider replac
       expect.objectContaining({ data: bytes.toString("base64") }),
     ]),
   })
-  await thread.startIfIdle({ content: { kind: "text", text: "Continue" } })
+  await thread.startIfIdle({
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "Continue" }],
+    },
+  })
   await expect
     .poll(() => thread.agentStatus)
     .toEqual({ completed: "new transport" })
@@ -4877,7 +5294,12 @@ it("closes the captured Turn when its model directory cannot refresh", async () 
     { modelClient: registry.createClient() },
   )
   const thread = await runtime.createThread()
-  await thread.startIfIdle({ content: { kind: "text", text: "Start" } })
+  await thread.startIfIdle({
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "Start" }],
+    },
+  })
   await expect
     .poll(() => thread.agentStatus)
     .toEqual({ errored: "Model directory refresh failed" })
@@ -4975,7 +5397,12 @@ it.each([
     { modelClient: registry.createClient() },
   )
   const thread = await runtime.createThread()
-  await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+  await thread.startIfIdle({
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "go" }],
+    },
+  })
   await warmed.promise
   release.resolve()
   await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })

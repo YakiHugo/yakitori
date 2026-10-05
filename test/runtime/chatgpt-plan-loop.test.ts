@@ -152,7 +152,10 @@ describe("ChatGPT plan registered Turn loop", () => {
       })
       // No model picker or other caller has primed the account catalog.
       await thread.startIfIdle({
-        content: { kind: "text", text: "Find the planning event" },
+        content: {
+          kind: "parts",
+          parts: [{ type: "text", text: "Find the planning event" }],
+        },
         modelSelection: { provider: providerId, model },
       })
       await expect

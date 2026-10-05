@@ -29,10 +29,13 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
+  type InputContent,
+  type InputPart,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -179,11 +182,13 @@ describe("composer", () => {
 
   it("sends the trimmed draft on Enter", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptDraft: "  hello mate  ",
+      promptDraft: inputParts("  hello mate  "),
     })
     render(<Composer />)
 
@@ -192,7 +197,7 @@ describe("composer", () => {
     await user.keyboard("{Enter}")
 
     expect(admitInput).toHaveBeenCalledTimes(1)
-    expect(admitInput).toHaveBeenCalledWith("hello mate")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("hello mate"), undefined)
   })
 
   it("resumes latest-output following when the reader sends", async () => {
@@ -201,7 +206,7 @@ describe("composer", () => {
     const admitInput = vi.fn(async () => {})
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "Continue",
+      promptDraft: inputParts("Continue"),
       admitInput,
     })
     render(
@@ -210,17 +215,19 @@ describe("composer", () => {
       </ConversationScrollContext.Provider>,
     )
     await user.click(screen.getByRole("button", { name: "Send" }))
-    expect(admitInput).toHaveBeenCalledWith("Continue")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("Continue"), undefined)
     expect(jumpToBottom).toHaveBeenCalledOnce()
   })
 
   it("does not send on Shift+Enter", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
     })
     render(<Composer />)
 
@@ -229,7 +236,7 @@ describe("composer", () => {
     await user.keyboard("{Shift>}{Enter}{/Shift}")
 
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("hello\n")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello\n"))
   })
 
   it.each([
@@ -237,32 +244,35 @@ describe("composer", () => {
     "Meta",
   ])("inserts Enter and Shift+Enter newlines, then sends with %s+Enter when configured", async (modifier) => {
     const user = userEvent.setup()
-    const admitInput = vi.fn(async (_text: string) => {})
+    const admitInput = vi.fn(async (_parts: readonly InputPart[]) => {})
     usePreferencesStore.setState({ sendShortcut: "mod-enter" })
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
     })
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
     await user.keyboard("{Enter}")
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("hello\n")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello\n"))
 
     await user.keyboard("{Shift>}{Enter}{/Shift}")
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("hello\n\n")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello\n\n"))
 
     await user.keyboard(`{${modifier}>}{Enter}{/${modifier}}`)
-    expect(admitInput).toHaveBeenCalledExactlyOnceWith("hello")
+    expect(admitInput).toHaveBeenCalledExactlyOnceWith(
+      inputParts("hello"),
+      undefined,
+    )
   })
 
   it("keeps the send button disabled for an empty draft", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "   ",
+      promptDraft: inputParts("   "),
     })
     render(<Composer />)
 
@@ -275,7 +285,7 @@ describe("composer", () => {
   it("keeps sending disabled until an old Session model is restored", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
       restoringModelSelectionFor: "session_1",
     })
     render(<Composer />)
@@ -289,7 +299,7 @@ describe("composer", () => {
   it("shows admission loading on the send button", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
       inFlightActions: new Set(["admit:session_1"]),
     })
     render(<Composer />)
@@ -314,7 +324,7 @@ describe("composer", () => {
       throw new ApiRequestError("not found", "not_found")
     }
     useAppStore.getState().startNewSession()
-    useAppStore.getState().setPromptAttachments([draftImage("high")])
+    useAppStore.getState().setPromptDraft(inputParts("", [draftImage("high")]))
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Send" }))
@@ -324,15 +334,19 @@ describe("composer", () => {
     expect(remove).toHaveProperty("disabled", true)
     await user.click(remove)
     expect(bridge.discardDraftImages).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptAttachments).toEqual([
-      draftImage("high"),
-    ])
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toEqual(inputParts("", [draftImage("high")]))
 
     rejectCreate(new Error("creation failed"))
     await waitFor(() => expect(remove).toHaveProperty("disabled", false))
-    expect(useAppStore.getState().promptAttachments).toEqual([
-      draftImage("high"),
-    ])
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toEqual(inputParts("", [draftImage("high")]))
   })
 
   it("keeps session prewarming quiet while the first input remains available", async () => {
@@ -346,7 +360,7 @@ describe("composer", () => {
       throw new ApiRequestError("not found", "not_found")
     }
     useAppStore.getState().startNewSession()
-    useAppStore.getState().setPromptDraft("hello")
+    useAppStore.getState().setPromptDraft(inputParts("hello"))
     render(<Composer />)
 
     expect(screen.queryByRole("status")).toBeNull()
@@ -368,7 +382,7 @@ describe("composer", () => {
     expect(screen.queryByRole("status")).toBeNull()
     await act(async () => rejectCreate(new Error("creation failed")))
     expect(screen.queryByRole("status")).toBeNull()
-    expect(useAppStore.getState().promptDraft).toBe("hello")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
   })
 
   it("uses the interrupt button for an active turn without duplicating its status", () => {
@@ -387,11 +401,13 @@ describe("composer", () => {
 
   it("blocks send and slash execution while the session is busy", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
       busy: true,
     })
     render(<Composer />)
@@ -408,7 +424,7 @@ describe("composer", () => {
     await pastePrompt(screen.getByRole("textbox"), "/com", true)
     await user.keyboard("{Enter}")
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
   })
 
   it("attaches an image, selects original detail, and sends without text", async () => {
@@ -422,7 +438,11 @@ describe("composer", () => {
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() => {
-      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+      expect(
+        (useAppStore.getState().promptDraft ?? []).filter(
+          (part) => part.type === "image",
+        ),
+      ).toHaveLength(1)
     })
     await user.click(
       screen.getByRole("button", {
@@ -431,18 +451,21 @@ describe("composer", () => {
     )
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    expect(admitInput).toHaveBeenCalledWith("", [
-      {
-        name: "screenshot.png",
-        mediaType: "image/png",
-        detail: "original",
-        sizeBytes: 9,
-        file: {
-          rolloutId: "session_1",
-          path: "attachments/staging/draft_1/1.png",
+    expect(admitInput).toHaveBeenCalledWith(
+      inputParts("", [
+        {
+          name: "screenshot.png",
+          mediaType: "image/png",
+          detail: "original",
+          sizeBytes: 9,
+          file: {
+            rolloutId: "session_1",
+            path: "attachments/staging/draft_1/1.png",
+          },
         },
-      },
-    ])
+      ]),
+      undefined,
+    )
   })
 
   it("opens a compact action list and invokes the existing image picker only after selection", async () => {
@@ -451,7 +474,7 @@ describe("composer", () => {
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "Keep this draft",
+      promptDraft: inputParts("Keep this draft"),
       sessionSkills: [
         {
           name: "Review",
@@ -481,7 +504,9 @@ describe("composer", () => {
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
     expect(bridge.pickImages).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("Keep this draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Keep this draft"),
+    )
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.click(screen.getByRole("option", { name: "Add image" }))
@@ -543,7 +568,7 @@ describe("composer", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       selectedSession: { ...createdSession, workingDirectory: "/repo" },
-      promptDraft: "Checkplease",
+      promptDraft: inputParts("Checkplease"),
     })
     render(<Composer />)
 
@@ -551,7 +576,9 @@ describe("composer", () => {
     await selectPrompt(editor, 5)
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe("Check @ please")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Check @ please"),
+    )
     expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
     expect(
       screen.getByRole("listbox", { name: "Files and folders" }),
@@ -571,8 +598,8 @@ describe("composer", () => {
       .find((option) => option.getAttribute("title") === "src/gui")
     if (!folder) throw new Error("Expected src/gui folder")
     await user.click(folder)
-    expect(useAppStore.getState().promptDraft).toBe(
-      "Check [@gui](src/gui) please",
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Check [@gui](src/gui) please"),
     )
     expect(editor.querySelector('[data-file-path="src/gui"]')).not.toBeNull()
     expect(bridge.pickImages).not.toHaveBeenCalled()
@@ -593,7 +620,7 @@ describe("composer", () => {
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.click(screen.getByRole("option", { name: "Files and folders" }))
     const editor = screen.getByRole("textbox", { name: "Message the Mate" })
-    expect(useAppStore.getState().promptDraft).toBe("@")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("@"))
     expect(document.activeElement).toBe(editor)
     expect(screen.queryByRole("combobox")).toBeNull()
     await pastePrompt(editor, "composer")
@@ -603,8 +630,8 @@ describe("composer", () => {
       ).toContain("composer.tsx"),
     )
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe(
-      "[@composer.tsx](src/gui/composer.tsx) ",
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("[@composer.tsx](src/gui/composer.tsx) "),
     )
     expect(
       editor.querySelector('[data-file-path="src/gui/composer.tsx"]'),
@@ -616,7 +643,7 @@ describe("composer", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       selectedSession: { ...createdSession, workingDirectory: "/repo" },
-      promptDraft: "Check review please",
+      promptDraft: inputParts("Check review please"),
     })
     render(<Composer />)
     const editor = screen.getByRole("textbox", { name: "Message the Mate" })
@@ -630,7 +657,9 @@ describe("composer", () => {
     })
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.click(screen.getByRole("option", { name: "Files and folders" }))
-    expect(useAppStore.getState().promptDraft).toBe("Check @ please")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Check @ please"),
+    )
     expect(
       screen.getByRole("listbox", { name: "Files and folders" }),
     ).toBeDefined()
@@ -640,12 +669,14 @@ describe("composer", () => {
     const user = userEvent.setup()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptAttachments: [draftImage("high")],
+      promptDraft: inputParts("", [draftImage("high")]),
     })
     render(<Composer />)
 
     await user.click(
-      screen.getByRole("button", { name: "Preview screenshot.png" }),
+      screen.getByRole("button", {
+        name: "Preview screenshot.png",
+      }),
     )
     const dialog = screen.getByRole("dialog", {
       name: "Preview screenshot.png",
@@ -665,41 +696,84 @@ describe("composer", () => {
     const user = userEvent.setup()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptAttachments: [draftImage("high")],
+      promptDraft: inputParts("", [draftImage("high")]),
     })
     render(<Composer />)
 
     await user.click(
-      screen.getByRole("button", { name: "Preview screenshot.png" }),
+      screen.getByRole("button", {
+        name: "Preview screenshot.png",
+      }),
     )
     expect(screen.getByRole("dialog")).toBeDefined()
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("removes an attachment and discards its staged file", async () => {
+  it("retains a removed image for Undo and discards it when the editor closes", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptAttachments: [draftImage("high")],
+      promptDraft: inputParts("", [draftImage("high")]),
     })
-    render(<Composer />)
+    const view = render(<Composer />)
 
     await user.click(
       screen.getByRole("button", { name: "Remove screenshot.png" }),
     )
 
-    expect(useAppStore.getState().promptAttachments).toEqual([])
-    expect(bridge.discardDraftImages).toHaveBeenCalledWith([draftImage("high")])
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toEqual(inputParts(""))
+    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Control>}z{/Control}")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("", [draftImage("high")]),
+    )
+    await user.click(
+      screen.getByRole("button", { name: "Remove screenshot.png" }),
+    )
+    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    view.unmount()
+    expect(bridge.discardDraftImages).toHaveBeenCalledExactlyOnceWith([
+      draftImage("high"),
+    ])
   })
 
-  it("explains and normalizes original detail for a model without that mode", async () => {
+  it("explains request-only detail fallback and clears the unchanged original-detail draft", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn(() => Promise.resolve())
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input") {
+        const body = params as { requestId: string }
+        return {
+          requestId: body.requestId,
+          inputId: "input_1",
+          content: {
+            ...requestedInputContent(body.requestId),
+            parts: requestedInputContent(body.requestId).parts.map((part) =>
+              part.type === "image"
+                ? {
+                    ...part,
+                    file: {
+                      rolloutId: "session_1",
+                      path: "attachments/requests/detail_1/1.png",
+                    },
+                  }
+                : part,
+            ),
+          },
+        }
+      }
+      if (method === "session/list") return { sessions: [] }
+      throw new ApiRequestError("not found", "not_found")
+    }
     useAppStore.setState({
-      admitInput,
       selection: { sessionId: "session_1" },
       defaultProvider: "kimi",
       defaultModel: "k3",
@@ -716,7 +790,7 @@ describe("composer", () => {
           ],
         },
       ],
-      promptAttachments: [
+      promptDraft: inputParts("", [
         {
           name: "screenshot.png",
           mediaType: "image/png",
@@ -724,10 +798,10 @@ describe("composer", () => {
           sizeBytes: 9,
           file: {
             rolloutId: "session_1",
-            path: "attachments/staging/draft_1/1.png",
+            path: "attachments/staging/detail_original/1.png",
           },
         },
-      ],
+      ]),
     })
     render(<Composer />)
 
@@ -739,9 +813,20 @@ describe("composer", () => {
     ).toHaveProperty("disabled", true)
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    expect(admitInput).toHaveBeenCalledWith("", [
-      expect.objectContaining({ detail: "high" }),
-    ])
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      content: {
+        kind: "parts",
+        parts: [expect.objectContaining({ type: "image", detail: "original" })],
+      },
+    })
+    await waitFor(() => {
+      expect(useAppStore.getState().promptDraft).toBeUndefined()
+      expect(
+        screen.queryByRole("button", { name: "Remove screenshot.png" }),
+      ).toBeNull()
+    })
   })
 
   it("stages picked images without creating a session", async () => {
@@ -755,7 +840,11 @@ describe("composer", () => {
     await user.click(screen.getByRole("option", { name: "Add image" }))
 
     await waitFor(() => {
-      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+      expect(
+        (useAppStore.getState().promptDraft ?? []).filter(
+          (part) => part.type === "image",
+        ),
+      ).toHaveLength(1)
     })
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
@@ -798,7 +887,7 @@ describe("composer", () => {
       new Error("Image import failed."),
     )
     respondWithSessionCreate()
-    useAppStore.setState({ promptDraft: "keep this draft" })
+    useAppStore.setState({ promptDraft: inputParts("keep this draft") })
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
@@ -810,7 +899,9 @@ describe("composer", () => {
       ),
     )
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(useAppStore.getState().promptDraft).toBe("keep this draft")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("keep this draft"),
+    )
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
@@ -900,9 +991,11 @@ describe("composer", () => {
     expect(useAppStore.getState().selection.sessionId).toBe(createdSession.id)
     await act(async () => resolveImport([draftImage("high")]))
     await waitFor(() =>
-      expect(useAppStore.getState().promptAttachments).toEqual([
-        draftImage("high"),
-      ]),
+      expect(
+        (useAppStore.getState().promptDraft ?? []).filter(
+          (part) => part.type === "image",
+        ),
+      ).toEqual(inputParts("", [draftImage("high")])),
     )
     expect(bridge.discardDraftImages).not.toHaveBeenCalled()
   })
@@ -933,7 +1026,11 @@ describe("composer", () => {
         draftImage("high"),
       ]),
     )
-    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toEqual(inputParts(""))
   })
 
   it("stages dropped images without creating a session", async () => {
@@ -948,7 +1045,11 @@ describe("composer", () => {
     })
 
     await waitFor(() => {
-      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+      expect(
+        (useAppStore.getState().promptDraft ?? []).filter(
+          (part) => part.type === "image",
+        ),
+      ).toHaveLength(1)
     })
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
@@ -978,7 +1079,11 @@ describe("composer", () => {
     })
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(useAppStore.getState().promptAttachments).toHaveLength(0)
+    expect(
+      (useAppStore.getState().promptDraft ?? []).filter(
+        (part) => part.type === "image",
+      ),
+    ).toHaveLength(0)
   })
 
   it("turns the send button into an interrupt action while a turn runs", async () => {
@@ -988,7 +1093,7 @@ describe("composer", () => {
       selection: { sessionId: "session_1" },
       execution: executionWithActiveTurn(),
       cancelTurn,
-      promptDraft: "follow up",
+      promptDraft: inputParts("follow up"),
     })
     render(<Composer />)
 
@@ -1015,12 +1120,14 @@ describe("composer", () => {
 
   it("still dispatches a follow-up on Enter while a turn runs", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
       execution: executionWithActiveTurn(),
-      promptDraft: "follow up",
+      promptDraft: inputParts("follow up"),
     })
     render(<Composer />)
 
@@ -1029,7 +1136,7 @@ describe("composer", () => {
     await user.keyboard("{Enter}")
 
     expect(admitInput).toHaveBeenCalledTimes(1)
-    expect(admitInput).toHaveBeenCalledWith("follow up")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("follow up"), undefined)
   })
 })
 
@@ -1110,7 +1217,7 @@ function executionWithHistory(...texts: readonly string[]) {
               requestId: `request_${index + 1}`,
               inputId: `input_${index + 1}`,
               role: InputRole.User,
-              content: { kind: "text", text },
+              content: { kind: "parts", parts: inputParts(text) },
             },
           },
         }),
@@ -1120,12 +1227,70 @@ function executionWithHistory(...texts: readonly string[]) {
 }
 
 describe("history navigation", () => {
+  it("retains the staged image owner while recalling history and restores its exact placement", async () => {
+    const user = userEvent.setup()
+    const image = {
+      ...draftImage("high"),
+      file: {
+        rolloutId: "draft_history",
+        path: "attachments/staging/history/1.png",
+      },
+    }
+    const parts: readonly InputPart[] = [
+      { type: "text", text: "before " },
+      { ...image, type: "image" },
+      { type: "text", text: " after" },
+    ]
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("earlier question"),
+      promptDraft: parts,
+    })
+    const view = render(<Composer />)
+    const editor = screen.getByRole("textbox")
+    await user.click(editor)
+    await selectPrompt(editor, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("earlier question"),
+    )
+    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    // The editor remounts for another selection, but the surface still owns
+    // the history snapshot and can restore it when the user returns.
+    act(() =>
+      useAppStore.setState({
+        selection: { sessionId: "session_other" },
+        sessionSelectionIntentRevision: 1,
+        promptDraft: inputParts("another draft"),
+      }),
+    )
+    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    act(() =>
+      useAppStore.setState({
+        selection: { sessionId: "session_1" },
+        sessionSelectionIntentRevision: 2,
+        promptDraft: inputParts("earlier question"),
+      }),
+    )
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toEqual(parts)
+    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    await user.click(
+      screen.getByRole("button", { name: "Remove screenshot.png" }),
+    )
+    view.unmount()
+    expect(
+      window.yakitoriDesktop?.discardDraftImages,
+    ).toHaveBeenCalledExactlyOnceWith([image])
+  })
+
   it("recalls admitted inputs with ArrowUp and restores the draft with ArrowDown", async () => {
     const user = userEvent.setup()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       execution: executionWithHistory("first question", "second question"),
-      promptDraft: "work in progress",
+      promptDraft: inputParts("work in progress"),
     })
     render(<Composer />)
 
@@ -1133,16 +1298,26 @@ describe("history navigation", () => {
     await user.click(textarea)
     await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
-    expect(useAppStore.getState().promptDraft).toBe("second question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("second question"),
+    )
     await user.keyboard("{ArrowUp}")
-    expect(useAppStore.getState().promptDraft).toBe("first question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("first question"),
+    )
     // Already at the oldest entry: ArrowUp changes nothing.
     await user.keyboard("{ArrowUp}")
-    expect(useAppStore.getState().promptDraft).toBe("first question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("first question"),
+    )
     await user.keyboard("{ArrowDown}")
-    expect(useAppStore.getState().promptDraft).toBe("second question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("second question"),
+    )
     await user.keyboard("{ArrowDown}")
-    expect(useAppStore.getState().promptDraft).toBe("work in progress")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("work in progress"),
+    )
   })
 
   it("keeps ArrowUp for cursor movement when the cursor is not at the start", async () => {
@@ -1150,7 +1325,7 @@ describe("history navigation", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       execution: executionWithHistory("first question"),
-      promptDraft: "hello",
+      promptDraft: inputParts("hello"),
     })
     render(<Composer />)
 
@@ -1159,7 +1334,7 @@ describe("history navigation", () => {
     await selectPrompt(textarea, 2)
     await user.keyboard("{ArrowUp}")
 
-    expect(useAppStore.getState().promptDraft).toBe("hello")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
   })
 
   it("treats an edit during recall as the new in-progress draft", async () => {
@@ -1167,7 +1342,7 @@ describe("history navigation", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       execution: executionWithHistory("first question"),
-      promptDraft: "work in progress",
+      promptDraft: inputParts("work in progress"),
     })
     render(<Composer />)
 
@@ -1175,21 +1350,54 @@ describe("history navigation", () => {
     await user.click(textarea)
     await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
-    expect(useAppStore.getState().promptDraft).toBe("first question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("first question"),
+    )
 
     await pastePrompt(textarea, "edited", true)
     await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
-    expect(useAppStore.getState().promptDraft).toBe("first question")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("first question"),
+    )
     await user.keyboard("{ArrowDown}")
-    expect(useAppStore.getState().promptDraft).toBe("edited")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("edited"))
   })
 })
 
 describe("slash command menu", () => {
+  it("completes a local command without discarding staged image parts", async () => {
+    const user = userEvent.setup()
+    const image = {
+      ...draftImage("high"),
+      file: {
+        rolloutId: "draft_command",
+        path: "attachments/staging/command/1.png",
+      },
+    }
+    const openModelPicker = vi.fn()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts("/mod", [image]),
+      openModelPicker,
+    })
+    render(<Composer />)
+    const editor = screen.getByRole("textbox")
+    await user.click(editor)
+    await selectPrompt(editor, 4)
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("/model", [image]),
+    )
+    expect(openModelPicker).not.toHaveBeenCalled()
+    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+  })
+
   it("executes the highlighted command on Enter and retains it until admission succeeds", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1205,14 +1413,16 @@ describe("slash command menu", () => {
     expect(menu.textContent).not.toContain("/compact")
 
     await user.keyboard("{Enter}")
-    expect(admitInput).toHaveBeenCalledWith("/compact")
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("/compact"), undefined)
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
     expect(screen.queryByRole("listbox")).toBeNull()
   })
 
   it("keeps the exact match selectable so Enter executes it", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1224,12 +1434,14 @@ describe("slash command menu", () => {
     expect(screen.getByRole("listbox")).toBeDefined()
 
     await user.keyboard("{Enter}")
-    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("/compact"), undefined)
   })
 
   it("executes a clicked command", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1240,13 +1452,15 @@ describe("slash command menu", () => {
     await pastePrompt(screen.getByRole("textbox"), "/com")
     await user.click(screen.getByRole("option", { name: /Compact/ }))
 
-    expect(admitInput).toHaveBeenCalledWith("/compact")
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("/compact"), undefined)
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
   })
 
   it("keeps the wrapped highlight selectable with arrow keys", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1263,7 +1477,9 @@ describe("slash command menu", () => {
 
   it("routes status and MCP commands to data panels without sending a message", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1308,25 +1524,28 @@ describe("slash command menu", () => {
     await pastePrompt(screen.getByRole("textbox"), "/model")
     await user.keyboard("{Enter}")
     expect(useAppStore.getState().modelPickerRevision).toBe(1)
-    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts(""))
   })
 
   it("completes compact as text instead of executing while images are staged", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptAttachments: [draftImage("high")],
+      promptDraft: inputParts("/com", [draftImage("high")]),
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("textbox"))
-    await pastePrompt(screen.getByRole("textbox"), "/com")
+    await selectPrompt(screen.getByRole("textbox"), 4)
     await user.keyboard("{Enter}")
 
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("/compact", [draftImage("high")]),
+    )
     // The exact match stays listed, but executing again is still blocked.
     expect(screen.getByRole("listbox")).toBeDefined()
     await user.keyboard("{Enter}")
@@ -1335,7 +1554,9 @@ describe("slash command menu", () => {
 
   it("completes the command as text while the session model is restoring", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1348,7 +1569,7 @@ describe("slash command menu", () => {
     await user.keyboard("{Enter}")
 
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
   })
 
   it("dismisses with Escape until the query changes", async () => {
@@ -1370,7 +1591,9 @@ describe("slash command menu", () => {
 
   it("stays closed once the draft takes arguments", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1383,12 +1606,17 @@ describe("slash command menu", () => {
     expect(screen.queryByRole("listbox")).toBeNull()
 
     await user.keyboard("{Enter}")
-    expect(admitInput).toHaveBeenCalledWith("/compact now")
+    expect(admitInput).toHaveBeenCalledWith(
+      inputParts("/compact now"),
+      undefined,
+    )
   })
 
   it("lets Shift+Enter insert a newline while the menu is open", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1400,11 +1628,38 @@ describe("slash command menu", () => {
     await user.keyboard("{Shift>}{Enter}{/Shift}")
 
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("/com\n")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/com\n"))
   })
 })
 
 describe("goal command", () => {
+  it.each([
+    "/goal",
+    "/goal Ship the feature",
+  ])("retains unsent images when handling %s locally", async (command) => {
+    const user = userEvent.setup()
+    const image = {
+      ...draftImage("high"),
+      file: {
+        rolloutId: "draft_goal",
+        path: `attachments/staging/goal/${command.length}.png`,
+      },
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts(command, [image]),
+      setGoal: vi.fn(async () => true),
+    })
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual([
+        { ...image, type: "image" },
+      ]),
+    )
+    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+  })
+
   it("creates a session for a goal entered in a new draft without admitting a user message", async () => {
     const user = userEvent.setup()
     respondWithSessionCreate()
@@ -1426,7 +1681,7 @@ describe("goal command", () => {
       }
       return respond(method, params)
     }
-    useAppStore.setState({ promptDraft: "/goal Ship the feature" })
+    useAppStore.setState({ promptDraft: inputParts("/goal Ship the feature") })
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Send" }))
     await waitFor(() => {
@@ -1448,12 +1703,14 @@ describe("goal command", () => {
     ]) {
       expect(fakeRef.current.requestsFor(method)).toHaveLength(0)
     }
-    expect(useAppStore.getState().promptDraft ?? "").toBe("")
+    expect(useAppStore.getState().promptDraft ?? []).toEqual(inputParts(""))
   })
 
   it("completes /goal from the menu and sets the session goal on submit", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     const setGoal = vi.fn().mockResolvedValue(true)
     useAppStore.setState({
       admitInput,
@@ -1470,7 +1727,7 @@ describe("goal command", () => {
     expect(menu.textContent).toContain("Goal")
     expect(menu.textContent).not.toContain("/goal")
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe("/goal ")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/goal "))
 
     await user.keyboard("ship the feature")
     await user.keyboard("{Enter}")
@@ -1481,16 +1738,18 @@ describe("goal command", () => {
       inputId: null,
     })
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft ?? "").toBe("")
+    expect(useAppStore.getState().promptDraft ?? []).toEqual(inputParts(""))
   })
 
   it("opens the goal editor on a bare /goal submit", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
-      promptDraft: "/goal",
+      promptDraft: inputParts("/goal"),
     })
     render(<Composer />)
 
@@ -1507,7 +1766,9 @@ describe("goal command", () => {
 describe("file mention popup", () => {
   it("picks a file with Enter, replacing the @token with a chip", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     fakeRef.current.respond = (method, params) => {
       if (method === "workspace/findFiles") {
         // The picker caches a one-shot index fetch and filters client-side.
@@ -1539,8 +1800,8 @@ describe("file mention popup", () => {
     await waitFor(() => expect(menu.textContent).toContain("app.tsx"))
 
     await user.keyboard("{ArrowDown}{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe(
-      "review [@app-store.ts](src/gui/app-store.ts) ",
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("review [@app-store.ts](src/gui/app-store.ts) "),
     )
     expect(admitInput).not.toHaveBeenCalled()
     expect(
@@ -1575,7 +1836,9 @@ describe("skill mention popup", () => {
 
   it("picks a skill with Enter, replacing the $token with a chip", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({ ...skillsState(), admitInput })
     render(<Composer />)
 
@@ -1588,8 +1851,10 @@ describe("skill mention popup", () => {
     expect(menu.textContent).not.toContain("Changelog Writer")
 
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe(
-      "use [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md) ",
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts(
+        "use [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md) ",
+      ),
     )
     expect(admitInput).not.toHaveBeenCalled()
     expect(
@@ -1607,6 +1872,7 @@ describe("skill mention popup", () => {
       if (method === "session/input") {
         const body = params as { requestId: string }
         return {
+          content: requestedInputContent(body.requestId),
           requestId: body.requestId,
           inputId: "input_1",
           event: createEventEnvelope({
@@ -1619,8 +1885,8 @@ describe("skill mention popup", () => {
                 inputId: "input_1",
                 role: InputRole.User,
                 content: {
-                  kind: "text",
-                  text: skillMentionText(templateCreator),
+                  kind: "parts",
+                  parts: inputParts(skillMentionText(templateCreator)),
                 },
               },
             },
@@ -1654,7 +1920,10 @@ describe("skill mention popup", () => {
     expect(admissions).toHaveLength(1)
     expect(admissions[0]?.params).toMatchObject({
       sessionId: "session_1",
-      content: { kind: "text", text: skillMentionText(templateCreator) },
+      content: {
+        kind: "parts",
+        parts: inputParts(skillMentionText(templateCreator)),
+      },
     })
   })
 
@@ -1667,8 +1936,8 @@ describe("skill mention popup", () => {
     await pastePrompt(screen.getByRole("textbox"), "$")
     await user.keyboard("{ArrowDown}{Tab}")
 
-    expect(useAppStore.getState().promptDraft).toBe(
-      `${skillMentionText(templateCreator)} `,
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts(`${skillMentionText(templateCreator)} `),
     )
   })
 
@@ -1676,7 +1945,7 @@ describe("skill mention popup", () => {
     const user = userEvent.setup()
     useAppStore.setState({
       ...skillsState(),
-      promptDraft: `${skillMentionText(templateCreator)} `,
+      promptDraft: inputParts(`${skillMentionText(templateCreator)} `),
     })
     render(<Composer />)
 
@@ -1706,7 +1975,9 @@ describe("skill mention popup", () => {
 
   it("closes the mention popup when the cursor leaves the trailing token", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
+      Promise.resolve(),
+    )
     useAppStore.setState({ ...skillsState(), admitInput })
     render(<Composer />)
 
@@ -1719,17 +1990,21 @@ describe("skill mention popup", () => {
     expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
 
     await user.keyboard("{Enter}")
-    expect(admitInput).toHaveBeenCalledWith("use $tem")
+    expect(admitInput).toHaveBeenCalledWith(inputParts("use $tem"), undefined)
   })
 
   it("treats a command with inline skills as ordinary message text", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn(async () => {})
     const draft = `/compact ${skillMentionText(templateCreator)}`
-    useAppStore.setState({ ...skillsState(), admitInput, promptDraft: draft })
+    useAppStore.setState({
+      ...skillsState(),
+      admitInput,
+      promptDraft: inputParts(draft),
+    })
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Send" }))
-    expect(admitInput).toHaveBeenCalledWith(draft)
+    expect(admitInput).toHaveBeenCalledWith(inputParts(draft), undefined)
   })
 })
 
@@ -2343,8 +2618,8 @@ describe("unified composer suggestions", () => {
     render(<Composer />)
     await pastePrompt(screen.getByRole("textbox"), "/rev")
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe(
-      `${skillMentionText(skill)} `,
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts(`${skillMentionText(skill)} `),
     )
     expect(admitInput).not.toHaveBeenCalled()
   })
@@ -2356,23 +2631,23 @@ describe("unified composer suggestions", () => {
     render(<Composer />)
     await pastePrompt(screen.getByRole("textbox"), "/com")
     await user.keyboard("{Tab}")
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
-    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
+    expect(admitInput).toHaveBeenCalledWith(inputParts("/compact"), undefined)
   })
 
   it("replaces a skill token at the caret without deleting surrounding text", async () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       sessionSkills: [skill],
-      promptDraft: "Please $rev then test",
+      promptDraft: inputParts("Please $rev then test"),
     })
     render(<Composer />)
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
     textarea.focus()
     await selectPrompt(textarea, 11)
     fireEvent.keyDown(textarea, { key: "Enter" })
-    expect(useAppStore.getState().promptDraft).toBe(
-      `Please ${skillMentionText(skill)}  then test`,
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts(`Please ${skillMentionText(skill)}  then test`),
     )
   })
 
@@ -2403,3 +2678,13 @@ describe("unified composer suggestions", () => {
     ).toBeNull()
   })
 })
+
+function requestedInputContent(requestId: string): InputContent {
+  const request = fakeRef.current.requests.find(
+    ({ method, params }) =>
+      method.startsWith("session/input") &&
+      (params as { requestId?: string }).requestId === requestId,
+  )
+  if (!request) throw new Error("Missing test input request")
+  return structuredClone((request.params as { content: InputContent }).content)
+}

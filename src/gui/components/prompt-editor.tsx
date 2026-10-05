@@ -1,21 +1,45 @@
+import { inputImageOwnership } from "../input-image-ownership.ts"
+import type {
+  ImageAttachment,
+  ImageDetail,
+  InputPart,
+} from "../../kernel/events.ts"
+import { sameInputParts } from "../input-parts.ts"
 import { baseKeymap, selectAll, splitBlock } from "prosemirror-commands"
 import { closeHistory, history, redo, undo } from "prosemirror-history"
 import { keymap } from "prosemirror-keymap"
 import { Slice } from "prosemirror-model"
-import { EditorState, TextSelection } from "prosemirror-state"
+import {
+  EditorState,
+  TextSelection,
+  type SelectionBookmark,
+} from "prosemirror-state"
 import { EditorView } from "prosemirror-view"
-import { type Ref, useImperativeHandle, useLayoutEffect, useRef } from "react"
+import {
+  type Ref,
+  useCallback,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+} from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
   parsePrompt,
+  parsePromptParts,
   promptOffset,
   promptPosition,
-  serializePrompt,
+  serializePromptParts,
 } from "./prompt-document.ts"
 
 export type PromptEditorHandle = Readonly<{
   focus(atEnd?: boolean): void
+  captureImageInsertion(): Readonly<{
+    insert(images: readonly ImageAttachment[]): boolean
+    cancel(): void
+  }>
+  removeImage(index: number): void
+  setImageDetail(index: number, detail: ImageDetail): void
   replaceRange(
     from: number,
     to: number,
@@ -24,9 +48,21 @@ export type PromptEditorHandle = Readonly<{
   ): void
 }>
 
+// A collapsed import bookmark stays before text typed while bytes are loading.
+// Positions are mapped through every ProseMirror transaction, not text offsets.
+function imageInsertionBookmark(position: number): SelectionBookmark {
+  return {
+    map: (mapping) => imageInsertionBookmark(mapping.map(position, -1)),
+    resolve: (doc) => TextSelection.near(doc.resolve(position)),
+  }
+}
+
 type Props = Readonly<{
   ref?: Ref<PromptEditorHandle>
-  value: string
+  value: readonly InputPart[]
+  // History recall temporarily parks the unsent draft outside this document.
+  parkedParts?: readonly InputPart[] | undefined
+  apiBase: string
   label: string
   placeholder?: string
   disabled?: boolean
@@ -34,7 +70,9 @@ type Props = Readonly<{
   activeSuggestion?: string | undefined
   menuOpen?: boolean
   suggestionsId?: string
-  onChange(text: string): void
+  onChange(parts: readonly InputPart[]): void
+  onPreviewImage?(image: ImageAttachment): void
+  onDiscardImages?(images: readonly ImageAttachment[]): void
   onSelection?(from: number, to: number): void
   onKeyDown?(event: globalThis.KeyboardEvent): boolean
   onPasteImages?(files: File[]): void
@@ -48,6 +86,51 @@ export function PromptEditor(props: Props) {
   const host = useRef<HTMLDivElement>(null)
   const editor = useRef<EditorView | null>(null)
   const latest = useRef(props)
+  const insertions = useRef(new Set<{ bookmark: SelectionBookmark }>())
+  const retainedImages = useRef(new Map<string, ImageAttachment>())
+  const rememberImages = useCallback((parts: readonly InputPart[]) => {
+    for (const part of parts)
+      if (
+        part.type === "image" &&
+        part.file.path.startsWith("attachments/staging/")
+      )
+        retainedImages.current.set(
+          `${part.file.rolloutId}\0${part.file.path}`,
+          {
+            name: part.name,
+            mediaType: part.mediaType,
+            sizeBytes: part.sizeBytes,
+            ...(part.detail === undefined ? {} : { detail: part.detail }),
+            file: part.file,
+          },
+        )
+  }, [])
+  const releaseUnusedImages = useCallback(
+    (parts: readonly InputPart[]) => {
+      const owned = [...parts, ...(latest.current.parkedParts ?? [])]
+      const live = new Set(
+        owned.flatMap((part) =>
+          part.type === "image"
+            ? [`${part.file.rolloutId}\0${part.file.path}`]
+            : [],
+        ),
+      )
+      const unused = [...retainedImages.current].filter(
+        ([key]) => !live.has(key),
+      )
+      for (const [key] of unused) retainedImages.current.delete(key)
+      if (unused.length)
+        latest.current.onDiscardImages?.(unused.map(([, image]) => image))
+      // The surface owns parked snapshots across keyed editor remounts.
+      for (const part of latest.current.parkedParts ?? [])
+        if (part.type === "image")
+          retainedImages.current.delete(
+            `${part.file.rolloutId}\0${part.file.path}`,
+          )
+      rememberImages(parts)
+    },
+    [rememberImages],
+  )
   useLayoutEffect(() => {
     latest.current = props
   })
@@ -63,6 +146,62 @@ export function PromptEditor(props: Props) {
             view.state.tr.setSelection(TextSelection.atEnd(view.state.doc)),
           )
         view.focus()
+      },
+      captureImageInsertion() {
+        const view = editor.current
+        if (!view) return { insert: () => false, cancel: () => {} }
+        const pending = {
+          bookmark: view.state.selection.empty
+            ? imageInsertionBookmark(view.state.selection.from)
+            : view.state.selection.getBookmark(),
+        }
+        insertions.current.add(pending)
+        return {
+          insert(images) {
+            if (editor.current !== view || !insertions.current.delete(pending))
+              return false
+            const selection = pending.bookmark.resolve(view.state.doc)
+            const content = parsePromptParts(
+              images.map((image) => ({ ...image, type: "image" })),
+            ).firstChild?.content
+            if (!content) return false
+            view.dispatch(
+              closeHistory(view.state.tr).replaceWith(
+                selection.from,
+                selection.to,
+                content,
+              ),
+            )
+            return true
+          },
+          cancel() {
+            insertions.current.delete(pending)
+          },
+        }
+      },
+      removeImage(index) {
+        const view = editor.current
+        if (!view) return
+        let count = 0
+        view.state.doc.descendants((node, pos) => {
+          if (node.type.name === "image" && count++ === index)
+            view.dispatch(
+              closeHistory(view.state.tr).delete(pos, pos + node.nodeSize),
+            )
+        })
+      },
+      setImageDetail(index, detail) {
+        const view = editor.current
+        if (!view) return
+        let count = 0
+        view.state.doc.descendants((node, pos) => {
+          if (node.type.name === "image" && count++ === index)
+            view.dispatch(
+              closeHistory(view.state.tr).setNodeMarkup(pos, undefined, {
+                image: { ...node.attrs.image, detail },
+              }),
+            )
+        })
       },
       replaceRange(from, to, text, cursorOffset) {
         const view = editor.current
@@ -86,7 +225,8 @@ export function PromptEditor(props: Props) {
 
   useLayoutEffect(() => {
     if (!host.current) return
-    const doc = parsePrompt(latest.current.value)
+    rememberImages(latest.current.value)
+    const doc = parsePromptParts(latest.current.value)
     const view = new EditorView(host.current, {
       state: EditorState.create({
         doc,
@@ -112,9 +252,16 @@ export function PromptEditor(props: Props) {
       }),
       editable: () => !latest.current.disabled,
       dispatchTransaction(tr) {
+        for (const pending of insertions.current)
+          pending.bookmark = pending.bookmark.map(tr.mapping)
         view.updateState(view.state.apply(tr))
-        if (tr.docChanged)
-          latest.current.onChange(serializePrompt(view.state.doc))
+        if (tr.docChanged) {
+          const parts = serializePromptParts(view.state.doc, (image) =>
+            inputImageOwnership.resolve(latest.current.apiBase, image),
+          )
+          rememberImages(parts)
+          latest.current.onChange(parts)
+        }
         if (tr.docChanged || tr.selectionSet) {
           const { from, to } = view.state.selection
           latest.current.onSelection?.(
@@ -160,11 +307,48 @@ export function PromptEditor(props: Props) {
             ? `[$${node.attrs.name}](${node.attrs.path})`
             : node.type.name === "file"
               ? `[@${node.attrs.name}](${node.attrs.path})`
-              : "",
+              : node.type.name === "image"
+                ? `[Image: ${node.attrs.image.name}]`
+                : "",
         ),
       clipboardTextParser: (text) => new Slice(parsePrompt(text).content, 1, 1),
       handleDOMEvents: {
-        click: (_view, event) => {
+        drop: (view, event) => {
+          const images = Array.from(event.dataTransfer?.files ?? []).filter(
+            (file) => file.type.startsWith("image/"),
+          )
+          if (!images.length || !latest.current.onPasteImages) return false
+          event.preventDefault()
+          event.stopPropagation()
+          const at = view.posAtCoords({
+            left: event.clientX,
+            top: event.clientY,
+          })
+          if (at)
+            view.dispatch(
+              view.state.tr.setSelection(
+                TextSelection.near(view.state.doc.resolve(at.pos)),
+              ),
+            )
+          latest.current.onPasteImages(images)
+          return true
+        },
+        click: (view, event) => {
+          const image =
+            event.target instanceof Element
+              ? event.target.closest<HTMLElement>("[data-prompt-image]")
+              : null
+          if (image) {
+            const node = view.state.doc.nodeAt(view.posAtDOM(image, 0))
+            if (node?.type.name === "image")
+              latest.current.onPreviewImage?.(
+                inputImageOwnership.resolve(
+                  latest.current.apiBase,
+                  node.attrs.image as ImageAttachment,
+                ),
+              )
+            return true
+          }
           const chip =
             event.target instanceof Element
               ? event.target.closest<HTMLElement>("[data-skill-path]")
@@ -181,7 +365,23 @@ export function PromptEditor(props: Props) {
             )
           return true
         },
-        keydown: (_view, event) => {
+        keydown: (view, event) => {
+          const image =
+            event.target instanceof Element
+              ? event.target.closest<HTMLElement>("[data-prompt-image]")
+              : null
+          if (image && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault()
+            const node = view.state.doc.nodeAt(view.posAtDOM(image, 0))
+            if (node?.type.name === "image")
+              latest.current.onPreviewImage?.(
+                inputImageOwnership.resolve(
+                  latest.current.apiBase,
+                  node.attrs.image as ImageAttachment,
+                ),
+              )
+            return true
+          }
           const chip =
             event.target instanceof Element
               ? event.target.closest<HTMLElement>("[data-skill-path]")
@@ -212,20 +412,36 @@ export function PromptEditor(props: Props) {
     })
     editor.current = view
     return () => {
+      insertions.current.clear()
+      releaseUnusedImages(
+        serializePromptParts(view.state.doc, (image) =>
+          inputImageOwnership.resolve(latest.current.apiBase, image),
+        ),
+      )
       view.destroy()
       editor.current = null
     }
-  }, [])
+  }, [rememberImages, releaseUnusedImages])
 
   useLayoutEffect(() => {
     const view = editor.current
     if (!view) return
-    if (serializePrompt(view.state.doc) !== props.value && !view.composing) {
+    if (
+      !sameInputParts(
+        serializePromptParts(view.state.doc, (image) =>
+          inputImageOwnership.resolve(props.apiBase, image),
+        ),
+        props.value,
+      ) &&
+      !view.composing
+    ) {
+      insertions.current.clear()
+      releaseUnusedImages(props.value)
       // External draft restoration/clear starts a fresh undo history, so Undo
       // cannot bring a sent message or another session's draft back.
       view.updateState(
         EditorState.create({
-          doc: parsePrompt(props.value),
+          doc: parsePromptParts(props.value),
           plugins: view.state.plugins,
         }),
       )
@@ -252,6 +468,8 @@ export function PromptEditor(props: Props) {
     })
   }, [
     props.value,
+    props.apiBase,
+    releaseUnusedImages,
     props.disabled,
     props.menuOpen,
     props.suggestionsId,

@@ -62,6 +62,17 @@ export type JsonValue =
 export type JsonObject = { readonly [key: string]: JsonValue }
 export type EventMetadata = JsonObject
 
+// Editable user input retains authored text/image placement in one array.
+export type InputPart =
+  | Readonly<{ type: "text"; text: string }>
+  | (Readonly<{ type: "image" }> & ImageAttachment)
+
+export type InputContent = Readonly<{
+  kind: "parts"
+  parts: readonly InputPart[]
+  contextAttachments?: readonly ContextExcerpt[]
+}>
+
 export type TextContent = Readonly<{
   kind: "text"
   text: string
@@ -410,7 +421,7 @@ export type InputAdmittedEvent = {
     readonly requestId: string
     readonly inputId: string
     readonly role: InputRole
-    readonly content: TextContent
+    readonly content: InputContent
     readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
@@ -814,7 +825,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isString(data.requestId) &&
           isString(data.inputId) &&
           isInputRole(data.role) &&
-          isTextContent(data.content) &&
+          isInputContent(data.content) &&
           (data.modelSelection === undefined ||
             isModelSelection(data.modelSelection)) &&
           (data.steered === undefined || data.steered === true)
@@ -1812,6 +1823,25 @@ function isTurnLatency(value: unknown): value is TurnLatency {
     optional.every(
       (key) => value[key] === undefined || isNonNegativeInteger(value[key]),
     )
+  )
+}
+
+export function isInputContent(value: unknown): value is InputContent {
+  return (
+    isRecord(value) &&
+    value.kind === "parts" &&
+    onlyKeys(value, ["kind", "parts", "contextAttachments"]) &&
+    Array.isArray(value.parts) &&
+    value.parts.every((part) => {
+      if (!isRecord(part)) return false
+      if (part.type === "text")
+        return onlyKeys(part, ["type", "text"]) && isString(part.text)
+      if (part.type !== "image") return false
+      const { type: _type, ...attachment } = part
+      return isImageAttachment(attachment)
+    }) &&
+    (value.contextAttachments === undefined ||
+      isContextExcerpts(value.contextAttachments))
   )
 }
 

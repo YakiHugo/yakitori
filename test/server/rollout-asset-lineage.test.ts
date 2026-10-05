@@ -99,7 +99,16 @@ describe("rollout asset lineage", () => {
       const admitted = await application.handlers.admitInput({
         sessionId: threadId,
         requestId: "request_physical_integration",
-        content: { kind: "text", text: "inspect", attachments },
+        content: {
+          kind: "parts" as const,
+          parts: [
+            { type: "text" as const, text: "inspect" },
+            ...attachments.map((image) => ({
+              type: "image" as const,
+              ...image,
+            })),
+          ],
+        },
       })
       expectOk(admitted)
       await waitForThreadIdle(application, threadId)
@@ -199,7 +208,13 @@ describe("rollout asset lineage", () => {
     const first = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_lineage_image",
-      content: { kind: "text", text: "remember", attachments },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "remember" },
+          ...attachments.map((image) => ({ type: "image" as const, ...image })),
+        ],
+      },
     })
     expectOk(first)
     await waitForThreadIdle(application, sourceId)
@@ -207,7 +222,10 @@ describe("rollout asset lineage", () => {
     const second = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_lineage_second",
-      content: { kind: "text", text: "fork here" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "fork here" }],
+      },
     })
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
@@ -216,7 +234,10 @@ describe("rollout asset lineage", () => {
       sessionId: sourceId,
       atInputId: second.body.inputId,
       reason: "edit",
-      content: { kind: "text", text: "child input" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "child input" }],
+      },
     })
     expectOk(child)
     const childId = child.body.session.id
@@ -227,7 +248,10 @@ describe("rollout asset lineage", () => {
       sessionId: childId,
       atInputId: childInputId,
       reason: "edit",
-      content: { kind: "text", text: "grandchild input" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "grandchild input" }],
+      },
     })
     expectOk(grandchild)
     const grandchildId = grandchild.body.session.id
@@ -242,7 +266,10 @@ describe("rollout asset lineage", () => {
     const continued = await application.handlers.admitInput({
       sessionId: grandchildId,
       requestId: "request_lineage_continue",
-      content: { kind: "text", text: "use inherited image" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "use inherited image" }],
+      },
     })
     expectOk(continued)
     await waitForThreadIdle(application, grandchildId)
@@ -296,7 +323,10 @@ describe("rollout asset lineage", () => {
       await application.handlers.admitInput({
         sessionId: sourceId,
         requestId: "request_command_first",
-        content: { kind: "text", text: "first" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "first" }],
+        },
       }),
     )
     await waitForThreadIdle(application, sourceId)
@@ -310,7 +340,10 @@ describe("rollout asset lineage", () => {
     const second = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_command_second",
-      content: { kind: "text", text: "fork here" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "fork here" }],
+      },
     })
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
@@ -318,7 +351,10 @@ describe("rollout asset lineage", () => {
       sessionId: sourceId,
       atInputId: second.body.inputId,
       reason: "edit",
-      content: { kind: "text", text: "child" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "child" }],
+      },
     })
     expectOk(child)
     const childId = child.body.session.id

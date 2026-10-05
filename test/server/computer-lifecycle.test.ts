@@ -180,7 +180,10 @@ async function input(
     await application.handlers.admitInput({
       sessionId,
       requestId: label,
-      content: { kind: "text", text: label },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: label }],
+      },
     }),
   )
 }

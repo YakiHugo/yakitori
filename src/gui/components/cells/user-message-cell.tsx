@@ -1,3 +1,5 @@
+import { inputContentImages } from "../../../kernel/input-content.ts"
+import { trimInputParts } from "../../input-parts.ts"
 import {
   FileText,
   ImageOff,
@@ -91,18 +93,17 @@ export function UserMessageCell({
   const forkSession = useAppStore((state) => state.forkSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
-  const [draft, setDraft] = useState(entry.text)
+  const [draft, setDraft] = useState(entry.parts)
   const [previewIndex, setPreviewIndex] = useState<number>()
-  const edited = draft.trim()
+  const edited = trimInputParts(draft)
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
     if (mode === "edit") {
       editorRef.current?.focus(true)
     }
   }, [mode])
-  const attachments = entry.attachments ?? []
+  const attachments = inputContentImages({ kind: "parts", parts: entry.parts })
   const contextAttachments = entry.contextAttachments ?? []
-  const hasAttachments = attachments.length > 0 || contextAttachments.length > 0
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]
 
@@ -110,41 +111,49 @@ export function UserMessageCell({
     <div className="group flex flex-col items-end gap-1.5">
       {mode !== "edit" ? (
         <>
-          {hasAttachments && (
+          {contextAttachments.length > 0 ? (
             <section
               className="message-attachments"
-              aria-label="Message attachments"
+              aria-label="Message sources"
             >
-              {attachments.length > 0 ? (
-                <div className="message-image-row">
-                  {attachments.map((attachment, index) => (
-                    <MessageImage
-                      key={`${apiBase}:${attachment.file.rolloutId}:${attachment.file.path}`}
-                      src={imageAttachmentUrl(attachment, apiBase)}
-                      name={attachment.name}
-                      onClick={() => setPreviewIndex(index)}
-                    />
-                  ))}
-                </div>
-              ) : null}
-              {contextAttachments.length > 0 ? (
-                <MessageSources excerpts={contextAttachments} />
-              ) : null}
+              <MessageSources excerpts={contextAttachments} />
             </section>
-          )}
-          {entry.text ? (
-            <div
-              className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground"
-              {...contextSourceAttributes({
-                kind: "message",
-                label: "User message",
-                messageId: entry.inputId,
-                ...(sessionId ? { sessionId } : {}),
-              })}
-            >
-              <MessageText text={entry.text} />
-            </div>
           ) : null}
+          {entry.parts.map((part, index) => {
+            const key = `${entry.inputId}:${index}`
+            if (part.type === "image")
+              return (
+                <div key={key} className="message-attachments">
+                  <MessageImage
+                    src={imageAttachmentUrl(part, apiBase)}
+                    name={part.name}
+                    onClick={() =>
+                      setPreviewIndex(
+                        attachments.findIndex(
+                          (image) =>
+                            image.file.rolloutId === part.file.rolloutId &&
+                            image.file.path === part.file.path,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+              )
+            return part.text ? (
+              <div
+                key={key}
+                className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground"
+                {...contextSourceAttributes({
+                  kind: "message",
+                  label: "User message",
+                  messageId: entry.inputId,
+                  ...(sessionId ? { sessionId } : {}),
+                })}
+              >
+                <MessageText text={part.text} />
+              </div>
+            ) : null
+          })}
           {sentAsGoal ? (
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <Target className="size-3" />
@@ -182,7 +191,7 @@ export function UserMessageCell({
                   aria-label="Edit & resubmit"
                   title="Edit & resubmit"
                   onClick={() => {
-                    setDraft(entry.text)
+                    setDraft(entry.parts)
                     setMode("edit")
                   }}
                   className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
@@ -241,28 +250,33 @@ export function UserMessageCell({
           className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if ((edited.length === 0 && !hasAttachments) || busy) return
-            void forkSession(entry.inputId, "edit", edited)
+            if (
+              (edited.length === 0 && contextAttachments.length === 0) ||
+              busy
+            )
+              return
+            void forkSession(entry.inputId, "edit", {
+              kind: "parts",
+              parts: edited,
+            })
           }}
         >
-          {attachments.length > 0 ? (
-            <div className="mb-3 flex gap-2">
-              {attachments.map((attachment) => (
-                <img
-                  key={attachment.file.path}
-                  src={imageAttachmentUrl(attachment, apiBase)}
-                  alt={attachment.name}
-                  className="size-16 rounded-lg object-cover"
-                />
-              ))}
-            </div>
-          ) : null}
           <PromptEditor
             ref={editorRef}
             label="Edit message"
             value={draft}
+            apiBase={apiBase}
             disabled={busy}
             onChange={setDraft}
+            onPreviewImage={(image) =>
+              setPreviewIndex(
+                attachments.findIndex(
+                  (candidate) =>
+                    candidate.file.rolloutId === image.file.rolloutId &&
+                    candidate.file.path === image.file.path,
+                ),
+              )
+            }
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 setMode(undefined)
@@ -274,8 +288,14 @@ export function UserMessageCell({
                 !event.altKey &&
                 (sendShortcut === "enter" || event.metaKey || event.ctrlKey)
               ) {
-                if (!busy && (edited.length > 0 || hasAttachments))
-                  void forkSession(entry.inputId, "edit", edited)
+                if (
+                  !busy &&
+                  (edited.length > 0 || contextAttachments.length > 0)
+                )
+                  void forkSession(entry.inputId, "edit", {
+                    kind: "parts",
+                    parts: edited,
+                  })
                 return true
               }
               return false
@@ -294,7 +314,9 @@ export function UserMessageCell({
             <Button
               type="submit"
               size="sm"
-              disabled={busy || (edited.length === 0 && !hasAttachments)}
+              disabled={
+                busy || (edited.length === 0 && contextAttachments.length === 0)
+              }
             >
               Send
             </Button>

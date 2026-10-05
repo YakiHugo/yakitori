@@ -155,7 +155,10 @@ describe("session methods over real handlers", () => {
     await rpc(connection, "session/input", {
       sessionId: created.session.id,
       requestId: "request_search_rpc",
-      content: { kind: "text", text: "needle message" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "needle message" }],
+      },
     })
 
     const tasks = await rpc<ApiSearchSessionsResponse>(
@@ -246,7 +249,10 @@ describe("session methods over real handlers", () => {
       {
         sessionId,
         requestId: "request_rpc_fork",
-        content: { kind: "text", text: "undo this" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "undo this" }],
+        },
       },
     )
 
@@ -256,7 +262,10 @@ describe("session methods over real handlers", () => {
       {
         atInputId: admitted.inputId,
         reason: "undo",
-        content: { kind: "text", text: "not allowed" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "not allowed" }],
+        },
       },
       {
         atInputId: admitted.inputId,
@@ -326,7 +335,10 @@ describe("session methods over real handlers", () => {
     const request = {
       sessionId,
       requestId: "request_rpc-retry",
-      content: { kind: "text", text: "persist once" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "persist once" }],
+      },
     }
 
     const first = await rpc(connection, "session/input", request)
@@ -335,7 +347,10 @@ describe("session methods over real handlers", () => {
 
     const conflict = await rpcError(connection, "session/input", {
       ...request,
-      content: { kind: "text", text: "persist something else" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "persist something else" }],
+      },
     })
     expect(conflict).toMatchObject({
       code: INTERNAL_ERROR,
@@ -360,7 +375,10 @@ describe("session methods over real handlers", () => {
       {
         sessionId,
         requestId: "request_rpc-cancel-input",
-        content: { kind: "text", text: "cancel me" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "cancel me" }],
+        },
       },
     )
 
@@ -428,7 +446,10 @@ describe("session methods over real handlers", () => {
     await rpc(connection, "session/input", {
       sessionId,
       requestId: "request_rpc-stream",
-      content: { kind: "text", text: "tail this" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "tail this" }],
+      },
     })
     await connection.waitForFrame(
       (frame) =>
@@ -448,14 +469,27 @@ describe("session methods over real handlers", () => {
       ) as {
       sessionId: string
       seq: number
-      event: { type: string; data: { content: { text: string } } }
+      event: {
+        type: string
+        data: {
+          content: {
+            kind: "parts"
+            parts: readonly { type: "text"; text: string }[]
+          }
+        }
+      }
     }
     expect(notification).toMatchObject({
       sessionId,
       seq: 4,
       event: {
         type: EventType.InputAdmitted,
-        data: { content: { kind: "text", text: "tail this" } },
+        data: {
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "tail this" }],
+          },
+        },
       },
     })
   })
@@ -472,7 +506,10 @@ describe("session methods over real handlers", () => {
       await rpc(connection, "session/input", {
         sessionId,
         requestId,
-        content: { kind: "text", text: requestId },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: requestId }],
+        },
       })
       await expect
         .poll(async () => {
@@ -1106,7 +1143,10 @@ it("publishes sidebar changes across connections and requires restoring an archi
   const error = await rpcError(connection, "session/input", {
     sessionId: session.id,
     requestId: "request_archived",
-    content: { kind: "text", text: "hello" },
+    content: {
+      kind: "parts" as const,
+      parts: [{ type: "text" as const, text: "hello" }],
+    },
   })
   expect(error.message).toContain("Restore this conversation")
   expect(

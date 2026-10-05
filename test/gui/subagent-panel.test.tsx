@@ -17,6 +17,7 @@ import {
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/gui/lib/rpc-client.ts")>()),
@@ -78,7 +79,7 @@ function start() {
       requestId: "request",
       inputId: "input",
       role: "user",
-      content: { kind: "text", text: "Review the renderer" },
+      content: { kind: "parts", parts: inputParts("Review the renderer") },
     },
   })
   emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
@@ -105,7 +106,7 @@ beforeEach(() => {
   useAppStore.setState({
     ...createInitialAppState(),
     selection: { sessionId: "parent" },
-    promptDraft: "Parent draft",
+    promptDraft: inputParts("Parent draft"),
   })
 })
 afterEach(() => {
@@ -156,7 +157,7 @@ it("replays a child with readable markdown answers and disclosed activity withou
   expect(screen.queryByRole("textbox")).toBeNull()
   expect(useAppStore.getState().selection).toBe(before.selection)
   expect(useAppStore.getState().execution).toBe(before.execution)
-  expect(useAppStore.getState().promptDraft).toBe("Parent draft")
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("Parent draft"))
   fireEvent.click(screen.getByRole("button", { name: "Back to agents" }))
   expect(props.onBack).toHaveBeenCalledOnce()
 })
@@ -243,7 +244,7 @@ it("replays a continued code block as one completed answer", () => {
         requestId: "request",
         inputId: "input",
         role: "user",
-        content: { kind: "text", text: "Review the renderer" },
+        content: { kind: "parts", parts: inputParts("Review the renderer") },
       },
     })
     emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })

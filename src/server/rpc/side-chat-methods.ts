@@ -1,9 +1,8 @@
 import {
-  isImageAttachment,
+  isInputContent,
   isModelSelection,
   type ModelSelection,
 } from "../../kernel/events.ts"
-import { isContextExcerpts } from "../../kernel/input-context.ts"
 import {
   SideChatError,
   type SideChatCreate,
@@ -122,33 +121,12 @@ export const sideChatMethods: readonly RpcMethodDefinition[] = [
     service.read(string(params, "sideChatId")),
   ),
   entry("sideChat/send", (service, params) => {
-    if (typeof params.text !== "string")
-      throw new SideChatError("text must be a string.")
-    if (
-      params.contextAttachments !== undefined &&
-      !isContextExcerpts(params.contextAttachments)
-    )
-      throw new SideChatError(
-        "contextAttachments must contain valid context excerpts.",
-      )
-    if (
-      params.attachments !== undefined &&
-      (!Array.isArray(params.attachments) ||
-        !params.attachments.every(isImageAttachment))
-    )
-      throw new SideChatError(
-        "attachments must contain valid image attachments.",
-      )
+    if (!isInputContent(params.content))
+      throw new SideChatError("content must contain valid ordered input parts.")
     return service.send({
       sideChatId: string(params, "sideChatId"),
-      text: params.text,
+      content: params.content,
       requestId: string(params, "requestId"),
-      ...(params.contextAttachments === undefined
-        ? {}
-        : { contextAttachments: params.contextAttachments }),
-      ...(params.attachments === undefined
-        ? {}
-        : { attachments: params.attachments }),
       ...model(params),
     })
   }),

@@ -117,7 +117,12 @@ describe("Turn recovery", () => {
     )
     const thread = await runtime.createThread()
     try {
-      await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "run" }],
+        },
+      })
       await expect.poll(() => executions).toBe(1)
       await entered.promise
       expect(requests).toBe(1)
@@ -140,7 +145,12 @@ describe("Turn recovery", () => {
       await runtime.manager.closeThread(thread.id)
       const resumed = await runtime.manager.resumeThread(thread.id)
       if (!resumed) throw new Error("Missing thread")
-      await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+      await resumed.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "continue" }],
+        },
+      })
       await expect
         .poll(() => resumed.agentStatus)
         .toEqual({ completed: "done" })
@@ -220,7 +230,12 @@ describe("Turn recovery", () => {
       ],
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "run" }],
+      },
+    })
     await waiting.promise
     await finished.promise
     await thread.interrupt("stop")
@@ -228,7 +243,12 @@ describe("Turn recovery", () => {
     await runtime.manager.closeThread(thread.id)
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (!resumed) throw new Error("Missing thread")
-    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "resumed" })
@@ -318,7 +338,12 @@ describe("Turn recovery", () => {
     )
     await writeFile(join(runtime.root, "existing.txt"), "original")
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "update file" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "update file" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(await readFile(join(runtime.root, "existing.txt"), "utf8")).toBe(
       continuation === "retry" ? "updated" : "original",
@@ -412,7 +437,12 @@ describe("Turn recovery", () => {
       return projectExecutionView(state)
     }
     try {
-      await thread.startIfIdle({ content: { kind: "text", text: "read" } })
+      await thread.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "read" }],
+        },
+      })
       await entered.promise
       const before = await replay()
       expect(
@@ -501,7 +531,10 @@ describe("Turn recovery", () => {
     ])
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: { kind: "text", text: "write then wait" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "write then wait" }],
+      },
     })
     await waiting.promise
     expect(await readFile(join(runtime.root, "result.txt"), "utf8")).toBe(
@@ -521,7 +554,12 @@ describe("Turn recovery", () => {
 
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Missing persisted thread")
-    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await resumed.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "continued" })
@@ -572,7 +610,10 @@ describe("Turn recovery", () => {
     await writeFile(join(runtime.root, "existing.txt"), "known content")
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: { kind: "text", text: "read while waiting" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "read while waiting" }],
+      },
     })
     await waiting.promise
     await readCompleted.promise
@@ -657,7 +698,12 @@ describe("Turn recovery", () => {
       111,
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "recover" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "recover" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(executions).toBe(1)
     expect(provider.callCount).toBe(3)

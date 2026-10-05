@@ -278,7 +278,10 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId,
             requestId: "request_endpoint",
-            content: { kind: "text", text: "Verify the endpoint" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "Verify the endpoint" }],
+            },
             modelSelection: {
               provider: connection.provider,
               model: connection.model,
@@ -344,7 +347,10 @@ describe("application composition", () => {
         const input = {
           sessionId,
           requestId: "request_completion",
-          content: { kind: "text" as const, text: "Finish the task" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "Finish the task" }],
+          },
         }
         expectOk(await application.handlers.admitInput(input))
         await vi.waitFor(() => {
@@ -459,7 +465,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: committedId,
           requestId: "request_first_commit",
-          content: { kind: "text", text: "persist this prompt" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "persist this prompt" }],
+          },
         })
         expectOk(admitted)
         // The admission is acknowledged at routing; the staged Session
@@ -565,7 +574,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_agent_listing",
-          content: { kind: "text", text: "delegate" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "delegate" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, rootThreadId)
@@ -753,7 +765,10 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_live_spawn",
-            content: { kind: "text", text: "delegate" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "delegate" }],
+            },
           }),
         )
         await waitForThreadIdle(application, rootSessionId)
@@ -806,7 +821,10 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_root_still_subscribed",
-            content: { kind: "text", text: "continue" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "continue" }],
+            },
           }),
         )
         await vi.waitFor(() =>
@@ -882,7 +900,10 @@ describe("application composition", () => {
           await first.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_spawn_observer",
-            content: { kind: "text", text: "delegate" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "delegate" }],
+            },
           }),
         )
         await waitForThreadIdle(first, rootSessionId)
@@ -998,7 +1019,10 @@ describe("application composition", () => {
             await restarted.handlers.admitInput({
               sessionId: rootSessionId,
               requestId: `request_resume_child_${turn}`,
-              content: { kind: "text", text: "resume observer" },
+              content: {
+                kind: "parts" as const,
+                parts: [{ type: "text" as const, text: "resume observer" }],
+              },
             }),
           )
           await expect
@@ -1144,7 +1168,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_spawn_child",
-          content: { kind: "text", text: "delegate" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "delegate" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, rootThreadId)
@@ -1188,7 +1215,10 @@ describe("application composition", () => {
         const followup = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_use_child_result",
-          content: { kind: "text", text: "use child result" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "use child result" }],
+          },
         })
         expectOk(followup)
         await waitForThreadIdle(application, rootThreadId)
@@ -1278,7 +1308,10 @@ describe("application composition", () => {
       const admitted = await first.handlers.admitInput({
         sessionId: rootThreadId,
         requestId: "request_spawn_persisted",
-        content: { kind: "text", text: "spawn persistent child" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "spawn persistent child" }],
+        },
       })
       expectOk(admitted)
       await waitForThreadIdle(first, rootThreadId)
@@ -1331,7 +1364,10 @@ describe("application composition", () => {
         const afterRestart = await resumed.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_list_restored",
-          content: { kind: "text", text: "list children" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "list children" }],
+          },
         })
         expectOk(afterRestart)
         await waitForThreadIdle(resumed, rootThreadId)
@@ -1394,9 +1430,14 @@ describe("application composition", () => {
           sessionId,
           requestId: "request_image",
           content: {
-            kind: "text",
-            text: "inspect",
-            attachments,
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "inspect" },
+              ...attachments.map((image) => ({
+                type: "image" as const,
+                ...image,
+              })),
+            ],
           },
         })
         expectOk(admitted)
@@ -1412,7 +1453,8 @@ describe("application composition", () => {
         expect(admittedEvent).toMatchObject({
           data: {
             content: {
-              attachments: [
+              parts: [
+                { type: "text", text: "inspect" },
                 {
                   detail: "high",
                   file: {
@@ -1488,9 +1530,14 @@ describe("application composition", () => {
           sessionId,
           requestId: "request_image",
           content: {
-            kind: "text",
-            text: "inspect",
-            attachments: replacementDraft,
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "inspect" },
+              ...replacementDraft.map((image) => ({
+                type: "image" as const,
+                ...image,
+              })),
+            ],
           },
         })
         expectError(conflictingImage, 409, ApiErrorCode.Conflict)
@@ -1517,10 +1564,11 @@ describe("application composition", () => {
           atInputId: admitted.body.inputId,
           reason: "edit",
           content: {
-            kind: "text",
-            text: "changed",
-            attachments: [
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "changed" },
               {
+                type: "image" as const,
                 name: "screen.png",
                 mediaType: "image/png",
                 data: Buffer.from("image-bytes").toString("base64"),
@@ -1539,8 +1587,21 @@ describe("application composition", () => {
           atInputId: admitted.body.inputId,
           reason: "edit",
           content: {
-            kind: "text",
-            text: "inspect more closely",
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "inspect more closely" },
+              {
+                type: "image",
+                name: "screen.png",
+                mediaType: "image/png",
+                sizeBytes: imageBytes.byteLength,
+                detail: "high",
+                file: {
+                  rolloutId: sessionId,
+                  path: "attachments/requests/request_image/1.png",
+                },
+              },
+            ],
           },
         })
         expectOk(forked)
@@ -1620,12 +1681,30 @@ describe("application composition", () => {
           application.handlers.admitInput({
             sessionId: concurrentSession.body.session.id,
             requestId: "request_concurrent_image",
-            content: { kind: "text", text: "A", attachments: draftA },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "A" },
+                ...draftA.map((image) => ({
+                  type: "image" as const,
+                  ...image,
+                })),
+              ],
+            },
           }),
           application.handlers.admitInput({
             sessionId: concurrentSession.body.session.id,
             requestId: "request_concurrent_image",
-            content: { kind: "text", text: "B", attachments: draftB },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "B" },
+                ...draftB.map((image) => ({
+                  type: "image" as const,
+                  ...image,
+                })),
+              ],
+            },
           }),
         ])
         expect(concurrent.map((result) => result.status).sort()).toEqual([
@@ -1664,7 +1743,10 @@ describe("application composition", () => {
           await first.handlers.admitInput({
             sessionId: existingSessionId,
             requestId: "request_restart_seed",
-            content: { kind: "text", text: "seed" },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: "seed" }],
+            },
           }),
         )
         await waitForThreadIdle(first, existingSessionId)
@@ -1715,7 +1797,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_close_active",
-          content: { kind: "text", text: "wait" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "wait" }],
+          },
         })
         expectOk(admitted)
         expect(
@@ -1768,9 +1853,14 @@ describe("application composition", () => {
           sessionId,
           requestId: "text_only_request",
           content: {
-            kind: "text",
-            text: "inspect",
-            attachments,
+            kind: "parts" as const,
+            parts: [
+              { type: "text" as const, text: "inspect" },
+              ...attachments.map((image) => ({
+                type: "image" as const,
+                ...image,
+              })),
+            ],
           },
         })
         expectOk(admitted)
@@ -2136,7 +2226,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_project_config",
-          content: { kind: "text", text: "run" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "run" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2198,7 +2291,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_outside_project_config",
-          content: { kind: "text", text: "run" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "run" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2305,7 +2401,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_mcp_reload",
-          content: { kind: "text", text: "run" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "run" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2338,7 +2437,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_provider_config",
-          content: { kind: "text", text: "hello" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "hello" }],
+          },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2420,7 +2522,12 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "configure-source",
-            content: { kind: "text", text: "Add my local coding source." },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "Add my local coding source." },
+              ],
+            },
           }),
         )
         await waitForThreadIdle(application, created.body.session.id)
@@ -2518,7 +2625,12 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "missing-configured-key",
-            content: { kind: "text", text: "Use the configured endpoint" },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "Use the configured endpoint" },
+              ],
+            },
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
           400,
@@ -2560,7 +2672,12 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "missing-reloaded-key",
-            content: { kind: "text", text: "Use the configured endpoint" },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "Use the configured endpoint" },
+              ],
+            },
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
           400,
@@ -2660,7 +2777,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_switch_provider",
-          content: { kind: "text", text: "switch" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "switch" }],
+          },
           modelSelection: { provider: "openai", model: "gpt-6-astra" },
         })
         expectOk(admitted)
@@ -2697,7 +2817,10 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_switch_grok_oidc",
-          content: { kind: "text", text: "use grok" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "use grok" }],
+          },
           modelSelection: { provider: "grok", model: "grok-4.5" },
         })
         expectError(admitted, 400, ApiErrorCode.InvalidInput)
@@ -2730,7 +2853,10 @@ describe("application composition", () => {
           const admitted = await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId,
-            content: { kind: "text", text },
+            content: {
+              kind: "parts" as const,
+              parts: [{ type: "text" as const, text: text }],
+            },
           })
           expectOk(admitted)
           await waitForThreadIdle(application, created.body.session.id)
@@ -2773,7 +2899,10 @@ describe("application composition", () => {
         const input = {
           sessionId: created.body.session.id,
           requestId: "request_idempotent_host",
-          content: { kind: "text", text: "only once" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "only once" }],
+          },
           modelSelection: { provider: "faux", model: "scripted" },
           parentInputId: "input_parent",
           metadata: { source: "test" },
@@ -2788,7 +2917,10 @@ describe("application composition", () => {
 
         const conflicting = await application.handlers.admitInput({
           ...input,
-          content: { kind: "text", text: "different" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "different" }],
+          },
         })
         expectError(conflicting, 409, ApiErrorCode.Conflict)
         const read = await application.handlers.readSession({
@@ -2843,14 +2975,20 @@ describe("application composition", () => {
         const first = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_fork_first",
-          content: { kind: "text", text: "first" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "first" }],
+          },
         })
         expectOk(first)
         await waitForThreadIdle(application, created.body.session.id)
         const second = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_fork_second",
-          content: { kind: "text", text: "replace this" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "replace this" }],
+          },
         })
         expectOk(second)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2859,7 +2997,10 @@ describe("application composition", () => {
           sessionId: created.body.session.id,
           atInputId: second.body.inputId,
           reason: "edit",
-          content: { kind: "text", text: "replacement" },
+          content: {
+            kind: "parts" as const,
+            parts: [{ type: "text" as const, text: "replacement" }],
+          },
           modelSelection: forkModelSelection,
         })
         expectOk(forked)
@@ -3180,7 +3321,10 @@ describe("application composition", () => {
       const admitted = await first.handlers.admitInput({
         sessionId: created.body.session.id,
         requestId: "request_before_restart",
-        content: { kind: "text", text: "resume after restart" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "resume after restart" }],
+        },
       })
       expectOk(admitted)
       await waitForThreadIdle(first, created.body.session.id)
@@ -3344,7 +3488,12 @@ describe("provider login registration", () => {
             const admitted = await application.handlers.admitInput({
               sessionId: created.body.session.id,
               requestId: `import-turn-${restarted}`,
-              content: { kind: "text", text: "Use the imported account." },
+              content: {
+                kind: "parts" as const,
+                parts: [
+                  { type: "text" as const, text: "Use the imported account." },
+                ],
+              },
               modelSelection: { provider: "codex", model: "gpt-6-astra" },
             })
             expectOk(admitted)
@@ -3691,7 +3840,12 @@ describe("provider login registration", () => {
           await application.handlers.admitInput({
             sessionId,
             requestId: "request_key",
-            content: { kind: "text", text: "Verify the selected key" },
+            content: {
+              kind: "parts" as const,
+              parts: [
+                { type: "text" as const, text: "Verify the selected key" },
+              ],
+            },
             modelSelection: { provider: "openai", model: "gpt-6-sol" },
           }),
         )

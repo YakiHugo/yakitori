@@ -144,11 +144,21 @@ describe("provider-native compaction history", () => {
       mateId: "mate",
       mateRevisionId: "revision",
     })
-    await thread.startIfIdle({ content: { kind: "text", text: "start" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "start" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 1" })
-    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 2" })
@@ -216,10 +226,20 @@ describe("provider-native compaction history", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "Do not change the public API." },
+      content: {
+        kind: "parts" as const,
+        parts: [
+          { type: "text" as const, text: "Do not change the public API." },
+        ],
+      },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done 1" })
-    await thread.startIfIdle({ content: { kind: "text", text: "Continue." } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue." }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done 2" })
     const stored = await harness.store.readThread(thread.id)
     const compacted = stored?.rollout.find(
@@ -257,13 +277,19 @@ describe("provider-native compaction history", () => {
     const resumed = await resumedManager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("missing restored thread")
     await resumed.startIfIdle({
-      content: { kind: "text", text: "Continue after restart." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue after restart." }],
+      },
     })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "done 3" })
     await resumed.startIfIdle({
-      content: { kind: "text", text: "Continue with Kimi." },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Continue with Kimi." }],
+      },
       modelSelection: { provider: "kimi", model: "kimi-k2.5" },
     })
     await expect
@@ -329,12 +355,20 @@ describe("provider-native compaction history", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: { kind: "text", text: "original request" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "original request" }],
+      },
     })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "old assistant state" })
-    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await thread.startIfIdle({
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "continue" }],
+      },
+    })
     await expect.poll(() => thread.agentStatus).toHaveProperty("errored")
     expect(JSON.stringify(thread.snapshot().context.history)).toContain(
       "old assistant state",

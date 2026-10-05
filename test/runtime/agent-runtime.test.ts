@@ -135,7 +135,12 @@ describe("agent runtime", () => {
         mateId: "mate_test",
         mateRevisionId: "mate_revision_test",
       })
-      await root.startIfIdle({ content: { kind: "text", text: "Start." } })
+      await root.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Start." }],
+        },
+      })
       await expect
         .poll(() => root.agentStatus)
         .toEqual({ completed: "root done" })
@@ -158,7 +163,12 @@ describe("agent runtime", () => {
       expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
         "20 weighted tokens",
       )
-      await root.startIfIdle({ content: { kind: "text", text: "Try again." } })
+      await root.startIfIdle({
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Try again." }],
+        },
+      })
       await expect
         .poll(() => root.agentStatus)
         .toEqual({ errored: "Session rollout token budget exceeded." })

@@ -10,6 +10,7 @@ import {
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import type { GitStatusResponse } from "../../src/server/workspace.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const { request, listAgents, openUrlTarget } = vi.hoisted(() => ({
   listAgents: vi.fn(),
@@ -203,8 +204,9 @@ it("shows submitted sources once and expands their original content", async () =
         inputId,
         text: "Use these sources",
         at: "2026-09-20T00:00:00Z",
-        attachments: [attachment],
+
         contextAttachments: [excerpt],
+        parts: inputParts("Use these sources", [attachment]),
       })),
     },
   }))

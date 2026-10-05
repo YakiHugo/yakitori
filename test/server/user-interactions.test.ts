@@ -65,7 +65,10 @@ describe("session user interactions", () => {
       const admitted = await app.handlers.admitInput({
         sessionId,
         requestId: "prepare_report",
-        content: { kind: "text", text: "Prepare a report" },
+        content: {
+          kind: "parts" as const,
+          parts: [{ type: "text" as const, text: "Prepare a report" }],
+        },
       })
       expect(admitted.ok).toBe(true)
       await vi.waitFor(() =>

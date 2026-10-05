@@ -1,3 +1,9 @@
+import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import {
+  inputContentText,
+  inputContentImages,
+  replaceInputImages,
+} from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
 import { isGoalStatus, type ThreadGoal } from "../core/goal.ts"
@@ -34,7 +40,7 @@ import {
   type ModelSelection,
   type RolloutAssets,
   type StoredEventEnvelope,
-  type TextContent,
+  type InputContent,
   type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
@@ -221,8 +227,6 @@ export type ThreadServerHandlers = ServerHandlers & {
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
 
-type AdmissionTextContent = TextContent
-
 // App-server projection over the live Session actor and canonical rollout.
 // It translates host DTOs only; execution never reads this projection.
 export function createThreadServerHandlers(
@@ -234,9 +238,9 @@ export function createThreadServerHandlers(
   const pumpReady = new Map<AgentThread, Promise<void>>()
   const publishedThrough = new Map<string, number>()
   const admissionTails = new Map<string, Promise<void>>()
-  const pendingInitialDrafts = new Map<string, TextContent>()
-  const pendingSteerDrafts = new Map<string, TextContent>()
-  const startingQueuedInputs = new Map<string, TextContent>()
+  const pendingInitialDrafts = new Map<string, readonly InputContent[]>()
+  const pendingSteerDrafts = new Map<string, readonly InputContent[]>()
+  const startingQueuedInputs = new Map<string, InputContent>()
   const inputQueue =
     options.inputQueue ?? new InputQueue(options.inputQueueDatabasePath)
   const queueOptions = { ...options, inputQueue }
@@ -301,7 +305,8 @@ export function createThreadServerHandlers(
               entry.item.item.id === started.inputItemId,
           )
           if (accepted && draft !== undefined)
-            void discardAdmittedDraftAttachments(threadId, requestId, draft)
+            for (const content of draft)
+              void discardAdmittedDraftAttachments(threadId, requestId, content)
           if (!accepted)
             void discardUnacceptedRequestAttachments(
               threadId,
@@ -329,7 +334,8 @@ export function createThreadServerHandlers(
         const draft = pendingInitialDrafts.get(key)
         if (draft !== undefined) {
           pendingInitialDrafts.delete(key)
-          void discardAdmittedDraftAttachments(threadId, requestId, draft)
+          for (const content of draft)
+            void discardAdmittedDraftAttachments(threadId, requestId, content)
         }
       }
       if (
@@ -343,7 +349,8 @@ export function createThreadServerHandlers(
       const draft = pendingSteerDrafts.get(key)
       if (draft === undefined) continue
       pendingSteerDrafts.delete(key)
-      void discardAdmittedDraftAttachments(threadId, requestId, draft)
+      for (const content of draft)
+        void discardAdmittedDraftAttachments(threadId, requestId, content)
     }
   }
 
@@ -671,23 +678,24 @@ export function createThreadServerHandlers(
   }
 
   type PromotedContent = {
-    readonly content: TextContent
+    readonly content: InputContent
     readonly rollback: (() => Promise<void>) | undefined
   }
 
   const promoteRequestAttachments = async (
     rolloutId: string,
     requestId: string,
-    content: TextContent,
+    content: InputContent,
   ): Promise<PromotedContent> => {
-    if (content.attachments === undefined) {
+    const attachments = inputContentImages(content)
+    if (attachments.length === 0) {
       return { content, rollback: undefined }
     }
     if (options.rolloutAssets === undefined) {
       throw invalidInput("Image attachments require rollout asset storage.")
     }
     try {
-      const allStagedInSession = content.attachments.every(
+      const allStagedInSession = attachments.every(
         (attachment) =>
           attachment.file.rolloutId === rolloutId &&
           attachment.file.path.startsWith("attachments/staging/"),
@@ -696,15 +704,15 @@ export function createThreadServerHandlers(
         ? await options.rolloutAssets.promoteImageAttachments(
             rolloutId,
             requestId,
-            content.attachments,
+            attachments,
           )
         : await options.rolloutAssets.copyImageAttachments(
             rolloutId,
             requestId,
-            content.attachments,
+            attachments,
           )
       return {
-        content: { ...content, attachments: promotion.attachments },
+        content: replaceInputImages(content, promotion.attachments),
         rollback: promotion.rollback,
       }
     } catch (error) {
@@ -720,10 +728,9 @@ export function createThreadServerHandlers(
   const discardAdmittedDraftAttachments = async (
     sessionId: string,
     requestId: string,
-    content: TextContent,
+    content: InputContent,
   ) => {
-    if (content.attachments === undefined) return
-    const drafts = content.attachments.filter((attachment) =>
+    const drafts = inputContentImages(content).filter((attachment) =>
       attachment.file.path.startsWith("attachments/staging/"),
     )
     if (drafts.length === 0) return
@@ -769,7 +776,7 @@ export function createThreadServerHandlers(
     request: ReturnType<typeof requireAdmitInputRequest>,
     submit: (
       thread: AgentThread,
-      content: TextContent,
+      content: InputContent,
     ) => Promise<TurnInputSubmission>,
   ) => {
     if ((await options.store.sessionPresentation(request.sessionId)).archived)
@@ -795,26 +802,25 @@ export function createThreadServerHandlers(
         // fence failed. Keep promoted files for a retry with the same request
         // ID; deleting them would leave a durable queued image dangling.
         const draftKey = `${request.sessionId}\0${request.requestId}`
-        pendingInitialDrafts.set(draftKey, request.content)
-        let submitted: TurnInputSubmission
-        try {
-          submitted = await submit(thread, content)
-        } catch (error) {
-          pendingInitialDrafts.delete(draftKey)
-          throw error
-        }
+        const submitted = await submit(thread, content)
         if (submitted.type === "not_submitted") {
-          pendingInitialDrafts.delete(draftKey)
           await rollbackPromotion?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
           })
         }
         if (submitted.type === "steered") {
-          pendingInitialDrafts.delete(draftKey)
           throw internalError("Admission unexpectedly returned steering.")
         }
-        if (submitted.type === "replayed") {
+        const hasImages = inputContentImages(request.content).length !== 0
+        if (hasImages)
+          pendingInitialDrafts.set(draftKey, [
+            ...(pendingInitialDrafts.get(draftKey) ?? []),
+            request.content,
+          ])
+        // A fast Turn can publish before draft tracking is installed. Reading
+        // after acceptance also covers retries after the original cleanup event.
+        if (submitted.type === "replayed" || hasImages) {
           const stored = await options.store.readThread(request.sessionId)
           const accepted = stored?.rollout.some(
             ({ item }) =>
@@ -826,13 +832,15 @@ export function createThreadServerHandlers(
               item.type === "turn_completed" &&
               item.turnId === submitted.turnId,
           )
+          const drafts = pendingInitialDrafts.get(draftKey) ?? []
           if (accepted || completed) pendingInitialDrafts.delete(draftKey)
           if (accepted)
-            await discardAdmittedDraftAttachments(
-              request.sessionId,
-              request.requestId,
-              request.content,
-            )
+            for (const draft of drafts)
+              await discardAdmittedDraftAttachments(
+                request.sessionId,
+                request.requestId,
+                draft,
+              )
           if (completed && !accepted) {
             await rollbackPromotion?.()
             await discardUnacceptedRequestAttachments(
@@ -847,6 +855,7 @@ export function createThreadServerHandlers(
           requestId: request.requestId,
           turnId: submitted.turnId,
           inputId: submitted.inputItemId,
+          content,
         })
       },
     )
@@ -1357,16 +1366,42 @@ export function createThreadServerHandlers(
           request.sessionId,
         )
         const beforeTurnId = turnIdForInput(source, request.atInputId)
-        const sourceAttachments = inputAttachments(source, request.atInputId)
         const sourceInput = source.rollout.find(
           ({ item }) =>
             item.type === "response_item" && item.item.id === request.atInputId,
         )?.item
-        const sourceContext =
-          sourceInput?.type === "response_item" &&
-          sourceInput.item.item.role === "user"
-            ? sourceInput.item.item.contextAttachments
-            : undefined
+        let forkContent: InputContent | undefined
+        if (request.content !== undefined) {
+          if (
+            sourceInput?.type !== "response_item" ||
+            sourceInput.item.item.role !== "user"
+          )
+            throw invalidInput("Fork input must be a user message.")
+          const sourceContent = modelUserInputContent(sourceInput.item.item)
+          const sourceAttachments = inputContentImages(sourceContent)
+          forkContent = {
+            ...request.content,
+            ...(request.content.contextAttachments === undefined &&
+            sourceContent.contextAttachments !== undefined
+              ? { contextAttachments: sourceContent.contextAttachments }
+              : {}),
+          }
+          for (const image of inputContentImages(forkContent)) {
+            if (
+              !sourceAttachments.some(
+                (original) =>
+                  original.file.rolloutId === image.file.rolloutId &&
+                  original.file.path === image.file.path &&
+                  original.name === image.name &&
+                  original.mediaType === image.mediaType &&
+                  original.sizeBytes === image.sizeBytes,
+              )
+            )
+              throw invalidInput(
+                "Fork images must reference images from the edited source input.",
+              )
+          }
+        }
         await options.store.setSessionHead(request.sessionId, request.sessionId)
         const previouslyDeferred =
           options.goals?.deferContinuation(request.sessionId, true) ?? false
@@ -1390,28 +1425,23 @@ export function createThreadServerHandlers(
         try {
           options.goals?.fork(request.sessionId, forked.thread.id)
           await ensureEventPump(forked.thread)
-          if (request.content !== undefined) {
+          if (forkContent !== undefined) {
             submissionId = createRequestId()
-            const attachments =
-              sourceAttachments.length === 0
+            const attachments = inputContentImages(forkContent)
+            const copied =
+              attachments.length === 0
                 ? undefined
-                : (
-                    await requireRolloutAssets(options).copyImageAttachments(
-                      forkRolloutId,
-                      submissionId,
-                      sourceAttachments,
-                    )
-                  ).attachments
+                : await requireRolloutAssets(options).copyImageAttachments(
+                    forkRolloutId,
+                    submissionId,
+                    attachments,
+                  )
             const submitted = await forked.thread.startIfIdle({
               submissionId,
-              content: {
-                ...request.content,
-                ...(request.content.contextAttachments === undefined &&
-                sourceContext !== undefined
-                  ? { contextAttachments: sourceContext }
-                  : {}),
-                ...(attachments === undefined ? {} : { attachments }),
-              },
+              content:
+                copied === undefined
+                  ? forkContent
+                  : replaceInputImages(forkContent, copied.attachments),
               ...(request.modelSelection === undefined
                 ? {}
                 : { modelSelection: request.modelSelection }),
@@ -1530,33 +1560,38 @@ export function createThreadServerHandlers(
             request.requestId,
           )
           if (existing !== undefined) {
-            const attachmentDetails = (
-              attachments: TextContent["attachments"],
-            ) =>
-              attachments?.map(({ name, mediaType, sizeBytes, detail }) => ({
-                name,
-                mediaType,
-                sizeBytes,
-                detail,
-              })) ?? []
-            if (
-              existing.input.content.text !== request.content.text ||
-              JSON.stringify(
-                existing.input.content.contextAttachments ?? [],
-              ) !== JSON.stringify(request.content.contextAttachments ?? []) ||
-              JSON.stringify(
-                attachmentDetails(existing.input.content.attachments),
-              ) !==
-                JSON.stringify(
-                  attachmentDetails(request.content.attachments),
-                ) ||
-              JSON.stringify(existing.input.modelSelection) !==
-                JSON.stringify(request.modelSelection) ||
-              JSON.stringify(existing.input.metadata) !==
-                JSON.stringify(request.metadata) ||
-              existing.input.parentInputId !== request.parentInputId
+            const retry = await promoteRequestAttachments(
+              stored.metadata.rolloutId,
+              request.requestId,
+              request.content,
             )
-              throw conflict("Input was not queued: request_conflict.")
+            try {
+              if (
+                fingerprintInputAdmission({
+                  role: InputRole.User,
+                  content: existing.input.content,
+                  modelSelection: existing.input.modelSelection,
+                  metadata: existing.input.metadata,
+                  parentInputId: existing.input.parentInputId,
+                }) !==
+                fingerprintInputAdmission({
+                  role: InputRole.User,
+                  content: retry.content,
+                  modelSelection: request.modelSelection,
+                  metadata: request.metadata,
+                  parentInputId: request.parentInputId,
+                })
+              )
+                throw conflict("Input was not queued: request_conflict.")
+            } catch (error) {
+              await retry.rollback?.()
+              throw error
+            }
+            await discardAdmittedDraftAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
             return existing
           }
           const rolloutId = stored.metadata.rolloutId
@@ -1596,6 +1631,7 @@ export function createThreadServerHandlers(
           requestId: request.requestId,
           turnId: request.requestId,
           inputId: item.id,
+          content: item.input.content,
         })
       } catch (error) {
         return fail(
@@ -1642,8 +1678,8 @@ export function createThreadServerHandlers(
           )
           const rolloutId = stored.metadata.rolloutId
           const sameAttachments =
-            JSON.stringify(request.content.attachments ?? []) ===
-            JSON.stringify(existing.input.content.attachments ?? [])
+            JSON.stringify(inputContentImages(request.content)) ===
+            JSON.stringify(inputContentImages(existing.input.content))
           if (
             !sameAttachments &&
             request.requestId === existing.input.submissionId
@@ -1770,6 +1806,7 @@ export function createThreadServerHandlers(
           requestId: result.item.input.submissionId,
           turnId: result.submission.turnId,
           inputId: result.submission.inputItemId,
+          content: result.item.input.content,
         })
       } catch (error) {
         return fail(error, reporter, "start-queued-input")
@@ -1802,10 +1839,6 @@ export function createThreadServerHandlers(
           request.content,
         )
         const steerKey = `${request.sessionId}\0${request.requestId}`
-        // The model may record a steer before this RPC returns; register the
-        // draft before handing ownership to the active Turn.
-        if (request.content.attachments !== undefined)
-          pendingSteerDrafts.set(steerKey, request.content)
         const submitted = await thread
           .steer(
             {
@@ -1821,16 +1854,38 @@ export function createThreadServerHandlers(
             request.expectedTurnId,
           )
           .catch(async (error: unknown) => {
-            pendingSteerDrafts.delete(steerKey)
             await promoted.rollback?.()
             throw error
           })
         if (submitted.type === "not_submitted") {
-          pendingSteerDrafts.delete(steerKey)
           await promoted.rollback?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
           })
+        }
+        if (inputContentImages(request.content).length !== 0) {
+          pendingSteerDrafts.set(steerKey, [
+            ...(pendingSteerDrafts.get(steerKey) ?? []),
+            request.content,
+          ])
+          const stored = await options.store.readThread(request.sessionId)
+          const recorded = stored?.rollout.some(
+            ({ item }) =>
+              item.type === "response_item" &&
+              item.item.turnId === request.requestId &&
+              item.item.item.role === "user" &&
+              item.item.item.context === undefined,
+          )
+          if (recorded) {
+            const drafts = pendingSteerDrafts.get(steerKey) ?? []
+            pendingSteerDrafts.delete(steerKey)
+            for (const draft of drafts)
+              await discardAdmittedDraftAttachments(
+                request.sessionId,
+                request.requestId,
+                draft,
+              )
+          }
         }
         // Steering acceptance is ephemeral. Preserve draft assets until the
         // model records this input, so a lost response or an interrupted Turn
@@ -1838,9 +1893,7 @@ export function createThreadServerHandlers(
         return ok(200, {
           requestId: request.requestId,
           turnId: submitted.turnId,
-          ...(promoted.content.attachments === undefined
-            ? {}
-            : { attachments: promoted.content.attachments }),
+          content: promoted.content,
         })
       } catch (error) {
         return fail(error, reporter, "steer-input")
@@ -2089,7 +2142,7 @@ async function mapStoredThread(
     ...(cacheExpiry === undefined ? {} : { cacheExpiry }),
     pendingInputs: pendingQueue.map((entry) => ({
       id: entry.id,
-      text: entry.input.content.text,
+      text: inputContentText(entry.input.content),
       admittedAt: entry.createdAt,
     })),
     pendingPermissions: pendingPermissions.map(
@@ -2187,10 +2240,6 @@ function mapRolloutEvent(
     // message_-prefixed user items are steered inputs, recorded when the
     // active Turn sampled them; input_-prefixed items start Turns.
     const steered = item.item.id.startsWith("message_")
-    const text = item.item.item.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("")
     return createEventEnvelope({
       ...base,
       event: {
@@ -2200,35 +2249,7 @@ function mapRolloutEvent(
           inputId: item.item.id,
           role: InputRole.User,
           ...(steered ? { steered: true } : {}),
-          content: {
-            kind: "text",
-            text,
-            ...(item.item.item.contextAttachments === undefined
-              ? {}
-              : { contextAttachments: item.item.item.contextAttachments }),
-            ...(!item.item.item.content.some((block) => block.type === "image")
-              ? {}
-              : {
-                  attachments: item.item.item.content
-                    .filter((block) => block.type === "image")
-                    .flatMap((image) =>
-                      "file" in image && typeof image.sizeBytes === "number"
-                        ? [
-                            {
-                              name:
-                                image.name ??
-                                image.file.path.split("/").at(-1) ??
-                                "image",
-                              mediaType: image.mediaType,
-                              sizeBytes: image.sizeBytes,
-                              detail: image.detail ?? "high",
-                              file: image.file,
-                            },
-                          ]
-                        : [],
-                    ),
-                }),
-          },
+          content: modelUserInputContent(item.item.item),
           ...(item.item.submissionMetadata?.modelSelection === undefined
             ? {}
             : {
@@ -2337,15 +2358,15 @@ async function requireStoredThread(
   throw notFound(`Session ${threadId} was not found.`, { sessionId: threadId })
 }
 
-function requestAttachmentOwners(content: TextContent): readonly string[] {
+function requestAttachmentOwners(content: InputContent): readonly string[] {
   return [
     ...new Set(
-      content.attachments?.flatMap((attachment) => {
+      inputContentImages(content).flatMap((attachment) => {
         const match = /^attachments\/requests\/([^/]+)\//.exec(
           attachment.file.path,
         )
         return match?.[1] === undefined ? [] : [match[1]]
-      }) ?? [],
+      }),
     ),
   ]
 }
@@ -2363,32 +2384,30 @@ function turnIdForInput(stored: StoredThread, inputId: string): string {
   })
 }
 
-function inputAttachments(
-  stored: StoredThread,
-  inputId: string,
-): readonly ImageAttachment[] {
-  const input = stored.rollout.find(
-    (record) =>
-      record.item.type === "response_item" && record.item.item.id === inputId,
-  )
-  if (input?.item.type !== "response_item") return []
-  const message = input.item.item.item
-  if (message.role !== "user") return []
-  return message.content
-    .filter((block) => block.type === "image")
-    .flatMap((image) =>
-      "file" in image && typeof image.sizeBytes === "number"
-        ? [
-            {
-              name: image.name ?? image.file.path.split("/").at(-1) ?? "image",
-              mediaType: image.mediaType,
-              sizeBytes: image.sizeBytes,
-              detail: image.detail ?? "high",
-              file: image.file,
-            },
-          ]
-        : [],
-    )
+function modelUserInputContent(
+  message: import("../kernel/events.ts").ModelUserMessage,
+): InputContent {
+  return {
+    kind: "parts",
+    parts: message.content.map((part) => {
+      if (part.type === "text") return { type: "text", text: part.text }
+      if (part.file === undefined || part.sizeBytes === undefined)
+        throw invalidInput(
+          "Input images require stored rollout asset references.",
+        )
+      return {
+        type: "image",
+        name: part.name ?? part.file.path.split("/").at(-1) ?? "image",
+        mediaType: part.mediaType,
+        detail: part.detail ?? "high",
+        sizeBytes: part.sizeBytes,
+        file: part.file,
+      }
+    }),
+    ...(message.contextAttachments === undefined
+      ? {}
+      : { contextAttachments: message.contextAttachments }),
+  }
 }
 
 function requireRolloutAssets(
@@ -2621,7 +2640,7 @@ function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
   const content =
     record.content === undefined
       ? undefined
-      : requireForkTextContent(record.content, maxInputBytes)
+      : requireAdmissionInputContent(record.content, maxInputBytes)
   const modelSelection = optionalModelSelectionField(record, "modelSelection")
   if (reason === ForkReason.Edit && content === undefined) {
     throw invalidInput("content is required when reason is edit.", {
@@ -2666,7 +2685,7 @@ function requireAdmitInputRequest(
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
-    content: requireAdmissionTextContent(
+    content: requireAdmissionInputContent(
       record.content,
       maxInputBytes,
       maxContextBytes,
@@ -2684,7 +2703,7 @@ function requireSteerInputRequest(input: unknown, maxInputBytes: number) {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
     expectedTurnId: requireString(record.expectedTurnId, "expectedTurnId"),
-    content: requireAdmissionTextContent(record.content, maxInputBytes),
+    content: requireAdmissionInputContent(record.content, maxInputBytes),
     ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalMetadataField(record, "metadata"),
   }
@@ -2905,74 +2924,76 @@ function requireOptionalSequence(
   })
 }
 
-function requireForkTextContent(
-  value: unknown,
-  maxInputBytes: number,
-): TextContent {
-  if (isRecord(value) && value.attachments !== undefined) {
-    throw invalidInput(
-      "Fork content attachments are inherited and must not be provided.",
-      { field: "content.attachments" },
-    )
-  }
-  const content = requireAdmissionTextContent(value, maxInputBytes)
-  return content
-}
-
-function requireAdmissionTextContent(
+function requireAdmissionInputContent(
   value: unknown,
   maxInputBytes: number,
   maxContextBytes = maxInputBytes,
-): AdmissionTextContent {
-  if (!isRecord(value)) {
-    throw invalidInput("content must be a text content object.")
-  }
-  if (value.kind === "text" && typeof value.text === "string") {
-    if (Buffer.byteLength(value.text, "utf8") > maxInputBytes) {
-      throw invalidInput(
-        `content.text must not exceed ${maxInputBytes} bytes.`,
-        {
-          field: "content.text",
-          maxBytes: maxInputBytes,
-        },
-      )
-    }
-    const attachments = requireImageAttachments(value.attachments)
-    if (
-      value.contextAttachments !== undefined &&
-      !isContextExcerpts(value.contextAttachments)
+): InputContent {
+  if (
+    !isRecord(value) ||
+    value.kind !== "parts" ||
+    !Array.isArray(value.parts) ||
+    Object.keys(value).some(
+      (key) => !["kind", "parts", "contextAttachments"].includes(key),
     )
+  )
+    throw invalidInput(
+      "content must include kind parts and an ordered parts array.",
+    )
+  let textBytes = 0
+  const parts = value.parts.map((part: unknown, index: number) => {
+    if (!isRecord(part))
       throw invalidInput(
-        "content.contextAttachments must contain valid context excerpts.",
+        `content.parts[${index}] must be a text or image object.`,
       )
     if (
-      value.contextAttachments !== undefined &&
-      Buffer.byteLength(JSON.stringify(value.contextAttachments), "utf8") >
-        maxContextBytes
-    )
-      throw invalidInput(
-        `content.contextAttachments must not exceed ${maxContextBytes} bytes.`,
-      )
-    return {
-      kind: "text",
-      text: value.text,
-      ...(value.contextAttachments === undefined
-        ? {}
-        : { contextAttachments: value.contextAttachments }),
-      ...(attachments.length === 0 ? {} : { attachments }),
+      part.type === "text" &&
+      typeof part.text === "string" &&
+      Object.keys(part).every((key) => key === "type" || key === "text")
+    ) {
+      textBytes += Buffer.byteLength(part.text, "utf8")
+      if (textBytes > maxInputBytes)
+        throw invalidInput(
+          `content.parts text must not exceed ${maxInputBytes} bytes.`,
+          { field: "content.parts", maxBytes: maxInputBytes },
+        )
+      return { type: "text" as const, text: part.text }
     }
+    if (
+      part.type === "image" &&
+      Object.keys(part).every((key) =>
+        ["type", "name", "mediaType", "sizeBytes", "detail", "file"].includes(
+          key,
+        ),
+      )
+    )
+      return { type: "image" as const, ...requireImageAttachment(part, index) }
+    throw invalidInput(
+      `content.parts[${index}] must be a text or image object.`,
+    )
+  })
+  if (
+    value.contextAttachments !== undefined &&
+    !isContextExcerpts(value.contextAttachments)
+  )
+    throw invalidInput(
+      "content.contextAttachments must contain valid context excerpts.",
+    )
+  if (
+    value.contextAttachments !== undefined &&
+    Buffer.byteLength(JSON.stringify(value.contextAttachments), "utf8") >
+      maxContextBytes
+  )
+    throw invalidInput(
+      `content.contextAttachments must not exceed ${maxContextBytes} bytes.`,
+    )
+  return {
+    kind: "parts",
+    parts,
+    ...(value.contextAttachments === undefined
+      ? {}
+      : { contextAttachments: value.contextAttachments }),
   }
-  throw invalidInput("content must include kind text and a string text value.")
-}
-
-function requireImageAttachments(value: unknown): readonly ImageAttachment[] {
-  if (value === undefined) return []
-  if (!Array.isArray(value)) {
-    throw invalidInput("content.attachments must be an array.", {
-      field: "content.attachments",
-    })
-  }
-  return value.map((item, index) => requireImageAttachment(item, index))
 }
 
 function requireImageAttachment(
@@ -2980,11 +3001,11 @@ function requireImageAttachment(
   index: number,
 ): ImageAttachment {
   if (!isRecord(value)) {
-    throw invalidInput(`content.attachments[${index}] must be an image object.`)
+    throw invalidInput(`content.parts[${index}] must be an image object.`)
   }
-  const name = requireString(value.name, `content.attachments[${index}].name`)
+  const name = requireString(value.name, `content.parts[${index}].name`)
   if (Buffer.byteLength(name, "utf8") > 255) {
-    throw invalidInput(`content.attachments[${index}].name is too long.`)
+    throw invalidInput(`content.parts[${index}].name is too long.`)
   }
   const mediaType = value.mediaType
   if (
@@ -2994,21 +3015,19 @@ function requireImageAttachment(
     mediaType !== "image/webp"
   ) {
     throw invalidInput(
-      `content.attachments[${index}].mediaType is not a supported image type.`,
+      `content.parts[${index}].mediaType is not a supported image type.`,
     )
   }
   if (
     !Number.isSafeInteger(value.sizeBytes) ||
     (value.sizeBytes as number) <= 0
   ) {
-    throw invalidInput(
-      `content.attachments[${index}].sizeBytes must be positive.`,
-    )
+    throw invalidInput(`content.parts[${index}].sizeBytes must be positive.`)
   }
   const detail = value.detail ?? "high"
   if (detail !== "high" && detail !== "original") {
     throw invalidInput(
-      `content.attachments[${index}].detail must be high or original.`,
+      `content.parts[${index}].detail must be high or original.`,
     )
   }
   return {
@@ -3027,10 +3046,11 @@ function requireRolloutAssetReference(
   if (
     !isRecord(value) ||
     !isStorageKey(value.rolloutId) ||
-    typeof value.path !== "string"
+    typeof value.path !== "string" ||
+    Object.keys(value).some((key) => key !== "rolloutId" && key !== "path")
   ) {
     throw invalidInput(
-      `content.attachments[${index}].file must be a rollout asset reference.`,
+      `content.parts[${index}].file must be a rollout asset reference.`,
     )
   }
   return { rolloutId: value.rolloutId, path: value.path }

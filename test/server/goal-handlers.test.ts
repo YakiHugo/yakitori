@@ -152,7 +152,10 @@ describe("goal handlers", () => {
     const submitted = await reopened.handlers.admitInput({
       sessionId,
       requestId: "request_user_resume",
-      content: { kind: "text", text: "Actually do this first" },
+      content: {
+        kind: "parts" as const,
+        parts: [{ type: "text" as const, text: "Actually do this first" }],
+      },
     })
     expect(submitted).toMatchObject({ ok: true })
     const request = await next.entered.promise

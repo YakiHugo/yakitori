@@ -1,5 +1,5 @@
+import type { InputPart } from "../../kernel/events.ts"
 import { create } from "zustand"
-import type { ImageAttachment } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
 
 export type WorkspaceView =
@@ -29,10 +29,9 @@ export type WorkspaceTab = (
   | {
       id: string
       kind: "chat"
-      draft: string
+      draft: readonly InputPart[]
       composerFocusRevision?: number
       excerpts: readonly ContextExcerpt[]
-      attachments: readonly ImageAttachment[]
       sourceSessionId?: string
       title?: string
       hasMessages?: boolean
@@ -86,9 +85,8 @@ type WorkspaceStore = {
   setBrowserTitle(id: string, title: string): void
   updateChatDraft(
     id: string,
-    draft: string,
+    draft: readonly InputPart[],
     excerpts: readonly ContextExcerpt[],
-    attachments?: readonly ImageAttachment[],
   ): void
 }
 
@@ -189,9 +187,8 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
             ...(get().sessionId === undefined
               ? {}
               : { workspaceSessionId: get().sessionId }),
-            draft: "",
+            draft: [],
             excerpts: [],
-            attachments: [],
             title: count === 0 ? "Side chat" : `Side chat ${count + 1}`,
             ...(sourceSessionId === undefined ? {} : { sourceSessionId }),
           }
@@ -431,12 +428,11 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       ),
     })
   },
-  updateChatDraft(id, draft, excerpts, attachments) {
+  updateChatDraft(id, draft, excerpts) {
     const update = (tab: Extract<WorkspaceTab, { kind: "chat" }>) => ({
       ...tab,
       draft,
       excerpts,
-      ...(attachments === undefined ? {} : { attachments }),
     })
     const current = get()
     set({

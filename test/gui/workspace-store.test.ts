@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, expect, it, vi } from "vitest"
+import { inputParts } from "./input-fixtures.ts"
 
 beforeEach(() => {
   localStorage.clear()
@@ -225,7 +226,7 @@ it("keeps selected context in its explicit side draft and advances focus only wh
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === second),
   ).toMatchObject({ excerpts: [] })
-  store.updateChatDraft(first, "", [])
+  store.updateChatDraft(first, inputParts(""), [])
   store.addChatExcerpt(first, { ...excerpt, id: "again" })
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
