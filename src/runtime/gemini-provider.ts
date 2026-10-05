@@ -395,35 +395,73 @@ export function toGeminiContents(
 ): GeminiContent[] {
   const contents: GeminiContent[] = []
   const calls = new Map<string, { name: string; id?: string }>()
+  // GenerateContent documents nested multimodal function responses for Gemini 3.
+  // Do not infer this capability for aliases or older/future model families.
+  // https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal
+  const nativeToolImages = /^(?:models\/)?gemini-3(?:[.-]|$)/.test(model ?? "")
+  let toolResultIndex = 0
   for (const message of messages) {
     if (message.role === "tool") {
       const call = calls.get(message.toolCallId)
       if (call === undefined)
         throw new GeminiProtocolError("Unmatched Gemini tool result.")
       calls.delete(message.toolCallId)
+      const resultIndex = toolResultIndex++
+      const images = nativeToolImages
+        ? (message.images ?? []).map((image, index) => {
+            if (
+              image.mediaType !== "image/png" &&
+              image.mediaType !== "image/jpeg" &&
+              image.mediaType !== "image/webp"
+            )
+              throw new GeminiProtocolError(
+                `Gemini 3 function responses do not support ${image.mediaType}; use PNG, JPEG or WebP.`,
+              )
+            return {
+              inlineData: {
+                mimeType: image.mediaType,
+                displayName: `tool_${resultIndex}_image_${index}`,
+                data: requireModelImageData(image),
+              },
+            }
+          })
+        : []
       const parts: JsonObject[] = [
         {
           functionResponse: {
             ...call,
-            response: message.isError
-              ? { error: message.content }
-              : { output: message.content },
+            response: {
+              ...(message.isError
+                ? { error: message.content }
+                : { output: message.content }),
+              ...(images.length === 0
+                ? {}
+                : {
+                    images: images.map(({ inlineData }) => ({
+                      $ref: inlineData.displayName,
+                    })),
+                  }),
+            },
+            ...(images.length === 0 ? {} : { parts: images }),
           },
         },
       ]
-      parts.push(
-        ...(message.images ?? []).flatMap((image): JsonObject[] => [
-          {
-            text: `[Image from tool ${call.name}, call ${message.toolCallId}]`,
-          },
-          {
-            inlineData: {
-              mimeType: image.mediaType,
-              data: requireModelImageData(image),
+      // Older/unknown models keep the established labeled user-image fallback.
+      // Native responses instead bind each image inside its exact tool result.
+      if (!nativeToolImages)
+        parts.push(
+          ...(message.images ?? []).flatMap((image): JsonObject[] => [
+            {
+              text: `[Image from tool ${call.name}, call ${message.toolCallId}]`,
             },
-          },
-        ]),
-      )
+            {
+              inlineData: {
+                mimeType: image.mediaType,
+                data: requireModelImageData(image),
+              },
+            },
+          ]),
+        )
       for (const document of message.documents ?? [])
         parts.push({
           text: `[Document ${document.name} was not sent: native PDF input is not enabled for Gemini.]`,

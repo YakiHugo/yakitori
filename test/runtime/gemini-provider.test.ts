@@ -617,6 +617,180 @@ describe("native Gemini provider", () => {
     )
   })
 
+  it.each([
+    "gemini-3-flash-preview",
+    "models/gemini-3.8-flash",
+  ])("binds parallel tool images inside native function responses for %s", async (model) => {
+    const messages = imageToolHistory(model)
+    const original = structuredClone(messages)
+    let body: Record<string, unknown> | undefined
+    await withServer(
+      async (incoming, outgoing) => {
+        body = await requestBody(incoming)
+        send(outgoing, [chunk([{ text: "Images inspected" }], "STOP")])
+      },
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(
+            request({
+              target: {
+                provider: "custom_gemini",
+                model,
+                instructionProfileId: "default",
+              },
+              messages,
+            }),
+          ),
+        )
+        expect(terminal(events).content).toMatchObject([
+          { type: "text", text: "Images inspected" },
+        ])
+      },
+    )
+    expect(messages).toEqual(original)
+    expect(body?.contents).toMatchObject([
+      {
+        role: "model",
+        parts: [
+          { functionCall: { name: "inspect", id: "native_a" } },
+          { functionCall: { name: "inspect", id: "native_b" } },
+        ],
+      },
+      {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              name: "inspect",
+              id: "native_a",
+              response: {
+                error: "Partial first result",
+                images: [
+                  { $ref: "tool_0_image_0" },
+                  { $ref: "tool_0_image_1" },
+                ],
+              },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: "image/png",
+                    data: "YWJj",
+                    displayName: "tool_0_image_0",
+                  },
+                },
+                {
+                  inlineData: {
+                    mimeType: "image/webp",
+                    data: "ZGVm",
+                    displayName: "tool_0_image_1",
+                  },
+                },
+              ],
+            },
+          },
+          {
+            functionResponse: {
+              name: "inspect",
+              id: "native_b",
+              response: {
+                output: "Second result",
+                images: [{ $ref: "tool_1_image_0" }],
+              },
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: "image/jpeg",
+                    data: "Z2hp",
+                    displayName: "tool_1_image_0",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ])
+    const contents = body?.contents as Array<{
+      parts: Array<Record<string, unknown>>
+    }>
+    expect(contents).toHaveLength(2)
+    expect(contents[1]?.parts).toHaveLength(2)
+    expect(
+      contents[1]?.parts.every(
+        (part) => Object.keys(part).join() === "functionResponse",
+      ),
+    ).toBe(true)
+  })
+
+  it.each([
+    "gemini-2.5-pro",
+    "gemini-test",
+    "gemini-4-pro",
+    undefined,
+  ])("retains the labeled fallback for older or unconfirmed model %s", (model) => {
+    const contents = toGeminiContents(
+      imageToolHistory(model ?? "gemini-test"),
+      "custom_gemini",
+      "scope_a",
+      model,
+    )
+    const parts = contents[1]?.parts ?? []
+    expect(parts.filter((part) => part.inlineData !== undefined)).toHaveLength(
+      3,
+    )
+    expect(
+      parts.filter((part) => part.functionResponse !== undefined),
+    ).toHaveLength(2)
+    expect(JSON.stringify(parts)).not.toContain("displayName")
+    expect(parts).toContainEqual({
+      text: "[Image from tool inspect, call call_a]",
+    })
+    expect(parts).toContainEqual({
+      text: "[Image from tool inspect, call call_b]",
+    })
+  })
+
+  it("rejects unsupported native tool image formats before issuing a request", async () => {
+    let requests = 0
+    const model = "gemini-3-flash-preview"
+    const history = imageToolHistory(model)
+    const messages: ModelMessage[] = history.map((message) =>
+      message.role === "tool"
+        ? {
+            ...message,
+            images: [{ type: "image", mediaType: "image/gif", data: "R0lG" }],
+          }
+        : message,
+    )
+    const events = await collect(
+      createGeminiProvider({
+        apiKey: "fake",
+        model,
+        baseURL: "https://generativelanguage.googleapis.com/v1beta",
+        fetchFn: async () => {
+          requests += 1
+          throw new Error("Unexpected network request")
+        },
+      })(
+        request({
+          target: {
+            provider: "custom_gemini",
+            model,
+            instructionProfileId: "default",
+          },
+          messages,
+        }),
+      ),
+    )
+    expect(requests).toBe(0)
+    expect(events).toMatchObject([
+      {
+        type: "failure",
+        failure: { kind: "protocol_error", stage: "request_build" },
+      },
+    ])
+  })
+
   it("rejects unmatched results before connecting", async () => {
     let requests = 0
     const fakeFetch: typeof fetch = async () => {
@@ -674,6 +848,51 @@ function provider(baseURL: string) {
     baseURL,
   })
 }
+function imageToolHistory(model: string): ModelMessage[] {
+  return [
+    {
+      role: "assistant",
+      content: ["a", "b"].map((id) => ({
+        type: "tool_call" as const,
+        id: `call_${id}`,
+        name: "inspect",
+        input: { path: id },
+        providerMetadata: {
+          gemini: {
+            provider: "custom_gemini",
+            scope: "scope_a",
+            model,
+            part: {
+              functionCall: {
+                name: "inspect",
+                id: `native_${id}`,
+                args: { path: id },
+              },
+              thoughtSignature: `signature_${id}`,
+            },
+          },
+        },
+      })),
+    },
+    {
+      role: "tool",
+      toolCallId: "call_a",
+      content: "Partial first result",
+      isError: true,
+      images: [
+        { type: "image", mediaType: "image/png", data: "YWJj" },
+        { type: "image", mediaType: "image/webp", data: "ZGVm" },
+      ],
+    },
+    {
+      role: "tool",
+      toolCallId: "call_b",
+      content: "Second result",
+      images: [{ type: "image", mediaType: "image/jpeg", data: "Z2hp" }],
+    },
+  ]
+}
+
 function chunk(parts: readonly unknown[], finishReason?: string) {
   return {
     candidates: [
