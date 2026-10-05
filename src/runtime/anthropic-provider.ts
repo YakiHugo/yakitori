@@ -239,6 +239,18 @@ async function* streamAnthropic(
             text: event.delta.text,
             ...(request.streamOutputItems ? { itemId } : {}),
           }
+        } else if (event.delta.type === "citations_delta") {
+          if (
+            pending.block.type !== "text" ||
+            !isJsonObject(event.delta.citation)
+          )
+            throw new AnthropicProtocolError(
+              "Anthropic citation delta has an invalid text block.",
+            )
+          const citations = pending.block.citations
+          if (citations != null && !Array.isArray(citations))
+            throw new AnthropicProtocolError("Invalid Anthropic citations.")
+          pending.block.citations = [...(citations ?? []), event.delta.citation]
         } else if (event.delta.type === "thinking_delta") {
           if (pending.block.type !== "thinking")
             throw new AnthropicProtocolError(
@@ -265,6 +277,10 @@ async function* streamAnthropic(
             )
           pending.inputStarted = true
           pending.input += event.delta.partial_json
+        } else {
+          throw new AnthropicProtocolError(
+            "Unsupported Anthropic content delta.",
+          )
         }
         continue
       }
@@ -620,7 +636,8 @@ export function fromAnthropicMessage(
 ): ModelResponse {
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
-    if (!isRecord(block)) continue
+    if (!isRecord(block))
+      throw new AnthropicProtocolError("Invalid Anthropic content block.")
     if (block.type === "thinking" && typeof block.thinking === "string") {
       content.push({
         type: "reasoning",
@@ -658,7 +675,29 @@ export function fromAnthropicMessage(
       continue
     }
     if (block.type === "text" && typeof block.text === "string") {
-      content.push({ type: "text", text: block.text })
+      if (
+        block.citations != null &&
+        (!Array.isArray(block.citations) ||
+          !block.citations.every(isJsonObject))
+      )
+        throw new AnthropicProtocolError("Invalid Anthropic citations.")
+      content.push({
+        type: "text",
+        text: block.text,
+        ...(Array.isArray(block.citations) && block.citations.length > 0
+          ? {
+              providerMetadata: {
+                anthropic: {
+                  provider,
+                  ...(continuationScope === undefined
+                    ? {}
+                    : { scope: continuationScope }),
+                  citations: block.citations,
+                },
+              },
+            }
+          : {}),
+      })
       continue
     }
     if (
@@ -692,7 +731,11 @@ export function fromAnthropicMessage(
             }
           : {}),
       })
+      continue
     }
+    throw new AnthropicProtocolError(
+      `Unsupported Anthropic content type: ${String(block.type)}.`,
+    )
   }
 
   const stopReason = mapStopReason(message.stop_reason, content)
@@ -775,7 +818,44 @@ function toAnthropicAssistantBlock(
       "Native compaction must be converted by its owning provider before using Anthropic Messages.",
     )
   }
-  if (block.type === "text") return { type: "text", text: block.text }
+  if (block.type === "text") {
+    const metadata = block.providerMetadata?.anthropic
+    // Document/search-result indices belong to the original request. A model
+    // switch or compaction can remove/reorder those sources, so keep their full
+    // provenance in history for display but never replay unbound indices.
+    const citations =
+      isJsonObject(metadata) &&
+      metadata.provider === provider &&
+      continuationScope !== undefined &&
+      metadata.scope === continuationScope &&
+      Array.isArray(metadata.citations)
+        ? metadata.citations.flatMap((citation) => {
+            if (
+              !isJsonObject(citation) ||
+              citation.type !== "web_search_result_location" ||
+              typeof citation.cited_text !== "string" ||
+              typeof citation.encrypted_index !== "string" ||
+              typeof citation.url !== "string" ||
+              (citation.title != null && typeof citation.title !== "string")
+            )
+              return []
+            return [
+              {
+                type: "web_search_result_location" as const,
+                cited_text: citation.cited_text,
+                encrypted_index: citation.encrypted_index,
+                url: citation.url,
+                title: citation.title ?? null,
+              },
+            ]
+          })
+        : []
+    return {
+      type: "text",
+      text: block.text,
+      ...(citations.length === 0 ? {} : { citations }),
+    }
+  }
   if (block.type === "reasoning")
     return toAnthropicReasoningBlock(block, provider, continuationScope)
   if (block.toolKind === "custom" && typeof block.input === "string") {

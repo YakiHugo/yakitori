@@ -135,6 +135,7 @@ async function* streamChatCompletions(
     let completionId: string | undefined
     let text = ""
     let reasoning = ""
+    const annotations: import("../kernel/index.ts").JsonValue[] = []
     let finishReason: string | undefined
     const calls = new Map<number, PendingToolCall>()
     for await (const chunk of stream) {
@@ -163,6 +164,22 @@ async function* streamChatCompletions(
         const delta = choice.delta
         if (!isJsonObject(delta))
           throw new ChatCompletionsProtocolError("Invalid completion delta.")
+        for (const field of ["audio", "images", "video", "function_call"]) {
+          if (delta[field] != null)
+            throw new ChatCompletionsProtocolError(
+              `Unsupported completion output: ${field}.`,
+            )
+        }
+        if (delta.annotations != null) {
+          if (
+            !Array.isArray(delta.annotations) ||
+            !delta.annotations.every(isJsonValue)
+          )
+            throw new ChatCompletionsProtocolError(
+              "Invalid completion annotations.",
+            )
+          annotations.push(...delta.annotations)
+        }
         for (const [field, type] of [
           ["content", "delta"],
           ["reasoning_content", "reasoning_delta"],
@@ -267,7 +284,18 @@ async function* streamChatCompletions(
           }),
         },
       })
-    if (text.length > 0) content.push({ type: "text", text })
+    if (text.length > 0 || annotations.length > 0)
+      content.push({
+        type: "text",
+        text,
+        ...(annotations.length === 0
+          ? {}
+          : {
+              providerMetadata: {
+                chatCompletions: continuationMetadata(request, { annotations }),
+              },
+            }),
+      })
     let incompleteToolCalls = false
     const ids = new Set<string>()
     for (const [, call] of [...calls].sort(([left], [right]) => left - right)) {

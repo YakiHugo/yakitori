@@ -3,6 +3,8 @@ import type {
   Tool as OpenAITool,
   Response,
   ResponseInput,
+  ResponseOutputMessage,
+  ResponseOutputText,
   ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
@@ -202,7 +204,11 @@ async function* streamOpenAI(
         type: "message" | "reasoning"
         parts: Map<
           number,
-          { type: "text" | "reasoning" | "refusal"; text: string }
+          {
+            type: "text" | "reasoning" | "refusal"
+            text: string
+            annotations?: ResponseOutputText["annotations"]
+          }
         >
       }
     >()
@@ -234,6 +240,24 @@ async function* streamOpenAI(
         throw new OpenAIProtocolError(
           "OpenAI returned an event after its terminal response.",
         )
+      // These are semantic payloads, not ignorable progress notifications.
+      // Their asset/native-reasoning contracts need dedicated IR support.
+      if (
+        event.type.startsWith("response.audio.") ||
+        event.type.startsWith("response.image_generation_call.") ||
+        event.type.startsWith("response.reasoning_text.")
+      )
+        throw new OpenAIProtocolError(
+          `Unsupported OpenAI content event: ${event.type}.`,
+        )
+      if (
+        (event.type === "response.content_part.added" ||
+          event.type === "response.content_part.done") &&
+        !["output_text", "refusal", "summary_text"].includes(event.part.type)
+      )
+        throw new OpenAIProtocolError(
+          `Unsupported OpenAI content part: ${event.part.type}.`,
+        )
       if (event.type === "response.output_item.added") {
         startedItems.set(event.output_index, event.item)
         continue
@@ -253,10 +277,15 @@ async function* streamOpenAI(
             type: reasoning ? ("reasoning" as const) : ("message" as const),
             parts: new Map<
               number,
-              { type: "text" | "reasoning" | "refusal"; text: string }
+              {
+                type: "text" | "reasoning" | "refusal"
+                text: string
+                annotations?: ResponseOutputText["annotations"]
+              }
             >(),
           }
           item.parts.set(partIndex, {
+            ...item.parts.get(partIndex),
             type: reasoning
               ? "reasoning"
               : event.type === "response.refusal.delta"
@@ -273,6 +302,38 @@ async function* streamOpenAI(
             ? { itemId: event.item_id }
             : {}),
         }
+        continue
+      }
+      if (event.type === "response.output_text.annotation.added") {
+        if (!isJsonObject(event.annotation))
+          throw new OpenAIProtocolError("Invalid OpenAI annotation.")
+        const fragment = fragments.get(event.item_id) ?? {
+          outputIndex: event.output_index,
+          type: "message" as const,
+          parts: new Map<
+            number,
+            {
+              type: "text" | "reasoning" | "refusal"
+              text: string
+              annotations?: ResponseOutputText["annotations"]
+            }
+          >(),
+        }
+        const part = fragment.parts.get(event.content_index) ?? {
+          type: "text" as const,
+          text: "",
+        }
+        const annotations = [...(part.annotations ?? [])]
+        if (
+          !Number.isInteger(event.annotation_index) ||
+          event.annotation_index < 0 ||
+          event.annotation_index > annotations.length
+        )
+          throw new OpenAIProtocolError("Invalid OpenAI annotation index.")
+        annotations[event.annotation_index] =
+          event.annotation as unknown as ResponseOutputText["annotations"][number]
+        fragment.parts.set(event.content_index, { ...part, annotations })
+        fragments.set(event.item_id, fragment)
         continue
       }
       if (event.type === "response.output_item.done") {
@@ -395,7 +456,7 @@ async function* streamOpenAI(
                   : {
                       type: "output_text",
                       text: part.text,
-                      annotations: [],
+                      annotations: part.annotations ?? [],
                       logprobs: [],
                     },
               )
@@ -613,9 +674,13 @@ export function toOpenAIInput(
     }
 
     let text = ""
+    let annotatedMessage: ResponseOutputMessage | undefined
     const flushText = () => {
-      if (text.length === 0) return
-      input.push({ role: "assistant", content: text })
+      if (annotatedMessage !== undefined) {
+        input.push(annotatedMessage)
+        annotatedMessage = undefined
+      }
+      if (text.length > 0) input.push({ role: "assistant", content: text })
       text = ""
     }
     for (const block of message.content) {
@@ -647,7 +712,44 @@ export function toOpenAIInput(
         continue
       }
       if (block.type === "text") {
-        text += block.text
+        const metadata = block.providerMetadata?.openai
+        const part = isJsonObject(metadata) ? metadata.part : undefined
+        // Preserve citation offsets and message phase without joining adjacent
+        // parts. Opaque file references stay with the account that issued them.
+        if (
+          isJsonObject(metadata) &&
+          metadata.provider === provider &&
+          continuationScope !== undefined &&
+          metadata.scope === continuationScope &&
+          typeof metadata.messageId === "string" &&
+          isJsonObject(part) &&
+          ((part.type === "output_text" &&
+            part.text === block.text &&
+            Array.isArray(part.annotations)) ||
+            (part.type === "refusal" && part.refusal === block.text))
+        ) {
+          if (annotatedMessage?.id !== metadata.messageId) {
+            flushText()
+            annotatedMessage = {
+              type: "message",
+              role: "assistant",
+              id: metadata.messageId,
+              status:
+                metadata.status === "incomplete" ? "incomplete" : "completed",
+              content: [],
+              ...(metadata.phase === "commentary" ||
+              metadata.phase === "final_answer"
+                ? { phase: metadata.phase }
+                : {}),
+            }
+          }
+          annotatedMessage.content.push(
+            part as unknown as ResponseOutputMessage["content"][number],
+          )
+        } else {
+          if (annotatedMessage !== undefined) flushText()
+          text += block.text
+        }
         continue
       }
       flushText()
@@ -875,6 +977,10 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "reasoning") {
+      if ((item.content?.length ?? 0) > 0)
+        throw new OpenAIProtocolError(
+          "Unsupported OpenAI native reasoning content; summary reasoning remains supported.",
+        )
       const text = item.summary.map((summary) => summary.text).join("\n\n")
       content.push({
         type: "reasoning",
@@ -896,14 +1002,56 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "message") {
+      const preserveParts =
+        item.phase != null ||
+        item.content.some(
+          (part) =>
+            part.type === "refusal" ||
+            (part.type === "output_text" &&
+              Array.isArray(part.annotations) &&
+              part.annotations.length > 0),
+        )
       for (const part of item.content) {
-        if (part.type === "output_text") {
-          content.push({ type: "text", text: part.text })
-          continue
-        }
-        if (part.type === "refusal") {
-          content.push({ type: "text", text: part.refusal })
-        }
+        if (part.type !== "output_text" && part.type !== "refusal")
+          throw new OpenAIProtocolError("Unsupported OpenAI message content.")
+        if (
+          part.type === "output_text" &&
+          part.annotations != null &&
+          !Array.isArray(part.annotations)
+        )
+          throw new OpenAIProtocolError("Invalid OpenAI annotations.")
+        const projected =
+          part.type === "output_text"
+            ? {
+                type: part.type,
+                text: part.text,
+                annotations: part.annotations ?? [],
+              }
+            : { type: part.type, refusal: part.refusal }
+        if (!isJsonObject(projected))
+          throw new OpenAIProtocolError(
+            "Invalid OpenAI message content metadata.",
+          )
+        content.push({
+          type: "text",
+          text: part.type === "output_text" ? part.text : part.refusal,
+          ...(preserveParts
+            ? {
+                providerMetadata: {
+                  openai: {
+                    provider,
+                    ...(continuationScope === undefined
+                      ? {}
+                      : { scope: continuationScope }),
+                    messageId: item.id,
+                    status: item.status,
+                    ...(item.phase == null ? {} : { phase: item.phase }),
+                    part: projected,
+                  },
+                },
+              }
+            : {}),
+        })
       }
       continue
     }
@@ -931,7 +1079,9 @@ function fromOpenAIOutput(
         item.call_id === null ||
         !isJsonValue(item.arguments)
       ) {
-        continue
+        throw new OpenAIProtocolError(
+          "Unsupported or invalid server tool search output.",
+        )
       }
       content.push({
         type: "tool_call",
@@ -942,7 +1092,10 @@ function fromOpenAIOutput(
       })
       continue
     }
-    if (item.type !== "function_call") continue
+    if (item.type !== "function_call")
+      throw new OpenAIProtocolError(
+        `Unsupported OpenAI output type: ${item.type}.`,
+      )
 
     let parsed: unknown
     try {
