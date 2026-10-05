@@ -449,7 +449,10 @@ describe("tool cell", () => {
       name: "screenshot.png",
       mediaType: "image/png",
       sizeBytes: 1_234,
-      file: { rolloutId: "rollout_1", path: "captures/screenshot.png" },
+      file: {
+        rolloutId: "rollout_1",
+        path: "tools/call_screenshot/screenshot.png",
+      },
     }
     render(
       <ToolCell
@@ -466,7 +469,10 @@ describe("tool cell", () => {
             state: "completed",
             resultText: "file contents",
           }),
-          attachments: [screenshot],
+          resultContent: [
+            { type: "text", text: "file contents" },
+            { ...screenshot, type: "image" },
+          ],
         }}
       />,
     )
@@ -477,7 +483,7 @@ describe("tool cell", () => {
 
     const image = await screen.findByRole("img", { name: "screenshot.png" })
     expect(image.getAttribute("src")).toBe(
-      `${expected}/rollouts/rollout_1/assets/captures/screenshot.png`,
+      `${expected}/rollouts/rollout_1/assets/tools/call_screenshot/screenshot.png`,
     )
   })
 })

@@ -9,6 +9,7 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
+  isKernelEvent,
   type ItemContent,
   type JsonValue,
   type KernelError,
@@ -20,6 +21,149 @@ import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("reconciles one ordered tool completion identically live, repeated and replayed", () => {
+    const image = {
+      type: "image" as const,
+      mediaType: "image/png" as const,
+      sizeBytes: 10,
+      file: { rolloutId: "rollout_1", path: "tools/call/image.png" },
+    }
+    const parts = [
+      { type: "text" as const, text: "before" },
+      image,
+      { type: "text" as const, text: "after" },
+    ]
+    const fact = toolCompleted({
+      itemId: "item_tool",
+      resultItemId: "result_tool",
+      toolCallId: "call",
+      turnId: "turn_1",
+      content: { kind: "tool_result", parts },
+    })
+    expect(isKernelEvent(fact)).toBe(true)
+    const complete = createExecutionEnvelope({ sessionId, seq: 2, event: fact })
+    const started = {
+      type: "transient" as const,
+      event: {
+        type: "item.started" as const,
+        sessionId,
+        turnId: "turn_1",
+        createdAt: "2026-10-05T00:00:00Z",
+        item: toolStartedItem({
+          itemId: "item_tool",
+          toolCallId: "call",
+          name: "inspect",
+          input: {},
+          requiresPermission: false,
+        }),
+      },
+    }
+    let state = reduceExecutionView(createExecutionViewState(), started)
+    state = reduceExecutionView(state, { type: "durable", event: complete })
+    state = reduceExecutionView(state, { type: "durable", event: complete })
+    state = reduceExecutionView(state, started)
+    const live = projectExecutionView(state).entries
+    const replay = projectExecutionView(
+      reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event: complete,
+      }),
+    ).entries
+    expect(live).toEqual(replay)
+    expect(live).toHaveLength(1)
+    expect(live[0]).toMatchObject({
+      kind: "tool",
+      toolCallId: "call",
+      resultContent: parts,
+      resultText: "before\nafter",
+      state: "completed",
+    })
+    expect(live[0]).not.toHaveProperty("attachments")
+  })
+
+  it("projects actual saved text-plus-attachments tool events into known legacy order", () => {
+    const image = {
+      name: "saved.png",
+      mediaType: "image/png" as const,
+      sizeBytes: 10,
+      file: { rolloutId: "rollout_1", path: "tools/call/saved.png" },
+    }
+    const event = createExecutionEnvelope({
+      sessionId,
+      seq: 1,
+      event: toolCompleted({
+        itemId: "tool",
+        resultItemId: "result",
+        toolCallId: "call",
+        turnId: "turn_1",
+        content: { kind: "text", text: "saved text", attachments: [image] },
+      }),
+    })
+    const view = projectExecutionView(
+      reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event,
+      }),
+    )
+    expect(view.entries).toMatchObject([
+      {
+        kind: "tool",
+        resultText: "saved text",
+        resultContent: [
+          { type: "text", text: "saved text" },
+          { ...image, type: "image" },
+        ],
+      },
+    ])
+  })
+
+  it.each(
+    [
+      [{ type: "text", text: "host", providerMetadata: { hidden: true } }],
+      [{ type: "image", mediaType: "image/png", data: "inline-bytes" }],
+      [
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          name: "missing",
+          sizeBytes: 10,
+        },
+      ],
+      [
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          name: "transport.pdf",
+          sizeBytes: 10,
+          file: { rolloutId: "rollout_1", path: "tools/call/report.pdf" },
+          data: "request-only-bytes",
+        },
+      ],
+    ].map((parts) => ({ parts })),
+  )("rejects malformed or transport-only media in durable tool completions: %j", ({
+    parts,
+  }) => {
+    expect(
+      isKernelEvent({
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            ...toolStartedItem({
+              itemId: "item",
+              toolCallId: "call",
+              name: "tool",
+              input: {},
+              requiresPermission: false,
+            }),
+            resultItemId: "result",
+            content: { kind: "tool_result", parts },
+          },
+        },
+      }),
+    ).toBe(false)
+  })
+
   it("preserves completed citation sources equally after live text and durable replay", () => {
     const completion = createExecutionEnvelope({
       sessionId,

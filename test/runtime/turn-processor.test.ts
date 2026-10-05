@@ -4353,6 +4353,18 @@ it.each([
   )
     throw new Error("Missing durable image result")
   const toolResult = record.item.item.item
+  const completedTool = stored?.rollout.find(
+    ({ item }) =>
+      item.type === "item_completed" &&
+      "toolCallId" in item.item &&
+      item.item.toolCallId === "call_image",
+  )
+  expect(completedTool?.item).toMatchObject({
+    type: "item_completed",
+    item: {
+      content: { kind: "tool_result", parts: toolResult.content },
+    },
+  })
   expect(
     Buffer.byteLength(toolContentText(toolResult.content)),
   ).toBeLessThanOrEqual(50 * 1024)
