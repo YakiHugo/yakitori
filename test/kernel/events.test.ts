@@ -10,6 +10,31 @@ import {
 } from "../../src/kernel/events.ts"
 
 describe("kernel facts", () => {
+  it("preserves optional JSON provider metadata on canonical text blocks", () => {
+    for (const role of ["assistant", "user", "developer"]) {
+      expect(
+        isModelMessage({
+          role,
+          content: [
+            {
+              type: "text",
+              text: "",
+              providerMetadata: {
+                gemini: { part: { text: "", thoughtSignature: "opaque" } },
+              },
+            },
+          ],
+        }),
+      ).toBe(true)
+      expect(
+        isModelMessage({
+          role,
+          content: [{ type: "text", text: "", providerMetadata: "invalid" }],
+        }),
+      ).toBe(false)
+    }
+  })
+
   it("round-trips bounded latency measurements without treating missing samples as zero", () => {
     const metrics = {
       modelCalls: 1,

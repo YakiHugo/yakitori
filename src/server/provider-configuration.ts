@@ -5,7 +5,11 @@ import { ConfigurationError } from "./config-errors.ts"
 
 export type ProviderConfiguration = Readonly<{
   name: string
-  wireApi: "openai_responses" | "openai_chat_completions" | "anthropic_messages"
+  wireApi:
+    | "openai_responses"
+    | "openai_chat_completions"
+    | "anthropic_messages"
+    | "gemini_generate_content"
   baseURL: string
   envKey?: string
   preset?: string
@@ -82,10 +86,11 @@ export function requireProviderConfiguration(
   if (
     wireApi !== "openai_responses" &&
     wireApi !== "openai_chat_completions" &&
-    wireApi !== "anthropic_messages"
+    wireApi !== "anthropic_messages" &&
+    wireApi !== "gemini_generate_content"
   ) {
     throw new ConfigurationError(
-      "wireApi must be openai_responses, openai_chat_completions or anthropic_messages.",
+      "wireApi must be openai_responses, openai_chat_completions, anthropic_messages or gemini_generate_content.",
     )
   }
   const envKey =
@@ -185,7 +190,15 @@ export function requireConfiguredModels(
       model.maxOutputTokens,
       "maxOutputTokens",
     )
+    const contextWindowScope = model.contextWindowScope
     if (
+      contextWindowScope !== undefined &&
+      contextWindowScope !== "input" &&
+      contextWindowScope !== "total"
+    )
+      throw new ConfigurationError("contextWindowScope must be input or total.")
+    if (
+      contextWindowScope !== "input" &&
       contextWindowTokens !== undefined &&
       maxOutputTokens !== undefined &&
       maxOutputTokens > contextWindowTokens
@@ -245,6 +258,7 @@ export function requireConfiguredModels(
       ...(pricing ? { pricing } : {}),
       ...(displayName === undefined ? {} : { displayName }),
       ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+      ...(contextWindowScope === undefined ? {} : { contextWindowScope }),
       ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
       ...(inputModalities === undefined
         ? {}
@@ -291,7 +305,9 @@ export function providersFromConfig(
               ? "anthropic_messages"
               : backend === "chat_completions"
                 ? "openai_chat_completions"
-                : backend,
+                : backend === "generate_content"
+                  ? "gemini_generate_content"
+                  : backend,
         envKey: record.env_key,
         preset: record.preset,
         models: record.models,
@@ -334,7 +350,9 @@ export function providerConfigValue(
         ? "responses"
         : configuration.wireApi === "anthropic_messages"
           ? "messages"
-          : "chat_completions",
+          : configuration.wireApi === "gemini_generate_content"
+            ? "generate_content"
+            : "chat_completions",
     models: configuration.models,
     ...(configuration.modelSelection === undefined
       ? {}

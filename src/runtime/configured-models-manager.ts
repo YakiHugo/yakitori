@@ -154,7 +154,7 @@ export function createConfiguredModelsManager(input: {
             contextWindowTokens: configured.contextWindowTokens,
             maxContextWindowTokens: configured.contextWindowTokens,
             effectiveContextWindowPercent: 100,
-            contextWindowScope: "total" as const,
+            contextWindowScope: configured.contextWindowScope ?? "total",
           }
     models.set(configured.id, { resolved, listed, capacity })
   }

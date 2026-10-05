@@ -262,6 +262,34 @@ export async function runProviderFlow(
     ).not.toBeChecked()
     await page.keyboard.press("Escape")
     await expect(openAIEditor).toHaveCount(0)
+    await page
+      .getByRole("button", { name: "Google Gemini", exact: true })
+      .click()
+    const geminiEditor = page.getByRole("dialog", {
+      name: "Google Gemini",
+      exact: true,
+    })
+    await geminiEditor.getByText("Advanced settings", { exact: true }).click()
+    await expect(geminiEditor.getByLabel("API protocol")).toHaveValue(
+      "gemini_generate_content",
+    )
+    await expect(geminiEditor.getByLabel("API base URL")).toHaveValue(
+      "https://generativelanguage.googleapis.com/v1beta",
+    )
+    await geminiEditor
+      .getByLabel("API protocol")
+      .selectOption("openai_chat_completions")
+    await page.keyboard.press("Escape")
+    await expect(geminiEditor).toHaveCount(0)
+    await page
+      .getByRole("button", { name: "Google Gemini", exact: true })
+      .click()
+    await geminiEditor.getByText("Advanced settings", { exact: true }).click()
+    await expect(geminiEditor.getByLabel("API protocol")).toHaveValue(
+      "gemini_generate_content",
+    )
+    await page.keyboard.press("Escape")
+    await expect(geminiEditor).toHaveCount(0)
     const search = page.getByRole("searchbox", { name: "Find a provider" })
     await search.fill("DeepSeek")
     await expect(search).toHaveValue("DeepSeek")

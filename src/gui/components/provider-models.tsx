@@ -160,7 +160,7 @@ export function ProviderModels({
             <div className="provider-model-facts">
               <span>
                 {model.contextWindowTokens
-                  ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(model.contextWindowTokens)} context`
+                  ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(model.contextWindowTokens)} ${model.contextWindowScope === "input" ? "input tokens" : "context"}`
                   : "Context unknown"}
               </span>
               {model.inputModalities?.includes("image") ? (
@@ -194,7 +194,9 @@ export function ProviderModels({
                       <Field key={key}>
                         <FieldLabel htmlFor={`${key}-${model.id}`}>
                           {key === "contextWindowTokens"
-                            ? "Context window"
+                            ? model.contextWindowScope === "input"
+                              ? "Input token limit"
+                              : "Context window"
                             : "Maximum output"}
                         </FieldLabel>
                         <Input
