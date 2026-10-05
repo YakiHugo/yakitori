@@ -20,6 +20,130 @@ import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("preserves completed citation sources equally after live text and durable replay", () => {
+    const completion = createExecutionEnvelope({
+      sessionId,
+      seq: 1,
+      createdAt: "2026-10-05T00:00:01.000Z",
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "agent_message",
+            itemId: "answer",
+            content: [
+              {
+                type: "text",
+                text: "First ",
+                providerMetadata: {
+                  openai: {
+                    part: {
+                      annotations: [
+                        {
+                          type: "url_citation",
+                          title: "Source",
+                          url: "https://example.com/source",
+                          start_index: 0,
+                          end_index: 5,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+              {
+                type: "text",
+                text: "second",
+                providerMetadata: {
+                  chatCompletions: {
+                    annotations: [
+                      {
+                        type: "url_citation",
+                        url_citation: {
+                          title: "Source",
+                          url: "https://example.com/source",
+                          start_index: 1,
+                          end_index: 6,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    })
+    let streaming = reduceExecutionView(createExecutionViewState(), {
+      type: "transient",
+      event: {
+        type: "item.started",
+        sessionId,
+        turnId: "turn_1",
+        item: { type: "agent_message", itemId: "answer" },
+        createdAt: "2026-10-05T00:00:00.000Z",
+      },
+    })
+    streaming = reduceExecutionView(streaming, {
+      type: "transient",
+      event: {
+        type: "assistant.delta",
+        sessionId,
+        turnId: "turn_1",
+        itemId: "answer",
+        streamId: "stream_1",
+        offset: 0,
+        delta: "First second",
+        createdAt: "2026-10-05T00:00:00.500Z",
+      },
+    })
+    expect(projectExecutionView(streaming).entries[0]).not.toHaveProperty(
+      "sources",
+    )
+
+    const live = reduceExecutionView(streaming, {
+      type: "durable",
+      event: completion,
+    })
+    const replay = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: JSON.parse(JSON.stringify(completion)),
+    })
+    const expected = [
+      {
+        kind: "assistant",
+        itemId: "answer",
+        turnId: "turn_1",
+        text: "First second",
+        status: "completed",
+        at: "2026-10-05T00:00:01.000Z",
+        sources: [
+          {
+            id: "citation_0_openai_0",
+            label: "Source",
+            url: "https://example.com/source",
+            origins: [
+              {
+                provider: "openai",
+                blockIndex: 0,
+                range: { start: 0, end: 5 },
+              },
+              {
+                provider: "chatCompletions",
+                blockIndex: 1,
+                range: { start: 1, end: 6 },
+              },
+            ],
+          },
+        ],
+      },
+    ]
+    expect(projectExecutionView(live).entries).toEqual(expected)
+    expect(projectExecutionView(replay).entries).toEqual(expected)
+  })
+
   it.each([
     "truncated",
     "refused",

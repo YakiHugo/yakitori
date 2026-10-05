@@ -147,7 +147,39 @@ export async function runProviderFlow(
         model: "smoke-model",
       }
       response.write(
-        `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: { role: "assistant", content: "Mock provider reply" }, finish_reason: null }] })}\n\n`,
+        `data: ${JSON.stringify({
+          ...completion,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                content: "Mock provider reply",
+                annotations: [
+                  {
+                    type: "url_citation",
+                    url_citation: {
+                      title: "Provider source",
+                      url: "https://example.org/source",
+                      start_index: 0,
+                      end_index: 4,
+                    },
+                  },
+                  {
+                    type: "url_citation",
+                    url_citation: {
+                      title: "Unavailable source",
+                      url: "javascript:alert(1)",
+                      start_index: 0,
+                      end_index: 4,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        })}\n\n`,
       )
       response.write(
         `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
@@ -372,6 +404,16 @@ export async function runProviderFlow(
     await expect(
       page.getByRole("main").getByText("Mock provider reply", { exact: true }),
     ).toBeVisible()
+    const sources = page.getByRole("region", { name: "Sources", exact: true })
+    await expect(
+      sources.getByRole("link", { name: "Provider source", exact: true }),
+    ).toHaveAttribute("href", "https://example.org/source")
+    await expect(
+      sources.getByText("Unavailable source", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      sources.getByRole("link", { name: "Unavailable source", exact: true }),
+    ).toHaveCount(0)
     await expect(
       page.getByRole("button", { name: "Interrupt", exact: true }),
     ).toHaveCount(0)
@@ -379,6 +421,27 @@ export async function runProviderFlow(
     await expect(
       page.getByRole("main").getByText("Mock provider reply", { exact: true }),
     ).toBeVisible()
+    await expect(
+      page
+        .getByRole("region", { name: "Sources", exact: true })
+        .getByRole("link", { name: "Provider source", exact: true }),
+    ).toHaveAttribute("href", "https://example.org/source")
+    await expect(
+      page
+        .getByRole("region", { name: "Sources", exact: true })
+        .getByText("Unavailable source", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      page
+        .getByRole("region", { name: "Sources", exact: true })
+        .getByRole("link", { name: "Unavailable source", exact: true }),
+    ).toHaveCount(0)
+    const sourcesPath = testInfo.outputPath("citation-sources.png")
+    await page.screenshot({ path: sourcesPath, animations: "disabled" })
+    await testInfo.attach("citation-sources", {
+      path: sourcesPath,
+      contentType: "image/png",
+    })
     await expect(
       page.getByRole("button", {
         name: "Select model and effort",

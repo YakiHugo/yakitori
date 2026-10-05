@@ -1,3 +1,4 @@
+import { citationSources, type CitationSource } from "./citation-sources.ts"
 import {
   type ImageAttachment,
   isKernelEvent,
@@ -30,6 +31,7 @@ export type ExecutionEntry =
     }
   | {
       readonly kind: "assistant"
+      readonly sources?: readonly CitationSource[]
       readonly itemId: string
       readonly turnId: string
       readonly text: string
@@ -860,11 +862,15 @@ function applyDurable(
                 .map((block) => block.text)
                 .join("")
             : item.text
-        if (text.length === 0) return removeItemEntry(next, item.itemId)
+        const sources =
+          item.type === "agent_message" ? citationSources(item.content) : []
+        if (text.length === 0 && sources.length === 0)
+          return removeItemEntry(next, item.itemId)
         const entry: ExecutionEntry =
           item.type === "agent_message"
             ? {
                 kind: "assistant",
+                ...(sources.length === 0 ? {} : { sources }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,
                 text,
