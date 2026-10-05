@@ -457,6 +457,9 @@ export async function runProviderFlow(
       page.getByRole("main").getByText("Mock provider reply", { exact: true }),
     ).toBeVisible()
     const checkToolImage = async () => {
+      await page
+        .getByRole("button", { name: "Used tools · View image", exact: true })
+        .click()
       await page.getByRole("button", { name: /^View image smoke\.png/ }).click()
       const parts = page.getByRole("region", {
         name: "Ordered tool result",
