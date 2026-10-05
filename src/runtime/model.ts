@@ -12,6 +12,7 @@ import type {
   ModelToolDefinition,
   ModelToolInputFormat,
   ModelToolResultMessage,
+  ModelToolContentBlock,
   ModelUserMessage,
   ModelUserContentBlock,
 } from "../kernel/index.ts"
@@ -29,6 +30,7 @@ export type {
   ModelToolDefinition,
   ModelToolInputFormat,
   ModelToolResultMessage,
+  ModelToolContentBlock,
   ModelUserMessage,
   ModelUserContentBlock,
 }

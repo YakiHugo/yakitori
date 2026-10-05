@@ -235,10 +235,13 @@ export function createSideChatService(options: {
                 ),
               }
             }
-            if (!message.images?.length) return message
             return {
               ...message,
-              images: await Promise.all(message.images.map(resolveImage)),
+              content: await Promise.all(
+                message.content.map((block) =>
+                  block.type === "image" ? resolveImage(block) : block,
+                ),
+              ),
             }
           }),
         )
@@ -249,23 +252,21 @@ export function createSideChatService(options: {
           referenceImage: ++imageNumber,
         })
         const quotedHistory = inheritedHistory.map((message) => {
-          if (message.role === "user")
+          if (message.role === "user" || message.role === "tool")
             return {
               ...message,
               content: message.content.map((block) =>
                 block.type === "image" ? quoteImage(block) : block,
               ),
             }
-          if (message.role === "tool" && message.images?.length)
-            return { ...message, images: message.images.map(quoteImage) }
           return message
         })
         const referenceImages = inheritedHistory.flatMap((message) =>
-          message.role === "user"
-            ? message.content.filter((block) => block.type === "image")
-            : message.role === "tool"
-              ? (message.images ?? [])
-              : [],
+          message.role === "user" || message.role === "tool"
+            ? [...message.content].filter(
+                (block): block is ModelImageBlock => block.type === "image",
+              )
+            : [],
         )
         const sourceSelection = source?.rollout
           .filter(({ item }) => item.type === "turn_context")

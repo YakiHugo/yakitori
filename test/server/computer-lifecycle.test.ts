@@ -1,3 +1,4 @@
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -99,7 +100,7 @@ async function fixture(waitForFirstAbort = false) {
         message.role === "tool" && message.toolCallId === `${label}:js`,
     )
     if (used?.role === "tool") {
-      toolResults.push(used.content)
+      toolResults.push(toolContentText(used.content))
       if (waitForFirstAbort && label === "first") {
         const signal = request.signal
         if (signal === undefined)

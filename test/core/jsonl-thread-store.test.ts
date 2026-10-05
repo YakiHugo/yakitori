@@ -38,6 +38,132 @@ describe("JsonlThreadStore", () => {
     "response_item",
     "agent_message",
     "compacted",
+  ] as const)("reads the shipped tool text/media shape in %s without rewriting or losing ownership", async (type) => {
+    const { root, store } = await createStore()
+    const id = `thread_saved_tool_${type}`
+    await createPersistentThread(store, metadata(id))
+    const assets = createStoreAssets(root, store)
+    const saved = await assets.saveToolFile(
+      id,
+      "saved_tool",
+      "image.png",
+      pngBytes(),
+    )
+    await store.shutdownThread(id)
+    const image = {
+      type: "image",
+      mediaType: "image/png",
+      file: saved.reference,
+      sizeBytes: pngBytes().length,
+    }
+    const tool = {
+      role: "tool",
+      toolCallId: "saved_tool",
+      content: "saved output",
+      images: [image],
+      documents: [],
+      isError: true,
+      fileObservations: [
+        { path: "source.ts", kind: "whole_file_read", complete: true },
+      ],
+      toolSearch: { tools: [] },
+    }
+    const envelope = {
+      id: "saved_result",
+      turnId: "saved_turn",
+      createdAt: "2026-09-07T00:00:00Z",
+      item: tool,
+    }
+    const item =
+      type === "compacted"
+        ? {
+            type,
+            turnId: "saved_turn",
+            summary: "checkpoint",
+            replacement: [envelope],
+          }
+        : {
+            type,
+            item: envelope,
+            ...(type === "agent_message" ? { messageId: "saved_message" } : {}),
+          }
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const raw = JSON.stringify({
+      threadId: id,
+      rolloutId: id,
+      seq: 1,
+      createdAt: envelope.createdAt,
+      item,
+    })
+    await appendFile(path, raw)
+    const reopened = new JsonlThreadStore({ root })
+    const restored = await reopened.resumeThread(id)
+    if (restored === undefined) throw new Error("Missing saved tool history")
+    const history = ContextManager.fromStoredThread(restored).snapshot().history
+    expect(history).toEqual([
+      {
+        ...envelope,
+        item: {
+          role: "tool",
+          toolCallId: "saved_tool",
+          isError: true,
+          content: [{ type: "text", text: "saved output" }, image],
+          fileObservations: tool.fileObservations,
+          toolSearch: { tools: [] },
+        },
+      },
+    ])
+    expect(
+      await createStoreAssets(root, reopened).read(saved.reference),
+    ).toEqual(pngBytes())
+    expect((await readFile(path, "utf8")).endsWith(`${raw}\n`)).toBe(true)
+    await reopened.shutdownThread(id)
+    const reread = await new JsonlThreadStore({ root }).readThread(id)
+    expect(
+      reread && ContextManager.fromStoredThread(reread).snapshot().history,
+    ).toEqual(history)
+  })
+
+  it.each([
+    { content: "old", images: [{ type: "text", text: "invalid image" }] },
+    { content: "old", documents: [{ type: "text", text: "invalid PDF" }] },
+    { content: [{ type: "text", text: "new" }], images: [] },
+  ])("rejects malformed or ambiguous saved tool media: %j", async (shape) => {
+    const { root, store } = await createStore()
+    const id = "thread_bad_tool"
+    await createPersistentThread(store, metadata(id))
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const raw = JSON.stringify({
+      threadId: id,
+      rolloutId: id,
+      seq: 1,
+      createdAt: "2026-09-07T00:00:00Z",
+      item: {
+        type: "response_item",
+        item: {
+          id: "bad",
+          turnId: "turn",
+          createdAt: "2026-09-07T00:00:00Z",
+          item: {
+            role: "tool",
+            toolCallId: "saved_tool",
+            ...shape,
+          },
+        },
+      },
+    })
+    await appendFile(path, `${raw}\n`)
+    await expect(new JsonlThreadStore({ root }).readThread(id)).rejects.toThrow(
+      "contains an invalid item",
+    )
+    expect((await readFile(path, "utf8")).endsWith(`${raw}\n`)).toBe(true)
+  })
+
+  it.each([
+    "response_item",
+    "agent_message",
+    "compacted",
   ] as const)("normalizes saved text-plus-images in %s without rewriting media or the stored record", async (type) => {
     const { root, store } = await createStore()
     const id = `thread_legacy_${type}`

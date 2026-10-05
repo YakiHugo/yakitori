@@ -171,7 +171,11 @@ describe("Chat Completions provider", () => {
               },
             ],
           },
-          { role: "tool", toolCallId: "call_eval", content: "2" },
+          {
+            role: "tool",
+            toolCallId: "call_eval",
+            content: [{ type: "text", text: "2" }],
+          },
         ],
         "custom_1",
       ),
@@ -647,12 +651,12 @@ describe("Chat Completions provider", () => {
                   {
                     role: "tool",
                     toolCallId: "call_a",
-                    content: "First result",
+                    content: [{ type: "text", text: "First result" }],
                   },
                   {
                     role: "tool",
                     toolCallId: "call_b",
-                    content: "Second result",
+                    content: [{ type: "text", text: "Second result" }],
                   },
                 ],
               }),
@@ -664,7 +668,11 @@ describe("Chat Completions provider", () => {
           expect(bodies[1]?.messages).toEqual([
             { role: "system", content: "System instruction" },
             ...replay,
-            { role: "tool", tool_call_id: "call_a", content: "First result" },
+            {
+              role: "tool",
+              tool_call_id: "call_a",
+              content: "First result",
+            },
             { role: "tool", tool_call_id: "call_b", content: "Second result" },
           ])
           expect(
@@ -737,17 +745,19 @@ describe("Chat Completions provider", () => {
       {
         role: "tool",
         toolCallId: "first",
-        content: "First result",
-        images: [image, image],
+        content: [{ type: "text", text: "First result" }, image, image],
       },
-      { role: "tool", toolCallId: "plain", content: "No image" },
+      {
+        role: "tool",
+        toolCallId: "plain",
+        content: [{ type: "text", text: "No image" }],
+      },
       {
         role: "tool",
         toolCallId: "last",
-        content: "Partial result",
-        isError: true,
-        images: [{ ...image, data: "ZGVm" }],
-        documents: [
+        content: [
+          { type: "text", text: "Partial result" },
+          { ...image, data: "ZGVm" },
           {
             type: "document",
             name: "report.pdf",
@@ -756,6 +766,7 @@ describe("Chat Completions provider", () => {
             sizeBytes: 10,
           },
         ],
+        isError: true,
       },
       ...(boundary === "end"
         ? []
@@ -777,21 +788,36 @@ describe("Chat Completions provider", () => {
       content: [{ type: "text", text: "Inspect" }, wireImage],
     })
     expect(converted.slice(2, 6)).toEqual([
-      { role: "tool", tool_call_id: "first", content: "First result" },
+      {
+        role: "tool",
+        tool_call_id: "first",
+        content:
+          'First result\n[Image from tool result "first", content part 2; image follows the tool-result batch.]\n[Image from tool result "first", content part 3; image follows the tool-result batch.]',
+      },
       { role: "tool", tool_call_id: "plain", content: "No image" },
       {
         role: "tool",
         tool_call_id: "last",
         content:
-          "[tool_error]\nPartial result\n[Document report.pdf was not sent: native PDF input is not enabled for Chat Completions.]",
+          '[tool_error]\nPartial result\n[Image from tool result "last", content part 2; image follows the tool-result batch.]\n[Document report.pdf was not sent: native PDF input is not enabled for Chat Completions.]',
       },
       {
         role: "user",
         content: [
-          { type: "text", text: 'Images from tool result "first":' },
+          {
+            type: "text",
+            text: 'Image from tool result "first", content part 2:',
+          },
           wireImage,
+          {
+            type: "text",
+            text: 'Image from tool result "first", content part 3:',
+          },
           wireImage,
-          { type: "text", text: 'Images from tool result "last":' },
+          {
+            type: "text",
+            text: 'Image from tool result "last", content part 2:',
+          },
           {
             type: "image_url",
             image_url: { url: "data:image/png;base64,ZGVm", detail: "high" },
@@ -817,7 +843,7 @@ describe("Chat Completions provider", () => {
     const result: ModelMessage = {
       role: "tool",
       toolCallId: "call",
-      content: "",
+      content: [{ type: "text", text: "" }],
     }
     const image = {
       type: "image" as const,
@@ -827,11 +853,11 @@ describe("Chat Completions provider", () => {
     const messages = toChatCompletionsMessages(
       [
         call,
-        { ...result, images: [image] },
+        { ...result, content: [...result.content, image] },
         call,
         result,
         call,
-        { ...result, images: [image] },
+        { ...result, content: [...result.content, image] },
       ],
       "custom_1",
     )
@@ -1030,8 +1056,8 @@ describe("Chat Completions provider", () => {
                 {
                   role: "tool",
                   toolCallId: "image",
-                  content: "Screenshot",
-                  images: [
+                  content: [
+                    { type: "text", text: "Screenshot" },
                     {
                       type: "image",
                       mediaType: "image/png",
@@ -1147,7 +1173,10 @@ describe("Chat Completions provider", () => {
           const expectedImageMessage = {
             role: "user",
             content: [
-              { type: "text", text: 'Images from tool result "call_image":' },
+              {
+                type: "text",
+                text: 'Image from tool result "call_image", content part 2:',
+              },
               {
                 type: "image_url",
                 image_url: {
@@ -1163,7 +1192,8 @@ describe("Chat Completions provider", () => {
             {
               role: "tool",
               tool_call_id: "call_image",
-              content: "Read image: screen.png",
+              content:
+                'Read image: screen.png\n[Image from tool result "call_image", content part 2; image follows the tool-result batch.]',
             },
             expectedImageMessage,
           ])
@@ -1189,10 +1219,11 @@ describe("Chat Completions provider", () => {
             "Images from tool result",
           )
           const tool = history.find((message) => message.role === "tool")
-          if (tool?.role !== "tool" || tool.images?.[0]?.file === undefined)
+          const image = tool?.content.find((block) => block.type === "image")
+          if (image?.file === undefined)
             throw new Error("Missing stored image reference")
-          expect(tool.images[0].data).toBeUndefined()
-          expect(await runtime.assets.read(tool.images[0].file)).toEqual(png)
+          expect(image.data).toBeUndefined()
+          expect(await runtime.assets.read(image.file)).toEqual(png)
           const resumed = await runtime.manager.resumeThread(thread.id)
           if (resumed === undefined) throw new Error("Missing resumed thread")
           await resumed.startIfIdle({

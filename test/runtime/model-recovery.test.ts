@@ -113,7 +113,7 @@ it("recovers a model request without replaying a completed tool or duplicating i
       expect.objectContaining({
         role: "tool",
         toolCallId: "effect_call",
-        content: "recorded",
+        content: [{ type: "text", text: "recorded" }],
       }),
     )
     expect(histories[2]).toEqual(histories[1])

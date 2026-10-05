@@ -1,12 +1,8 @@
 import { isDeepStrictEqual } from "node:util"
 import { inspectImageBytes } from "../../kernel/image-metadata.ts"
-import type {
-  JsonValue,
-  ModelDocumentBlock,
-  ModelImageBlock,
-} from "../../kernel/index.ts"
+import type { JsonValue, ModelToolContentBlock } from "../../kernel/index.ts"
 import { imageDecodeError } from "../prepare-model-image.ts"
-import { finalizeToolOutput } from "./result-output.ts"
+import { finalizeToolContent } from "./result-output.ts"
 import type { ToolExecutionContext, ToolExecutionResult } from "./types.ts"
 
 export async function mcpResult(
@@ -16,25 +12,28 @@ export async function mcpResult(
   const result = record(value)
   const blocks = Array.isArray(result?.content) ? result.content : []
   const text: string[] = []
-  const images: ModelImageBlock[] = []
-  const documents: ModelDocumentBlock[] = []
+  const parts: ModelToolContentBlock[] = []
+  const appendText = (value: string) => {
+    text.push(value)
+    parts.push({ type: "text", text: value })
+  }
   const visible: JsonValue[] = []
   for (const [index, block] of blocks.entries()) {
     const item = record(block)
     if (item === undefined) continue
     if (item.type === "text" && typeof item.text === "string") {
-      text.push(item.text)
+      appendText(item.text)
       visible.push(item)
       continue
     }
     if (item.type === "resource_link") {
-      text.push(`${item.name ?? "Resource"}: ${item.uri}`)
+      appendText(`${item.name ?? "Resource"}: ${item.uri}`)
       visible.push(item)
       continue
     }
     const resource = record(item.resource)
     if (typeof resource?.text === "string") {
-      text.push(resource.text)
+      appendText(resource.text)
       visible.push(item)
       continue
     }
@@ -44,7 +43,7 @@ export async function mcpResult(
       item.type === "image" ||
       (typeof mime === "string" && mime.startsWith("image/"))
     if (typeof data !== "string" || (!isImage && mime !== "application/pdf")) {
-      text.push(`[Unsupported MCP content: ${String(item.type)}]`)
+      appendText(`[Unsupported MCP content: ${String(item.type)}]`)
       visible.push({ type: String(item.type), unsupported: true })
       continue
     }
@@ -76,8 +75,11 @@ export async function mcpResult(
       `media-${index}.${mediaType.split("/")[1]}`,
       bytes,
     )
+    appendText(
+      `[${mediaType === "application/pdf" ? "Document" : "Image"} attached]`,
+    )
     if (mediaType === "application/pdf")
-      documents.push({
+      parts.push({
         type: "document",
         mediaType,
         name: `document-${index}.pdf`,
@@ -85,7 +87,7 @@ export async function mcpResult(
         file: saved.reference,
       })
     else
-      images.push({
+      parts.push({
         type: "image",
         mediaType,
         detail: "high",
@@ -98,16 +100,13 @@ export async function mcpResult(
       sizeBytes: bytes.length,
       file: saved.reference,
     })
-    text.push(
-      `[${mediaType === "application/pdf" ? "Document" : "Image"} attached]`,
-    )
   }
   const structuredContent = result?.structuredContent
   if (
     structuredContent !== undefined &&
     !text.some((part) => carriesStructuredContent(part, structuredContent))
   )
-    text.push(JSON.stringify(structuredContent))
+    appendText(JSON.stringify(structuredContent))
   const content = text.join("\n")
   const output = {
     content: visible,
@@ -126,12 +125,7 @@ export async function mcpResult(
     ...base,
     presentation: {
       async toModelContent(budget) {
-        const projected = await finalizeToolOutput(base, budget, context)
-        return {
-          ...projected,
-          ...(images.length === 0 ? {} : { images }),
-          ...(documents.length === 0 ? {} : { documents }),
-        }
+        return finalizeToolContent(parts, budget, context)
       },
     },
   }

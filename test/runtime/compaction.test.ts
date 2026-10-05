@@ -11,7 +11,7 @@ describe("compaction request", () => {
     const earlier = {
       role: "tool" as const,
       toolCallId: "older",
-      content: "keep earlier output",
+      content: [{ type: "text" as const, text: "keep earlier output" }],
     }
     const user = {
       role: "user" as const,
@@ -20,7 +20,7 @@ describe("compaction request", () => {
     const trailing = {
       role: "tool" as const,
       toolCallId: "last",
-      content: "result".repeat(10_000),
+      content: [{ type: "text" as const, text: "result".repeat(10_000) }],
       toolSearch: {
         tools: [
           { name: "large", description: "x".repeat(10_000), inputSchema: {} },
@@ -35,25 +35,28 @@ describe("compaction request", () => {
     expect(result.slice(0, 2)).toEqual([earlier, user])
     expect(result[2]).toEqual({
       ...trailing,
-      content: "Tool output omitted to fit the context window.",
+      content: [
+        {
+          type: "text",
+          text: "Tool output omitted to fit the context window.",
+        },
+      ],
       toolSearch: { tools: [] },
     })
-    expect(trailing.content).toHaveLength(60_000)
+    expect(trailing.content[0]?.text).toHaveLength(60_000)
   })
   it("removes media from omitted tool tails without changing earlier history", () => {
     const media: ModelMessage = {
       role: "tool",
       toolCallId: "media",
-      content: "Attached media",
-      images: [
+      content: [
+        { type: "text", text: "Attached media" },
         {
           type: "image",
           mediaType: "image/png",
           data: "pixels",
           detail: "high",
         },
-      ],
-      documents: [
         {
           type: "document",
           mediaType: "application/pdf",
@@ -79,10 +82,19 @@ describe("compaction request", () => {
     expect(result[2]).toEqual({
       role: "tool",
       toolCallId: "media",
-      content: "Tool output omitted to fit the context window.",
+      content: [
+        {
+          type: "text",
+          text: "Tool output omitted to fit the context window.",
+        },
+      ],
     })
-    expect(media.images).toHaveLength(1)
-    expect(media.documents).toHaveLength(1)
+    expect(
+      media.content.filter((block) => block.type === "image"),
+    ).toHaveLength(1)
+    expect(
+      media.content.filter((block) => block.type === "document"),
+    ).toHaveLength(1)
   })
   it("flattens source groups and appends the checkpoint instruction", () => {
     const request = buildCompactionRequest({

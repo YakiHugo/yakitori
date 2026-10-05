@@ -1,3 +1,5 @@
+import type { ModelToolContentBlock } from "../../kernel/index.ts"
+import { toolContentText } from "../model-tool-content.ts"
 import type {
   ToolExecutionContext,
   ToolExecutionResult,
@@ -34,18 +36,78 @@ export function textPreview(
   return preview === "" ? notice : `${notice}\n${preview}`
 }
 
+// Allocate one text budget across the whole result, preserving every media slot.
+// Prefix lengths are measured only after fitText has respected UTF-8 boundaries.
+function boundedContent(
+  content: readonly ModelToolContentBlock[],
+  budget: ToolOutputBudget,
+  notice: string,
+): readonly ModelToolContentBlock[] {
+  const text = toolContentText(content)
+  if (fitText(text, budget) === text) return content
+  if (fitText(notice, budget) !== notice)
+    throw new Error("Tool output budget cannot fit its recovery metadata.")
+  const prefix = fitText(text, {
+    maxBytes: budget.maxBytes - Buffer.byteLength(notice) - 1,
+    maxLines: budget.maxLines - notice.split("\n").length,
+  })
+  let offset = 0
+  return [
+    { type: "text", text: notice },
+    ...content.flatMap((block): ModelToolContentBlock[] => {
+      if (block.type !== "text") return [block]
+      const start = offset
+      offset += block.text.length + 1
+      return prefix.length === 0 || start > prefix.length
+        ? []
+        : [{ type: "text", text: block.text.slice(0, prefix.length - start) }]
+    }),
+  ]
+}
+
 export function mediaPresentation(
   content: ToolModelContent,
 ): ToolResultPresentation {
   return {
     toModelContent: (budget) => ({
       ...content,
-      content: textPreview(
+      content: boundedContent(
         content.content,
         budget,
         "[Tool text truncated; media retained.]",
       ),
     }),
+  }
+}
+
+export async function finalizeToolContent(
+  content: readonly ModelToolContentBlock[],
+  budget: ToolOutputBudget,
+  context: ToolExecutionContext,
+  fileName = "result.txt",
+): Promise<ToolModelContent> {
+  const text = toolContentText(content)
+  if (fitText(text, budget) === text)
+    return { content, toolContentTruncated: false }
+  // One artifact and one budget for the result, never one per text block.
+  const saved =
+    context.rolloutAssets !== undefined &&
+    context.rolloutId !== undefined &&
+    context.toolCallId !== undefined
+      ? await context.rolloutAssets.saveToolFile(
+          context.rolloutId,
+          context.toolCallId,
+          fileName,
+          Buffer.from(text),
+        )
+      : undefined
+  const notice =
+    saved === undefined
+      ? "[Output truncated. Full output unavailable: no rollout asset storage.]"
+      : `[Output truncated. Full text saved to ${saved.path}. Use read_file with offset and limit, or a bounded command for long lines.]`
+  return {
+    content: boundedContent(content, budget, notice),
+    toolContentTruncated: true,
   }
 }
 
@@ -57,35 +119,21 @@ export async function finalizeToolOutput(
 ): Promise<ToolModelContent> {
   if (result.presentation !== undefined) {
     const projected = await result.presentation.toModelContent(budget)
-    if (fitText(projected.content, budget) !== projected.content)
+    const text = toolContentText(projected.content)
+    if (fitText(text, budget) !== text)
       throw new Error("Tool result exceeded its declared output budget.")
     return {
       ...projected,
       toolContentTruncated:
-        projected.toolContentTruncated ?? projected.content !== result.content,
+        projected.toolContentTruncated ?? text !== result.content,
     }
   }
-  if (fitText(result.content, budget) === result.content)
-    return { content: result.content, toolContentTruncated: false }
-  const saved =
-    context.rolloutAssets !== undefined &&
-    context.rolloutId !== undefined &&
-    context.toolCallId !== undefined
-      ? await context.rolloutAssets.saveToolFile(
-          context.rolloutId,
-          context.toolCallId,
-          fileName,
-          Buffer.from(result.content),
-        )
-      : undefined
-  const notice =
-    saved === undefined
-      ? "[Output truncated. Full output unavailable: no rollout asset storage.]"
-      : `[Output truncated. Full text saved to ${saved.path}. Use read_file with offset and limit, or a bounded command for long lines.]`
-  return {
-    content: textPreview(result.content, budget, notice),
-    toolContentTruncated: true,
-  }
+  return finalizeToolContent(
+    [{ type: "text", text: result.content }],
+    budget,
+    context,
+    fileName,
+  )
 }
 
 export function headTailPreview(

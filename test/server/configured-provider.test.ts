@@ -401,9 +401,11 @@ it.each([
         {
           role: "tool",
           toolCallId: "call_pdf",
-          content: media.content,
-          ...(media.images.length ? { images: media.images } : {}),
-          ...(media.documents.length ? { documents: media.documents } : {}),
+          content: [
+            { type: "text", text: media.content },
+            ...media.images,
+            ...media.documents,
+          ],
         },
       ],
       tools: [],
@@ -444,7 +446,10 @@ it.each([
           {
             role: "user",
             content: [
-              { type: "text", text: 'Images from tool result "call_pdf":' },
+              {
+                type: "text",
+                text: 'Image from tool result "call_pdf", content part 2:',
+              },
               {
                 type: "image_url",
                 image_url: {

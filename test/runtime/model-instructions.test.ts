@@ -1,3 +1,4 @@
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -213,7 +214,9 @@ it.each([
       requests[1]?.messages.some(
         (message) =>
           message.role === "tool" &&
-          message.content.includes("Stable reference material."),
+          toolContentText(message.content).includes(
+            "Stable reference material.",
+          ),
       ),
     ).toBe(true)
     await thread.startIfIdle({ content: { kind: "text", text: "Continue" } })

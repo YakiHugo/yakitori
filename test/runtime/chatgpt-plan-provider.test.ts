@@ -150,7 +150,7 @@ describe("ChatGPT plan inference", () => {
       {
         role: "tool",
         toolCallId: "search1",
-        content: "Found shell",
+        content: [{ type: "text", text: "Found shell" }],
         toolSearch: {
           tools: [
             {

@@ -48,13 +48,12 @@ export function estimateModelRequestBudget(
       message.role !== "user" && message.role !== "tool"
         ? total
         : total +
-          (message.role === "user"
-            ? message.content.filter((block) => block.type === "image")
-            : (message.images ?? [])
-          ).reduce(
-            (subtotal, image) => subtotal + estimateImageTokens(image),
-            0,
-          ),
+          [...message.content]
+            .filter((block): block is ModelImageBlock => block.type === "image")
+            .reduce(
+              (subtotal, image) => subtotal + estimateImageTokens(image),
+              0,
+            ),
     0,
   )
   const estimatedInputTokens =
@@ -90,10 +89,9 @@ export function estimateHistoryTokens(
       total +
       estimateMessageTextTokens(message) +
       (message.role === "user" || message.role === "tool"
-        ? (message.role === "user"
-            ? message.content.filter((block) => block.type === "image")
-            : (message.images ?? [])
-          ).reduce((tokens, image) => tokens + estimateImageTokens(image), 0)
+        ? [...message.content]
+            .filter((block): block is ModelImageBlock => block.type === "image")
+            .reduce((tokens, image) => tokens + estimateImageTokens(image), 0)
         : 0),
     0,
   )
@@ -104,11 +102,13 @@ function estimateMessageTextTokens(message: ModelMessage): number {
     return (
       estimateTextTokens(JSON.stringify(message, omitImagePayload)) +
       (message.role === "tool"
-        ? (message.documents ?? []).reduce(
-            (total, document) =>
-              total + Math.ceil(document.sizeBytes / APPROX_BYTES_PER_TOKEN),
-            0,
-          )
+        ? message.content
+            .filter((block) => block.type === "document")
+            .reduce(
+              (total, document) =>
+                total + Math.ceil(document.sizeBytes / APPROX_BYTES_PER_TOKEN),
+              0,
+            )
         : 0)
     )
   const native = message.content.filter((block) => block.type === "compaction")

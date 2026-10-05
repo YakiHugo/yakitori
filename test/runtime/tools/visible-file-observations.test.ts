@@ -11,7 +11,7 @@ describe("visible file observations", () => {
       {
         role: "tool",
         toolCallId: "read",
-        content: "read contents",
+        content: [{ type: "text", text: "read contents" }],
         fileObservations: [
           {
             path: "src/value.ts",
@@ -24,7 +24,7 @@ describe("visible file observations", () => {
       {
         role: "tool",
         toolCallId: "edit",
-        content: "edited contents",
+        content: [{ type: "text", text: "edited contents" }],
         fileObservations: [
           {
             path: "src/value.ts",
@@ -34,7 +34,11 @@ describe("visible file observations", () => {
           },
         ],
       },
-      { role: "tool", toolCallId: "hidden", content: "no grant" },
+      {
+        role: "tool",
+        toolCallId: "hidden",
+        content: [{ type: "text", text: "no grant" }],
+      },
     ])
     expect(visible.latest("src/value.ts")).toEqual({
       sha256: "b".repeat(64),
@@ -180,7 +184,7 @@ describe("visible file observations", () => {
       {
         role: "tool",
         toolCallId: "patch",
-        content: "done",
+        content: [{ type: "text", text: "done" }],
         fileObservations: [
           {
             path: "src/a.ts",

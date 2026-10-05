@@ -479,33 +479,32 @@ export function toAnthropicMessages(
               type: "tool_reference" as const,
               tool_name: tool.name,
             }))
-          : (message.images?.length ?? 0) + (message.documents?.length ?? 0) ===
-              0
-            ? message.content
-            : [
-                { type: "text" as const, text: message.content },
-                ...(message.images ?? []).map((image) => ({
-                  type: "image" as const,
-                  source: {
-                    type: "base64" as const,
-                    media_type: image.mediaType,
-                    data: requireModelImageData(image),
-                  },
-                })),
-                ...(message.documents ?? []).map((document) => {
-                  if (document.data === undefined)
-                    throw new Error("Unresolved document asset.")
+          : message.content.every((block) => block.type === "text")
+            ? message.content.map((block) => block.text).join("\n")
+            : message.content.map((block) => {
+                if (block.type === "text")
+                  return { type: "text" as const, text: block.text }
+                if (block.type === "image")
                   return {
-                    type: "document" as const,
-                    title: document.name,
+                    type: "image" as const,
                     source: {
                       type: "base64" as const,
-                      media_type: "application/pdf" as const,
-                      data: document.data,
+                      media_type: block.mediaType,
+                      data: requireModelImageData(block),
                     },
                   }
-                }),
-              ],
+                if (block.data === undefined)
+                  throw new Error("Unresolved document asset.")
+                return {
+                  type: "document" as const,
+                  title: block.name,
+                  source: {
+                    type: "base64" as const,
+                    media_type: "application/pdf" as const,
+                    data: block.data,
+                  },
+                }
+              }),
       ...(message.isError ? { is_error: true } : {}),
     }
     appendAnthropicUserContent(converted, [toolResult])

@@ -517,7 +517,7 @@ describe("finalized tool router", () => {
       isModelMessage({
         role: "tool",
         toolCallId: "search_1",
-        content: JSON.stringify({ tools }),
+        content: [{ type: "text", text: JSON.stringify({ tools }) }],
         toolSearch: { tools },
       }),
     ).toBe(true)

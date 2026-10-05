@@ -476,36 +476,31 @@ export function toChatCompletionsMessages(
             ),
       })
     } else if (message.role === "tool") {
-      if ((message.images?.length ?? 0) > 0) {
-        toolImages.push(
-          {
-            type: "text",
-            text: `Images from tool result ${JSON.stringify(message.toolCallId)}:`,
-          },
-          ...(message.images ?? []).map((image) => ({
-            type: "image_url" as const,
-            image_url: {
-              url: `data:${image.mediaType};base64,${requireModelImageData(image)}`,
-              detail: "high" as const,
+      const text = message.content
+        .map((block, index) => {
+          if (block.type === "text") return block.text
+          if (block.type === "document")
+            return `[Document ${block.name} was not sent: native PDF input is not enabled for Chat Completions.]`
+          const label = `Image from tool result ${JSON.stringify(message.toolCallId)}, content part ${index + 1}`
+          toolImages.push(
+            { type: "text", text: `${label}:` },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                detail: "high",
+              },
             },
-          })),
-        )
-      }
-      const omissions = [
-        ...(message.documents ?? []).map(
-          (document) =>
-            `[Document ${document.name} was not sent: native PDF input is not enabled for Chat Completions.]`,
-        ),
-      ]
+          )
+          // Keep tool text in the tool role. The marker binds this position to the
+          // labeled image after the complete result batch; Chat cannot interleave it.
+          return `[${label}; image follows the tool-result batch.]`
+        })
+        .join("\n")
       result.push({
         role: "tool",
         tool_call_id: message.toolCallId,
-        content: [
-          message.isError
-            ? `[tool_error]\n${message.content}`
-            : message.content,
-          ...omissions,
-        ].join("\n"),
+        content: message.isError ? `[tool_error]\n${text}` : text,
       })
     } else {
       const toolCalls: ToolCall[] = []

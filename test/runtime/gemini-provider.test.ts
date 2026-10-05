@@ -587,8 +587,8 @@ describe("native Gemini provider", () => {
             {
               role: "tool",
               toolCallId: call.id,
-              content: "2",
-              images: [
+              content: [
+                { type: "text", text: "2" },
                 { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
               ],
             },
@@ -607,9 +607,21 @@ describe("native Gemini provider", () => {
           role: "user",
           parts: [
             {
-              functionResponse: { name: "evaluate", response: { output: "2" } },
+              functionResponse: {
+                name: "evaluate",
+                response: {
+                  output: [
+                    { text: "2" },
+                    {
+                      text: `[Image from tool evaluate, call ${call.id}, content part 2; image follows the function response.]`,
+                    },
+                  ],
+                },
+              },
             },
-            { text: `[Image from tool evaluate, call ${call.id}]` },
+            {
+              text: `[Image from tool evaluate, call ${call.id}, content part 2]`,
+            },
             { inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } },
           ],
         })
@@ -664,8 +676,8 @@ describe("native Gemini provider", () => {
               name: "inspect",
               id: "native_a",
               response: {
-                error: "Partial first result",
-                images: [
+                error: [
+                  { text: "Partial first result" },
                   { $ref: "tool_0_image_0" },
                   { $ref: "tool_0_image_1" },
                 ],
@@ -693,8 +705,7 @@ describe("native Gemini provider", () => {
               name: "inspect",
               id: "native_b",
               response: {
-                output: "Second result",
-                images: [{ $ref: "tool_1_image_0" }],
+                output: [{ text: "Second result" }, { $ref: "tool_1_image_0" }],
               },
               parts: [
                 {
@@ -743,10 +754,10 @@ describe("native Gemini provider", () => {
     ).toHaveLength(2)
     expect(JSON.stringify(parts)).not.toContain("displayName")
     expect(parts).toContainEqual({
-      text: "[Image from tool inspect, call call_a]",
+      text: "[Image from tool inspect, call call_a, content part 2]",
     })
     expect(parts).toContainEqual({
-      text: "[Image from tool inspect, call call_b]",
+      text: "[Image from tool inspect, call call_b, content part 2]",
     })
   })
 
@@ -758,7 +769,7 @@ describe("native Gemini provider", () => {
       message.role === "tool"
         ? {
             ...message,
-            images: [{ type: "image", mediaType: "image/gif", data: "R0lG" }],
+            content: [{ type: "image", mediaType: "image/gif", data: "R0lG" }],
           }
         : message,
     )
@@ -807,7 +818,11 @@ describe("native Gemini provider", () => {
       stream(
         request({
           messages: [
-            { role: "tool", toolCallId: "missing", content: "result" },
+            {
+              role: "tool",
+              toolCallId: "missing",
+              content: [{ type: "text", text: "result" }],
+            },
           ],
         }),
       ),
@@ -877,18 +892,20 @@ function imageToolHistory(model: string): ModelMessage[] {
     {
       role: "tool",
       toolCallId: "call_a",
-      content: "Partial first result",
-      isError: true,
-      images: [
+      content: [
+        { type: "text", text: "Partial first result" },
         { type: "image", mediaType: "image/png", data: "YWJj" },
         { type: "image", mediaType: "image/webp", data: "ZGVm" },
       ],
+      isError: true,
     },
     {
       role: "tool",
       toolCallId: "call_b",
-      content: "Second result",
-      images: [{ type: "image", mediaType: "image/jpeg", data: "Z2hp" }],
+      content: [
+        { type: "text", text: "Second result" },
+        { type: "image", mediaType: "image/jpeg", data: "Z2hp" },
+      ],
     },
   ]
 }

@@ -55,7 +55,8 @@ describe("stored PDF model projection", () => {
       ctx,
     )
     const original = JSON.stringify(durable)
-    const documents = durable.documents ?? []
+    const documents =
+      durable.content.filter((block) => block.type === "document") ?? []
     expect(documents).toHaveLength(1)
     const native = await prepareModelDocuments(documents, ctx.rolloutAssets, {
       nativePdf: true,

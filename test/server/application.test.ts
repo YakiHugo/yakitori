@@ -1,3 +1,4 @@
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
   mkdir,
   mkdtemp,
@@ -1176,7 +1177,7 @@ describe("application composition", () => {
         const toolResults = root?.rollout.flatMap((entry) =>
           entry.item.type === "response_item" &&
           entry.item.item.item.role === "tool"
-            ? [entry.item.item.item.content]
+            ? [toolContentText(entry.item.item.item.content)]
             : [],
         )
         expect(toolResults?.join("\n")).toContain("/root/survey")
@@ -1341,7 +1342,7 @@ describe("application composition", () => {
               entry.item.type === "response_item" &&
               entry.item.item.item.role === "tool" &&
               entry.item.item.item.toolCallId === "tool_list_restored"
-                ? [entry.item.item.item.content]
+                ? [toolContentText(entry.item.item.item.content)]
                 : [],
             )
             .at(-1) ?? ""

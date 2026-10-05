@@ -189,7 +189,7 @@ describe("ChatGPT plan registered Turn loop", () => {
           expect.objectContaining({
             role: "tool",
             toolCallId: "calendar_1",
-            content: "planning",
+            content: [{ type: "text", text: "planning" }],
           }),
         ]),
       )

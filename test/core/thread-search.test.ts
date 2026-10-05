@@ -258,7 +258,11 @@ function envelope(
     createdAt: "2026-01-01T00:00:00.000Z",
     item:
       role === "tool"
-        ? { role, toolCallId: `call_${turnId}`, content: text }
+        ? {
+            role,
+            toolCallId: `call_${turnId}`,
+            content: [{ type: "text" as const, text }],
+          }
         : { role, content: [{ type: "text" as const, text }] },
   }
 }

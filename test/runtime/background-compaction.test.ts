@@ -21,7 +21,7 @@ const call = entry("call", {
 const result = entry("result", {
   role: "tool",
   toolCallId: "tool",
-  content: "old output ".repeat(10_000),
+  content: [{ type: "text", text: "old output ".repeat(10_000) }],
 })
 
 describe("background checkpoint boundary", () => {

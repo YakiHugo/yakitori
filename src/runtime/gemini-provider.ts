@@ -407,65 +407,60 @@ export function toGeminiContents(
         throw new GeminiProtocolError("Unmatched Gemini tool result.")
       calls.delete(message.toolCallId)
       const resultIndex = toolResultIndex++
-      const images = nativeToolImages
-        ? (message.images ?? []).map((image, index) => {
-            if (
-              image.mediaType !== "image/png" &&
-              image.mediaType !== "image/jpeg" &&
-              image.mediaType !== "image/webp"
-            )
-              throw new GeminiProtocolError(
-                `Gemini 3 function responses do not support ${image.mediaType}; use PNG, JPEG or WebP.`,
-              )
-            return {
+      const images: JsonObject[] = []
+      const fallbackImages: JsonObject[] = []
+      const ordered = message.content.map((block, index): JsonValue => {
+        if (block.type === "text") return { text: block.text }
+        if (block.type === "document")
+          return {
+            text: `[Document ${block.name} was not sent: native PDF input is not enabled for Gemini.]`,
+          }
+        if (!nativeToolImages) {
+          const label = `Image from tool ${call.name}, call ${message.toolCallId}, content part ${index + 1}`
+          fallbackImages.push(
+            { text: `[${label}]` },
+            {
               inlineData: {
-                mimeType: image.mediaType,
-                displayName: `tool_${resultIndex}_image_${index}`,
-                data: requireModelImageData(image),
+                mimeType: block.mediaType,
+                data: requireModelImageData(block),
               },
-            }
-          })
-        : []
+            },
+          )
+          return { text: `[${label}; image follows the function response.]` }
+        }
+        if (
+          block.mediaType !== "image/png" &&
+          block.mediaType !== "image/jpeg" &&
+          block.mediaType !== "image/webp"
+        )
+          throw new GeminiProtocolError(
+            `Gemini 3 function responses do not support ${block.mediaType}; use PNG, JPEG or WebP.`,
+          )
+        const displayName = `tool_${resultIndex}_image_${images.length}`
+        images.push({
+          inlineData: {
+            mimeType: block.mediaType,
+            displayName,
+            data: requireModelImageData(block),
+          },
+        })
+        return { $ref: displayName }
+      })
+      // Response JSON owns the ordered descriptors; binary parts are referenced
+      // once at their source position, never promoted to user-authored text.
+      const output = message.content.every((block) => block.type === "text")
+        ? message.content.map((block) => block.text).join("\n")
+        : ordered
       const parts: JsonObject[] = [
         {
           functionResponse: {
             ...call,
-            response: {
-              ...(message.isError
-                ? { error: message.content }
-                : { output: message.content }),
-              ...(images.length === 0
-                ? {}
-                : {
-                    images: images.map(({ inlineData }) => ({
-                      $ref: inlineData.displayName,
-                    })),
-                  }),
-            },
+            response: message.isError ? { error: output } : { output },
             ...(images.length === 0 ? {} : { parts: images }),
           },
         },
+        ...fallbackImages,
       ]
-      // Older/unknown models keep the established labeled user-image fallback.
-      // Native responses instead bind each image inside its exact tool result.
-      if (!nativeToolImages)
-        parts.push(
-          ...(message.images ?? []).flatMap((image): JsonObject[] => [
-            {
-              text: `[Image from tool ${call.name}, call ${message.toolCallId}]`,
-            },
-            {
-              inlineData: {
-                mimeType: image.mediaType,
-                data: requireModelImageData(image),
-              },
-            },
-          ]),
-        )
-      for (const document of message.documents ?? [])
-        parts.push({
-          text: `[Document ${document.name} was not sent: native PDF input is not enabled for Gemini.]`,
-        })
       const previous = contents.at(-1)
       // Parallel results must follow the entire model call batch together.
       if (
