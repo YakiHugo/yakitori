@@ -1222,6 +1222,50 @@ describe("Chat Completions provider", () => {
     )
   })
 
+  it("preserves streamed completion annotations and rejects unsupported semantic media", async () => {
+    const annotation = {
+      type: "url_citation",
+      url_citation: {
+        start_index: 0,
+        end_index: 6,
+        title: "Source",
+        url: "https://example.com/source",
+      },
+    }
+    await withServer(
+      (_incoming, outgoing) =>
+        send(outgoing, [
+          chunk({ content: "Source", annotations: [annotation] }, "stop"),
+        ]),
+      async (baseURL) => {
+        const events = await collect(provider(baseURL)(request()))
+        expect(terminal(events).content).toMatchObject([
+          {
+            type: "text",
+            text: "Source",
+            providerMetadata: {
+              chatCompletions: { annotations: [annotation] },
+            },
+          },
+        ])
+      },
+    )
+    for (const field of ["audio", "images", "video", "function_call"]) {
+      await withServer(
+        (_incoming, outgoing) =>
+          send(outgoing, [chunk({ [field]: {} }, "stop")]),
+        async (baseURL) => {
+          const events = await collect(provider(baseURL)(request()))
+          expect(events.at(-1)).toMatchObject({
+            type: "failure",
+            failure: { kind: "protocol_error", stage: "response_body" },
+          })
+          expect(events.some((event) => event.type === "response")).toBe(false)
+        },
+      )
+    }
+  })
+
   it("reports HTTP errors and retry hints without an SDK retry", async () => {
     let count = 0
     await withServer(
