@@ -2,6 +2,7 @@ import {
   createAnthropicProvider,
   createChatCompletionsProvider,
   createConfiguredModelsManager,
+  createGeminiProvider,
   createModelProvider,
   createOpenAIProvider,
   createOpenAITurnTransport,
@@ -90,12 +91,14 @@ export function createConfiguredProvider(
           ? createOpenAIProvider(options)
           : configuration.wireApi === "anthropic_messages"
             ? createAnthropicProvider(options)
-            : createChatCompletionsProvider({
-                ...options,
-                ...(preset?.flavor === undefined
-                  ? {}
-                  : { flavor: preset.flavor }),
-              }))
+            : configuration.wireApi === "gemini_generate_content"
+              ? createGeminiProvider(options)
+              : createChatCompletionsProvider({
+                  ...options,
+                  ...(preset?.flavor === undefined
+                    ? {}
+                    : { flavor: preset.flavor }),
+                }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
           const model = (await models.listModels()).find(
@@ -108,7 +111,8 @@ export function createConfiguredProvider(
           const target = {
             ...request.target,
             ...(catalogProvider === undefined ||
-            configuration.wireApi === "openai_chat_completions"
+            configuration.wireApi === "openai_chat_completions" ||
+            configuration.wireApi === "gemini_generate_content"
               ? {}
               : { provider: catalogProvider }),
             ...(effort === undefined ? {} : { effort }),

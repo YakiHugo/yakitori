@@ -79,7 +79,7 @@ export function ProviderEditor({
           {draft.existing
             ? "Manage this provider's key and models."
             : custom
-              ? "Connect an OpenAI or Anthropic compatible API."
+              ? "Connect an OpenAI, Anthropic or Gemini compatible API."
               : "Add your API key to start using this provider."}
         </p>
         {preset ? (
@@ -374,6 +374,7 @@ function ProtocolField({
         <option value="openai_chat_completions">OpenAI Chat Completions</option>
         <option value="openai_responses">OpenAI Responses</option>
         <option value="anthropic_messages">Anthropic Messages</option>
+        <option value="gemini_generate_content">Gemini GenerateContent</option>
       </select>
     </Field>
   )

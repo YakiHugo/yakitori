@@ -96,10 +96,11 @@ export type ItemContent = TextContent | JsonContent
 
 // Provider-neutral, model-visible history IR. The kernel owns this contract so
 // durable checkpoints and forks do not depend on runtime request assembly.
-export type ModelTextBlock = {
-  readonly type: "text"
-  readonly text: string
-}
+export type ModelTextBlock = Readonly<{
+  type: "text"
+  text: string
+  providerMetadata?: JsonObject
+}>
 
 export type ModelImageBlock =
   | {
@@ -881,9 +882,11 @@ function isAgentMessageItem(
     value.content.every(
       (block) =>
         isRecord(block) &&
-        onlyKeys(block, ["type", "text"]) &&
+        onlyKeys(block, ["type", "text", "providerMetadata"]) &&
         block.type === "text" &&
-        isString(block.text),
+        isString(block.text) &&
+        (block.providerMetadata === undefined ||
+          isJsonObject(block.providerMetadata)),
     ) &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata))
@@ -1335,9 +1338,11 @@ export function isModelMessage(value: unknown): value is ModelMessage {
     value.content.every(
       (block) =>
         isRecord(block) &&
-        onlyKeys(block, ["type", "text"]) &&
+        onlyKeys(block, ["type", "text", "providerMetadata"]) &&
         block.type === "text" &&
-        isString(block.text),
+        isString(block.text) &&
+        (block.providerMetadata === undefined ||
+          isJsonObject(block.providerMetadata)),
     ) &&
     (value.images === undefined ||
       (value.role === "user" &&
@@ -1400,7 +1405,12 @@ function isFileObservationRange(
 function isModelContentBlock(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.type)) return false
   if (value.type === "text") {
-    return onlyKeys(value, ["type", "text"]) && isString(value.text)
+    return (
+      onlyKeys(value, ["type", "text", "providerMetadata"]) &&
+      isString(value.text) &&
+      (value.providerMetadata === undefined ||
+        isJsonObject(value.providerMetadata))
+    )
   }
   if (value.type === "reasoning") {
     return (

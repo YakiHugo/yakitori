@@ -16,7 +16,10 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import type { ProviderPreset } from "../../src/runtime/provider-presets.ts"
+import {
+  providerPresets,
+  type ProviderPreset,
+} from "../../src/runtime/provider-presets.ts"
 import type { ApiConfiguredProvider } from "../../src/server/provider-configuration.ts"
 import type { SubscriptionConnection } from "../../src/server/subscription-connections.ts"
 
@@ -251,6 +254,78 @@ it("retains existing model metadata and the stored key while editing model IDs",
       modelSelection: "selected",
       models: [preset.models[1], { id: "new-model" }],
     },
+  })
+})
+
+it("preserves an existing Gemini compatibility connection when the native preset changes", async () => {
+  const user = userEvent.setup()
+  const compatibility: ApiConfiguredProvider = {
+    id: "gemini-compatibility",
+    credential: "stored",
+    configuration: {
+      name: "Gemini compatibility",
+      preset: "gemini",
+      wireApi: "openai_chat_completions",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      models: [{ id: "gemini-3.8-flash" }],
+    },
+  }
+  request.mockResolvedValue({
+    providers: [compatibility],
+    presets: providerPresets,
+  })
+  render(<ProviderSettings />)
+  await user.click(
+    await screen.findByRole("button", { name: /^Gemini compatibility/ }),
+  )
+  await user.click(screen.getByText("Advanced settings"))
+  expect(
+    (screen.getByLabelText("API protocol") as HTMLSelectElement).value,
+  ).toBe("openai_chat_completions")
+  expect(
+    (screen.getByLabelText("API base URL") as HTMLInputElement).value,
+  ).toBe("https://generativelanguage.googleapis.com/v1beta/openai/")
+  fireEvent.change(screen.getByLabelText("Connection name"), {
+    target: { value: "Gemini work" },
+  })
+  await user.click(screen.getByRole("button", { name: "Save changes" }))
+  await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
+  expect(request).toHaveBeenCalledWith("provider/configuration/write", {
+    id: "gemini-compatibility",
+    configuration: { ...compatibility.configuration, name: "Gemini work" },
+  })
+})
+
+it("saves a new Gemini preset connection with the native protocol and endpoint", async () => {
+  const user = userEvent.setup()
+  request.mockResolvedValue({ providers: [], presets: providerPresets })
+  render(<ProviderSettings />)
+  await user.click(await screen.findByRole("button", { name: "Google Gemini" }))
+  await user.click(screen.getByText("Advanced settings"))
+  expect(
+    (screen.getByLabelText("API protocol") as HTMLSelectElement).value,
+  ).toBe("gemini_generate_content")
+  await user.selectOptions(
+    screen.getByLabelText("API protocol"),
+    "openai_chat_completions",
+  )
+  await user.selectOptions(
+    screen.getByLabelText("API protocol"),
+    "gemini_generate_content",
+  )
+  await user.type(screen.getByLabelText("API key"), "native-test-key")
+  await user.click(screen.getByRole("button", { name: "Add provider" }))
+  await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
+  expect(request).toHaveBeenCalledWith("provider/configuration/write", {
+    configuration: {
+      name: "Google Gemini",
+      preset: "gemini",
+      wireApi: "gemini_generate_content",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      envKey: "GEMINI_API_KEY",
+      models: [],
+    },
+    apiKey: "native-test-key",
   })
 })
 

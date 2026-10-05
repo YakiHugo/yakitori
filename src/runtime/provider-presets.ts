@@ -4,6 +4,7 @@ export type ConfiguredModel = Readonly<{
   id: string
   displayName?: string
   contextWindowTokens?: number
+  contextWindowScope?: "input" | "total"
   maxOutputTokens?: number
   inputModalities?: readonly ("text" | "image" | "video")[]
   efforts?: readonly string[]
@@ -21,7 +22,11 @@ export type ProviderPreset = Readonly<{
   id: string
   name: string
   baseURL: string
-  wireApi: "openai_responses" | "openai_chat_completions" | "anthropic_messages"
+  wireApi:
+    | "openai_responses"
+    | "openai_chat_completions"
+    | "anthropic_messages"
+    | "gemini_generate_content"
   envKey?: string
   kind?: "vendor" | "relay" | "local" | "subscription"
   noKey?: boolean
@@ -76,12 +81,12 @@ export const providerPresets: readonly ProviderPreset[] = [
   {
     id: "gemini",
     name: "Google Gemini",
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
-    wireApi: "openai_chat_completions",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    wireApi: "gemini_generate_content",
     envKey: "GEMINI_API_KEY",
     flavor: "gemini",
     models: [{ id: "gemini-3.8-flash", inputModalities: ["text", "image"] }],
-    documentationURL: "https://ai.google.dev/gemini-api/docs/openai",
+    documentationURL: "https://ai.google.dev/gemini-api/docs/text-generation",
   },
   {
     id: "xai",

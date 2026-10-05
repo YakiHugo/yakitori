@@ -46,7 +46,12 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
         base_url: { type: "string" },
         api_backend: {
           type: "string",
-          enum: ["responses", "chat_completions", "messages"],
+          enum: [
+            "responses",
+            "chat_completions",
+            "messages",
+            "generate_content",
+          ],
         },
         api_key: {
           type: "string",
@@ -77,7 +82,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
           type: "array",
           items: { type: "object" },
           description:
-            "Optional upstream model metadata overrides: id, displayName, contextWindowTokens, maxOutputTokens, inputModalities, efforts and defaultEffort.",
+            "Optional upstream model metadata overrides: id, displayName, contextWindowTokens, contextWindowScope (input or total), maxOutputTokens, inputModalities, efforts and defaultEffort.",
         },
         model_ids: {
           type: "array",
@@ -162,9 +167,12 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
           const backend = record.api_backend
           if (
             backend !== undefined &&
-            !["responses", "messages", "chat_completions"].includes(
-              String(backend),
-            )
+            ![
+              "responses",
+              "messages",
+              "chat_completions",
+              "generate_content",
+            ].includes(String(backend))
           )
             throw new ConfigurationError("Unknown API backend.")
           const configuration = requireProviderConfiguration({
@@ -178,9 +186,11 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
                   ? "anthropic_messages"
                   : backend === "chat_completions"
                     ? "openai_chat_completions"
-                    : (previous?.wireApi ??
-                      preset?.wireApi ??
-                      "openai_chat_completions"),
+                    : backend === "generate_content"
+                      ? "gemini_generate_content"
+                      : (previous?.wireApi ??
+                        preset?.wireApi ??
+                        "openai_chat_completions"),
             preset: preset?.id ?? previous?.preset,
             envKey: record.env_key ?? previous?.envKey ?? preset?.envKey,
             noKey: record.no_key ?? previous?.noKey ?? preset?.noKey,

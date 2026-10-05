@@ -12,6 +12,7 @@ export async function discoverProviderModels(
   apiKey: string | undefined,
 ): Promise<readonly ConfiguredModel[]> {
   const messages = configuration.wireApi === "anthropic_messages"
+  const gemini = configuration.wireApi === "gemini_generate_content"
   const preset = providerPresets.find(
     (entry) => entry.id === configuration.preset,
   )
@@ -28,6 +29,7 @@ export async function discoverProviderModels(
   const headers: Record<string, string> = { accept: "application/json" }
   if (apiKey && !(configuration.noKey && apiKey === "local-no-key")) {
     if (messages) headers["x-api-key"] = apiKey
+    else if (gemini) headers["x-goog-api-key"] = apiKey
     else headers.Authorization = `Bearer ${apiKey}`
   }
   if (messages) headers["anthropic-version"] = "2023-06-01"
@@ -55,6 +57,7 @@ export async function discoverProviderModels(
       // custom endpoints and authentication failures must remain visible.
       if (
         pages.size === 1 &&
+        !gemini &&
         [404, 405].includes(response.status) &&
         officialPreset?.models.length
       )
@@ -73,11 +76,58 @@ export async function discoverProviderModels(
         })
       throw cause
     }
-    if (!isRecord(body) || !Array.isArray(body.data))
+    const entries = isRecord(body)
+      ? gemini
+        ? body.models
+        : body.data
+      : undefined
+    if (!isRecord(body) || !Array.isArray(entries))
       throw new ConfigurationError(
-        "The model catalog must contain a data array.",
+        `The model catalog must contain a ${gemini ? "models" : "data"} array.`,
       )
-    for (const entry of body.data) {
+    for (const entry of entries) {
+      if (gemini) {
+        // Gemini's native catalog reports input/output limits separately and
+        // generation methods, but no modality or reasoning-effort level list.
+        // https://ai.google.dev/api/models
+        if (
+          !isRecord(entry) ||
+          typeof entry.name !== "string" ||
+          !/^models\/[^/?#\s]+$/.test(entry.name)
+        )
+          throw new ConfigurationError(
+            "A model catalog entry has no model resource name.",
+          )
+        if (
+          !Array.isArray(entry.supportedGenerationMethods) ||
+          !entry.supportedGenerationMethods.includes("generateContent")
+        )
+          continue
+        const id = entry.name.slice("models/".length)
+        const known = officialPreset?.models.find((model) => model.id === id)
+        const capacity = entry.inputTokenLimit
+        const output = entry.outputTokenLimit
+        models.set(id, {
+          id,
+          ...(typeof entry.displayName === "string" && entry.displayName.trim()
+            ? { displayName: entry.displayName }
+            : {}),
+          ...(typeof capacity === "number" &&
+          Number.isSafeInteger(capacity) &&
+          capacity > 0
+            ? { contextWindowTokens: capacity, contextWindowScope: "input" }
+            : {}),
+          ...(typeof output === "number" &&
+          Number.isSafeInteger(output) &&
+          output > 0
+            ? { maxOutputTokens: output }
+            : {}),
+          ...(known?.inputModalities
+            ? { inputModalities: known.inputModalities }
+            : {}),
+        })
+        continue
+      }
       if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim())
         throw new ConfigurationError("A model catalog entry has no model ID.")
       const capabilities = isRecord(entry.capabilities)
@@ -189,6 +239,15 @@ export async function discoverProviderModels(
             }
           : {}),
       })
+    }
+    if (gemini) {
+      if (body.nextPageToken === undefined || body.nextPageToken === "") break
+      if (typeof body.nextPageToken !== "string")
+        throw new ConfigurationError(
+          "The model catalog has an invalid nextPageToken.",
+        )
+      url.searchParams.set("pageToken", body.nextPageToken)
+      continue
     }
     if (body.has_more !== true) break
     if (typeof body.last_id !== "string" || !body.last_id)
