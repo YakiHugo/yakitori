@@ -28,7 +28,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify macOS shell and sidecar behavior
-        run: pnpm test test/runtime/user-shell-env.test.ts test/runtime/tools/unified-exec.test.ts test/desktop/server-process.test.ts
+        run: pnpm test test/runtime/user-shell-env.test.ts test/runtime/tools/unified-exec.test.ts test/desktop/server-process.test.ts test/desktop/chatgpt-sidecar.test.ts
 
       - name: Package the desktop app
         run: pnpm package:desktop

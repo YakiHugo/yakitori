@@ -50,7 +50,7 @@ export function createSubscriptionConnections(input: {
       const job = jobs.get(id)
       return {
         id,
-        name: id === "codex" ? "ChatGPT" : "Grok",
+        name: id === "codex" ? "Codex CLI" : "Grok",
         available: available[id],
         ...(job === undefined
           ? {}

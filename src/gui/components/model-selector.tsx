@@ -11,6 +11,7 @@ import type {
   ApiProviderModel,
   ApiProviderSummary,
 } from "../../server/protocol.ts"
+import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { cn } from "../lib/utils.ts"
 import {
   normalizeKimiModelSelection,
@@ -252,218 +253,260 @@ export function ModelSelector({
   }
 
   return (
-    <div ref={selectorRef} className="relative flex min-w-0 items-center">
-      {menu !== undefined ? (
-        <div
-          aria-hidden="true"
-          className="fixed inset-0 z-10"
-          onClick={() => setMenu(undefined)}
-        />
-      ) : null}
-
-      <button
-        type="button"
-        aria-label="Select model and effort"
-        aria-expanded={menu !== undefined}
-        onClick={openFirstLevel}
-        className={cn(
-          "h-8 max-w-64 min-w-0 items-center gap-1.5 rounded-full bg-muted/70 px-3 text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          menu === undefined
-            ? "flex"
-            : "grid w-40 grid-cols-[0.875rem_minmax(0,1fr)_0.875rem] text-center",
-        )}
-      >
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div ref={selectorRef} className="relative flex min-w-0 items-center">
         {menu !== undefined ? (
-          <>
-            <span aria-hidden="true" />
-            <span className="min-w-0 truncate text-muted-foreground">
-              {menu === "effort" ? "Select effort" : "Select model"}
-            </span>
-          </>
-        ) : (
-          <>
-            {fast ? (
-              <Zap className="size-3.5 shrink-0 fill-blue-500 text-blue-500" />
-            ) : null}
-            <span className="min-w-0 truncate">
-              {effective === undefined
-                ? "Select model"
-                : displayName(providers, effective)}
-            </span>
-            {currentEffort === undefined ? null : (
-              <span className="shrink-0 text-muted-foreground">
-                {displayEffort(currentEffort)}
-              </span>
-            )}
-          </>
-        )}
-        <ChevronDown
-          className={cn(
-            "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
-            menu !== undefined && "rotate-180",
-          )}
-        />
-      </button>
+          <div
+            aria-hidden="true"
+            className="fixed inset-0 z-10"
+            onClick={() => setMenu(undefined)}
+          />
+        ) : null}
 
-      {menu !== undefined ? (
-        <div
-          ref={popoverRef}
-          data-model-picker=""
-          className="composer-control-popover absolute bottom-full left-1/2 z-20 mb-2 overflow-hidden rounded-[20px] border bg-popover text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]"
+        <button
+          type="button"
+          aria-label="Select model and effort"
+          aria-expanded={menu !== undefined}
+          onClick={openFirstLevel}
+          className={cn(
+            "h-8 max-w-64 min-w-0 items-center gap-1.5 rounded-full bg-muted/70 px-3 text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            menu === undefined
+              ? "flex"
+              : "grid w-40 grid-cols-[0.875rem_minmax(0,1fr)_0.875rem] text-center",
+          )}
         >
-          {menu === "effort" && effective !== undefined ? (
-            <div className="p-3.5">
-              <div className="grid grid-cols-[2.25rem_1fr_2.25rem] items-start">
-                {speeds !== undefined ? (
+          {menu !== undefined ? (
+            <>
+              <span aria-hidden="true" />
+              <span className="min-w-0 truncate text-muted-foreground">
+                {menu === "effort" ? "Select effort" : "Select model"}
+              </span>
+            </>
+          ) : (
+            <>
+              {fast ? (
+                <Zap className="size-3.5 shrink-0 fill-blue-500 text-blue-500" />
+              ) : null}
+              <span className="min-w-0 truncate">
+                {effective === undefined
+                  ? "Select model"
+                  : displayName(providers, effective)}
+              </span>
+              {currentEffort === undefined ? null : (
+                <span className="shrink-0 text-muted-foreground">
+                  {displayEffort(currentEffort)}
+                </span>
+              )}
+            </>
+          )}
+          <ChevronDown
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
+              menu !== undefined && "rotate-180",
+            )}
+          />
+        </button>
+
+        {menu !== undefined ? (
+          <div
+            ref={popoverRef}
+            data-model-picker=""
+            className="composer-control-popover absolute bottom-full left-1/2 z-20 mb-2 overflow-hidden rounded-[20px] border bg-popover text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]"
+          >
+            {menu === "effort" && effective !== undefined ? (
+              <div className="p-3.5">
+                <div className="grid grid-cols-[2.25rem_1fr_2.25rem] items-start">
+                  {speeds !== undefined ? (
+                    <button
+                      type="button"
+                      aria-label={
+                        fast ? "Use standard speed" : "Use fast speed"
+                      }
+                      title={fast ? "Fast speed" : "Standard speed"}
+                      onClick={toggleSpeed}
+                      className="grid size-8 place-items-center rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <Zap
+                        className={cn(
+                          "size-4",
+                          fast
+                            ? "fill-blue-500 text-blue-500"
+                            : "text-muted-foreground",
+                        )}
+                      />
+                    </button>
+                  ) : (
+                    <span />
+                  )}
                   <button
                     type="button"
-                    aria-label={fast ? "Use standard speed" : "Use fast speed"}
-                    title={fast ? "Fast speed" : "Standard speed"}
-                    onClick={toggleSpeed}
-                    className="grid size-8 place-items-center rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="Select model"
+                    onClick={() => setMenu("model")}
+                    className="mx-auto flex max-w-full flex-col items-center rounded-lg px-2 py-0.5 text-center transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <Zap
+                    <span
                       className={cn(
-                        "size-4",
-                        fast
-                          ? "fill-blue-500 text-blue-500"
-                          : "text-muted-foreground",
+                        "text-[14px] leading-5 font-semibold text-blue-600 dark:text-blue-400",
+                        peak && "effort-peak-label",
                       )}
-                    />
+                    >
+                      {currentEffort === undefined
+                        ? "Automatic"
+                        : displayEffort(currentEffort)}
+                    </span>
+                    <span className="mt-0.5 block max-w-full truncate text-center text-[13px] font-normal text-muted-foreground">
+                      {displayName(providers, effective)}
+                    </span>
                   </button>
-                ) : (
                   <span />
+                </div>
+
+                {efforts !== undefined && efforts.length > 0 ? (
+                  <EffortSlider
+                    efforts={efforts}
+                    current={currentEffort}
+                    fast={fast}
+                    onChange={selectEffort}
+                  />
+                ) : (
+                  <p className="px-2 pt-4 pb-2 text-center text-xs text-muted-foreground">
+                    This model has no reasoning effort levels.
+                  </p>
                 )}
+              </div>
+            ) : (
+              <div className="max-h-[min(27rem,50vh)] overflow-y-auto p-2">
+                <div className="flex items-center gap-1 px-1 pt-0.5 pb-1.5">
+                  {effortMenuAvailable ? (
+                    <button
+                      type="button"
+                      aria-label="Back to effort"
+                      onClick={() => setMenu("effort")}
+                      className="grid size-7 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <ChevronLeft className="size-4" />
+                    </button>
+                  ) : null}
+                  <span className="px-1 text-xs font-medium text-muted-foreground">
+                    Select model
+                  </span>
+                </div>
                 <button
                   type="button"
-                  aria-label="Select model"
-                  onClick={() => setMenu("model")}
-                  className="mx-auto flex max-w-full flex-col items-center rounded-lg px-2 py-0.5 text-center transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-pressed={current === undefined}
+                  onClick={() => {
+                    changeSelection(undefined)
+                    const defaultSelection = normalizeKimiModelSelection(
+                      resolveEffectiveModel({
+                        sessionCurrent: undefined,
+                        userPreference,
+                        defaultProvider,
+                        defaultModel,
+                        providers,
+                      }),
+                      providers,
+                    )
+                    const entry = providers
+                      .find(
+                        (provider) =>
+                          provider.name === defaultSelection?.provider,
+                      )
+                      ?.models.find(
+                        (model) => model.id === defaultSelection?.model,
+                      )
+                    setMenu(hasEffortControls(entry) ? "effort" : undefined)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <span
-                    className={cn(
-                      "text-[14px] leading-5 font-semibold text-blue-600 dark:text-blue-400",
-                      peak && "effort-peak-label",
-                    )}
-                  >
-                    {currentEffort === undefined
-                      ? "Automatic"
-                      : displayEffort(currentEffort)}
-                  </span>
-                  <span className="mt-0.5 block max-w-full truncate text-center text-[13px] font-normal text-muted-foreground">
-                    {displayName(providers, effective)}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">Default</span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      Recommended set of models
+                    </span>
                   </span>
                 </button>
-                <span />
+                {[...availableProviders]
+                  .sort((left, right) => {
+                    if (left.name === defaultProvider) return -1
+                    if (right.name === defaultProvider) return 1
+                    return 0
+                  })
+                  .map((provider) =>
+                    provider.models.length === 0 &&
+                    !provider.catalogError ? null : (
+                      <div key={provider.name}>
+                        {availableProviders.length > 1 ||
+                        provider.catalogError ? (
+                          <div className="px-2.5 pt-2.5 pb-0.5 text-[10px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
+                            {provider.displayName ?? provider.name}
+                          </div>
+                        ) : null}
+                        {provider.catalogError ? (
+                          <div className="px-2.5 py-2 text-xs text-muted-foreground">
+                            <p role="status">{provider.catalogError}</p>
+                            <button
+                              type="button"
+                              className="mt-1 underline"
+                              onClick={() => {
+                                setMenu(undefined)
+                                useAppStore.getState().openSettings("providers")
+                              }}
+                            >
+                              Manage connection
+                            </button>
+                          </div>
+                        ) : null}
+                        {provider.models.map((model) => {
+                          const selected =
+                            effective?.provider === provider.name &&
+                            effective.model === model.id
+                          return (
+                            <button
+                              key={`${provider.name}/${model.id}`}
+                              type="button"
+                              aria-pressed={selected}
+                              onClick={() =>
+                                selectModel(provider.name, model.id)
+                              }
+                              className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <span className="min-w-0 flex-1 truncate">
+                                {model.displayName ?? model.id}
+                              </span>
+                              {selected ? (
+                                <Check
+                                  aria-hidden="true"
+                                  className="size-4 shrink-0"
+                                />
+                              ) : null}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ),
+                  )}
               </div>
-
-              {efforts !== undefined && efforts.length > 0 ? (
-                <EffortSlider
-                  efforts={efforts}
-                  current={currentEffort}
-                  fast={fast}
-                  onChange={selectEffort}
-                />
-              ) : (
-                <p className="px-2 pt-4 pb-2 text-center text-xs text-muted-foreground">
-                  This model has no reasoning effort levels.
-                </p>
-              )}
-            </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+      {effective?.provider.startsWith("chatgpt-") ? (
+        <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground">
+          {effectiveEntry ? (
+            <span>Using ChatGPT plan</span>
           ) : (
-            <div className="max-h-[min(27rem,50vh)] overflow-y-auto p-2">
-              <div className="flex items-center gap-1 px-1 pt-0.5 pb-1.5">
-                {effortMenuAvailable ? (
-                  <button
-                    type="button"
-                    aria-label="Back to effort"
-                    onClick={() => setMenu("effort")}
-                    className="grid size-7 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <ChevronLeft className="size-4" />
-                  </button>
-                ) : null}
-                <span className="px-1 text-xs font-medium text-muted-foreground">
-                  Select model
-                </span>
-              </div>
+            <>
+              <span>ChatGPT connection needs attention</span>
               <button
                 type="button"
-                aria-pressed={current === undefined}
-                onClick={() => {
-                  changeSelection(undefined)
-                  const defaultSelection = normalizeKimiModelSelection(
-                    resolveEffectiveModel({
-                      sessionCurrent: undefined,
-                      userPreference,
-                      defaultProvider,
-                      defaultModel,
-                      providers,
-                    }),
-                    providers,
-                  )
-                  const entry = providers
-                    .find(
-                      (provider) =>
-                        provider.name === defaultSelection?.provider,
-                    )
-                    ?.models.find(
-                      (model) => model.id === defaultSelection?.model,
-                    )
-                  setMenu(hasEffortControls(entry) ? "effort" : undefined)
-                }}
-                className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="underline"
+                onClick={() => useAppStore.getState().openSettings("providers")}
               >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">Default</span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    Recommended set of models
-                  </span>
-                </span>
+                Manage connection
               </button>
-              {[...availableProviders]
-                .sort((left, right) => {
-                  if (left.name === defaultProvider) return -1
-                  if (right.name === defaultProvider) return 1
-                  return 0
-                })
-                .map((provider) =>
-                  provider.models.length === 0 ? null : (
-                    <div key={provider.name}>
-                      {availableProviders.length > 1 ? (
-                        <div className="px-2.5 pt-2.5 pb-0.5 text-[10px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
-                          {provider.name}
-                        </div>
-                      ) : null}
-                      {provider.models.map((model) => {
-                        const selected =
-                          effective?.provider === provider.name &&
-                          effective.model === model.id
-                        return (
-                          <button
-                            key={`${provider.name}/${model.id}`}
-                            type="button"
-                            aria-pressed={selected}
-                            onClick={() => selectModel(provider.name, model.id)}
-                            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          >
-                            <span className="min-w-0 flex-1 truncate">
-                              {model.displayName ?? model.id}
-                            </span>
-                            {selected ? (
-                              <Check
-                                aria-hidden="true"
-                                className="size-4 shrink-0"
-                              />
-                            ) : null}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ),
-                )}
-            </div>
+            </>
           )}
+          <ChatGPTUsageLink />
         </div>
       ) : null}
     </div>

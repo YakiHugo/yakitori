@@ -207,9 +207,9 @@ export async function runProviderFlow(
       path: catalogPath,
       contentType: "image/png",
     })
-    await page.getByRole("button", { name: "ChatGPT", exact: true }).click()
+    await page.getByRole("button", { name: "Codex CLI", exact: true }).click()
     const subscription = page.getByRole("dialog", {
-      name: "ChatGPT",
+      name: "Codex CLI",
       exact: true,
     })
     await expect(subscription.getByRole("status")).toHaveText(
@@ -222,7 +222,7 @@ export async function runProviderFlow(
       .getByRole("button", { name: "Import existing account…" })
       .click()
     const accountImport = page.getByRole("dialog", {
-      name: "Import ChatGPT account",
+      name: "Import Codex CLI account",
       exact: true,
     })
     await accountImport

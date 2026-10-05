@@ -1,3 +1,11 @@
+import {
+  createChatGPTConnections,
+  type ChatGPTConnections,
+} from "./chatgpt-connections.ts"
+import {
+  createChatGPTModelConnections,
+  ChatGPTModelCatalogError,
+} from "./chatgpt-model-connections.ts"
 import { createHash } from "node:crypto"
 import { createSubscriptionAccountStore } from "./subscription-accounts.ts"
 import { defaultCodexAuthPath } from "../runtime/codex-credentials.ts"
@@ -162,6 +170,10 @@ const MCP_STEP_GRACE_MS = 1_000
 const serverUserAgent = `${packageJson.name}/${packageJson.version}`
 
 export type YakitoriApplicationOptions = {
+  readonly chatgpt?: Readonly<{
+    fetchFn?: typeof fetch
+    openAuthorization?: (url: string, signal?: AbortSignal) => Promise<void>
+  }>
   readonly activeMateId?: string
   readonly guiStaticDir?: string
   readonly mateDatabasePath?: string
@@ -244,6 +256,7 @@ export async function createYakitoriApplication(
     await mcpOAuth.close()
     await providerConfigPending
     await subscriptionConnections?.close()
+    await chatgpt?.close()
   }
   // Attached when an HTTP server binds a message processor; server-initiated
   // notifications (session activity, server-side renames) stay silent until
@@ -253,6 +266,7 @@ export async function createYakitoriApplication(
     | undefined
   let modelsRefreshTimer: ReturnType<typeof setInterval> | undefined
   let subscriptionConnections: SubscriptionConnections | undefined
+  let chatgpt: ChatGPTConnections | undefined
   let providerConfigTimer: ReturnType<typeof setInterval> | undefined
   let providerConfigPending: Promise<void> | undefined
 
@@ -359,6 +373,50 @@ export async function createYakitoriApplication(
     const subscriptionAccounts = createSubscriptionAccountStore(
       join(credentialDirectory, "..", "subscription-accounts"),
     )
+    let chatGPTProviders: Readonly<Record<string, ModelProvider>> = {}
+    let applyChatGPT = () => {}
+    const chatGPTConnections = createChatGPTConnections({
+      directory: join(credentialDirectory, "..", "chatgpt-connections"),
+      ...options.chatgpt,
+      async changed() {
+        if (!(await refreshChatGPTProviders()))
+          broadcastNotification?.("provider/configuration/changed", {})
+      },
+      reportError(cause) {
+        reportOperationalFailure(reporter, {
+          component: "provider-configuration",
+          operation: "chatgpt-connection",
+          cause,
+        })
+      },
+    })
+    chatgpt = chatGPTConnections
+    const chatGPTModels = createChatGPTModelConnections({
+      resolve: (identity) => chatGPTConnections.resolve(identity),
+      ...(options.chatgpt?.fetchFn === undefined
+        ? {}
+        : { fetchFn: options.chatgpt.fetchFn }),
+    })
+    let chatGPTProjection = ""
+    let chatGPTRefreshGeneration = 0
+    async function refreshChatGPTProviders() {
+      const version = ++chatGPTRefreshGeneration
+      const accounts = await chatGPTConnections.available()
+      if (version !== chatGPTRefreshGeneration) return false
+      const projection = JSON.stringify(accounts)
+      if (projection === chatGPTProjection) return false
+      chatGPTProjection = projection
+      chatGPTProviders = Object.fromEntries(
+        accounts.map((account) => [
+          account.id,
+          chatGPTModels.provider(account.identity, account.id),
+        ]),
+      )
+      applyChatGPT()
+      broadcastNotification?.("provider/configuration/changed", {})
+      return true
+    }
+    await refreshChatGPTProviders()
     let providerConfigurations: Readonly<
       Record<string, StoredProviderConfiguration>
     > = userConfiguration.modelProviders ?? {}
@@ -408,10 +466,13 @@ export async function createYakitoriApplication(
         ),
       ),
       ...configured,
+      ...chatGPTProviders,
     })
     const providerRegistry = createProviderRegistry(
       executableProviders(configuredProviders),
     )
+    applyChatGPT = () =>
+      providerRegistry.replace(executableProviders(configuredProviders))
     subscriptionConnections = createSubscriptionConnections({
       async readAvailability() {
         const states = await providerCredentialStates(
@@ -464,6 +525,7 @@ export async function createYakitoriApplication(
       },
     })
     applyConfigured = (configured) => {
+      configuredProviders = configured
       providerRegistry.replace(executableProviders(configured))
     }
     // The configuration file is also a model-editable interface. Observe
@@ -473,6 +535,7 @@ export async function createYakitoriApplication(
       providerConfigPending = userConfig
         .readConfiguration()
         .then(async (configuration) => {
+          await refreshChatGPTProviders()
           if (
             JSON.stringify(configuration.modelProviders ?? {}) !==
             JSON.stringify(providerConfigurations)
@@ -529,6 +592,8 @@ export async function createYakitoriApplication(
       },
     }
     const providers = async (): Promise<ApiListProvidersResponse> => {
+      await refreshChatGPTProviders()
+      const chatGPTAccounts = (await chatGPTConnections.read()).accounts
       const credentialStates = await providerCredentialStates(
         false,
         await subscriptionAccounts.codexPath(),
@@ -537,6 +602,7 @@ export async function createYakitoriApplication(
         ...new Set([
           ...providerRegistry.providers,
           ...Object.keys(providerConfigurations),
+          ...chatGPTAccounts.map((account) => account.providerId),
           "codex",
           "grok",
           "kimi",
@@ -545,8 +611,18 @@ export async function createYakitoriApplication(
       const [summaries, userPreference] = await Promise.all([
         Promise.all(
           names.map((name) => {
-            const state =
-              providerConfigurations[name] === undefined
+            const chatGPTAccount = chatGPTAccounts.find(
+              (account) => account.providerId === name,
+            )
+            const state = chatGPTAccount
+              ? {
+                  availability:
+                    chatGPTAccount.state === "connected"
+                      ? ("available" as const)
+                      : ("requires_login" as const),
+                  credentialKind: "oauth" as const,
+                }
+              : providerConfigurations[name] === undefined
                 ? credentialStates[name]
                 : {
                     availability: providerRegistry.providers.includes(name)
@@ -560,13 +636,16 @@ export async function createYakitoriApplication(
               registered &&
               (usesInjectedTransport ||
                 (state?.availability ?? "available") === "available")
-            return providerSummary(
+            const summary = providerSummary(
               available ? modelDirectory : unavailableModelDirectory,
               name,
               available && name === provider.provider
                 ? provider.model
                 : undefined,
               {
+                ...(chatGPTAccount === undefined
+                  ? {}
+                  : { displayName: chatGPTAccount.label }),
                 availability: available ? "available" : "requires_login",
                 ...(!available ||
                 usesInjectedTransport ||
@@ -578,6 +657,19 @@ export async function createYakitoriApplication(
                   : { rateLimits: state.rateLimits }),
               },
             )
+            return chatGPTAccount === undefined
+              ? summary
+              : summary.catch((error) => {
+                  if (!(error instanceof ChatGPTModelCatalogError)) throw error
+                  return {
+                    name,
+                    displayName: chatGPTAccount.label,
+                    availability: "available" as const,
+                    credentialKind: "oauth" as const,
+                    models: [],
+                    catalogError: error.message,
+                  }
+                })
           }),
         ),
         userConfig.read(),
@@ -1171,6 +1263,7 @@ export async function createYakitoriApplication(
           projectStore: ownedProjectStore,
           providers,
           providerConfiguration,
+          chatgpt: chatGPTConnections,
           subscriptionUsage,
           userConfig: routedUserConfig,
           availableProviders: providerRegistry.providers,
@@ -1349,7 +1442,7 @@ async function providerSummary(
   configuredModel: string | undefined,
   state: Pick<
     ApiProviderSummary,
-    "availability" | "credentialKind" | "rateLimits"
+    "availability" | "credentialKind" | "rateLimits" | "displayName"
   > = {},
 ): Promise<ApiProviderSummary> {
   const models: ApiProviderModel[] = (await directory.listModels(name)).map(

@@ -46,12 +46,13 @@ export function requireProviderId(value: unknown): string {
   if (
     typeof value !== "string" ||
     !/^[a-z][a-z0-9_-]*$/.test(value) ||
+    value.startsWith("chatgpt-") ||
     ["__proto__", "constructor", "prototype", "faux", "codex", "kimi"].includes(
       value,
     )
   ) {
     throw new ConfigurationError(
-      "Provider id must start with a lowercase letter and contain only lowercase letters, numbers, underscores or hyphens. faux, codex and kimi are reserved.",
+      "Provider id must start with a lowercase letter and contain only lowercase letters, numbers, underscores or hyphens. faux, codex, kimi and the chatgpt- prefix are reserved.",
     )
   }
   return value

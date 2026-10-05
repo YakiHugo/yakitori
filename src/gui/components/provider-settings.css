@@ -711,3 +711,83 @@ html[data-desktop="macos"]
   font-size: 12px;
   margin: 16px 0 10px;
 }
+
+.chatgpt-connections {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  margin-bottom: 32px;
+}
+.chatgpt-connection-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.chatgpt-connection-copy {
+  flex: 1;
+}
+.chatgpt-connection-heading h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.chatgpt-connection-heading p,
+.chatgpt-connection-footer {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.chatgpt-accounts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.chatgpt-account {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.chatgpt-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chatgpt-connection-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 18px;
+}
+.chatgpt-connection-footer a,
+.chatgpt-usage-summary a {
+  color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.chatgpt-revocation-warning {
+  max-width: 52ch;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.chatgpt-usage-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 24px;
+  font-size: 13px;
+}
+@media (max-width: 600px) {
+  .chatgpt-connections {
+    padding: 16px;
+  }
+  .chatgpt-connection-heading {
+    flex-wrap: wrap;
+  }
+  .chatgpt-account {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

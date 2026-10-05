@@ -314,6 +314,15 @@ export function createTurnProcessor(
       const selection: ModelSelection = input.modelSelection ??
         snapshot.configuration?.defaultTarget ?? { provider, model }
       const models = options.modelClient?.models(selection.provider)
+      // Account-scoped catalogs may be empty until first use. Load missing
+      // choices here, but retain admission-time refresh for known models so it
+      // stays paired with the captured Turn transport across provider reloads.
+      try {
+        models?.validate(selection)
+      } catch (error) {
+        if (!(error instanceof ModelNotConfiguredError)) throw error
+        await models?.refresh()
+      }
       const modelTransport =
         options.loadModelTransport === undefined
           ? snapshot.configuration?.modelTransport

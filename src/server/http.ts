@@ -1,3 +1,4 @@
+import type { ChatGPTConnections } from "./chatgpt-connections.ts"
 import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
@@ -38,6 +39,7 @@ export type YakitoriStaticAssets = {
 
 type YakitoriHttpServerCommonOptions = {
   readonly providerConfiguration?: ProviderService
+  readonly chatgpt?: ChatGPTConnections
   readonly mcp?: McpService
   readonly interactions?: SessionInteractions
   readonly sideChats?: SideChatService
@@ -125,6 +127,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const messageProcessor =
     options.messageProcessor ??
     new MessageProcessor({
+      ...(options.chatgpt === undefined ? {} : { chatgpt: options.chatgpt }),
       ...(options.providerConfiguration === undefined
         ? {}
         : { providerConfiguration: options.providerConfiguration }),
