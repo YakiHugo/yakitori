@@ -152,7 +152,7 @@ describe("stored PDF model projection", () => {
 })
 
 describe("native PDF request limits", () => {
-  it("counts raw file bytes across Chat results and does not charge rejected reservations", () => {
+  it("counts raw file bytes across OpenAI results and does not charge rejected reservations", () => {
     const budget = createNativePdfBudget({
       maxFileBytes: 50_000_000,
       fileLimitExclusive: true,
@@ -163,6 +163,69 @@ describe("native PDF request limits", () => {
     expect(budget.reserve(2_000_000, 1)).toContain("combined PDF request size")
     expect(budget.reserve(1_000_000, 1)).toBeUndefined()
     expect(budget.reserve(1, 1)).toContain("combined PDF request size")
+  })
+
+  it("counts each OpenAI file occurrence without inventing page or base64 limits", () => {
+    const limits = {
+      maxFileBytes: 50_000_000,
+      fileLimitExclusive: true,
+      maxRequestBytes: 50_000_000,
+    }
+    const boundary = createNativePdfBudget(limits)
+    expect(boundary.reserve(25_000_000, 10_000)).toBeUndefined()
+    expect(boundary.reserve(25_000_000, 10_000)).toBeUndefined()
+    expect(boundary.reserve(1, 1)).toContain("combined PDF request size")
+    const repeated = createNativePdfBudget(limits)
+    expect(repeated.reserve(20_000_000, 1)).toBeUndefined()
+    expect(repeated.reserve(20_000_000, 1)).toBeUndefined()
+    expect(repeated.reserve(20_000_000, 1)).toContain(
+      "combined PDF request size",
+    )
+  })
+
+  it.each([
+    100, 600,
+  ])("reserves ordinary images before admitting PDFs into %i shared media units", (limit) => {
+    const budget = createNativePdfBudget(
+      { maxRequestMediaUnits: limit, maxInlineBytes: 8 },
+      limit - 2,
+    )
+    expect(budget.reserve(3, 3)).toContain(
+      `combined ${limit}-unit image/PDF-page`,
+    )
+    expect(budget.reserve(3, 1)).toBeUndefined()
+    // A byte failure consumes no pages; a page failure consumes no bytes.
+    expect(budget.reserve(4, 1)).toContain("inline PDF payload")
+    expect(budget.reserve(3, 2)).toContain(
+      `combined ${limit}-unit image/PDF-page`,
+    )
+    expect(budget.reserve(3, 1)).toBeUndefined()
+    expect(budget.reserve(1, 1)).toContain(
+      `combined ${limit}-unit image/PDF-page`,
+    )
+  })
+
+  it("bounds aggregate Anthropic base64 only as a lower-bound preflight without a raw file quota", () => {
+    const limits = { maxInlineBytes: 32_000_000 }
+    const budget = createNativePdfBudget(limits)
+    expect(budget.reserve(12_000_000, 1)).toBeUndefined()
+    expect(budget.reserve(12_000_001, 1)).toContain("inline PDF payload")
+    expect(budget.reserve(12_000_000, 1)).toBeUndefined()
+    expect(budget.reserve(1, 1)).toContain("inline PDF payload")
+    expect(createNativePdfBudget(limits).reserve(24_000_000, 1)).toBeUndefined()
+    expect(createNativePdfBudget(limits).reserve(24_000_001, 1)).toContain(
+      "inline PDF payload",
+    )
+  })
+
+  it("labels conservative unknown-model admission separately from verified quotas", () => {
+    const budget = createNativePdfBudget(
+      { maxRequestMediaUnits: 100, mediaLimitIsConservative: true },
+      99,
+    )
+    expect(budget.reserve(1, 2)).toContain("Yakitori's conservative 100-unit")
+    expect(budget.reserve(1, 2)).toContain("unverified model")
+    expect(budget.reserve(1, 1)).toBeUndefined()
   })
 
   it("counts Gemini page occurrences and base64 padding across the request", () => {

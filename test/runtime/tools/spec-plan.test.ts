@@ -146,7 +146,8 @@ describe("Step tool planning", () => {
       if (
         nativePdf &&
         entry.user &&
-        entry.wireApi === "openai_chat_completions"
+        (entry.wireApi === "openai_chat_completions" ||
+          entry.wireApi === "openai_responses")
       ) {
         expect(step.userDocumentReading.nativePdfLimits).toEqual({
           maxFileBytes: 50_000_000,
@@ -154,8 +155,66 @@ describe("Step tool planning", () => {
           maxRequestBytes: 50_000_000,
         })
       }
+      if (!nativePdf)
+        expect(step.userDocumentReading.nativePdfLimits).toBeUndefined()
       await step.toolRouter.release()
     }
+    await registry.dispose()
+  })
+
+  it.each([
+    { model: "claude-sonnet-4-6", configuredWindow: 200_000, media: 600 },
+    { model: "claude-opus-4-6", configuredWindow: 1_000, media: 600 },
+    { model: "claude-haiku-4-5", configuredWindow: 1_000_000, media: 100 },
+    { model: "claude-custom", configuredWindow: 1_000_000, media: 100 },
+  ])("uses verified media capacity rather than the configured window for $model", async ({
+    model,
+    configuredWindow,
+    media,
+  }) => {
+    const provider = "personal"
+    const models = createConfiguredModelsManager({
+      provider,
+      catalogProvider: "anthropic",
+      wireApi: "anthropic_messages",
+      models: [
+        {
+          id: model,
+          contextWindowTokens: configuredWindow,
+          inputModalities: ["text", "image"],
+        },
+      ],
+    })
+    const selection = { provider, model }
+    const registry = createToolRegistry([])
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "pdf",
+      },
+      models,
+    ).resolveStep(selection, models)
+    const step = captureStepContext({
+      registry,
+      configuration,
+      nativePdf: true,
+      wireApi: "anthropic_messages",
+    })
+    const limits = {
+      maxInlineBytes: 32_000_000,
+      maxRequestMediaUnits: media,
+      ...(model === "claude-custom" ? { mediaLimitIsConservative: true } : {}),
+    }
+    expect(step.documentReading).toEqual({
+      nativePdf: true,
+      images: true,
+      nativePdfLimits: limits,
+    })
+    expect(step.userDocumentReading).toEqual(step.documentReading)
+    await step.toolRouter.release()
     await registry.dispose()
   })
 

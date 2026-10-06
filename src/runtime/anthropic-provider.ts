@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import type {
   ContentBlockParam,
+  MessageCreateParamsStreaming,
   MessageParam,
   OutputConfig,
   RawMessageStreamEvent,
@@ -31,6 +32,7 @@ import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
+import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type AnthropicProviderOptions = {
@@ -56,13 +58,20 @@ export function createAnthropicProvider(
       maxRetries: 0,
     })
 
-  return (request) => streamAnthropic(client, options.model, request)
+  return (request) =>
+    streamAnthropic(
+      client,
+      options.model,
+      request,
+      options.baseURL ?? "https://api.anthropic.com",
+    )
 }
 
 async function* streamAnthropic(
   client: Anthropic,
   defaultModel: string,
   request: ModelRequest,
+  fallbackBaseURL: string,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield { type: "cancelled" }
@@ -109,34 +118,66 @@ async function* streamAnthropic(
             supportsAdaptiveThinking(request.target.model || defaultModel)
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
+    const body: MessageCreateParamsStreaming = {
+      stream: true,
+      model: request.target.model || defaultModel,
+      max_tokens: request.maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
+      system: toAnthropicSystem(request.system, explicitPromptCaching),
+      messages: toAnthropicRequestMessages(
+        request.messages,
+        request.tools,
+        explicitPromptCaching,
+        nativeDeferredLoading,
+        request.target.provider,
+        request.continuationScope,
+      ),
+      ...(tools === undefined ? {} : { tools }),
+      ...(request.cacheKey === undefined
+        ? {}
+        : { metadata: { user_id: request.cacheKey } }),
+      ...(thinking === undefined ? {} : { thinking }),
+      ...(effortLevel === undefined
+        ? {}
+        : {
+            output_config: {
+              effort: effortLevel as NonNullable<OutputConfig["effort"]>,
+            },
+          }),
+    }
+    // Only PDFs sent to the direct API use Anthropic's documented whole-body
+    // limit. Compatible endpoints own their limits, regardless of provider ID.
+    if (
+      URL.parse(client.baseURL ?? fallbackBaseURL)?.href ===
+        "https://api.anthropic.com/" &&
+      body.messages.some(
+        (message) =>
+          Array.isArray(message.content) &&
+          message.content.some(
+            (block) =>
+              block.type === "document" ||
+              (block.type === "tool_result" &&
+                Array.isArray(block.content) &&
+                block.content.some((part) => part.type === "document")),
+          ),
+      )
+    ) {
+      const requestBytes = Buffer.byteLength(JSON.stringify(body), "utf8")
+      if (requestBytes > ANTHROPIC_REQUEST_MAX_BYTES) {
+        yield {
+          type: "failure",
+          failure: {
+            kind: "invalid_request",
+            stage: "request_build",
+            provider: request.target.provider,
+            wireApi: "anthropic_messages",
+            message: `PDF-bearing Anthropic request is ${requestBytes} bytes, exceeding the ${ANTHROPIC_REQUEST_MAX_BYTES}-byte (32 MB) request limit. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.`,
+          },
+        }
+        return
+      }
+    }
     stream = await client.messages.create(
-      {
-        stream: true,
-        model: request.target.model || defaultModel,
-        max_tokens:
-          request.maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
-        system: toAnthropicSystem(request.system, explicitPromptCaching),
-        messages: toAnthropicRequestMessages(
-          request.messages,
-          request.tools,
-          explicitPromptCaching,
-          nativeDeferredLoading,
-          request.target.provider,
-          request.continuationScope,
-        ),
-        ...(tools === undefined ? {} : { tools }),
-        ...(request.cacheKey === undefined
-          ? {}
-          : { metadata: { user_id: request.cacheKey } }),
-        ...(thinking === undefined ? {} : { thinking }),
-        ...(effortLevel === undefined
-          ? {}
-          : {
-              output_config: {
-                effort: effortLevel as NonNullable<OutputConfig["effort"]>,
-              },
-            }),
-      },
+      body,
       request.signal === undefined && effortLevel === undefined
         ? undefined
         : {

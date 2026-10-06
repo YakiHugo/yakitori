@@ -1341,6 +1341,242 @@ function effortRequest(
   }
 }
 
+describe("anthropic PDF request size", () => {
+  const pdf = {
+    type: "document" as const,
+    name: "résumé.pdf",
+    mediaType: "application/pdf" as const,
+    sizeBytes: 6,
+    file: { rolloutId: "rollout_test", path: "report.pdf" },
+    data: "JVBERi0x",
+  }
+  const request: ModelRequest = {
+    ...effortRequest("anthropic", "high"),
+    target: {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      instructionProfileId: "anthropic",
+      effort: "high",
+    },
+    system: [{ id: "base", revision: "1", text: "" }],
+    messages: [
+      { role: "user", content: [pdf, { type: "text", text: 'Résumé\n"' }] },
+    ],
+    tools: [
+      {
+        name: "inspect",
+        description: 'Read selected pages "only"',
+        inputSchema: {
+          type: "object",
+          properties: { pages: { type: "string", description: "页码" } },
+        },
+      },
+    ],
+    cacheKey: "pdf-size-test",
+  }
+
+  async function collect(
+    input: ModelRequest,
+    client: Anthropic,
+    baseURL?: string,
+  ): Promise<ModelStreamEvent[]> {
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+      ...(baseURL === undefined ? {} : { baseURL }),
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(input)) events.push(event)
+    return events
+  }
+
+  it("measures complete UTF-8 JSON and accepts exactly 32 MB before rejecting added content", async () => {
+    const sentBytes: number[] = []
+    const client = new Anthropic({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        sentBytes.push(new TextEncoder().encode(String(init?.body)).length)
+        let response = ""
+        for await (const event of anthropicRawMessage({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "ok" }],
+        })) {
+          response += `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+        }
+        return new Response(response, {
+          headers: { "content-type": "text/event-stream" },
+        })
+      },
+    })
+
+    expect((await collect(request, client)).at(-1)?.type).toBe("response")
+    // Measure the actual SDK wire body once, then fill exactly the remaining
+    // bytes with multibyte text. No adapter sizing helper defines the boundary.
+    const padding = 32_000_000 - (sentBytes[0] ?? 0)
+    const text = "界".repeat(Math.floor(padding / 3)) + "x".repeat(padding % 3)
+    const atLimit: ModelRequest = {
+      ...request,
+      system: [{ id: "base", revision: "1", text }],
+    }
+    expect((await collect(atLimit, client)).at(-1)?.type).toBe("response")
+    expect(sentBytes.at(-1)).toBe(32_000_000)
+
+    const overLimit: ModelRequest[] = [
+      { ...atLimit, system: [{ id: "base", revision: "1", text: `${text}x` }] },
+      {
+        ...atLimit,
+        tools: request.tools.map((tool) => ({
+          ...tool,
+          description: `${tool.description}x`,
+        })),
+      },
+      {
+        ...atLimit,
+        messages: [
+          {
+            role: "user",
+            content: [pdf, { type: "text", text: 'Résumé\n"x' }],
+          },
+        ],
+      },
+    ]
+    for (const oversized of overLimit) {
+      expect(await collect(oversized, client)).toEqual([
+        {
+          type: "failure",
+          failure: {
+            kind: "invalid_request",
+            stage: "request_build",
+            provider: "anthropic",
+            wireApi: "anthropic_messages",
+            message:
+              "PDF-bearing Anthropic request is 32000001 bytes, exceeding the 32000000-byte (32 MB) request limit. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.",
+          },
+        },
+      ])
+    }
+    expect(sentBytes).toHaveLength(2)
+  })
+
+  it("guards tool-result PDF history using the injected endpoint despite a renamed provider", async () => {
+    let fetchCalls = 0
+    const client = new Anthropic({
+      apiKey: "test",
+      baseURL: "https://API.ANTHROPIC.COM:443/",
+      maxRetries: 0,
+      fetch: async () => {
+        fetchCalls += 1
+        throw new Error("Oversized PDF history must not reach fetch")
+      },
+    })
+    const events = await collect(
+      {
+        ...request,
+        target: { ...request.target, provider: "renamed-provider" },
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_call", id: "read_1", name: "inspect", input: {} },
+            ],
+          },
+          {
+            role: "tool",
+            toolCallId: "read_1",
+            content: [pdf, { type: "text", text: "x".repeat(32_000_000) }],
+          },
+          { role: "user", content: [{ type: "text", text: "Summarize it" }] },
+        ],
+      },
+      client,
+      "https://compatible.example/v1",
+    )
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "invalid_request",
+          stage: "request_build",
+          provider: "renamed-provider",
+          message: expect.stringContaining("read_document with selected pages"),
+        }),
+      },
+    ])
+    expect(fetchCalls).toBe(0)
+  })
+
+  it.each([
+    ["https://compatible.example/v1", "https://api.anthropic.com", false],
+    ["https://api.anthropic.com/v1", undefined, false],
+    ["https://api.anthropic.com//", undefined, false],
+    ["https://api.anthropic.com?proxy=true", undefined, false],
+    ["https://api.anthropic.com#proxy", undefined, false],
+    ["https://api.anthropic.com:8443", undefined, false],
+    ["http://api.anthropic.com", undefined, false],
+    [undefined, "https://compatible.example/v1", false],
+    [undefined, "https://api.anthropic.com/", true],
+    [undefined, undefined, true],
+  ] as const)("scopes the limit to the actual direct endpoint (%s, fallback %s)", async (clientBaseURL, baseURL, guarded) => {
+    let createCalls = 0
+    const client = {
+      ...(clientBaseURL === undefined ? {} : { baseURL: clientBaseURL }),
+      messages: {
+        create() {
+          createCalls += 1
+          return anthropicRawMessage({ stop_reason: "end_turn", content: [] })
+        },
+      },
+    } as unknown as Anthropic
+    const events = await collect(
+      {
+        ...request,
+        system: [{ id: "base", revision: "1", text: "x".repeat(32_000_000) }],
+      },
+      client,
+      baseURL,
+    )
+    expect(events.at(-1)?.type).toBe(guarded ? "failure" : "response")
+    expect(createCalls).toBe(guarded ? 0 : 1)
+  })
+
+  it.each([
+    "text",
+    "image",
+  ] as const)("preserves oversized %s-only requests", async (type) => {
+    let createCalls = 0
+    const client = {
+      baseURL: "https://api.anthropic.com",
+      messages: {
+        create() {
+          createCalls += 1
+          return anthropicRawMessage({ stop_reason: "end_turn", content: [] })
+        },
+      },
+    } as unknown as Anthropic
+    const data = "A".repeat(32_000_000)
+    const events = await collect(
+      {
+        ...request,
+        messages: [
+          {
+            role: "user",
+            content: [
+              type === "text"
+                ? { type, text: data }
+                : { type, mediaType: "image/png", data },
+            ],
+          },
+        ],
+      },
+      client,
+    )
+    expect(events.at(-1)?.type).toBe("response")
+    expect(createCalls).toBe(1)
+  })
+})
+
 describe("anthropic provider error classification", () => {
   it("marks a 429 API error as retryable with its status", async () => {
     const error = new Anthropic.APIError(

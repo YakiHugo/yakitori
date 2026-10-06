@@ -17,6 +17,7 @@ import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import type {
+  ModelDocumentBlock,
   ModelRequest,
   ModelStreamEvent,
   StreamFn,
@@ -5937,4 +5938,400 @@ it("reprojects ordered user PDFs across native, text, image and unknown-model ca
       )?.item,
   ).toEqual({ role: "user", content: content.parts })
   expect(await assets.read(document.file)).toEqual(bytes)
+})
+
+it.each([
+  { model: "claude-haiku-4-5", imageCount: 99, limit: 100 },
+  { model: "claude-sonnet-4-6", imageCount: 599, limit: 600 },
+  { model: "claude-opus-4-6", imageCount: 599, limit: 600 },
+  { model: "claude-unverified-custom", imageCount: 99, limit: 100 },
+])("reserves later image occurrences before whole PDFs at $model's shared media boundary", async ({
+  model,
+  imageCount,
+  limit,
+}) => {
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-mixed-boundary-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const provider = "anthropic-mixed"
+  const faux = createFauxProvider([
+    { content: [{ type: "text", text: "Media bounded" }] },
+  ])
+  const client = createProviderRegistry({
+    [provider]: createModelProvider({
+      info: {
+        id: provider,
+        wireApi: "anthropic_messages",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
+      models: createConfiguredModelsManager({
+        provider,
+        catalogProvider: "anthropic",
+        wireApi: "anthropic_messages",
+        models: [{ id: model, inputModalities: ["text", "image"] }],
+      }),
+      stream: faux.stream,
+    }),
+  }).createClient()
+  const runtime = await createRuntime(faux.stream, createToolRegistry([]), {
+    provider,
+    model,
+    modelClient: client,
+    rolloutAssets: assets,
+  })
+  const thread = await runtime.createThread()
+  const documents = []
+  for (const pages of [["one"], ["one", "two"]]) {
+    const bytes = pdfFixture(pages)
+    const name = `${pages.length}-page.pdf`
+    const saved = await assets.saveToolFile(thread.id, name, name, bytes)
+    documents.push({
+      type: "document" as const,
+      name,
+      mediaType: "application/pdf" as const,
+      file: saved.reference,
+      sizeBytes: bytes.length,
+    })
+  }
+  const [onePage, twoPages] = documents
+  if (onePage === undefined || twoPages === undefined)
+    throw new Error("Missing PDF fixtures")
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+    "base64",
+  )
+  const savedImage = await assets.saveToolFile(
+    thread.id,
+    "shared_image",
+    "shared.png",
+    png,
+  )
+  const image = {
+    type: "image" as const,
+    name: "shared.png",
+    mediaType: "image/png" as const,
+    file: savedImage.reference,
+    sizeBytes: png.length,
+    detail: "high" as const,
+  }
+  const parts = [
+    { type: "text" as const, text: "before two pages" },
+    twoPages,
+    { type: "text" as const, text: "before one page" },
+    onePage,
+    { type: "text" as const, text: "before repeated PDF" },
+    onePage,
+    { type: "text" as const, text: "before repeated images" },
+    ...Array.from({ length: imageCount }, () => image),
+    { type: "text" as const, text: "after images" },
+  ]
+  await thread.startIfIdle({ content: { kind: "parts", parts } })
+  expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+  expect(await nextLifecycleEvent(thread)).toMatchObject({
+    type: "turn.completed",
+  })
+  expect(faux.callCount).toBe(1)
+  const projected = faux.requests[0]?.messages.find(
+    (message) =>
+      message.role === "user" &&
+      message.content.some(
+        (block) => block.type === "text" && block.text === "before two pages",
+      ),
+  )
+  const reason =
+    model === "claude-unverified-custom"
+      ? "Yakitori's conservative 100-unit image/PDF-page admission limit for an unverified model"
+      : `combined ${limit}-unit image/PDF-page request limit`
+  expect(projected?.content.slice(0, 7)).toEqual([
+    parts[0],
+    { type: "text", text: expect.stringContaining(reason) },
+    parts[2],
+    { ...onePage, data: pdfFixture(["one"]).toString("base64") },
+    parts[4],
+    { type: "text", text: expect.stringContaining(reason) },
+    parts[6],
+  ])
+  for (const index of [1, 5]) {
+    const notice = projected?.content[index]
+    expect(notice).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("Original PDF retained at"),
+    })
+    if (notice?.type !== "text") throw new Error("Missing PDF notice")
+    expect(notice.text).toContain("Use read_document")
+    expect(notice.text).toContain('"pages":"1-5"')
+  }
+  expect(projected?.content.at(-1)).toEqual(parts.at(-1))
+  expect(
+    projected?.content.filter((block) => block.type === "document"),
+  ).toHaveLength(1)
+  const projectedImages = projected?.content.filter(
+    (block) => block.type === "image",
+  )
+  expect(projectedImages).toHaveLength(imageCount)
+  expect(
+    projectedImages?.every((block) => block.data === png.toString("base64")),
+  ).toBe(true)
+  expect(
+    thread.snapshot().context.history.find(({ item }) => item.role === "user")
+      ?.item,
+  ).toEqual({ role: "user", content: parts })
+  expect(await assets.read(twoPages.file)).toEqual(pdfFixture(["one", "two"]))
+  expect(await assets.read(onePage.file)).toEqual(pdfFixture(["one"]))
+})
+
+it("rebuilds Anthropic's shared user and parallel-tool media budget for retries, reloads, and model/account switches", async () => {
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-mixed-replay-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(["Retained mixed request PDF"])
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+    "base64",
+  )
+  const requests: ModelRequest[] = []
+  const stream: StreamFn = async function* (request) {
+    requests.push(request)
+    if (requests.length === 1) {
+      yield {
+        type: "output_item",
+        itemId: "mixed_reads",
+        content: [
+          {
+            type: "tool_call",
+            id: "pdf_first",
+            name: "read_document",
+            input: { path: "report.pdf" },
+          },
+          {
+            type: "tool_call",
+            id: "pdf_second",
+            name: "read_document",
+            input: { path: "report.pdf" },
+          },
+          {
+            type: "tool_call",
+            id: "image_last",
+            name: "view_image",
+            input: { path: "screen.png" },
+          },
+        ],
+      }
+      yield {
+        type: "failure",
+        failure: {
+          kind: "stream_disconnected",
+          stage: "response_body",
+          provider: request.target.provider,
+          wireApi: "anthropic_messages",
+          message: "Disconnected after completed parallel media calls",
+        },
+      }
+      return
+    }
+    yield responseEvent("Mixed request inspected")
+  }
+  const registry = createProviderRegistry(
+    Object.fromEntries(
+      ["anthropic-work", "anthropic-personal"].map((provider) => [
+        provider,
+        createModelProvider({
+          info: {
+            id: provider,
+            wireApi: "anthropic_messages",
+            capabilities: { remoteCompaction: false, nativePdf: true },
+            retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
+          },
+          models: createConfiguredModelsManager({
+            provider,
+            catalogProvider: "anthropic",
+            wireApi: "anthropic_messages",
+            models: [
+              { id: "claude-haiku-4-5", contextWindowTokens: 1_000_000 },
+              { id: "claude-sonnet-4-6", contextWindowTokens: 1_000_000 },
+            ],
+          }),
+          stream,
+        }),
+      ]),
+    ),
+  )
+  const root = await mkdtemp(join(tmpdir(), "yakitori-mixed-runtime-"))
+  const manager = new ThreadManager({
+    store: new MemoryThreadStore(),
+    createTurnProcessor: () =>
+      createTurnProcessor({
+        stream,
+        toolRegistry: createToolRegistry(),
+        loadProjectInstructions: async () => undefined,
+        provider: "anthropic-work",
+        model: "claude-haiku-4-5",
+        modelClient: registry.createClient(),
+        rolloutAssets: assets,
+      }),
+  })
+  cleanups.push(async () => {
+    await manager.shutdown()
+    await rm(root, { recursive: true, force: true })
+  })
+  await writeFile(join(root, "report.pdf"), bytes)
+  await writeFile(join(root, "screen.png"), png)
+  const thread = await manager.createThread({
+    workingDirectory: root,
+    mateId: "mate_live",
+    mateRevisionId: "mate_revision_live",
+  })
+  const uploadedPdf = await assets.saveToolFile(
+    thread.id,
+    "user_pdf",
+    "upload.pdf",
+    bytes,
+  )
+  const uploadedImage = await assets.saveToolFile(
+    thread.id,
+    "user_image",
+    "shared.png",
+    png,
+  )
+  const document = {
+    type: "document" as const,
+    name: "upload.pdf",
+    mediaType: "application/pdf" as const,
+    file: uploadedPdf.reference,
+    sizeBytes: bytes.length,
+  }
+  const image = {
+    type: "image" as const,
+    name: "shared.png",
+    mediaType: "image/png" as const,
+    file: uploadedImage.reference,
+    sizeBytes: png.length,
+    detail: "high" as const,
+  }
+  const parts = [
+    { type: "text" as const, text: "before user PDF" },
+    document,
+    { type: "text" as const, text: "after user PDF" },
+    ...Array.from({ length: 98 }, () => image),
+  ]
+  await thread.startIfIdle({ content: { kind: "parts", parts } })
+  expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+  expect(await nextLifecycleEvent(thread)).toMatchObject({
+    type: "turn.completed",
+  })
+  expect(requests).toHaveLength(2)
+  expect(requests[1]?.attempt?.number).toBe(2)
+  const durableMedia = thread
+    .snapshot()
+    .context.history.map(({ item }) => item)
+    .filter(
+      (item) =>
+        (item.role === "user" || item.role === "tool") &&
+        item.content.some(
+          (block) => block.type === "image" || block.type === "document",
+        ),
+    )
+  await manager.closeThread(thread.id)
+  const restored = await manager.resumeThread(thread.id)
+  if (restored === undefined) throw new Error("Thread did not reload")
+  for (const modelSelection of [
+    { provider: "anthropic-work", model: "claude-sonnet-4-6" },
+    { provider: "anthropic-personal", model: "claude-haiku-4-5" },
+  ]) {
+    await restored.startIfIdle({
+      content: { kind: "parts", parts: [{ type: "text", text: "Read again" }] },
+      modelSelection,
+    })
+    expect((await nextLifecycleEvent(restored))?.type).toBe("turn.started")
+    const completed = await nextLifecycleEvent(restored)
+    expect(completed, JSON.stringify(completed)).toMatchObject({
+      type: "turn.completed",
+    })
+  }
+  expect(requests).toHaveLength(4)
+  expect(requests.map((request) => request.target.provider)).toEqual([
+    "anthropic-work",
+    "anthropic-work",
+    "anthropic-work",
+    "anthropic-personal",
+  ])
+  for (const [index, request] of requests.entries()) {
+    const user = request.messages.find(
+      (message) =>
+        message.role === "user" &&
+        message.content.some((block) => block.type === "document"),
+    )
+    expect(user?.content.slice(0, 3)).toEqual([
+      parts[0],
+      { ...document, data: bytes.toString("base64") },
+      parts[2],
+    ])
+    expect(
+      request.messages.flatMap((message) =>
+        message.content.filter((block) => block.type === "image"),
+      ),
+    ).toHaveLength(index === 0 ? 98 : 99)
+    if (index === 0) continue
+    const tools = request.messages.filter((message) => message.role === "tool")
+    expect(tools.map((message) => message.toolCallId)).toEqual([
+      "pdf_first",
+      "pdf_second",
+      "image_last",
+    ])
+    for (const result of tools.slice(0, 2)) {
+      const documents = result.content.filter(
+        (block) => block.type === "document",
+      )
+      if (index === 2) {
+        expect(documents).toMatchObject([{ data: bytes.toString("base64") }])
+      } else {
+        expect(documents).toEqual([])
+        expect(toolContentText(result.content)).toContain(
+          "combined 100-unit image/PDF-page request limit",
+        )
+        expect(toolContentText(result.content)).toContain(
+          "Original PDF retained at",
+        )
+        expect(toolContentText(result.content)).toContain("Use read_document")
+      }
+      expect(result.content.filter((block) => block.type === "image")).toEqual(
+        [],
+      )
+    }
+    expect(
+      tools[2]?.content.filter((block) => block.type === "image"),
+    ).toMatchObject([{ data: png.toString("base64") }])
+  }
+  expect(
+    restored
+      .snapshot()
+      .context.history.map(({ item }) => item)
+      .filter(
+        (item) =>
+          (item.role === "user" || item.role === "tool") &&
+          item.content.some(
+            (block) => block.type === "image" || block.type === "document",
+          ),
+      ),
+  ).toEqual(durableMedia)
+  const retainedDocuments = durableMedia
+    .flatMap((item) =>
+      item.role === "user" || item.role === "tool" ? item.content : [],
+    )
+    .filter((block): block is ModelDocumentBlock => block.type === "document")
+  expect(retainedDocuments).toHaveLength(3)
+  for (const retained of retainedDocuments) {
+    expect(retained.data).toBeUndefined()
+    expect(await assets.read(retained.file)).toEqual(bytes)
+  }
 })

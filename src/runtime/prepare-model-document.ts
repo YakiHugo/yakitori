@@ -9,10 +9,12 @@ export type DocumentReadingCapabilities = Readonly<{
   nativePdf: boolean
   images: boolean
   nativePdfLimits?: Readonly<{
-    maxFileBytes: number
+    maxFileBytes?: number
     fileLimitExclusive?: boolean
     maxRequestBytes?: number
     maxRequestPages?: number
+    maxRequestMediaUnits?: number
+    mediaLimitIsConservative?: boolean
     maxInlineBytes?: number
   }>
 }>
@@ -21,6 +23,7 @@ export type DocumentReadingCapabilities = Readonly<{
 // Failed reservations consume nothing; retries and model switches get a fresh one.
 export function createNativePdfBudget(
   limits: DocumentReadingCapabilities["nativePdfLimits"],
+  imageOccurrences = 0,
 ) {
   let bytes = 0
   let pages = 0
@@ -28,8 +31,9 @@ export function createNativePdfBudget(
   const check = (sizeBytes: number, totalPages = 0): string | undefined => {
     if (limits === undefined) return
     if (
-      sizeBytes > limits.maxFileBytes ||
-      (limits.fileLimitExclusive && sizeBytes === limits.maxFileBytes)
+      limits.maxFileBytes !== undefined &&
+      (sizeBytes > limits.maxFileBytes ||
+        (limits.fileLimitExclusive && sizeBytes === limits.maxFileBytes))
     )
       return "the per-file PDF size limit was exceeded"
     if (
@@ -42,6 +46,13 @@ export function createNativePdfBudget(
       pages + totalPages > limits.maxRequestPages
     )
       return "the combined PDF request page limit was exceeded"
+    if (
+      limits.maxRequestMediaUnits !== undefined &&
+      imageOccurrences + pages + totalPages > limits.maxRequestMediaUnits
+    )
+      return limits.mediaLimitIsConservative
+        ? `Yakitori's conservative ${limits.maxRequestMediaUnits}-unit image/PDF-page admission limit for an unverified model was exceeded`
+        : `the combined ${limits.maxRequestMediaUnits}-unit image/PDF-page request limit was exceeded`
     if (
       limits.maxInlineBytes !== undefined &&
       inlineBytes + 4 * Math.ceil(sizeBytes / 3) > limits.maxInlineBytes

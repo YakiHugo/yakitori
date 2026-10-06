@@ -1,7 +1,8 @@
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
-import type { ResolvedModel } from "../model-catalog.ts"
+import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
 import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
+  ANTHROPIC_REQUEST_MAX_BYTES,
   GEMINI_INLINE_REQUEST_MAX_BYTES,
   supportsGeminiToolPdf,
   supportsGeminiUserPdf,
@@ -15,6 +16,9 @@ import {
 import type { ToolRegistry, ToolRouter } from "./registry.ts"
 
 const FILE_EDITING_TOOLS = new Set(["apply_patch", "edit_file", "write_file"])
+// Until a model's capacity is verified, use the smaller documented media
+// allowance as a local safety policy rather than assume access to the 1M tier.
+const UNVERIFIED_ANTHROPIC_MEDIA_SAFETY_UNITS = 100
 
 type ProviderToolCapabilities = Readonly<{
   supportsCustomTools: boolean
@@ -94,13 +98,22 @@ export function captureStepContext(
     input.nativePdf === true &&
     nativeUserPdfModel &&
     model.inputModalities.includes("image")
+  // These are immutable catalog capabilities, not the user's configured or
+  // effective context budget. Unknown IDs get a labeled conservative policy.
+  // https://platform.claude.com/docs/en/build-with-claude/context-windows#context-window-sizes-by-model
+  const anthropicCapacity =
+    input.wireApi === "anthropic_messages"
+      ? catalogModelCapacity({ provider: "anthropic", model: model.model })
+      : undefined
   const documentReading: DocumentReadingCapabilities = Object.freeze({
     nativePdf,
-    // These are first-party PDF transport limits, not model context estimates.
+    // First-party PDF transport limits. Decimal MB is the conservative byte
+    // interpretation of the published unit, not a model context estimate.
     // https://developers.openai.com/api/docs/guides/file-inputs
     // https://ai.google.dev/gemini-api/docs/generate-content/document-processing
     ...((nativePdf || nativeUserPdf) &&
-    input.wireApi === "openai_chat_completions"
+    (input.wireApi === "openai_chat_completions" ||
+      input.wireApi === "openai_responses")
       ? {
           nativePdfLimits: {
             maxFileBytes: 50_000_000,
@@ -117,7 +130,24 @@ export function captureStepContext(
               maxInlineBytes: GEMINI_INLINE_REQUEST_MAX_BYTES,
             },
           }
-        : {}),
+        : (nativePdf || nativeUserPdf) && input.wireApi === "anthropic_messages"
+          ? {
+              nativePdfLimits: {
+                // PDF base64 alone is only a lower bound. The adapter checks
+                // the complete serialized request before any network call.
+                maxInlineBytes: ANTHROPIC_REQUEST_MAX_BYTES,
+                maxRequestMediaUnits:
+                  anthropicCapacity === undefined
+                    ? UNVERIFIED_ANTHROPIC_MEDIA_SAFETY_UNITS
+                    : anthropicCapacity.contextWindowTokens >= 1_000_000
+                      ? 600
+                      : 100,
+                ...(anthropicCapacity === undefined
+                  ? { mediaLimitIsConservative: true }
+                  : {}),
+              },
+            }
+          : {}),
     // Each wire adapter owns image placement, including Chat's synthetic user
     // content after tool results. Only the selected model gates image tools.
     images: model.inputModalities.includes("image"),

@@ -43,6 +43,12 @@ export function supportsOpenAIChatUserPdf(model: string): boolean {
 // https://ai.google.dev/gemini-api/docs/generate-content/file-input-methods
 export const GEMINI_INLINE_REQUEST_MAX_BYTES = 100_000_000
 
+// Messages limits the whole JSON request, not raw bytes per PDF. Decimal MB is
+// a conservative interpretation of the documented unit; the final wire guard
+// also includes system text, tools, images and serialization overhead.
+// https://platform.claude.com/docs/en/api/errors#request-size-limits
+export const ANTHROPIC_REQUEST_MAX_BYTES = 32_000_000
+
 // A vision-capable catalog entry is not enough: Codex is Responses-only;
 // Astra/6.1 Sol tool calls require Responses, and Sol/Luna Chat tools require
 // explicit non-reasoning mode. Never silently change the user's reasoning.
