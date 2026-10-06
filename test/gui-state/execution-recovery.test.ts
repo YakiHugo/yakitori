@@ -9,7 +9,7 @@ import {
   type TurnOutcome,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
-import { inputParts } from "./input-fixtures.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 const session: ApiSessionDetail = {
   id: "session_recovery",

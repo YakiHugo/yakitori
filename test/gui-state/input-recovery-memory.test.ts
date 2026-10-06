@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { InputContent } from "../../src/kernel/events.ts"
 import { createInputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
-import { inputParts } from "./input-fixtures.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 const draft = {
   apiBase: "http://localhost:4141/",

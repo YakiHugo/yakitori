@@ -1,6 +1,6 @@
-// @vitest-environment happy-dom
+import "./setup-store-environment.ts"
 import { beforeEach, expect, it, vi } from "vitest"
-import { inputParts } from "./input-fixtures.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 beforeEach(() => {
   localStorage.clear()

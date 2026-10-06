@@ -295,7 +295,7 @@ export function createInitialAppState(): AppStoreData {
   return {
     sidebar: { sections: [], entries: {} },
     collapsedSections: JSON.parse(
-      window.localStorage.getItem("yakitori.collapsedSections") ?? "{}",
+      globalThis.localStorage.getItem("yakitori.collapsedSections") ?? "{}",
     ) as Record<string, boolean>,
     apiBase: initialApiBase(),
     busy: false,
@@ -1403,7 +1403,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (open) delete collapsedSections[sectionId]
       else collapsedSections[sectionId] = true
       set({ collapsedSections })
-      window.localStorage.setItem(
+      globalThis.localStorage.setItem(
         "yakitori.collapsedSections",
         JSON.stringify(collapsedSections),
       )
@@ -1499,7 +1499,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ),
           )
           persistCollapsedProjects(collapsedProjects)
-          const remembered = window.localStorage.getItem("yakitori.project")
+          const remembered = globalThis.localStorage.getItem("yakitori.project")
           // An empty remembered value is an explicit "No project" choice
           // (written by setNewSessionProject/selectSession); only a missing
           // key falls back to the first project.
@@ -1657,7 +1657,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
       })
       if (state.selection.sessionId === undefined) loadDraftSkills(projectId)
-      window.localStorage.setItem("yakitori.project", projectId ?? "")
+      globalThis.localStorage.setItem("yakitori.project", projectId ?? "")
       // The dropdown changes the destination of the current draft, including
       // its staged attachments. Supersede the old request and create there.
       if (state.selection.sessionId === undefined && newSessionCreation)
@@ -1935,7 +1935,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ),
         }))
         persistCollapsedProjects(get().collapsedProjects)
-        window.localStorage.setItem("yakitori.project", project.id)
+        globalThis.localStorage.setItem("yakitori.project", project.id)
         get().startNewSession(project.id)
       })
       set((state) => {
@@ -2100,7 +2100,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
         })
       if (summary !== undefined) {
         set({ currentProject: summary.projectId })
-        window.localStorage.setItem("yakitori.project", summary.projectId ?? "")
+        globalThis.localStorage.setItem(
+          "yakitori.project",
+          summary.projectId ?? "",
+        )
       }
       set((state) => ({
         sessionSelectionIntentRevision:
@@ -3386,9 +3389,9 @@ export function findSessionSummary(
 }
 
 function initialApiBase(): string {
-  const queryApi = new URLSearchParams(window.location.search).get("api")
+  const queryApi = new URLSearchParams(globalThis.location.search).get("api")
   if (queryApi) return queryApi
-  return window.location.origin
+  return globalThis.location.origin
 }
 
 function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
@@ -3457,9 +3460,7 @@ function sameModelSelection(
 }
 
 function initialModelSelections(): Record<string, ModelSelection> {
-  // Read via window: Node 24 exposes a bare global localStorage stub whose
-  // methods throw, and test environments leave it in place.
-  const raw = window.localStorage.getItem("yakitori.modelSelections")
+  const raw = globalThis.localStorage.getItem("yakitori.modelSelections")
   if (raw === null) return {}
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -3479,14 +3480,14 @@ function initialModelSelections(): Record<string, ModelSelection> {
 function persistModelSelections(
   modelSelections: Readonly<Record<string, ModelSelection>>,
 ): void {
-  window.localStorage.setItem(
+  globalThis.localStorage.setItem(
     "yakitori.modelSelections",
     JSON.stringify(modelSelections),
   )
 }
 
 function initialCollapsedProjects(): Record<string, boolean> {
-  const raw = window.localStorage.getItem("yakitori.collapsedProjects")
+  const raw = globalThis.localStorage.getItem("yakitori.collapsedProjects")
   if (raw === null) return {}
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -3508,7 +3509,7 @@ function initialCollapsedProjects(): Record<string, boolean> {
 function persistCollapsedProjects(
   collapsedProjects: Readonly<Record<string, boolean>>,
 ): void {
-  window.localStorage.setItem(
+  globalThis.localStorage.setItem(
     "yakitori.collapsedProjects",
     JSON.stringify(collapsedProjects),
   )

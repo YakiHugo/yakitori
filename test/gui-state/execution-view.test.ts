@@ -17,7 +17,7 @@ import {
   type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
-import { inputParts } from "./input-fixtures.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 

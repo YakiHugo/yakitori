@@ -1,9 +1,9 @@
 import { beforeEach } from "vitest"
 import type { AppStore } from "../../src/gui/store/app-store.ts"
 
-// Node-environment test files (runtime/kernel/server) run this setup too, and
-// app-store.ts reads window.localStorage while the store is created at module
-// load, so only touch it under a DOM test environment.
+// UI tests share the renderer singleton and can replace its actions. The
+// Node store contracts install their own storage/location harness and reset
+// their stores explicitly, so only apply this implicit reset in the DOM lane.
 if (typeof window !== "undefined") {
   // zustand setState is a shallow merge and createInitialAppState() returns
   // only data fields, so action mocks a test installs stay in the shared
