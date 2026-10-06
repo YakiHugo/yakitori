@@ -195,27 +195,44 @@ export async function handleServerControlRequest(
   request: ServerControlRequest,
 ): Promise<ServerControlResponse> {
   try {
-    if (request.type === "import_image_paths") {
+    if (
+      request.type === "import_attachment_paths" ||
+      request.type === "import_attachment_bytes"
+    ) {
+      const importToRollout = (rolloutId: string) =>
+        request.type === "import_attachment_paths"
+          ? application.rolloutAssets.importAttachmentPaths(
+              rolloutId,
+              request.ownerId,
+              request.paths,
+            )
+          : application.rolloutAssets.importAttachmentBytes(
+              rolloutId,
+              request.ownerId,
+              request.items,
+            )
       if (request.rolloutId !== undefined) {
-        const attachments = await application.rolloutAssets.importImagePaths(
-          request.rolloutId,
-          request.ownerId,
-          request.paths,
-        )
+        const attachments = await importToRollout(request.rolloutId)
         return { requestId: request.requestId, ok: true, attachments }
       }
-      if (request.sessionId === undefined) {
+      if (request.sessionId === undefined)
         throw new Error("Attachment import requires a target.")
-      }
       const thread = await application.threadStore.readThread(request.sessionId)
       if (thread === undefined) {
         if (application.sideChats !== undefined) {
           try {
-            const attachments = await application.sideChats.importImagePaths(
-              request.sessionId,
-              request.ownerId,
-              request.paths,
-            )
+            const attachments =
+              request.type === "import_attachment_paths"
+                ? await application.sideChats.importAttachmentPaths(
+                    request.sessionId,
+                    request.ownerId,
+                    request.paths,
+                  )
+                : await application.sideChats.importAttachmentBytes(
+                    request.sessionId,
+                    request.ownerId,
+                    request.items,
+                  )
             return { requestId: request.requestId, ok: true, attachments }
           } catch (error) {
             if (!(error instanceof SideChatError && error.code === "not_found"))
@@ -224,16 +241,10 @@ export async function handleServerControlRequest(
         }
         throw new Error(`Session ${request.sessionId} was not found.`)
       }
-      const attachments = await application.rolloutAssets.importImagePaths(
-        thread.metadata.rolloutId,
-        request.ownerId,
-        request.paths,
-      )
+      const attachments = await importToRollout(thread.metadata.rolloutId)
       return { requestId: request.requestId, ok: true, attachments }
     }
-    await application.rolloutAssets.discardDraftImageAttachments(
-      request.attachments,
-    )
+    await application.rolloutAssets.discardDraftAttachments(request.attachments)
     application.releaseDraftRolloutAssets?.(
       request.attachments.map((attachment) => attachment.file.rolloutId),
     )

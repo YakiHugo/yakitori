@@ -24,6 +24,7 @@ import {
   type ModelStreamEvent,
   type ModelStreamFailureEvent,
   requireModelImageData,
+  requireModelDocumentData,
   type StreamFn,
 } from "./model.ts"
 import { resolveModelWireEffort } from "./model-catalog.ts"
@@ -640,15 +641,26 @@ export function toOpenAIInput(
         role: "user",
         content: message.content.every((block) => block.type === "text")
           ? message.content.map((block) => block.text).join("")
-          : message.content.map((block) =>
-              block.type === "text"
-                ? { type: "input_text" as const, text: block.text }
-                : {
-                    type: "input_image" as const,
-                    detail: block.detail ?? "high",
-                    image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  },
-            ),
+          : message.content.map((block) => {
+              if (block.type === "text")
+                return { type: "input_text" as const, text: block.text }
+              if (block.type === "image")
+                return {
+                  type: "input_image" as const,
+                  detail: block.detail ?? "high",
+                  image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                }
+              if (provider !== "openai")
+                return {
+                  type: "input_text" as const,
+                  text: `[Document ${block.name} was not sent: native PDF input is not enabled for this provider.]`,
+                }
+              return {
+                type: "input_file" as const,
+                filename: block.name,
+                file_data: `data:application/pdf;base64,${requireModelDocumentData(block)}`,
+              }
+            }),
       })
       continue
     }

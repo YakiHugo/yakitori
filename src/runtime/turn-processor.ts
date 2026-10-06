@@ -1252,6 +1252,7 @@ async function executeTurnModelLoop(
             ).messages,
             input.options.rolloutAssets,
             executionStep.documentReading,
+            executionStep.userDocumentReading,
             input.signal,
           )
         },
@@ -1267,6 +1268,7 @@ async function executeTurnModelLoop(
           adapted.messages,
           input.options.rolloutAssets,
           step.documentReading,
+          step.userDocumentReading,
           input.signal,
         ),
         tools: toolPlan.modelDefinitions,
@@ -1721,6 +1723,7 @@ async function executeTurnModelLoop(
               ).messages,
               input.options.rolloutAssets,
               step.documentReading,
+              step.userDocumentReading,
               signal,
             )
             requestStartedAt = Date.now()
@@ -2371,6 +2374,7 @@ async function compactLiveHistory(
         ).messages,
         input.rolloutAssets,
         compactionStep.documentReading,
+        compactionStep.userDocumentReading,
         input.signal,
       )
       try {
@@ -3124,12 +3128,15 @@ async function resolveRolloutAssetMedia(
   messages: readonly ModelMessage[],
   rolloutAssets: RolloutAssets | undefined,
   documentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
+  userDocumentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
   signal?: AbortSignal,
 ): Promise<readonly ModelMessage[]> {
   const { createNativePdfBudget, prepareModelDocuments } = await import(
     "./prepare-model-document.ts"
   )
-  const nativePdfBudget = createNativePdfBudget(documentReading.nativePdfLimits)
+  const nativePdfBudget = createNativePdfBudget(
+    userDocumentReading.nativePdfLimits ?? documentReading.nativePdfLimits,
+  )
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
   // rasterization worker per message concurrently.
@@ -3154,24 +3161,6 @@ async function resolveRolloutAssetMedia(
       }
       return prepareModelImage(bytes, image.detail ?? "high")
     }
-    if (message.role === "user") {
-      const { contextAttachments, ...user } = message
-      const content = await Promise.all(
-        user.content.map((block) =>
-          block.type === "image" ? resolveImage(block) : block,
-        ),
-      )
-      resolved.push({
-        ...user,
-        content: contextAttachments?.length
-          ? [
-              ...content,
-              { type: "text", text: formatInputContext(contextAttachments) },
-            ]
-          : content,
-      })
-      continue
-    }
     const content: ModelToolContentBlock[] = []
     // PDF raster/text fallback expands at its source slot, not after later text
     // or other assets. Keep the existing sequential PDF cache/budget boundary.
@@ -3182,7 +3171,7 @@ async function resolveRolloutAssetMedia(
         const projected = await prepareModelDocuments(
           [block],
           rolloutAssets,
-          documentReading,
+          message.role === "user" ? userDocumentReading : documentReading,
           signal,
           nativePdfBudget,
         )
@@ -3191,7 +3180,15 @@ async function resolveRolloutAssetMedia(
         content.push(...projected.images, ...projected.documents)
       }
     }
-    resolved.push({ ...message, content })
+    if (message.role === "user") {
+      const { contextAttachments, ...user } = message
+      if (contextAttachments?.length)
+        content.push({
+          type: "text",
+          text: formatInputContext(contextAttachments),
+        })
+      resolved.push({ ...user, content })
+    } else resolved.push({ ...message, content })
   }
   return resolved
 }

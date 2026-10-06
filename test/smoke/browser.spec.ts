@@ -9,6 +9,7 @@ import {
   runBudgetedGoal,
   runFauxTurn,
   runProviderFlow,
+  smokePdfBytes,
 } from "./fixtures.ts"
 
 test("built GUI sends a turn and restores its transcript after reload", async ({
@@ -40,7 +41,16 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
       page.getByRole("main").getByText("Hello from faux.", { exact: true }),
     ).toBeVisible()
     await runBudgetedGoal(page)
-    await runProviderFlow(page, testInfo)
+    const imported = await server.request({
+      type: "import_attachment_bytes",
+      rolloutId: "draft_browser_pdf",
+      ownerId: "pdf_smoke",
+      items: [{ name: "ordered-smoke.pdf", data: smokePdfBytes }],
+    })
+    const pdf = imported.ok ? imported.attachments?.[0] : undefined
+    if (pdf?.mediaType !== "application/pdf")
+      throw new Error("Browser PDF fixture import failed")
+    await runProviderFlow(page, testInfo, { browserPdf: pdf })
     expect(errors).toEqual([])
   } finally {
     try {

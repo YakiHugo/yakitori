@@ -91,7 +91,7 @@ describe("rollout asset lineage", () => {
       ).rejects.toMatchObject({ code: "ENOENT" })
 
       const imageBytes = pngBuffer(128)
-      const attachments = await application.rolloutAssets.importImageBytes(
+      const attachments = await application.rolloutAssets.importAttachmentBytes(
         rolloutId,
         "draft_physical_integration",
         [{ name: "screen.png", data: imageBytes }],
@@ -200,7 +200,7 @@ describe("rollout asset lineage", () => {
       sourceId,
       PersistContext.TurnStart,
     )
-    const attachments = await application.rolloutAssets.importImageBytes(
+    const attachments = await application.rolloutAssets.importAttachmentBytes(
       sourceId,
       "lineage_draft",
       [{ name: "source.png", data: imageBytes }],

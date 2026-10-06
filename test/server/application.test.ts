@@ -34,6 +34,8 @@ import type { ProviderConfigurationResponse } from "../../src/server/provider-se
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { deferred } from "./rpc/testkit.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { handleServerControlRequest } from "../../src/server/server-process.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -1393,6 +1395,76 @@ describe("application composition", () => {
     })
   })
 
+  it("imports validated original PDFs through path and byte control commands", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      try {
+        const bytes = pdfFixture(["original document"])
+        const path = join(workspace, "source.pdf")
+        await writeFile(path, bytes)
+        const imported = await handleServerControlRequest(application, {
+          type: "import_attachment_paths",
+          requestId: "path_pdf",
+          rolloutId: "draft_path_pdf",
+          ownerId: "path_pdf",
+          paths: [path],
+        })
+        expect(imported.ok).toBe(true)
+        if (!imported.ok || imported.attachments?.[0] === undefined)
+          throw new Error("Missing imported PDF")
+        const attachment = imported.attachments[0]
+        expect(attachment).toMatchObject({
+          name: "source.pdf",
+          mediaType: "application/pdf",
+          sizeBytes: bytes.byteLength,
+        })
+        expect(attachment).not.toHaveProperty("data")
+        expect(attachment).not.toHaveProperty("detail")
+        await writeFile(path, "source changed")
+        expect(await application.rolloutAssets.read(attachment.file)).toEqual(
+          bytes,
+        )
+        const pasted = await handleServerControlRequest(application, {
+          type: "import_attachment_bytes",
+          requestId: "bytes_pdf",
+          rolloutId: "draft_bytes_pdf",
+          ownerId: "bytes_pdf",
+          items: [{ name: "pasted.pdf", data: Uint8Array.from(bytes) }],
+        })
+        expect(pasted.ok).toBe(true)
+        if (!pasted.ok || pasted.attachments?.[0] === undefined)
+          throw new Error("Missing byte PDF")
+        expect(
+          await application.rolloutAssets.read(pasted.attachments[0].file),
+        ).toEqual(bytes)
+        const invalid = await handleServerControlRequest(application, {
+          type: "import_attachment_bytes",
+          requestId: "invalid_pdf",
+          rolloutId: "draft_invalid_pdf",
+          ownerId: "invalid_pdf",
+          items: [
+            { name: "invalid.pdf", data: Buffer.from("%PDF-1.4\ninvalid") },
+          ],
+        })
+        expect(invalid.ok).toBe(false)
+        expect(
+          await handleServerControlRequest(application, {
+            type: "discard_draft_attachments",
+            requestId: "discard_pdf",
+            attachments: [attachment],
+          }),
+        ).toEqual({ requestId: "discard_pdf", ok: true })
+        await expect(
+          application.rolloutAssets.read(attachment.file),
+        ).rejects.toMatchObject({ code: "ENOENT" })
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it("stores admitted images beside the Session and hydrates model requests", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       let captured: ModelRequest | undefined
@@ -1421,11 +1493,12 @@ describe("application composition", () => {
         )
         const imageBytes = pngBuffer(128)
         const draftRolloutId = "draft_application_test"
-        const attachments = await application.rolloutAssets.importImageBytes(
-          draftRolloutId,
-          "draft_application_test",
-          [{ name: "screen.png", data: imageBytes }],
-        )
+        const attachments =
+          await application.rolloutAssets.importAttachmentBytes(
+            draftRolloutId,
+            "draft_application_test",
+            [{ name: "screen.png", data: imageBytes }],
+          )
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "request_image",
@@ -1521,7 +1594,7 @@ describe("application composition", () => {
         const replacementBytes = Buffer.from(imageBytes)
         replacementBytes[12] = 1
         const replacementDraft =
-          await application.rolloutAssets.importImageBytes(
+          await application.rolloutAssets.importAttachmentBytes(
             sessionId,
             "draft_application_conflict",
             [{ name: "screen.png", data: replacementBytes }],
@@ -1666,12 +1739,12 @@ describe("application composition", () => {
           PersistContext.TurnStart,
         )
         const [draftA, draftB] = await Promise.all([
-          application.rolloutAssets.importImageBytes(
+          application.rolloutAssets.importAttachmentBytes(
             concurrentSession.body.session.id,
             "draft_concurrent_a",
             [{ name: "screen.png", data: imageBytes }],
           ),
-          application.rolloutAssets.importImageBytes(
+          application.rolloutAssets.importAttachmentBytes(
             concurrentSession.body.session.id,
             "draft_concurrent_b",
             [{ name: "screen.png", data: imageBytes }],
@@ -1731,7 +1804,7 @@ describe("application composition", () => {
       let existingSessionId: string
       let existingAttachment:
         | Awaited<
-            ReturnType<typeof first.rolloutAssets.importImageBytes>
+            ReturnType<typeof first.rolloutAssets.importAttachmentBytes>
           >[number]
         | undefined
       let newSessionAttachment: typeof existingAttachment
@@ -1750,16 +1823,17 @@ describe("application composition", () => {
           }),
         )
         await waitForThreadIdle(first, existingSessionId)
-        ;[existingAttachment] = await first.rolloutAssets.importImageBytes(
+        ;[existingAttachment] = await first.rolloutAssets.importAttachmentBytes(
           existingSessionId,
           "draft_existing_restart",
           [{ name: "existing.png", data: bytes }],
         )
-        ;[newSessionAttachment] = await first.rolloutAssets.importImageBytes(
-          "draft_new_session_restart",
-          "draft_new_session_restart",
-          [{ name: "new.png", data: bytes }],
-        )
+        ;[newSessionAttachment] =
+          await first.rolloutAssets.importAttachmentBytes(
+            "draft_new_session_restart",
+            "draft_new_session_restart",
+            [{ name: "new.png", data: bytes }],
+          )
       } finally {
         await first.close()
       }
@@ -1843,11 +1917,12 @@ describe("application composition", () => {
           sessionId,
           PersistContext.TurnStart,
         )
-        const attachments = await application.rolloutAssets.importImageBytes(
-          sessionId,
-          "text_only_draft",
-          [{ name: "screen.png", data: pngBuffer(128) }],
-        )
+        const attachments =
+          await application.rolloutAssets.importAttachmentBytes(
+            sessionId,
+            "text_only_draft",
+            [{ name: "screen.png", data: pngBuffer(128) }],
+          )
         const read = vi.spyOn(application.rolloutAssets, "read")
         const admitted = await application.handlers.admitInput({
           sessionId,
@@ -1901,11 +1976,12 @@ describe("application composition", () => {
         const imageBytes = pngBuffer(128 * 1024 + 17)
         const sourcePath = join(rootDir, "large.png")
         await writeFile(sourcePath, imageBytes)
-        const [attachment] = await application.rolloutAssets.importImagePaths(
-          created.body.session.id,
-          "draft_large_http",
-          [sourcePath],
-        )
+        const [attachment] =
+          await application.rolloutAssets.importAttachmentPaths(
+            created.body.session.id,
+            "draft_large_http",
+            [sourcePath],
+          )
         if (attachment === undefined) throw new Error("missing imported image")
 
         const response = await fetch(

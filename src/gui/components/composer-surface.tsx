@@ -1,7 +1,8 @@
-import { inputImageOwnership } from "../input-image-ownership.ts"
+import { PdfAttachmentCard, openPdfAttachment } from "./pdf-attachment.tsx"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import type { InputPart } from "../../kernel/events.ts"
 import {
-  inputContentImages,
+  inputContentAttachments,
   inputContentText,
 } from "../../kernel/input-content.ts"
 import { textInputParts, trimInputParts } from "../input-parts.ts"
@@ -39,18 +40,18 @@ import {
 import {
   COMPACT_DIRECTIVE,
   GOAL_DIRECTIVE,
-  type ImageAttachment,
+  type UserAttachment,
 } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
-  appendImageFiles,
-  appendPickedImages,
-  discardDraftImages,
-  discardPickedImages,
-  imageAttachmentUrl,
-  pickImages as selectImages,
-  validateImageFiles,
+  appendAttachmentFiles,
+  appendPickedAttachments,
+  discardDraftAttachments,
+  discardPickedAttachments,
+  attachmentUrl,
+  pickAttachments as selectAttachments,
+  validateAttachmentFiles,
 } from "../composer-attachments.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
@@ -124,16 +125,16 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
 ]
 
-export type ComposerImageImport = (
+export type ComposerAttachmentImport = (
   prepare: () => Promise<
     | {
-        collect(sessionId?: string): Promise<readonly ImageAttachment[]>
+        collect(sessionId?: string): Promise<readonly UserAttachment[]>
         cleanup?: (() => Promise<void>) | undefined
       }
     | undefined
   >,
   validate?: () => void,
-) => Promise<readonly ImageAttachment[] | undefined>
+) => Promise<readonly UserAttachment[] | undefined>
 
 // Session creation and submission belong to the caller. Editor behavior and
 // presentation are shared by the main conversation and temporary chats.
@@ -161,8 +162,8 @@ export function ComposerSurface({
   onSubmit,
   onCancel,
   modelControls,
-  importImages,
-  readingImages,
+  importAttachments,
+  readingAttachments,
   attachmentError,
   onAttachmentError,
   searchFiles,
@@ -197,8 +198,8 @@ export function ComposerSurface({
   onSubmit(parts: readonly InputPart[], mode?: "auto" | "queue"): void
   onCancel(): void
   modelControls: ReactNode
-  importImages: ComposerImageImport
-  readingImages: boolean
+  importAttachments: ComposerAttachmentImport
+  readingAttachments: boolean
   attachmentError?: string | undefined
   onAttachmentError(error: string): void
   // Powers the @-mention file picker; without it the @ trigger stays inert.
@@ -222,7 +223,7 @@ export function ComposerSurface({
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const draft = promptPartsText(parts)
-  const attachments = inputContentImages({ kind: "parts", parts })
+  const attachments = inputContentAttachments({ kind: "parts", parts })
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const contextPanelRef = useRef<HTMLDivElement>(null)
   const addContextRef = useRef<HTMLButtonElement>(null)
@@ -248,20 +249,20 @@ export function ComposerSurface({
   const releaseParked = useCallback(
     (previous: readonly InputPart[], next: readonly InputPart[] = []) => {
       const live = new Set(
-        inputImageOwnership
+        inputAttachmentOwnership
           .resolveParts(currentOwner.current.apiBase, [
             ...currentOwner.current.parts,
             ...next,
           ])
           .flatMap((part) =>
-            part.type === "image"
+            part.type !== "text"
               ? [`${part.file.rolloutId}\0${part.file.path}`]
               : [],
           ),
       )
-      const unused = inputContentImages({
+      const unused = inputContentAttachments({
         kind: "parts",
-        parts: inputImageOwnership.resolveParts(
+        parts: inputAttachmentOwnership.resolveParts(
           currentOwner.current.apiBase,
           previous,
         ),
@@ -271,11 +272,11 @@ export function ComposerSurface({
           !live.has(`${image.file.rolloutId}\0${image.file.path}`),
       )
       if (unused.length)
-        void discardDraftImages(unused).catch((error: unknown) =>
+        void discardDraftAttachments(unused).catch((error: unknown) =>
           currentOwner.current.onAttachmentError(
             error instanceof Error
               ? error.message
-              : "Unused images could not be released.",
+              : "Unused attachments could not be released.",
           ),
         )
     },
@@ -457,41 +458,41 @@ export function ComposerSurface({
     text === COMPACT_DIRECTIVE &&
     (attachments.length > 0 || excerpts.length > 0)
   const canSend =
-    containsInput && !busy && !sending && !readingImages && !compactBlocked
+    containsInput && !busy && !sending && !readingAttachments && !compactBlocked
 
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) return
-    const insertion = editorRef.current?.captureImageInsertion()
+    const insertion = editorRef.current?.captureAttachmentInsertion()
     try {
-      const added = await importImages(
+      const added = await importAttachments(
         async () => ({
           collect: (importSessionId) =>
-            appendImageFiles([], importSessionId, files),
+            appendAttachmentFiles([], importSessionId, files),
         }),
-        () => validateImageFiles(files),
+        () => validateAttachmentFiles(files),
       )
       if (added?.length && !insertion?.insert(added))
-        await discardDraftImages(added)
+        await discardDraftAttachments(added)
     } finally {
       insertion?.cancel()
     }
   }
 
-  const pickImages = async () => {
+  const pickAttachments = async () => {
     setAddMenuOpen(false)
-    const insertion = editorRef.current?.captureImageInsertion()
+    const insertion = editorRef.current?.captureAttachmentInsertion()
     try {
-      const added = await importImages(async () => {
-        const selection = await selectImages()
+      const added = await importAttachments(async () => {
+        const selection = await selectAttachments()
         if (selection === undefined) return
         return {
           collect: (importSessionId) =>
-            appendPickedImages([], importSessionId, selection.selectionId),
-          cleanup: () => discardPickedImages(selection.selectionId),
+            appendPickedAttachments([], importSessionId, selection.selectionId),
+          cleanup: () => discardPickedAttachments(selection.selectionId),
         }
       })
       if (added?.length && !insertion?.insert(added))
-        await discardDraftImages(added)
+        await discardDraftAttachments(added)
     } finally {
       insertion?.cancel()
     }
@@ -500,7 +501,7 @@ export function ComposerSurface({
   const pickAddAction = (action: "files" | "image") => {
     setAddMenuOpen(false)
     if (action === "image") {
-      void pickImages()
+      void pickAttachments()
     } else if (searchFiles) {
       const prefix =
         selection.from > 0 && !/\s/u.test(draft[selection.from - 1] ?? "")
@@ -752,7 +753,7 @@ export function ComposerSurface({
                 <button
                   type="button"
                   role="option"
-                  aria-label="Add image"
+                  aria-label="Add images or PDFs"
                   aria-selected={addHighlight === 1}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setAddHighlight(1)}
@@ -760,7 +761,7 @@ export function ComposerSurface({
                   className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left text-[14px] leading-5 transition-colors ${addHighlight === 1 ? "bg-accent text-foreground" : "text-foreground/80 hover:bg-accent/60"}`}
                 >
                   <ImagePlus className="size-4 shrink-0 text-muted-foreground" />
-                  <span>Images</span>
+                  <span>Images or PDFs</span>
                 </button>
               </div>
             ) : menuOpen ? (
@@ -802,65 +803,85 @@ export function ComposerSurface({
             <div className="flex gap-2 overflow-x-auto px-4 pt-3">
               {attachments.map((attachment, index) => (
                 <div
-                  key={`${attachment.file.rolloutId}:${attachment.file.path}`}
-                  className="group/image relative size-14 shrink-0 rounded-xl border bg-muted shadow-sm"
+                  // biome-ignore lint/suspicious/noArrayIndexKey: Part slots distinguish repeated references to the same asset.
+                  key={`${index}:${attachment.file.rolloutId}:${attachment.file.path}`}
+                  className={
+                    attachment.mediaType === "application/pdf"
+                      ? "relative shrink-0 max-w-72"
+                      : "group/image relative size-14 shrink-0 rounded-xl border bg-muted shadow-sm"
+                  }
                 >
-                  <button
-                    type="button"
-                    aria-label={`Preview ${attachment.name}`}
-                    onClick={() => setPreviewIndex(index)}
-                    className="block size-full cursor-zoom-in overflow-hidden rounded-[calc(var(--radius-xl)-1px)]"
-                  >
-                    <img
-                      src={imageAttachmentUrl(attachment, apiBase)}
-                      alt={attachment.name}
-                      className="size-full object-cover"
+                  {attachment.mediaType === "application/pdf" ? (
+                    <PdfAttachmentCard
+                      attachment={attachment}
+                      apiBase={apiBase}
                     />
-                  </button>
+                  ) : (
+                    <button
+                      type="button"
+                      aria-label={`Preview ${attachment.name}`}
+                      onClick={() => setPreviewIndex(index)}
+                      className="block size-full cursor-zoom-in overflow-hidden rounded-[calc(var(--radius-xl)-1px)]"
+                    >
+                      <img
+                        src={attachmentUrl(attachment, apiBase)}
+                        alt={attachment.name}
+                        className="size-full object-cover"
+                      />
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={sending}
                     aria-label={`Remove ${attachment.name}`}
-                    onClick={() => editorRef.current?.removeImage(index)}
+                    onClick={() => editorRef.current?.removeAttachment(index)}
                     className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full border border-white/80 bg-black/75 text-white shadow-sm transition-[transform,background-color] hover:scale-105 hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <X className="size-3" />
                   </button>
-                  <button
-                    type="button"
-                    aria-label={
-                      supportsOriginal
-                        ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
-                        : `Original detail unavailable for ${attachment.name}`
-                    }
-                    disabled={!supportsOriginal || sending}
-                    onClick={() =>
-                      editorRef.current?.setImageDetail(
-                        index,
-                        attachment.detail === "original" ? "high" : "original",
-                      )
-                    }
-                    title={
-                      supportsOriginal
-                        ? "Toggle image detail"
-                        : "Original detail unavailable"
-                    }
-                    className="absolute bottom-1 left-1 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] leading-none font-medium text-white opacity-0 backdrop-blur-sm transition-opacity group-hover/image:opacity-100 hover:bg-black focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
-                  >
-                    {supportsOriginal && attachment.detail === "original"
-                      ? "Original"
-                      : "High"}
-                  </button>
+                  {attachment.mediaType !== "application/pdf" ? (
+                    <button
+                      type="button"
+                      aria-label={
+                        supportsOriginal
+                          ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
+                          : `Original detail unavailable for ${attachment.name}`
+                      }
+                      disabled={!supportsOriginal || sending}
+                      onClick={() =>
+                        editorRef.current?.setImageDetail(
+                          index,
+                          attachment.detail === "original"
+                            ? "high"
+                            : "original",
+                        )
+                      }
+                      title={
+                        supportsOriginal
+                          ? "Toggle image detail"
+                          : "Original detail unavailable"
+                      }
+                      className="absolute bottom-1 left-1 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] leading-none font-medium text-white opacity-0 backdrop-blur-sm transition-opacity group-hover/image:opacity-100 hover:bg-black focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {supportsOriginal && attachment.detail === "original"
+                        ? "Original"
+                        : "High"}
+                    </button>
+                  ) : null}
                 </div>
               ))}
             </div>
           ) : null}
-          {attachments.length > 0 && !supportsImages ? (
+          {attachments.some(
+            (attachment) => attachment.mediaType !== "application/pdf",
+          ) && !supportsImages ? (
             <p className="px-3 pt-2 text-xs text-amber-700 dark:text-amber-300">
               The selected model does not support images. Attachments will be
               omitted and the model will receive a notice.
             </p>
-          ) : attachments.length > 0 && !supportsOriginal ? (
+          ) : attachments.some(
+              (attachment) => attachment.mediaType !== "application/pdf",
+            ) && !supportsOriginal ? (
             <p className="px-3 pt-2 text-xs text-muted-foreground">
               Original detail is unavailable for the selected model. Images will
               use High detail.
@@ -898,7 +919,17 @@ export function ComposerSurface({
               setDismissedQuery(undefined)
               setAddMenuOpen(false)
             }}
-            onPasteImages={(images) => void addFiles(images)}
+            onOpenDocument={(document) => {
+              void openPdfAttachment(document, apiBase).catch(
+                (error: unknown) =>
+                  onAttachmentError(
+                    error instanceof Error
+                      ? error.message
+                      : "Could not open PDF.",
+                  ),
+              )
+            }}
+            onPasteAttachments={(images) => void addFiles(images)}
             onPreviewImage={(image) =>
               setPreviewIndex(
                 attachments.findIndex(
@@ -908,12 +939,12 @@ export function ComposerSurface({
                 ),
               )
             }
-            onDiscardImages={(images) => {
-              void discardDraftImages(images).catch((error: unknown) =>
+            onDiscardAttachments={(images) => {
+              void discardDraftAttachments(images).catch((error: unknown) =>
                 onAttachmentError(
                   error instanceof Error
                     ? error.message
-                    : "Unused images could not be released.",
+                    : "Unused attachments could not be released.",
                 ),
               )
             }}
@@ -927,7 +958,7 @@ export function ComposerSurface({
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                disabled={readingImages || sending}
+                disabled={readingAttachments || sending}
                 aria-label="Add context"
                 aria-expanded={addMenuOpen}
                 aria-controls={`${suggestionsId}-add`}
@@ -941,7 +972,7 @@ export function ComposerSurface({
                   setDismissedQuery(queryKey)
                 }}
               >
-                {readingImages ? (
+                {readingAttachments ? (
                   <LoaderCircle className="animate-spin" />
                 ) : (
                   <Plus
@@ -1011,9 +1042,10 @@ export function ComposerSurface({
           </p>
         )}
       </form>
-      {previewAttachment === undefined ? null : (
+      {previewAttachment === undefined ||
+      previewAttachment.mediaType === "application/pdf" ? null : (
         <ImageLightbox
-          src={imageAttachmentUrl(previewAttachment, apiBase)}
+          src={attachmentUrl(previewAttachment, apiBase)}
           name={previewAttachment.name}
           onClose={() => setPreviewIndex(undefined)}
         />

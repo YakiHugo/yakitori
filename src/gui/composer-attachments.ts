@@ -1,57 +1,71 @@
-import type { ImageAttachment } from "../kernel/events.ts"
+import type { UserAttachment } from "../kernel/events.ts"
 
-export async function appendPickedImages(
-  current: readonly ImageAttachment[],
+export async function appendPickedAttachments(
+  current: readonly UserAttachment[],
   sessionId: string | undefined,
   selectionId: string,
-): Promise<readonly ImageAttachment[]> {
-  const added = await requireDesktopBridge().importPickedImages({
+): Promise<readonly UserAttachment[]> {
+  const added = await requireDesktopBridge().importPickedAttachments({
     ...(sessionId === undefined ? {} : { sessionId }),
     selectionId,
   })
   return [...current, ...added]
 }
 
-export async function pickImages(): Promise<
+export async function pickAttachments(): Promise<
   { readonly selectionId: string } | undefined
 > {
-  return requireDesktopBridge().pickImages()
+  return requireDesktopBridge().pickAttachments()
 }
 
-export async function discardPickedImages(selectionId: string): Promise<void> {
-  await requireDesktopBridge().discardPickedImages({ selectionId })
+export async function discardPickedAttachments(
+  selectionId: string,
+): Promise<void> {
+  await requireDesktopBridge().discardPickedAttachments({ selectionId })
 }
 
-export function validateImageFiles(files: readonly File[]): void {
-  if (files.some((file) => !file.type.startsWith("image/"))) {
-    throw new Error("Only PNG, JPEG, GIF, and WebP images can be attached.")
+export function validateAttachmentFiles(files: readonly File[]): void {
+  if (
+    files.some(
+      (file) =>
+        ![
+          "image/png",
+          "image/jpeg",
+          "image/gif",
+          "image/webp",
+          "application/pdf",
+        ].includes(file.type) &&
+        !(file.type === "" && /\.(pdf|png|jpe?g|gif|webp)$/i.test(file.name)),
+    )
+  ) {
+    throw new Error("Only PDF, PNG, JPEG, GIF, and WebP files can be attached.")
   }
-  if (files.some((file) => file.size > 50_000_000)) {
-    throw new Error("Image must be no larger than 50 MB.")
+  if (files.some((file) => file.size === 0 || file.size > 50_000_000)) {
+    throw new Error("Attachment must contain data and be no larger than 50 MB.")
   }
 }
 
-export async function appendImageFiles(
-  current: readonly ImageAttachment[],
+export async function appendAttachmentFiles(
+  current: readonly UserAttachment[],
   sessionId: string | undefined,
   files: readonly File[],
-): Promise<readonly ImageAttachment[]> {
-  validateImageFiles(files)
-  const added = await requireDesktopBridge().importImageFiles({
+): Promise<readonly UserAttachment[]> {
+  validateAttachmentFiles(files)
+  const added = await requireDesktopBridge().importAttachmentFiles({
     ...(sessionId === undefined ? {} : { sessionId }),
     files,
   })
   return [...current, ...added]
 }
 
-export async function discardDraftImages(
-  attachments: readonly ImageAttachment[],
+export async function discardDraftAttachments(
+  attachments: readonly UserAttachment[],
 ): Promise<void> {
-  await requireDesktopBridge().discardDraftImages(attachments)
+  await requireDesktopBridge().discardDraftAttachments(attachments)
 }
 
-export function imageAttachmentUrl(
-  attachment: ImageAttachment,
+export function attachmentUrl(
+  attachment: UserAttachment,
   apiBase = window.location.origin,
 ): string {
   const base = apiBase.endsWith("/") ? apiBase : `${apiBase}/`
@@ -66,7 +80,7 @@ export function imageAttachmentUrl(
 
 export function requireDesktopBridge(): YakitoriDesktopBridge {
   if (window.yakitoriDesktop === undefined) {
-    throw new Error("Image attachments require the Yakitori desktop app.")
+    throw new Error("Attachments require the Yakitori desktop app.")
   }
   return window.yakitoriDesktop
 }

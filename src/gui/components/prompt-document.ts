@@ -1,4 +1,4 @@
-import type { InputPart, ImageAttachment } from "../../kernel/events.ts"
+import type { InputPart, UserAttachment } from "../../kernel/events.ts"
 import { type Node, Schema } from "prosemirror-model"
 
 export type SkillMention = Readonly<{ name: string; path: string }>
@@ -13,7 +13,8 @@ export function fileMentionText(mention: FileMention): string {
 }
 
 function mentionText(node: Node): string {
-  if (node.type.name === "image") return "\uFFFC"
+  if (node.type.name === "image" || node.type.name === "document")
+    return "\uFFFC"
   return node.type.name === "skill"
     ? skillMentionText({ name: node.attrs.name, path: node.attrs.path })
     : fileMentionText({ name: node.attrs.name, path: node.attrs.path })
@@ -47,6 +48,25 @@ export const promptSchema = new Schema({
           contenteditable: "false",
         },
         `▧ ${node.attrs.image.name}`,
+      ],
+    },
+    document: {
+      group: "inline",
+      inline: true,
+      atom: true,
+      selectable: true,
+      attrs: { document: {} },
+      // No parseDOM rule: external HTML cannot mint a local document reference.
+      toDOM: (node) => [
+        "button",
+        {
+          class: "prompt-skill prompt-document",
+          type: "button",
+          "data-prompt-document": "true",
+          contenteditable: "false",
+          "aria-label": `Open attached PDF ${node.attrs.document.name}`,
+        },
+        `PDF ${node.attrs.document.name}`,
       ],
     },
     skill: {
@@ -120,8 +140,8 @@ export function parsePromptParts(parts: readonly InputPart[]): Node {
   const paragraphs: Node[] = []
   let content: Node[] = []
   for (const part of parts) {
-    if (part.type === "image") {
-      content.push(promptSchema.node("image", { image: part }))
+    if (part.type !== "text") {
+      content.push(promptSchema.node(part.type, { [part.type]: part }))
       continue
     }
     parsePrompt(part.text).forEach((paragraph, _offset, index) => {
@@ -140,7 +160,9 @@ export function parsePromptParts(parts: readonly InputPart[]): Node {
 
 export function serializePromptParts(
   doc: Node,
-  resolveImage: (image: ImageAttachment) => ImageAttachment = (image) => image,
+  resolveAttachment: (attachment: UserAttachment) => UserAttachment = (
+    attachment,
+  ) => attachment,
 ): readonly InputPart[] {
   const parts: InputPart[] = []
   const appendText = (text: string) => {
@@ -153,12 +175,16 @@ export function serializePromptParts(
   doc.forEach((paragraph, _offset, index) => {
     if (index > 0) appendText("\n")
     paragraph.forEach((node) => {
-      if (node.type.name === "image")
-        parts.push({
-          ...resolveImage(node.attrs.image as ImageAttachment),
-          type: "image",
-        })
-      else appendText(node.isText ? (node.text ?? "") : mentionText(node))
+      if (node.type.name === "image" || node.type.name === "document") {
+        const attachment = resolveAttachment(
+          node.attrs[node.type.name] as UserAttachment,
+        )
+        parts.push(
+          attachment.mediaType === "application/pdf"
+            ? { ...attachment, type: "document" }
+            : { ...attachment, type: "image" },
+        )
+      } else appendText(node.isText ? (node.text ?? "") : mentionText(node))
     })
   })
   return parts

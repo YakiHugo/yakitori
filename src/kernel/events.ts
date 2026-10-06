@@ -62,10 +62,11 @@ export type JsonValue =
 export type JsonObject = { readonly [key: string]: JsonValue }
 export type EventMetadata = JsonObject
 
-// Editable user input retains authored text/image placement in one array.
+// Editable user input retains authored text/attachment placement in one array.
 export type InputPart =
   | Readonly<{ type: "text"; text: string }>
   | (Readonly<{ type: "image" }> & ImageAttachment)
+  | (Readonly<{ type: "document" }> & PdfAttachment)
 
 export type InputContent = Readonly<{
   kind: "parts"
@@ -97,6 +98,15 @@ export type ImageDetail = "high" | "original"
 export type ImageAttachment = ImageAttachmentMetadata & {
   readonly file: RolloutAssetReference
 }
+
+export type PdfAttachment = Readonly<{
+  name: string
+  mediaType: "application/pdf"
+  sizeBytes: number
+  file: RolloutAssetReference
+}>
+
+export type UserAttachment = ImageAttachment | PdfAttachment
 
 export type JsonContent = {
   readonly kind: "json"
@@ -206,7 +216,10 @@ export type ModelHistoryContext =
       revision: string
     }>
 
-export type ModelUserContentBlock = ModelTextBlock | ModelImageBlock
+export type ModelUserContentBlock =
+  | ModelTextBlock
+  | ModelImageBlock
+  | ModelDocumentBlock
 
 export type ModelUserMessage = Readonly<{
   role: "user"
@@ -1364,7 +1377,9 @@ export function isModelMessage(value: unknown): value is ModelMessage {
           isString(block.text) &&
           (block.providerMetadata === undefined ||
             isJsonObject(block.providerMetadata))) ||
-        (value.role === "user" && isModelImageBlock(block)),
+        (value.role === "user" &&
+          (isModelImageBlock(block) ||
+            (isModelDocumentBlock(block) && block.data === undefined))),
     ) &&
     (value.context === undefined || isModelHistoryContext(value.context))
   )
@@ -1836,9 +1851,10 @@ export function isInputContent(value: unknown): value is InputContent {
       if (!isRecord(part)) return false
       if (part.type === "text")
         return onlyKeys(part, ["type", "text"]) && isString(part.text)
-      if (part.type !== "image") return false
-      const { type: _type, ...attachment } = part
-      return isImageAttachment(attachment)
+      const { type, ...attachment } = part
+      return type === "image"
+        ? isImageAttachment(attachment)
+        : type === "document" && isPdfAttachment(attachment)
     }) &&
     (value.contextAttachments === undefined ||
       isContextExcerpts(value.contextAttachments))
@@ -1867,6 +1883,20 @@ export function isImageAttachment(value: unknown): value is ImageAttachment {
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
     isNonNegativeInteger(value.sizeBytes) &&
+    isRolloutAssetReference(value.file)
+  )
+}
+
+export function isPdfAttachment(value: unknown): value is PdfAttachment {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["name", "mediaType", "file", "sizeBytes"]) &&
+    isString(value.name) &&
+    value.name.length > 0 &&
+    value.mediaType === "application/pdf" &&
+    typeof value.sizeBytes === "number" &&
+    Number.isSafeInteger(value.sizeBytes) &&
+    value.sizeBytes > 0 &&
     isRolloutAssetReference(value.file)
   )
 }

@@ -1,6 +1,7 @@
 import {
   type ImageAttachment,
   type InputContent,
+  type UserAttachment,
   isImageAttachment,
   isInputContent,
   type ModelDeveloperMessage,
@@ -16,29 +17,39 @@ export function inputContentText(content: InputContent): string {
     .join("")
 }
 
-export function inputContentImages(
+export function inputContentAttachments(
   content: InputContent,
-): readonly ImageAttachment[] {
-  return content.parts.flatMap((part) => {
-    if (part.type !== "image") return []
+): readonly UserAttachment[] {
+  return content.parts.flatMap((part): UserAttachment[] => {
+    if (part.type === "text") return []
     const { type: _type, ...attachment } = part
     return [attachment]
   })
 }
 
-export function replaceInputImages(
+export function replaceInputAttachments(
   content: InputContent,
-  images: readonly ImageAttachment[],
+  attachments: readonly UserAttachment[],
 ): InputContent {
   let index = 0
   const parts = content.parts.map((part) => {
-    if (part.type !== "image") return part
-    const image = images[index++]
-    if (image === undefined) throw new Error("Missing replacement input image.")
-    return { type: "image" as const, ...image }
+    if (part.type === "text") return part
+    const attachment = attachments[index++]
+    if (attachment === undefined)
+      throw new Error("Missing replacement input attachment.")
+    if (
+      (part.type === "document") !==
+      (attachment.mediaType === "application/pdf")
+    )
+      throw new Error(
+        "Replacement input attachment type does not match its slot.",
+      )
+    return attachment.mediaType === "application/pdf"
+      ? { type: "document" as const, ...attachment }
+      : { type: "image" as const, ...attachment }
   })
-  if (index !== images.length)
-    throw new Error("Unexpected replacement input image.")
+  if (index !== attachments.length)
+    throw new Error("Unexpected replacement input attachment.")
   return { ...content, parts }
 }
 

@@ -15,11 +15,12 @@ export function sameInputParts(
       if (part.type === "text")
         return other?.type === "text" && part.text === other.text
       return (
-        other?.type === "image" &&
+        other?.type === part.type &&
         part.name === other.name &&
         part.mediaType === other.mediaType &&
         part.sizeBytes === other.sizeBytes &&
-        part.detail === other.detail &&
+        (part.type !== "image" ||
+          (other.type === "image" && part.detail === other.detail)) &&
         part.file.rolloutId === other.file.rolloutId &&
         part.file.path === other.file.path
       )

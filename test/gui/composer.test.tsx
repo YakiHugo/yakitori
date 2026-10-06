@@ -63,11 +63,11 @@ beforeEach(() => {
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
     value: {
-      pickImages: vi.fn(async () => ({ selectionId: "selection_1" })),
-      importPickedImages: vi.fn(async () => [draftImage("high")]),
-      discardPickedImages: vi.fn(async () => {}),
-      importImageFiles: vi.fn(async () => [draftImage("high")]),
-      discardDraftImages: vi.fn(async () => {}),
+      pickAttachments: vi.fn(async () => ({ selectionId: "selection_1" })),
+      importPickedAttachments: vi.fn(async () => [draftImage("high")]),
+      discardPickedAttachments: vi.fn(async () => {}),
+      importAttachmentFiles: vi.fn(async () => [draftImage("high")]),
+      discardDraftAttachments: vi.fn(async () => {}),
       openFile: vi.fn(async () => {}),
       openUrl: vi.fn(async () => {}),
     },
@@ -333,7 +333,7 @@ describe("composer", () => {
     })
     expect(remove).toHaveProperty("disabled", true)
     await user.click(remove)
-    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
     expect(
       (useAppStore.getState().promptDraft ?? []).filter(
         (part) => part.type === "image",
@@ -436,7 +436,7 @@ describe("composer", () => {
     })
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() => {
       expect(
         (useAppStore.getState().promptDraft ?? []).filter(
@@ -488,14 +488,14 @@ describe("composer", () => {
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
 
-    expect(bridge.pickImages).not.toHaveBeenCalled()
+    expect(bridge.pickAttachments).not.toHaveBeenCalled()
     const menu = screen.getByRole("listbox", { name: "Add context" })
     expect(
       Array.from(menu.querySelectorAll('[role="option"]')).map(
         (option) =>
           option.getAttribute("aria-label") ?? option.textContent?.trim(),
       ),
-    ).toEqual(["Files and folders", "Add image"])
+    ).toEqual(["Files and folders", "Add images or PDFs"])
     expect(menu.textContent).toContain("Images")
     expect(menu.textContent).not.toContain("Review")
     expect(menu.textContent).not.toContain("Goal")
@@ -503,15 +503,15 @@ describe("composer", () => {
 
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
-    expect(bridge.pickImages).not.toHaveBeenCalled()
+    expect(bridge.pickAttachments).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("Keep this draft"),
     )
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() => {
-      expect(bridge.pickImages).toHaveBeenCalledOnce()
+      expect(bridge.pickAttachments).toHaveBeenCalledOnce()
     })
   })
 
@@ -523,10 +523,9 @@ describe("composer", () => {
       screen.getByRole("option", { name: "Files and folders" }),
     ).toHaveProperty("disabled", true)
     expect(screen.getByText("Select a project to browse")).toBeDefined()
-    expect(screen.getByRole("option", { name: "Add image" })).toHaveProperty(
-      "disabled",
-      false,
-    )
+    expect(
+      screen.getByRole("option", { name: "Add images or PDFs" }),
+    ).toHaveProperty("disabled", false)
   })
 
   it("switches from the add list to editor shortcuts when typing @ or /", async () => {
@@ -602,7 +601,7 @@ describe("composer", () => {
       inputParts("Check [@gui](src/gui) please"),
     )
     expect(editor.querySelector('[data-file-path="src/gui"]')).not.toBeNull()
-    expect(bridge.pickImages).not.toHaveBeenCalled()
+    expect(bridge.pickAttachments).not.toHaveBeenCalled()
   })
 
   it("clicks Files and folders, searches in the editor, and selects a file with Enter", async () => {
@@ -729,7 +728,7 @@ describe("composer", () => {
         (part) => part.type === "image",
       ),
     ).toEqual(inputParts(""))
-    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
     await user.click(screen.getByRole("textbox"))
     await user.keyboard("{Control>}z{/Control}")
     expect(useAppStore.getState().promptDraft).toEqual(
@@ -738,9 +737,9 @@ describe("composer", () => {
     await user.click(
       screen.getByRole("button", { name: "Remove screenshot.png" }),
     )
-    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
     view.unmount()
-    expect(bridge.discardDraftImages).toHaveBeenCalledExactlyOnceWith([
+    expect(bridge.discardDraftAttachments).toHaveBeenCalledExactlyOnceWith([
       draftImage("high"),
     ])
   })
@@ -837,7 +836,7 @@ describe("composer", () => {
     const attach = screen.getByRole("button", { name: "Add context" })
     expect(attach).toHaveProperty("disabled", false)
     await user.click(attach)
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
 
     await waitFor(() => {
       expect(
@@ -850,11 +849,11 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    expect(bridge.pickImages).toHaveBeenCalledWith()
-    expect(bridge.importPickedImages).toHaveBeenCalledWith({
+    expect(bridge.pickAttachments).toHaveBeenCalledWith()
+    expect(bridge.importPickedAttachments).toHaveBeenCalledWith({
       selectionId: "selection_1",
     })
-    expect(bridge.discardPickedImages).toHaveBeenCalledWith({
+    expect(bridge.discardPickedAttachments).toHaveBeenCalledWith({
       selectionId: "selection_1",
     })
   })
@@ -863,12 +862,12 @@ describe("composer", () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    vi.mocked(bridge.pickImages).mockResolvedValueOnce(undefined)
+    vi.mocked(bridge.pickAttachments).mockResolvedValueOnce(undefined)
     respondWithSessionCreate()
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Add context" }),
@@ -883,7 +882,7 @@ describe("composer", () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    vi.mocked(bridge.importPickedImages).mockRejectedValueOnce(
+    vi.mocked(bridge.importPickedAttachments).mockRejectedValueOnce(
       new Error("Image import failed."),
     )
     respondWithSessionCreate()
@@ -891,7 +890,7 @@ describe("composer", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
 
     await waitFor(() =>
       expect(screen.getByRole("alert").textContent).toBe(
@@ -919,7 +918,7 @@ describe("composer", () => {
       if (method === "session/skills") return { skills: [] }
       throw new ApiRequestError("not found", "not_found")
     }
-    vi.mocked(bridge.pickImages).mockReturnValueOnce(
+    vi.mocked(bridge.pickAttachments).mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePick = resolve
       }),
@@ -928,7 +927,7 @@ describe("composer", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await act(async () => {
       resolveCreate({
         session: createdSession,
@@ -942,7 +941,7 @@ describe("composer", () => {
     resolvePick({ selectionId: "selection_during_create" })
 
     await waitFor(() => {
-      expect(bridge.importPickedImages).toHaveBeenCalledWith({
+      expect(bridge.importPickedAttachments).toHaveBeenCalledWith({
         sessionId: createdSession.id,
         selectionId: "selection_during_create",
       })
@@ -964,7 +963,7 @@ describe("composer", () => {
       if (method === "session/skills") return { skills: [] }
       throw new ApiRequestError("not found", "not_found")
     }
-    vi.mocked(bridge.importPickedImages).mockReturnValueOnce(
+    vi.mocked(bridge.importPickedAttachments).mockReturnValueOnce(
       new Promise((resolve) => {
         resolveImport = resolve
       }),
@@ -973,9 +972,9 @@ describe("composer", () => {
     const intent = useAppStore.getState().sessionSelectionIntentRevision
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() =>
-      expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
+      expect(bridge.importPickedAttachments).toHaveBeenCalledOnce(),
     )
     await act(async () => {
       resolveCreate({
@@ -997,7 +996,7 @@ describe("composer", () => {
         ),
       ).toEqual(inputParts("", [draftImage("high")])),
     )
-    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
   })
 
   it("discards an image import when navigation supersedes the draft", async () => {
@@ -1005,7 +1004,7 @@ describe("composer", () => {
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     let resolveImport!: (value: ReturnType<typeof draftImage>[]) => void
-    vi.mocked(bridge.importPickedImages).mockReturnValueOnce(
+    vi.mocked(bridge.importPickedAttachments).mockReturnValueOnce(
       new Promise((resolve) => {
         resolveImport = resolve
       }),
@@ -1013,16 +1012,16 @@ describe("composer", () => {
     useAppStore.getState().startNewSession()
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() =>
-      expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
+      expect(bridge.importPickedAttachments).toHaveBeenCalledOnce(),
     )
     await act(async () => {
       await useAppStore.getState().selectSession("session_existing")
       resolveImport([draftImage("high")])
     })
     await waitFor(() =>
-      expect(bridge.discardDraftImages).toHaveBeenCalledWith([
+      expect(bridge.discardDraftAttachments).toHaveBeenCalledWith([
         draftImage("high"),
       ]),
     )
@@ -1055,7 +1054,7 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    expect(bridge.importImageFiles).toHaveBeenCalledWith({
+    expect(bridge.importAttachmentFiles).toHaveBeenCalledWith({
       files: [file],
     })
   })
@@ -1070,11 +1069,11 @@ describe("composer", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add image" }))
+    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
 
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toBe(
-        "Image attachments require the Yakitori desktop app.",
+        "Attachments require the Yakitori desktop app.",
       )
     })
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
@@ -1227,18 +1226,29 @@ function executionWithHistory(...texts: readonly string[]) {
 }
 
 describe("history navigation", () => {
-  it("retains the staged image owner while recalling history and restores its exact placement", async () => {
+  it.each([
+    "image",
+    "document",
+  ] as const)("retains the staged %s owner while recalling history and restores its exact placement", async (kind) => {
     const user = userEvent.setup()
     const image = {
-      ...draftImage("high"),
+      ...(kind === "image"
+        ? draftImage("high")
+        : {
+            name: "history.pdf",
+            mediaType: "application/pdf" as const,
+            sizeBytes: 100,
+          }),
       file: {
         rolloutId: "draft_history",
-        path: "attachments/staging/history/1.png",
+        path: `attachments/staging/history/1.${kind === "image" ? "png" : "pdf"}`,
       },
     }
     const parts: readonly InputPart[] = [
       { type: "text", text: "before " },
-      { ...image, type: "image" },
+      image.mediaType === "application/pdf"
+        ? { ...image, type: "document" }
+        : { ...image, type: "image" },
       { type: "text", text: " after" },
     ]
     useAppStore.setState({
@@ -1254,7 +1264,9 @@ describe("history navigation", () => {
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("earlier question"),
     )
-    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
     // The editor remounts for another selection, but the surface still owns
     // the history snapshot and can restore it when the user returns.
     act(() =>
@@ -1264,7 +1276,9 @@ describe("history navigation", () => {
         promptDraft: inputParts("another draft"),
       }),
     )
-    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
     act(() =>
       useAppStore.setState({
         selection: { sessionId: "session_1" },
@@ -1275,13 +1289,15 @@ describe("history navigation", () => {
     await user.click(screen.getByRole("textbox"))
     await user.keyboard("{ArrowDown}")
     expect(useAppStore.getState().promptDraft).toEqual(parts)
-    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
     await user.click(
-      screen.getByRole("button", { name: "Remove screenshot.png" }),
+      screen.getByRole("button", { name: `Remove ${image.name}` }),
     )
     view.unmount()
     expect(
-      window.yakitoriDesktop?.discardDraftImages,
+      window.yakitoriDesktop?.discardDraftAttachments,
     ).toHaveBeenCalledExactlyOnceWith([image])
   })
 
@@ -1390,7 +1406,9 @@ describe("slash command menu", () => {
       inputParts("/model", [image]),
     )
     expect(openModelPicker).not.toHaveBeenCalled()
-    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
   })
 
   it("executes the highlighted command on Enter and retains it until admission succeeds", async () => {
@@ -1657,7 +1675,9 @@ describe("goal command", () => {
         { ...image, type: "image" },
       ]),
     )
-    expect(window.yakitoriDesktop?.discardDraftImages).not.toHaveBeenCalled()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
   })
 
   it("creates a session for a goal entered in a new draft without admitting a user message", async () => {
@@ -2688,3 +2708,102 @@ function requestedInputContent(requestId: string): InputContent {
   if (!request) throw new Error("Missing test input request")
   return structuredClone((request.params as { content: InputContent }).content)
 }
+
+describe("PDF attachment composer", () => {
+  const pdf = {
+    name: "manual.pdf",
+    mediaType: "application/pdf" as const,
+    sizeBytes: 100,
+    file: {
+      rolloutId: "draft_pdf_composer",
+      path: "attachments/staging/draft_pdf/manual.pdf",
+    },
+  }
+  it("sends a PDF-only draft and preserves its promoted document identity", async () => {
+    const user = userEvent.setup()
+    const original: InputContent = {
+      kind: "parts",
+      parts: [{ ...pdf, type: "document" }],
+    }
+    const accepted: InputContent = {
+      kind: "parts",
+      parts: [
+        {
+          ...pdf,
+          type: "document",
+          file: {
+            rolloutId: "session_1",
+            path: "attachments/requests/pdf/manual.pdf",
+          },
+        },
+      ],
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: original.parts,
+    })
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input")
+        return {
+          requestId: (params as { requestId: string }).requestId,
+          inputId: "input_pdf",
+          content: accepted,
+        }
+      if (method === "session/list") return { sessions: [] }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    render(<Composer />)
+    expect(
+      screen.getByRole("button", { name: "Send" }).hasAttribute("disabled"),
+    ).toBe(false)
+    expect(
+      screen.queryByText("The selected model does not support images.", {
+        exact: false,
+      }),
+    ).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await waitFor(() =>
+      expect(
+        (
+          fakeRef.current.requestsFor("session/input")[0]?.params as
+            | { content?: InputContent }
+            | undefined
+        )?.content,
+      ).toEqual(original),
+    )
+    await waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toBeUndefined(),
+    )
+    expect(
+      screen.queryByRole("button", { name: "Remove manual.pdf" }),
+    ).toBeNull()
+  })
+  it("keeps a removed PDF for Undo without deleting its bytes", async () => {
+    const user = userEvent.setup()
+    const undoPdf = {
+      ...pdf,
+      file: { ...pdf.file, path: "attachments/staging/undo_pdf/manual.pdf" },
+    }
+    const parts: InputPart[] = [
+      { type: "text", text: "before" },
+      { ...undoPdf, type: "document" },
+      { type: "text", text: "after" },
+    ]
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: parts,
+    })
+    const view = render(<Composer />)
+    const bridge = window.yakitoriDesktop
+    await user.click(screen.getByRole("button", { name: "Remove manual.pdf" }))
+    expect(bridge?.discardDraftAttachments).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Control>}z{/Control}")
+    expect(useAppStore.getState().promptDraft).toEqual(parts)
+    await user.click(screen.getByRole("button", { name: "Remove manual.pdf" }))
+    view.unmount()
+    expect(bridge?.discardDraftAttachments).toHaveBeenCalledExactlyOnceWith([
+      undoPdf,
+    ])
+  })
+})

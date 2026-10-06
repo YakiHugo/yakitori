@@ -15,6 +15,7 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -158,12 +159,13 @@ describe("structured context and ephemeral forks", () => {
       .png({ compressionLevel: 0 })
       .toBuffer()
     expect(changedBytes.length).toBe(bytes.length)
-    const [image] = await context.app.rolloutAssets.importImageBytes(
+    const [image] = await context.app.rolloutAssets.importAttachmentBytes(
       id,
       "ordered_draft",
       [{ name: "placed.png", data: bytes }],
     )
-    if (!image) throw new Error("Missing draft")
+    if (!image || image.mediaType === "application/pdf")
+      throw new Error("Missing draft")
     const content: InputContent = {
       kind: "parts",
       parts: [
@@ -200,12 +202,13 @@ describe("structured context and ephemeral forks", () => {
         ],
       }),
     ).toMatchObject({ ok: false, status: 409 })
-    const [changed] = await context.app.rolloutAssets.importImageBytes(
+    const [changed] = await context.app.rolloutAssets.importAttachmentBytes(
       id,
       "changed_draft",
       [{ name: "placed.png", data: changedBytes }],
     )
-    if (!changed) throw new Error("Missing changed draft")
+    if (!changed || changed.mediaType === "application/pdf")
+      throw new Error("Missing changed draft")
     expect(
       await submit({
         kind: "parts",
@@ -222,12 +225,14 @@ describe("structured context and ephemeral forks", () => {
     release()
     await until(() => requests.length === 2)
     if (route === "steer") {
-      const [retryImage] = await context.app.rolloutAssets.importImageBytes(
-        id,
-        "after_sample_retry",
-        [{ name: "placed.png", data: bytes }],
-      )
-      if (!retryImage) throw new Error("Missing retry image")
+      const [retryImage] =
+        await context.app.rolloutAssets.importAttachmentBytes(
+          id,
+          "after_sample_retry",
+          [{ name: "placed.png", data: bytes }],
+        )
+      if (!retryImage || retryImage.mediaType === "application/pdf")
+        throw new Error("Missing retry image")
       expect(
         await submit({
           kind: "parts",
@@ -382,6 +387,221 @@ describe("structured context and ephemeral forks", () => {
     }
   })
 
+  it.each([
+    "direct",
+    "queue",
+    "steer",
+  ] as const)("preserves mixed PDF/image %s input through admission and replay", async (route) => {
+    const requests: ModelRequest[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const context = await fixture(async function* (request) {
+      requests.push(request)
+      if (route !== "direct" && requests.length === 1) await gate
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "done" }],
+        },
+      }
+    })
+    cleanups.push(async () => {
+      release()
+    })
+    const id = await createMain(context.app)
+    if (route !== "direct") {
+      const initial = await context.app.handlers.admitInput({
+        sessionId: id,
+        requestId: "mixed_active",
+        modelSelection: { provider: "openai", model: "gpt-6-astra" },
+        content: { kind: "parts", parts: [{ type: "text", text: "wait" }] },
+      })
+      if (!initial.ok) throw new Error(initial.body.error.message)
+      await until(() => requests.length === 1)
+    }
+    const pdfBytes = pdfFixture(["Authored PDF"])
+    const imageBytes = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "#112233" },
+    })
+      .png()
+      .toBuffer()
+    const [pdf, image] = await context.app.rolloutAssets.importAttachmentBytes(
+      id,
+      "mixed_draft",
+      [
+        { name: "report.pdf", data: pdfBytes },
+        { name: "image.png", data: imageBytes },
+      ],
+    )
+    if (
+      pdf?.mediaType !== "application/pdf" ||
+      !image ||
+      image.mediaType === "application/pdf"
+    )
+      throw new Error("Missing mixed fixture attachments")
+    const content: InputContent = {
+      kind: "parts",
+      parts: [
+        { type: "text", text: "before PDF" },
+        { type: "document", ...pdf },
+        { type: "text", text: "between media" },
+        { type: "image", ...image },
+        { type: "text", text: "after image" },
+      ],
+    }
+    const submit = (value: InputContent) => {
+      const request = {
+        sessionId: id,
+        requestId: "mixed_request",
+        content: value,
+        modelSelection: { provider: "openai", model: "gpt-6-astra" },
+      }
+      return route === "steer"
+        ? context.app.handlers.steerInput({
+            ...request,
+            expectedTurnId: "mixed_active",
+          })
+        : route === "queue"
+          ? context.app.handlers.queueInput(request)
+          : context.app.handlers.admitInput(request)
+    }
+    const accepted = await submit(content)
+    if (!accepted.ok) throw new Error(accepted.body.error.message)
+    expect(await submit(content)).toMatchObject({
+      ok: true,
+      body: accepted.body,
+    })
+    expect(
+      await submit({ ...content, parts: [...content.parts].reverse() }),
+    ).toMatchObject({ ok: false, status: 409 })
+    expect(
+      await submit({
+        ...content,
+        parts: content.parts.map((part) =>
+          part.type === "document"
+            ? { ...part, sizeBytes: part.sizeBytes + 1 }
+            : part,
+        ),
+      }),
+    ).toMatchObject({ ok: false, status: 409 })
+    release()
+    await until(
+      () =>
+        requests.length === (route === "direct" ? 1 : 2) &&
+        context.app.threadManager.getThread(id)?.status === "idle",
+    )
+    const user = requests
+      .at(-1)
+      ?.messages.filter(
+        (message) => message.role === "user" && message.context === undefined,
+      )
+      .at(-1)
+    expect(user?.content.map((block) => block.type)).toEqual([
+      "text",
+      "text",
+      "image",
+      "text",
+      "image",
+      "text",
+    ])
+    expect(user?.content[0]).toEqual({ type: "text", text: "before PDF" })
+    expect(user?.content[1]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("report.pdf"),
+    })
+    expect(user?.content[3]).toEqual({ type: "text", text: "between media" })
+    expect(user?.content[5]).toEqual({ type: "text", text: "after image" })
+    await context.restart()
+    const events = await context.app.handlers.readSessionEvents({
+      sessionId: id,
+    })
+    if (!events.ok) throw new Error(events.body.error.message)
+    const admission = events.body.events.find(
+      (event) =>
+        isKernelEvent(event) &&
+        event.type === "input.admitted" &&
+        event.data.requestId === "mixed_request",
+    )
+    if (!isKernelEvent(admission) || admission.type !== "input.admitted")
+      throw new Error("Missing PDF admission")
+    expect(admission.data.content.parts.map((part) => part.type)).toEqual([
+      "text",
+      "document",
+      "text",
+      "image",
+      "text",
+    ])
+    const storedPdf = admission.data.content.parts.find(
+      (part) => part.type === "document",
+    )
+    if (!storedPdf) throw new Error("Missing persisted PDF")
+    expect(await context.app.rolloutAssets.read(storedPdf.file)).toEqual(
+      pdfBytes,
+    )
+    expect(
+      await context.app.handlers.admitInput({
+        sessionId: id,
+        requestId: "mixed_request",
+        modelSelection: { provider: "openai", model: "gpt-6-astra" },
+        content: admission.data.content,
+      }),
+    ).toMatchObject({ ok: true, status: 200 })
+    if (route === "direct") {
+      const foreign = await context.app.handlers.forkSession({
+        sessionId: id,
+        atInputId: admission.data.inputId,
+        reason: "edit",
+        content: {
+          kind: "parts",
+          parts: [
+            {
+              ...storedPdf,
+              file: {
+                ...storedPdf.file,
+                path: "attachments/requests/foreign/1.pdf",
+              },
+            },
+          ],
+        },
+      })
+      expect(foreign).toMatchObject({ ok: false, status: 400 })
+      const forked = await context.app.handlers.forkSession({
+        sessionId: id,
+        atInputId: admission.data.inputId,
+        reason: "edit",
+        content: {
+          kind: "parts",
+          parts: [storedPdf, { type: "text", text: "PDF first" }],
+        },
+      })
+      if (!forked.ok) throw new Error(forked.body.error.message)
+      await until(
+        () =>
+          context.app.threadManager.getThread(forked.body.session.id)
+            ?.status === "idle",
+      )
+      expect(
+        await context.app.handlers.deleteSession({ sessionId: id }),
+      ).toMatchObject({ ok: true })
+      const fork = await context.app.threadStore.readThread(
+        forked.body.session.id,
+      )
+      const document = fork?.rollout.flatMap(({ item }) =>
+        item.type === "response_item" && item.item.item.role === "user"
+          ? item.item.item.content.filter((block) => block.type === "document")
+          : [],
+      )[0]
+      if (!document) throw new Error("Missing fork PDF")
+      expect(document.file.rolloutId).toBe(forked.body.session.id)
+      expect(await context.app.rolloutAssets.read(document.file)).toEqual(
+        pdfBytes,
+      )
+    }
+  })
+
   it("retains edited image positions, rejects foreign assets, and copies source images across parent deletion", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
@@ -400,7 +620,7 @@ describe("structured context and ephemeral forks", () => {
     })
       .png()
       .toBuffer()
-    const attachments = await context.app.rolloutAssets.importImageBytes(
+    const attachments = await context.app.rolloutAssets.importAttachmentBytes(
       id,
       "fork_images",
       [
@@ -676,7 +896,7 @@ describe("structured context and ephemeral forks", () => {
     })
       .png()
       .toBuffer()
-    const attachments = await context.app.rolloutAssets.importImageBytes(
+    const attachments = await context.app.rolloutAssets.importAttachmentBytes(
       id,
       "ordered_images",
       [
@@ -1134,7 +1354,7 @@ describe("structured context and ephemeral forks", () => {
     await writeFile(join(context.root, "parent.png"), bytes)
     const attachments =
       origin === "user"
-        ? await context.app.rolloutAssets.importImageBytes(
+        ? await context.app.rolloutAssets.importAttachmentBytes(
             parentId,
             "parent_image_draft",
             [{ name: "parent.png", data: bytes }],
@@ -1352,7 +1572,7 @@ describe("structured context and ephemeral forks", () => {
       modelSelection: { provider: "openai", model: "gpt-5" },
     })
     const imported = await handleServerControlRequest(context.app, {
-      type: "import_image_paths",
+      type: "import_attachment_paths",
       requestId: "import_side",
       sessionId: side.id,
       ownerId: "draft_side",
@@ -1367,10 +1587,11 @@ describe("structured context and ephemeral forks", () => {
         kind: "parts" as const,
         parts: [
           { type: "text" as const, text: "Inspect the file" },
-          ...imported.attachments.map((image) => ({
-            type: "image" as const,
-            ...image,
-          })),
+          ...imported.attachments.map((attachment) =>
+            attachment.mediaType === "application/pdf"
+              ? { type: "document" as const, ...attachment }
+              : { type: "image" as const, ...attachment },
+          ),
           { type: "text", text: " and image" },
         ],
       },

@@ -1,4 +1,10 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises"
+import type { StoredThread } from "../../src/core/rollout.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -181,7 +187,13 @@ describe("temporary side conversations", () => {
         ),
       ).toEqual(["hello", "reply 1", "follow-up", "reply 2"])
       await expect(
-        context.service.importImagePaths(created.id, "owner", []),
+        context.service.importAttachmentPaths(created.id, "owner", []),
+      ).rejects.toMatchObject({
+        code: "conflict",
+        message: expect.stringContaining("read-only"),
+      })
+      await expect(
+        context.service.importAttachmentBytes(created.id, "owner", []),
       ).rejects.toMatchObject({
         code: "conflict",
         message: expect.stringContaining("read-only"),
@@ -745,6 +757,216 @@ describe("temporary side conversations", () => {
       )
     } finally {
       await context.close()
+    }
+  })
+
+  it.each([
+    "user",
+    "tool",
+  ] as const)("owns inherited %s PDFs through source deletion and nested side-chat close", async (origin) => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-side-pdf-"))
+    const parentId = "session_parent"
+    const owners = new Set([parentId])
+    const assets = createRolloutAssets(root, {
+      async withMutationLease(id, mutate) {
+        if (!owners.has(id)) throw new Error("Missing ephemeral owner")
+        await mkdir(join(root, "rollouts", id), { recursive: true })
+        return mutate()
+      },
+      async validatePdf(bytes) {
+        const result = await readPdf({ bytes, format: "native" })
+        if (!result.ok) throw new Error(result.message)
+      },
+    })
+    const bytes = pdfFixture(["Inherited PDF content"])
+    const saved = await assets.saveToolFile(
+      parentId,
+      "parent_pdf",
+      "report.pdf",
+      bytes,
+    )
+    const document = {
+      type: "document" as const,
+      name: "report.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: bytes.length,
+      file: saved.reference,
+    }
+    const createdAt = new Date().toISOString()
+    const source: StoredThread = {
+      metadata: {
+        id: parentId,
+        rolloutId: parentId,
+        conversationId: parentId,
+        createdAt,
+        updatedAt: createdAt,
+        workingDirectory: root,
+      },
+      rollout: [
+        {
+          threadId: parentId,
+          rolloutId: parentId,
+          seq: 0,
+          createdAt,
+          item: {
+            type: "response_item",
+            item: {
+              id: "parent_content",
+              turnId: "parent_turn",
+              createdAt,
+              item:
+                origin === "user"
+                  ? { role: "user", content: [document] }
+                  : {
+                      role: "tool",
+                      toolCallId: "parent_pdf",
+                      content: [document],
+                    },
+            },
+          },
+        },
+        {
+          threadId: parentId,
+          rolloutId: parentId,
+          seq: 1,
+          createdAt,
+          item: {
+            type: "turn_completed",
+            turnId: "parent_turn",
+            outcome: "completed",
+          },
+        },
+      ],
+    }
+    const requests: ModelRequest[] = []
+    const providers = createProviderRegistry({
+      openai: createModelProvider({
+        info: {
+          id: "openai",
+          wireApi: "openai_responses",
+          capabilities: { remoteCompaction: false, nativePdf: true },
+        },
+        stream: async function* (request) {
+          requests.push(request)
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "PDF answer" }],
+            },
+          }
+        },
+      }),
+    })
+    const errors: unknown[] = []
+    const service = createSideChatService({
+      defaultCwd: root,
+      defaultModel: { provider: "openai", model: "gpt-6-astra" },
+      mateId: "test-mate",
+      mateRevisionId: "test-revision",
+      readSource: async () => source,
+      rolloutAssets: assets,
+      createProcessor(stored) {
+        owners.add(stored.metadata.id)
+        return createTurnProcessor({
+          modelClient: providers.createClient(),
+          rolloutAssets: assets,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        })
+      },
+      async releaseAssets(id) {
+        await assets.discardEphemeralRolloutFiles(id)
+        owners.delete(id)
+      },
+      changed() {},
+      reportError: (error) => errors.push(error),
+    })
+    try {
+      const side = await service.create({ sourceSessionId: parentId })
+      await assets.discardEphemeralRolloutFiles(parentId)
+      await service.send({
+        sideChatId: side.id,
+        requestId: "side_pdf",
+        content: {
+          kind: "parts",
+          parts: [{ type: "text", text: "Explain the PDF" }],
+        },
+      })
+      await until(() => service.read(side.id).activeTurnId === undefined)
+      const nested = await service.create({ sourceSessionId: side.id })
+      await service.remove(side.id)
+      const [draft] = await service.importAttachmentBytes(
+        nested.id,
+        "followup_draft",
+        [{ name: "follow-up.pdf", data: bytes }],
+      )
+      if (draft?.mediaType !== "application/pdf")
+        throw new Error("Missing PDF draft")
+      await service.send({
+        sideChatId: nested.id,
+        requestId: "nested_pdf",
+        content: {
+          kind: "parts",
+          parts: [
+            { type: "text", text: "Explain the same PDF again" },
+            { type: "document", ...draft },
+            { type: "text", text: "Compare this copy" },
+          ],
+        },
+      })
+      await until(() => service.read(nested.id).activeTurnId === undefined)
+      expect(requests).toHaveLength(2)
+      for (const [index, request] of requests.entries()) {
+        const documents = request.messages.flatMap((message) =>
+          message.role === "user"
+            ? message.content.filter((block) => block.type === "document")
+            : [],
+        )
+        expect(documents).toHaveLength(index === 0 ? 1 : 2)
+        expect(documents[0]).toMatchObject({
+          name: "report.pdf",
+          data: bytes.toString("base64"),
+          file: { rolloutId: index === 0 ? side.id : nested.id },
+        })
+        expect(
+          JSON.stringify(
+            request.messages.filter((message) => message.role === "developer"),
+          ),
+        ).not.toContain(bytes.toString("base64"))
+      }
+      expect(
+        requests
+          .at(-1)
+          ?.messages.filter(
+            (message) =>
+              message.role === "user" && message.context === undefined,
+          )
+          .at(-1)?.content,
+      ).toMatchObject([
+        { type: "text", text: "Explain the same PDF again" },
+        {
+          type: "document",
+          name: "follow-up.pdf",
+          data: bytes.toString("base64"),
+        },
+        { type: "text", text: "Compare this copy" },
+      ])
+      await expect(assets.read(draft.file)).rejects.toMatchObject({
+        code: "ENOENT",
+      })
+      expect(errors).toEqual([])
+      await service.remove(nested.id)
+      expect(owners).toEqual(new Set([parentId]))
+      expect(await readdir(join(root, "rollouts"))).toEqual([])
+      await expect(
+        service.create({ sourceSessionId: parentId }),
+      ).rejects.toMatchObject({ code: "ENOENT" })
+      expect(owners).toEqual(new Set([parentId]))
+      expect(await readdir(join(root, "rollouts"))).toEqual([])
+    } finally {
+      await service.close()
+      await rm(root, { recursive: true, force: true })
     }
   })
 

@@ -1,33 +1,48 @@
-import type { ImageAttachment } from "../kernel/events.ts"
+import {
+  isImageAttachment,
+  isPdfAttachment,
+  type UserAttachment,
+} from "../kernel/events.ts"
+import { isStorageKey } from "../kernel/ids.ts"
+
+type AttachmentImportTarget = Readonly<{
+  sessionId?: string
+  rolloutId?: string
+  ownerId: string
+}>
 
 export type ServerControlCommand =
-  | {
-      readonly type: "import_image_paths"
-      readonly sessionId?: string
-      readonly rolloutId?: string
-      readonly ownerId: string
-      readonly paths: readonly string[]
-    }
-  | {
-      readonly type: "discard_draft_images"
-      readonly attachments: readonly ImageAttachment[]
-    }
+  | (AttachmentImportTarget &
+      Readonly<{
+        type: "import_attachment_paths"
+        paths: readonly string[]
+      }>)
+  | (AttachmentImportTarget &
+      Readonly<{
+        type: "import_attachment_bytes"
+        items: readonly Readonly<{ name: string; data: Uint8Array }>[]
+      }>)
+  | Readonly<{
+      type: "discard_draft_attachments"
+      attachments: readonly UserAttachment[]
+    }>
 
-export type ServerControlRequest = ServerControlCommand & {
-  readonly requestId: string
-}
+export type ServerControlRequest = ServerControlCommand &
+  Readonly<{
+    requestId: string
+  }>
 
 export type ServerControlResponse =
-  | {
-      readonly requestId: string
-      readonly ok: true
-      readonly attachments?: readonly ImageAttachment[]
-    }
-  | {
-      readonly requestId: string
-      readonly ok: false
-      readonly error: string
-    }
+  | Readonly<{
+      requestId: string
+      ok: true
+      attachments?: readonly UserAttachment[]
+    }>
+  | Readonly<{
+      requestId: string
+      ok: false
+      error: string
+    }>
 
 export function isServerControlResponse(
   value: unknown,
@@ -46,7 +61,7 @@ export function isServerControlResponse(
     return (
       !("attachments" in value) ||
       (Array.isArray(value.attachments) &&
-        value.attachments.every(isImageAttachment))
+        value.attachments.every(isAttachment))
     )
   }
   return false
@@ -65,46 +80,50 @@ export function isServerControlRequest(
   ) {
     return false
   }
-  if (value.type === "import_image_paths") {
+  if (
+    value.type === "import_attachment_paths" ||
+    value.type === "import_attachment_bytes"
+  ) {
+    const sessionId = "sessionId" in value ? value.sessionId : undefined
+    const rolloutId = "rolloutId" in value ? value.rolloutId : undefined
+    if (
+      !(
+        (isStorageKey(sessionId) && rolloutId === undefined) ||
+        (isStorageKey(rolloutId) && sessionId === undefined)
+      ) ||
+      !("ownerId" in value) ||
+      !isStorageKey(value.ownerId)
+    )
+      return false
+    if (value.type === "import_attachment_paths") {
+      return (
+        "paths" in value &&
+        Array.isArray(value.paths) &&
+        value.paths.every((path) => typeof path === "string" && path.length > 0)
+      )
+    }
     return (
-      (("sessionId" in value && typeof value.sessionId === "string") ||
-        ("rolloutId" in value && typeof value.rolloutId === "string")) &&
-      "ownerId" in value &&
-      typeof value.ownerId === "string" &&
-      "paths" in value &&
-      Array.isArray(value.paths) &&
-      value.paths.every((path) => typeof path === "string")
+      "items" in value &&
+      Array.isArray(value.items) &&
+      value.items.every(
+        (item: unknown) =>
+          typeof item === "object" &&
+          item !== null &&
+          "name" in item &&
+          typeof item.name === "string" &&
+          "data" in item &&
+          item.data instanceof Uint8Array,
+      )
     )
   }
   return (
-    value.type === "discard_draft_images" &&
+    value.type === "discard_draft_attachments" &&
     "attachments" in value &&
     Array.isArray(value.attachments) &&
-    value.attachments.every(isImageAttachment)
+    value.attachments.every(isAttachment)
   )
 }
 
-function isImageAttachment(value: unknown): value is ImageAttachment {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "name" in value &&
-    typeof value.name === "string" &&
-    "mediaType" in value &&
-    (value.mediaType === "image/png" ||
-      value.mediaType === "image/jpeg" ||
-      value.mediaType === "image/gif" ||
-      value.mediaType === "image/webp") &&
-    "sizeBytes" in value &&
-    typeof value.sizeBytes === "number" &&
-    "detail" in value &&
-    (value.detail === "high" || value.detail === "original") &&
-    "file" in value &&
-    typeof value.file === "object" &&
-    value.file !== null &&
-    "rolloutId" in value.file &&
-    typeof value.file.rolloutId === "string" &&
-    "path" in value.file &&
-    typeof value.file.path === "string"
-  )
+function isAttachment(value: unknown): value is UserAttachment {
+  return isImageAttachment(value) || isPdfAttachment(value)
 }

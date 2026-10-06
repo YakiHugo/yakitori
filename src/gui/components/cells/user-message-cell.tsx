@@ -1,4 +1,5 @@
-import { inputContentImages } from "../../../kernel/input-content.ts"
+import { PdfAttachmentCard, openPdfAttachment } from "../pdf-attachment.tsx"
+import { inputContentAttachments } from "../../../kernel/input-content.ts"
 import { trimInputParts } from "../../input-parts.ts"
 import {
   FileText,
@@ -18,7 +19,7 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import type { ContextExcerpt } from "../../../kernel/input-context.ts"
-import { imageAttachmentUrl } from "../../composer-attachments.ts"
+import { attachmentUrl } from "../../composer-attachments.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
@@ -95,6 +96,7 @@ export function UserMessageCell({
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.parts)
   const [previewIndex, setPreviewIndex] = useState<number>()
+  const [openError, setOpenError] = useState<string>()
   const edited = trimInputParts(draft)
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
@@ -102,7 +104,10 @@ export function UserMessageCell({
       editorRef.current?.focus(true)
     }
   }, [mode])
-  const attachments = inputContentImages({ kind: "parts", parts: entry.parts })
+  const attachments = inputContentAttachments({
+    kind: "parts",
+    parts: entry.parts,
+  })
   const contextAttachments = entry.contextAttachments ?? []
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]
@@ -121,11 +126,19 @@ export function UserMessageCell({
           ) : null}
           {entry.parts.map((part, index) => {
             const key = `${entry.inputId}:${index}`
+            if (part.type === "document")
+              return (
+                <PdfAttachmentCard
+                  key={key}
+                  attachment={part}
+                  apiBase={apiBase}
+                />
+              )
             if (part.type === "image")
               return (
                 <div key={key} className="message-attachments">
                   <MessageImage
-                    src={imageAttachmentUrl(part, apiBase)}
+                    src={attachmentUrl(part, apiBase)}
                     name={part.name}
                     onClick={() =>
                       setPreviewIndex(
@@ -245,6 +258,7 @@ export function UserMessageCell({
         </div>
       ) : null}
 
+      {openError === undefined ? null : <p role="alert">{openError}</p>}
       {mode === "edit" ? (
         <form
           className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
@@ -268,6 +282,16 @@ export function UserMessageCell({
             apiBase={apiBase}
             disabled={busy}
             onChange={setDraft}
+            onOpenDocument={(document) => {
+              void openPdfAttachment(document, apiBase).catch(
+                (error: unknown) =>
+                  setOpenError(
+                    error instanceof Error
+                      ? error.message
+                      : "Could not open PDF.",
+                  ),
+              )
+            }}
             onPreviewImage={(image) =>
               setPreviewIndex(
                 attachments.findIndex(
@@ -323,9 +347,10 @@ export function UserMessageCell({
           </div>
         </form>
       ) : null}
-      {preview === undefined ? null : (
+      {preview === undefined ||
+      preview.mediaType === "application/pdf" ? null : (
         <ImageLightbox
-          src={imageAttachmentUrl(preview, apiBase)}
+          src={attachmentUrl(preview, apiBase)}
           name={preview.name}
           onClose={() => setPreviewIndex(undefined)}
         />

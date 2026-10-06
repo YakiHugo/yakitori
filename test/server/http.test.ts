@@ -1,3 +1,4 @@
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
@@ -378,3 +379,64 @@ function isAddressInfo(value: unknown): value is AddressInfo {
     "port" in value
   )
 }
+
+it("serves original PDF bytes inline or as a safely named same-origin download", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-pdf-download-"))
+  try {
+    const assets = createRolloutAssets(root, {
+      withMutationLease: async (_id, mutate) => mutate(),
+    })
+    await mkdir(join(root, "rollouts", "rollout_download"), { recursive: true })
+    const bytes = Buffer.from("%PDF-1.7\noriginal bytes")
+    const saved = await assets.saveToolFile(
+      "rollout_download",
+      "call_pdf",
+      "original.pdf",
+      bytes,
+    )
+    await withListeningServer(
+      createYakitoriHttpServer({
+        handlers: createFakeHandlers(),
+        rolloutAssets: assets,
+      }),
+      async (baseUrl) => {
+        const url = `${baseUrl}/rollouts/${saved.reference.rolloutId}/assets/${saved.reference.path}`
+        const inline = await fetch(url)
+        expect(inline.headers.get("content-type")).toBe("application/pdf")
+        expect(inline.headers.get("content-disposition")).toBeNull()
+        expect(Buffer.from(await inline.arrayBuffer())).toEqual(bytes)
+        const name = "手册 (final).pdf"
+        const download = await fetch(
+          `${url}?download=${encodeURIComponent(name)}`,
+        )
+        expect(download.status).toBe(200)
+        expect(download.headers.get("content-disposition")).toBe(
+          `attachment; filename="download.pdf"; filename*=UTF-8''${encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+        )
+        expect(download.headers.get("content-length")).toBe(
+          String(bytes.length),
+        )
+        expect(Buffer.from(await download.arrayBuffer())).toEqual(bytes)
+        for (const invalid of [
+          "../secret.pdf",
+          "bad\r\nX-Evil: yes",
+          "bad\\path.pdf",
+          "",
+          "a".repeat(256),
+        ]) {
+          const response = await fetch(
+            `${url}?download=${encodeURIComponent(invalid)}`,
+          )
+          expect(response.headers.get("content-disposition")).toBeNull()
+          expect(response.headers.get("x-evil")).toBeNull()
+          await response.arrayBuffer()
+        }
+        expect((await fetch(`${url}missing?download=missing.pdf`)).status).toBe(
+          404,
+        )
+      },
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

@@ -933,8 +933,13 @@ describe("native Gemini provider", () => {
     expect(messages).toEqual(original)
   })
 
-  it("bounds the entire PDF request at 100 MB of serialized UTF-8 before fetch", async () => {
-    const model = "gemini-3-flash-preview"
+  it.each([
+    { model: "gemini-3-flash-preview", source: "tool" },
+    { model: "gemini-2.5-pro", source: "user" },
+  ] as const)("bounds the entire $source PDF request to $model at 100 MB of serialized UTF-8 before fetch", async ({
+    model,
+    source,
+  }) => {
     const document = {
       type: "document" as const,
       name: "report.pdf",
@@ -950,15 +955,22 @@ describe("native Gemini provider", () => {
         instructionProfileId: "default",
       },
       system: [{ id: "system", revision: "1", text: "a" }],
-      messages: [
-        {
-          role: "assistant",
-          content: [
-            { type: "tool_call", id: "call", name: "inspect", input: {} },
-          ],
-        },
-        { role: "tool", toolCallId: "call", content: [document, document] },
-      ],
+      messages:
+        source === "user"
+          ? [{ role: "user", content: [document, document] }]
+          : [
+              {
+                role: "assistant",
+                content: [
+                  { type: "tool_call", id: "call", name: "inspect", input: {} },
+                ],
+              },
+              {
+                role: "tool",
+                toolCallId: "call",
+                content: [document, document],
+              },
+            ],
     })
     const lengths: number[] = []
     const stream = createGeminiProvider({
@@ -984,7 +996,7 @@ describe("native Gemini provider", () => {
     const boundary = {
       ...base,
       messages: base.messages.map((message) =>
-        message.role !== "tool"
+        message.role !== "tool" && message.role !== "user"
           ? message
           : {
               ...message,
@@ -1015,7 +1027,7 @@ describe("native Gemini provider", () => {
           stage: "request_build",
           kind: "invalid_request",
           message:
-            "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages or smaller tool results.",
+            "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages, smaller attachments or less request content.",
         },
       },
     ])

@@ -1,3 +1,4 @@
+import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   ChevronDown,
   FileText,
@@ -12,13 +13,13 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import type { SessionCacheExpiry } from "../../core/session-cache-expiry.ts"
-import type { ImageAttachment } from "../../kernel/events.ts"
+import type { UserAttachment } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type {
   GitPullRequestsResponse,
   GitStatusResponse,
 } from "../../server/workspace.ts"
-import { imageAttachmentUrl } from "../composer-attachments.ts"
+import { attachmentUrl } from "../composer-attachments.ts"
 import { useSessionAgents } from "../hooks/use-session-agents.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
@@ -90,12 +91,12 @@ function SummaryPopover({
     new URL(apiBase, window.location.href).hostname,
   )
   const sources = useMemo(() => {
-    const images = new Map<string, ImageAttachment>()
+    const images = new Map<string, UserAttachment>()
     const excerpts = new Map<string, ContextExcerpt>()
     for (const entry of entries) {
       if (entry.kind !== "user_input") continue
       for (const attachment of entry.parts.filter(
-        (part) => part.type === "image",
+        (part) => part.type !== "text",
       ))
         images.set(
           `${attachment.file.rolloutId}:${attachment.file.path}`,
@@ -530,11 +531,18 @@ function SummaryPopover({
                           <span>{attachment.name}</span>
                           <ChevronDown size={12} aria-hidden="true" />
                         </summary>
-                        <img
-                          src={imageAttachmentUrl(attachment, apiBase)}
-                          alt={attachment.name}
-                          loading="lazy"
-                        />
+                        {attachment.mediaType === "application/pdf" ? (
+                          <PdfAttachmentCard
+                            attachment={attachment}
+                            apiBase={apiBase}
+                          />
+                        ) : (
+                          <img
+                            src={attachmentUrl(attachment, apiBase)}
+                            alt={attachment.name}
+                            loading="lazy"
+                          />
+                        )}
                       </details>
                     ))}
                   </div>

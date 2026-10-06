@@ -24,7 +24,7 @@ describe("server control message handler", () => {
     })
 
     onMessage({
-      type: "discard_draft_images",
+      type: "discard_draft_attachments",
       requestId: "request_1",
       attachments: [],
     })

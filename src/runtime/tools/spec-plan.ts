@@ -4,7 +4,9 @@ import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   GEMINI_INLINE_REQUEST_MAX_BYTES,
   supportsGeminiToolPdf,
+  supportsGeminiUserPdf,
   supportsOpenAIChatToolPdf,
+  supportsOpenAIChatUserPdf,
 } from "../native-pdf-capabilities.ts"
 import {
   type ResolvedStepConfiguration,
@@ -31,6 +33,7 @@ export type StepContext = Readonly<{
   toolRouter: ToolRouter
   toolWireProtocol: ToolWireProtocol
   documentReading: DocumentReadingCapabilities
+  userDocumentReading: DocumentReadingCapabilities
 }>
 
 export function captureStepContext(
@@ -81,12 +84,23 @@ export function captureStepContext(
     input.nativePdf === true &&
     nativePdfModel &&
     model.inputModalities.includes("image")
+  const nativeUserPdfModel =
+    input.wireApi === "openai_chat_completions"
+      ? supportsOpenAIChatUserPdf(model.model)
+      : input.wireApi === "gemini_generate_content"
+        ? supportsGeminiUserPdf(model.model)
+        : true
+  const nativeUserPdf =
+    input.nativePdf === true &&
+    nativeUserPdfModel &&
+    model.inputModalities.includes("image")
   const documentReading: DocumentReadingCapabilities = Object.freeze({
     nativePdf,
     // These are first-party PDF transport limits, not model context estimates.
     // https://developers.openai.com/api/docs/guides/file-inputs
     // https://ai.google.dev/gemini-api/docs/generate-content/document-processing
-    ...(nativePdf && input.wireApi === "openai_chat_completions"
+    ...((nativePdf || nativeUserPdf) &&
+    input.wireApi === "openai_chat_completions"
       ? {
           nativePdfLimits: {
             maxFileBytes: 50_000_000,
@@ -94,7 +108,8 @@ export function captureStepContext(
             maxRequestBytes: 50_000_000,
           },
         }
-      : nativePdf && input.wireApi === "gemini_generate_content"
+      : (nativePdf || nativeUserPdf) &&
+          input.wireApi === "gemini_generate_content"
         ? {
             nativePdfLimits: {
               maxFileBytes: 50_000_000,
@@ -136,6 +151,10 @@ export function captureStepContext(
     }),
     toolWireProtocol,
     documentReading,
+    userDocumentReading: Object.freeze({
+      ...documentReading,
+      nativePdf: nativeUserPdf,
+    }),
   }
 }
 

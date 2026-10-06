@@ -6,18 +6,26 @@ type YakitoriDesktopBridge = {
   writeClipboardText(text: string): Promise<void>
   browser: import("../desktop/workspace-browser-types.ts").WorkspaceBrowserBridge
   pickProjectFolder(): Promise<string | null>
-  pickImages(): Promise<{ readonly selectionId: string } | undefined>
-  importPickedImages(input: {
-    readonly sessionId?: string
-    readonly selectionId: string
-  }): Promise<readonly import("../kernel/events.ts").ImageAttachment[]>
-  discardPickedImages(input: { readonly selectionId: string }): Promise<void>
-  importImageFiles(input: {
-    readonly sessionId?: string
-    readonly files: readonly File[]
-  }): Promise<readonly import("../kernel/events.ts").ImageAttachment[]>
-  discardDraftImages(
-    input: readonly import("../kernel/events.ts").ImageAttachment[],
+  pickAttachments(): Promise<Readonly<{ selectionId: string }> | undefined>
+  importPickedAttachments(
+    input: Readonly<{
+      sessionId?: string
+      selectionId: string
+    }>,
+  ): Promise<readonly import("../kernel/events.ts").UserAttachment[]>
+  discardPickedAttachments(
+    input: Readonly<{
+      selectionId: string
+    }>,
+  ): Promise<void>
+  importAttachmentFiles(
+    input: Readonly<{
+      sessionId?: string
+      files: readonly File[]
+    }>,
+  ): Promise<readonly import("../kernel/events.ts").UserAttachment[]>
+  discardDraftAttachments(
+    input: readonly import("../kernel/events.ts").UserAttachment[],
   ): Promise<void>
   openFile(input: {
     readonly path: string

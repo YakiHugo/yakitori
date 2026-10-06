@@ -17,7 +17,7 @@ export type DocumentReadingCapabilities = Readonly<{
   }>
 }>
 
-// One budget belongs to one projected request, including every tool result.
+// One budget belongs to one projected request, including user attachments and every tool result.
 // Failed reservations consume nothing; retries and model switches get a fresh one.
 export function createNativePdfBudget(
   limits: DocumentReadingCapabilities["nativePdfLimits"],

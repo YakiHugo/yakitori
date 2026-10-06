@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { type ChildProcess, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import {
   isServerControlResponse,
@@ -41,6 +41,8 @@ export function spawnServerProcess(
     ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
     env: input.env ?? process.env,
     stdio: ["ignore", "pipe", "pipe", "ipc"],
+    // Attachment byte commands must preserve Uint8Array across the sidecar IPC.
+    serialization: "advanced",
   })
 
   const pending = new Map<

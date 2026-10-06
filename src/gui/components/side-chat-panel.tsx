@@ -1,6 +1,7 @@
+import { PdfAttachmentCard, openPdfAttachment } from "./pdf-attachment.tsx"
 import { PromptEditor } from "./prompt-editor.tsx"
-import { inputContentImages } from "../../kernel/input-content.ts"
-import { inputImageOwnership } from "../input-image-ownership.ts"
+import { inputContentAttachments } from "../../kernel/input-content.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { sameInputParts, trimInputParts } from "../input-parts.ts"
 import { LoaderCircle, MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -12,8 +13,8 @@ import type {
 } from "../../kernel/events.ts"
 import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import {
-  discardDraftImages,
-  imageAttachmentUrl,
+  discardDraftAttachments,
+  attachmentUrl,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
@@ -29,7 +30,7 @@ import {
 } from "../store/workspace-store.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
 import {
-  type ComposerImageImport,
+  type ComposerAttachmentImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
@@ -53,7 +54,7 @@ export function SideChatPanel({
   const [pending, setPending] = useState(false)
   const [expiredByServer, setExpiredByServer] = useState(false)
   const [, setExpiryTick] = useState(0)
-  const [readingImages, setReadingImages] = useState(false)
+  const [readingAttachments, setReadingAttachments] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [previewImage, setPreviewImage] = useState<ImageAttachment>()
   const [resolvingPermissions, setResolvingPermissions] = useState<
@@ -122,14 +123,18 @@ export function SideChatPanel({
           (message) => message.role === "user" && message.id === sent.requestId,
         )
       if (sent && accepted?.role === "user") {
-        inputImageOwnership.promote(apiBase, sent.content, accepted.content)
+        inputAttachmentOwnership.promote(
+          apiBase,
+          sent.content,
+          accepted.content,
+        )
         const current = useWorkspaceStore
           .getState()
           .tabs.find((candidate) => candidate.id === tab.id)
         if (current?.kind === "chat")
           updateDraft(
             tab.id,
-            inputImageOwnership.resolveParts(apiBase, current.draft),
+            inputAttachmentOwnership.resolveParts(apiBase, current.draft),
             current.excerpts,
           )
       }
@@ -259,9 +264,12 @@ export function SideChatPanel({
     })
   }, [ensureChat])
 
-  const importImages: ComposerImageImport = async (prepare, validate) => {
-    if (readingImages || sending.current || expired) return
-    setReadingImages(true)
+  const importAttachments: ComposerAttachmentImport = async (
+    prepare,
+    validate,
+  ) => {
+    if (readingAttachments || sending.current || expired) return
+    setReadingAttachments(true)
     setAttachmentError(undefined)
     let release: (() => Promise<void>) | undefined
     try {
@@ -281,7 +289,7 @@ export function SideChatPanel({
         expiredByServer ||
         isExpired(chatRef.current ?? current)
       ) {
-        await discardDraftImages(added)
+        await discardDraftAttachments(added)
         return
       }
       return added
@@ -299,7 +307,7 @@ export function SideChatPanel({
             cause instanceof Error ? cause.message : String(cause),
           )
       }
-      if (!disposed.current) setReadingImages(false)
+      if (!disposed.current) setReadingAttachments(false)
     }
   }
 
@@ -363,7 +371,11 @@ export function SideChatPanel({
       )
       if (accepted?.role !== "user")
         throw new Error("Side chat acknowledgement omitted its accepted input.")
-      inputImageOwnership.promote(apiBase, request.content, accepted.content)
+      inputAttachmentOwnership.promote(
+        apiBase,
+        request.content,
+        accepted.content,
+      )
       applySnapshot(response)
       const latest = latestTab()
       // An ACK only consumes the exact draft that was submitted. Selection
@@ -371,8 +383,8 @@ export function SideChatPanel({
       if (
         latest !== undefined &&
         sameInputParts(
-          inputImageOwnership.resolveParts(apiBase, latest.draft),
-          inputImageOwnership.resolveParts(apiBase, originalDraft),
+          inputAttachmentOwnership.resolveParts(apiBase, latest.draft),
+          inputAttachmentOwnership.resolveParts(apiBase, originalDraft),
         ) &&
         latest.excerpts === originalExcerpts
       )
@@ -380,7 +392,7 @@ export function SideChatPanel({
       else if (latest)
         updateDraft(
           tab.id,
-          inputImageOwnership.resolveParts(apiBase, latest.draft),
+          inputAttachmentOwnership.resolveParts(apiBase, latest.draft),
           latest.excerpts,
         )
       attempt.current = undefined
@@ -501,6 +513,13 @@ export function SideChatPanel({
                         className="markdown side-chat-user-bubble"
                         workspaceRoot={chat.cwd}
                       />
+                    ) : part.type === "document" ? (
+                      <PdfAttachmentCard
+                        // biome-ignore lint/suspicious/noArrayIndexKey: Part slots distinguish repeated references to the same asset.
+                        key={`${message.id}:${index}`}
+                        attachment={part}
+                        apiBase={apiBase}
+                      />
                     ) : (
                       <button
                         type="button"
@@ -511,7 +530,7 @@ export function SideChatPanel({
                         className="cursor-zoom-in"
                       >
                         <img
-                          src={imageAttachmentUrl(part, apiBase)}
+                          src={attachmentUrl(part, apiBase)}
                           alt={part.name}
                           className="max-h-40 rounded-lg object-contain"
                         />
@@ -570,16 +589,30 @@ export function SideChatPanel({
               disabled
               onChange={() => {}}
               onPreviewImage={setPreviewImage}
+              onOpenDocument={(document) => {
+                void openPdfAttachment(document, apiBase).catch(
+                  (error: unknown) =>
+                    setAttachmentError(
+                      error instanceof Error
+                        ? error.message
+                        : "Could not open PDF.",
+                    ),
+                )
+              }}
             />
           ) : null}
           {tab.excerpts.length > 0 ||
-          inputContentImages({ kind: "parts", parts: tab.draft }).length > 0 ? (
+          inputContentAttachments({ kind: "parts", parts: tab.draft }).length >
+            0 ? (
             <p>
               {tab.excerpts.length} context excerpt
               {tab.excerpts.length === 1 ? "" : "s"} and{" "}
-              {inputContentImages({ kind: "parts", parts: tab.draft }).length}{" "}
-              image attachment
-              {inputContentImages({ kind: "parts", parts: tab.draft })
+              {
+                inputContentAttachments({ kind: "parts", parts: tab.draft })
+                  .length
+              }{" "}
+              attachment
+              {inputContentAttachments({ kind: "parts", parts: tab.draft })
                 .length === 1
                 ? ""
                 : "s"}{" "}
@@ -653,8 +686,8 @@ export function SideChatPanel({
           }
           onSubmit={(parts) => void send(parts)}
           onCancel={() => void cancel()}
-          importImages={importImages}
-          readingImages={readingImages}
+          importAttachments={importAttachments}
+          readingAttachments={readingAttachments}
           attachmentError={attachmentError}
           onAttachmentError={setAttachmentError}
           label="Message side chat"
@@ -688,7 +721,7 @@ export function SideChatPanel({
       )}
       {previewImage ? (
         <ImageLightbox
-          src={imageAttachmentUrl(previewImage, apiBase)}
+          src={attachmentUrl(previewImage, apiBase)}
           name={previewImage.name}
           onClose={() => setPreviewImage(undefined)}
         />
