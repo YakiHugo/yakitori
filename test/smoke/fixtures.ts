@@ -571,7 +571,7 @@ export async function runProviderFlow(
       {
         type: "image_url",
         image_url: {
-          url: expect.stringMatching(/^data:image\/png;base64,/),
+          url: expect.stringMatching(/^data:image\/jpeg;base64,/),
           detail: "high",
         },
       },
