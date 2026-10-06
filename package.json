@@ -23,6 +23,8 @@
     "install:main": "node scripts/install-main-app.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:contracts": "vitest run --project=contracts",
+    "test:ui": "vitest run --project=ui",
     "test:browser": "playwright test --project=browser",
     "test:desktop-smoke": "playwright test --project=desktop",
     "test:watch": "vitest",

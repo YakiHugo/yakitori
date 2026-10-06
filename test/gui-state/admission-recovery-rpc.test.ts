@@ -1,5 +1,4 @@
-// @vitest-environment happy-dom
-
+import "./setup-store-environment.ts"
 import { afterEach, expect, it, vi } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createExecutionViewState } from "../../src/gui/execution-view.ts"
@@ -19,8 +18,8 @@ import {
   initializeConnection,
   openTestConnection,
 } from "../server/rpc/testkit.ts"
-import { FakeRpcClient } from "./fake-rpc-client.ts"
-import { inputParts } from "./input-fixtures.ts"
+import { FakeRpcClient } from "../gui/fake-rpc-client.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,

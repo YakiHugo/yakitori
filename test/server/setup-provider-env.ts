@@ -1,17 +1,20 @@
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { afterAll } from "vitest"
 
-// Server tests build real applications, and the application discovers local
-// CLI logins and provider API keys from the environment. Point every
-// credential source at a missing path so tests never touch the developer's
-// real accounts — the startup catalog refresh would otherwise hit the network
-// and write cache files into the test's temporary rootDir. Tests that need
-// credentials set these variables explicitly themselves.
-process.env.CODEX_HOME = join(tmpdir(), "yakitori-test-missing-codex-home")
-process.env.GROK_CREDENTIALS = join(
-  tmpdir(),
-  "yakitori-test-missing-grok-auth.json",
-)
+// Application/sidecar integration tests discover accounts and create credential
+// locks even without signing in. Isolate the actual home too, so a developer's
+// ChatGPT account is never read or written and child processes inherit the same
+// boundary. A unique directory per test file also prevents cross-worker state.
+const home = mkdtempSync(join(tmpdir(), "yakitori-test-home-"))
+process.env.HOME = home
+process.env.USERPROFILE = home
+process.env.XDG_CONFIG_HOME = join(home, ".config")
+process.env.CODEX_HOME = join(home, ".codex")
+process.env.GROK_CREDENTIALS = join(home, ".grok", "auth.json")
+afterAll(() => rmSync(home, { recursive: true, force: true }))
+
 delete process.env.XAI_API_KEY
 delete process.env.KIMI_API_KEY
 delete process.env.ANTHROPIC_API_KEY

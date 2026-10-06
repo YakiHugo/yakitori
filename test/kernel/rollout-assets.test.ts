@@ -297,30 +297,42 @@ describe("rollout assets", () => {
     ).rejects.toThrow("not a draft")
   })
 
-  it("rejects a reused request owner when a new draft has different bytes", async () => {
+  it.each([
+    "promote",
+    "copy",
+  ] as const)("rejects changed bytes under an existing %s owner without damaging its snapshot", async (operation) => {
     const root = await makeRoot()
-    const sessionId = createSessionId()
-    const files = await createTestRolloutAssets(root, sessionId)
+    const source = "rollout_source"
+    const target = operation === "promote" ? source : "rollout_target"
+    const files = await createTestRolloutAssets(root, source, target)
     const original = pngBytes()
-    const replacement = Buffer.from(original)
-    replacement[12] = 1
-
-    const firstDraft = await files.importAttachmentBytes(
-      sessionId,
-      "draft_first",
-      [{ name: "screen.png", data: original }],
+    const changed = Buffer.from(original)
+    changed[12] = 1
+    const firstDraft = await files.importAttachmentBytes(source, "first", [
+      { name: "screen.png", data: original },
+    ])
+    const replacement = await files.importAttachmentBytes(
+      source,
+      "replacement",
+      [{ name: "screen.png", data: changed }],
     )
-    await files.promoteAttachments(sessionId, "request_same", firstDraft)
+    const prepare =
+      operation === "promote" ? files.promoteAttachments : files.copyAttachments
+    const first = await prepare(target, "same_owner", firstDraft)
     await files.discardDraftAttachments(firstDraft)
-    const replacementDraft = await files.importAttachmentBytes(
-      sessionId,
-      "draft_replacement",
-      [{ name: "screen.png", data: replacement }],
-    )
 
-    await expect(
-      files.promoteAttachments(sessionId, "request_same", replacementDraft),
-    ).rejects.toThrow("different attachment")
+    await expect(prepare(target, "same_owner", replacement)).rejects.toThrow(
+      "different attachment",
+    )
+    const attachment = first.attachments[0]
+    assert(attachment !== undefined)
+    expect(attachment.file).toEqual({
+      rolloutId: target,
+      path: "attachments/requests/same_owner/1.png",
+    })
+    expect(await files.read(attachment.file)).toEqual(original)
+    assert(replacement[0] !== undefined)
+    expect(await files.read(replacement[0].file)).toEqual(changed)
   })
 
   it("gives a concurrent promotion exclusive rollback ownership", async () => {
@@ -356,114 +368,87 @@ describe("rollout assets", () => {
     if (attachment === undefined) throw new Error("missing promoted image")
     const stored = await files.read(attachment.file)
     expect(stored.equals(firstBytes) || stored.equals(secondBytes)).toBe(true)
+    await winner.value.rollback()
+    await expect(files.read(attachment.file)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    for (const draft of [...firstDraft, ...secondDraft]) {
+      expect((await files.read(draft.file)).byteLength).toBe(
+        firstBytes.byteLength,
+      )
+    }
   })
 
-  it("rolls back files copied before a later attachment fails", async () => {
+  it.each([
+    "promote",
+    "copy",
+  ] as const)("rolls back only newly created files when a retried %s batch fails", async (operation) => {
     const root = await makeRoot()
-    const sourceSessionId = createSessionId()
-    const targetSessionId = createSessionId()
-    const files = await createTestRolloutAssets(
-      root,
-      sourceSessionId,
-      targetSessionId,
-    )
-    const [source] = await files.importAttachmentBytes(
-      sourceSessionId,
-      "draft_source",
-      [{ name: "screen.png", data: pngBytes() }],
-    )
-    if (source === undefined) throw new Error("missing source attachment")
+    const source = "rollout_source"
+    const target = operation === "promote" ? source : "rollout_target"
+    const files = await createTestRolloutAssets(root, source, target)
+    const drafts = await files.importAttachmentBytes(source, "draft", [
+      { name: "first.png", data: pngBytes() },
+      { name: "second.png", data: pngBytes() },
+    ])
+    const firstDraft = drafts[0]
+    assert(firstDraft !== undefined)
+    const prepare =
+      operation === "promote" ? files.promoteAttachments : files.copyAttachments
+    const first = await prepare(target, "retry", [firstDraft])
+    const unrelated = await prepare(target, "other_owner", [firstDraft])
+    const retry = await prepare(target, "retry", [firstDraft])
+    await retry.rollback()
     const missing = {
-      ...source,
-      file: {
-        rolloutId: sourceSessionId,
-        path: "attachments/requests/missing/2.png",
-      },
+      ...firstDraft,
+      file: { rolloutId: source, path: "attachments/staging/missing/3.png" },
     }
 
     await expect(
-      files.copyAttachments(targetSessionId, "request_copy", [source, missing]),
+      prepare(target, "retry", [...drafts, missing]),
     ).rejects.toMatchObject({ code: "ENOENT" })
-    await expect(
-      readFile(
+    expect(
+      await readdir(
         join(
           root,
           "rollouts",
-          targetSessionId,
+          target,
           "files",
           "attachments",
           "requests",
-          "request_copy",
-          "1.png",
+          "retry",
         ),
       ),
-    ).rejects.toMatchObject({ code: "ENOENT" })
+    ).toEqual(["1.png"])
+    for (const attachment of [
+      ...first.attachments,
+      ...unrelated.attachments,
+      ...drafts,
+    ]) {
+      expect(await files.read(attachment.file)).toEqual(pngBytes())
+    }
   })
 
-  it("keeps existing request images when a retried copy is rolled back", async () => {
+  it("rejects promotion from another rollout before creating a request snapshot", async () => {
     const root = await makeRoot()
-    const sourceSessionId = createSessionId()
-    const targetSessionId = createSessionId()
     const files = await createTestRolloutAssets(
       root,
-      sourceSessionId,
-      targetSessionId,
+      "rollout_source",
+      "rollout_other",
     )
-    const [source] = await files.importAttachmentBytes(
-      sourceSessionId,
+    const drafts = await files.importAttachmentBytes(
+      "rollout_source",
       "draft",
       [{ name: "screen.png", data: pngBytes() }],
     )
-    if (source === undefined) throw new Error("missing source attachment")
-
-    const first = await files.copyAttachments(targetSessionId, "retry", [
-      source,
-    ])
-    const retry = await files.copyAttachments(targetSessionId, "retry", [
-      source,
-    ])
-    await retry.rollback()
-    if (first.attachments[0] === undefined)
-      throw new Error("missing copied attachment")
-    await expect(files.read(first.attachments[0].file)).resolves.toEqual(
-      pngBytes(),
-    )
-  })
-
-  it("rejects a reused copy owner when the source image has different bytes", async () => {
-    const root = await makeRoot()
-    const sourceRolloutId = createSessionId()
-    const targetRolloutId = createSessionId()
-    const files = await createTestRolloutAssets(
-      root,
-      sourceRolloutId,
-      targetRolloutId,
-    )
-    const original = pngBytes()
-    const replacement = Buffer.from(original)
-    replacement[12] = 1
-    const firstSource = await files.importAttachmentBytes(
-      sourceRolloutId,
-      "first_source",
-      [{ name: "screen.png", data: original }],
-    )
-    const replacementSource = await files.importAttachmentBytes(
-      sourceRolloutId,
-      "replacement_source",
-      [{ name: "screen.png", data: replacement }],
-    )
-    const first = await files.copyAttachments(
-      targetRolloutId,
-      "request_same",
-      firstSource,
-    )
-
     await expect(
-      files.copyAttachments(targetRolloutId, "request_same", replacementSource),
-    ).rejects.toThrow("A different attachment already exists for this request.")
-    const copied = first.attachments[0]
-    if (copied === undefined) throw new Error("missing original copy")
-    await expect(files.read(copied.file)).resolves.toEqual(original)
+      files.promoteAttachments("rollout_other", "request", drafts),
+    ).rejects.toThrow("not a draft owned by this rollout")
+    await expect(
+      stat(join(root, "rollouts", "rollout_other", "files")),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+    assert(drafts[0] !== undefined)
+    expect(await files.read(drafts[0].file)).toEqual(pngBytes())
   })
 
   it("imports a native path as a snapshot and discards it on request", async () => {
@@ -479,6 +464,7 @@ describe("rollout assets", () => {
       [sourcePath],
     )
     if (attachment === undefined) throw new Error("missing imported attachment")
+    await writeFile(sourcePath, "source changed after selection")
     await expect(files.read(attachment.file)).resolves.toEqual(pngBytes())
 
     await files.discardDraftAttachments([attachment])

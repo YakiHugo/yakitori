@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { setImmediate as nextTurn } from "node:timers/promises"
 import { afterEach, expect, it, vi } from "vitest"
 import { deferred } from "./rpc/testkit.ts"
 import {
@@ -36,6 +37,7 @@ async function loginFixture() {
   )
   vi.stubEnv("PATH", directory)
   let available = false
+  const importStarted = deferred<void>()
   const completed = vi.fn(async () => {
     available = true
   })
@@ -43,10 +45,13 @@ async function loginFixture() {
     readAvailability: async () => ({ codex: available, grok: false }),
     refresh: async () => {},
     importAccount: completed,
-    loginCompleted: completed,
+    loginCompleted: () => {
+      importStarted.resolve()
+      return completed()
+    },
   })
   connections.push(service)
-  return { service, completed, gate, log }
+  return { service, completed, importStarted, gate, log }
 }
 
 it("imports the selected subscription and refuses to report success without an available account", async () => {
@@ -86,9 +91,12 @@ it("waits for a file import during shutdown and leaves its failure with the requ
   const closing = service.close().then(() => {
     closed = true
   })
-  await Promise.resolve()
-  expect(closed).toBe(false)
-  rejectImport(new Error("rejected by vendor"))
+  try {
+    await nextTurn()
+    expect(closed).toBe(false)
+  } finally {
+    rejectImport(new Error("rejected by vendor"))
+  }
   await failure
   await closing
   expect(closed).toBe(true)
@@ -98,38 +106,33 @@ it("starts one CLI login, exposes its authorization URL and imports completion",
   const { service, completed, gate, log } = await loginFixture()
   await service.login("codex")
   await service.login("codex")
-  await vi.waitFor(
-    async () =>
-      expect((await service.read())[0]).toMatchObject({
-        available: false,
-        login: {
-          state: "running",
-          url: "https://auth.openai.com/authorize?state=test",
-        },
-      }),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[0])
+    .toMatchObject({
+      available: false,
+      login: {
+        state: "running",
+        url: "https://auth.openai.com/authorize?state=test",
+      },
+    })
   expect(await readFile(log, "utf8")).toBe("login\n")
   expect(completed).not.toHaveBeenCalled()
   await writeFile(gate, "done")
-  await vi.waitFor(
-    async () =>
-      expect((await service.read())[0]).toMatchObject({
-        available: true,
-        login: { state: "succeeded" },
-      }),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[0])
+    .toMatchObject({
+      available: true,
+      login: { state: "succeeded" },
+    })
   expect(completed).toHaveBeenCalledOnce()
 })
 
 it("stops an owned login process when the application closes", async () => {
   const { service, completed } = await loginFixture()
   await service.login("codex")
-  await vi.waitFor(
-    async () => expect((await service.read())[0]?.login?.url).toBeDefined(),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.url)
+    .toBe("https://auth.openai.com/authorize?state=test")
   await service.close()
   expect((await service.read())[0]?.login?.state).toBe("failed")
   expect(completed).not.toHaveBeenCalled()
@@ -140,70 +143,72 @@ it("reports a CLI that exits successfully without producing a usable account", a
   const { service, completed, gate } = await loginFixture()
   completed.mockImplementation(async () => {})
   await service.login("codex")
-  await vi.waitFor(async () =>
-    expect((await service.read())[0]?.login?.url).toBeDefined(),
-  )
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.url)
+    .toBe("https://auth.openai.com/authorize?state=test")
   await writeFile(gate, "done")
-  await vi.waitFor(async () =>
-    expect((await service.read())[0]).toMatchObject({
+  await expect
+    .poll(async () => (await service.read())[0])
+    .toMatchObject({
       available: false,
       login: {
         state: "failed",
         message:
           "Sign-in finished without a usable account. Try signing in again.",
       },
-    }),
-  )
+    })
 })
 
 it("cancels a pending login without importing it and allows a new attempt", async () => {
   const { service, completed, log } = await loginFixture()
   await service.login("codex")
-  await vi.waitFor(
-    async () => expect((await service.read())[0]?.login?.url).toBeDefined(),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.url)
+    .toBe("https://auth.openai.com/authorize?state=test")
   expect((await service.cancel("codex"))[0]?.login).toBeUndefined()
   expect(completed).not.toHaveBeenCalled()
   await service.login("codex")
-  await vi.waitFor(
-    async () => expect((await service.read())[0]?.login?.url).toBeDefined(),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.url)
+    .toBe("https://auth.openai.com/authorize?state=test")
   expect(await readFile(log, "utf8")).toBe("login\nlogin\n")
 })
 
 it("waits for login persistence before a canceled sign-in can be replaced", async () => {
-  const { service, completed, gate } = await loginFixture()
+  const { service, completed, importStarted, gate } = await loginFixture()
   const persistence = deferred<void>()
   completed.mockImplementation(() => persistence.promise)
   await service.login("codex")
   await writeFile(gate, "done")
-  await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce())
+  // Wait for the process-exit callback itself, not a one-second mock poll.
+  await importStarted.promise
+  expect(completed).toHaveBeenCalledOnce()
   let canceled = false
   const canceling = service.cancel("codex").then((result) => {
     canceled = true
     return result
   })
-  await Promise.resolve()
-  expect(canceled).toBe(false)
-  persistence.resolve()
+  try {
+    // Let a wrongly unblocked cancel settle before checking the barrier.
+    await nextTurn()
+    expect(canceled).toBe(false)
+  } finally {
+    persistence.resolve()
+  }
   expect((await canceling)[0]?.login).toBeUndefined()
 })
 
 it("reports a missing CLI without claiming that the subscription connected", async () => {
   const { service, completed } = await loginFixture()
   await service.login("grok")
-  await vi.waitFor(
-    async () =>
-      expect((await service.read())[1]).toMatchObject({
-        available: false,
-        login: {
-          state: "failed",
-          message: "Install the grok CLI first, then try signing in again.",
-        },
-      }),
-    { timeout: 5000 },
-  )
+  await expect
+    .poll(async () => (await service.read())[1])
+    .toMatchObject({
+      available: false,
+      login: {
+        state: "failed",
+        message: "Install the grok CLI first, then try signing in again.",
+      },
+    })
   expect(completed).not.toHaveBeenCalled()
 })

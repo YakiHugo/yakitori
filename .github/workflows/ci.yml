@@ -66,8 +66,13 @@ jobs:
           retention-days: 7
 
   tests:
+    name: Tests (${{ matrix.layer }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [contracts, ui]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,15 +88,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run the full test suite
-        run: pnpm test --reporter=default --reporter=junit --outputFile.junit=test-results/vitest.xml
+      - name: Run the ${{ matrix.layer }} test layer
+        run: pnpm test:${{ matrix.layer }} --reporter=default --reporter=junit --outputFile.junit=test-results/vitest-${{ matrix.layer }}.xml
 
       - name: Upload test failure diagnostics
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: test-failure-diagnostics
+          name: test-${{ matrix.layer }}-failure-diagnostics
           path: test-results
           if-no-files-found: ignore
           retention-days: 7

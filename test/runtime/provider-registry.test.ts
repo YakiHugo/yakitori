@@ -80,8 +80,10 @@ describe("provider registry", () => {
   it("routes requests by their resolved target", async () => {
     const seen: string[] = []
     const registry = createProviderRegistry({
-      anthropic: (request) => responseStream(seen, request.target.model),
-      openai: (request) => responseStream(seen, request.target.model),
+      anthropic: (request) =>
+        responseStream(seen, `anthropic:${request.target.model}`),
+      openai: (request) =>
+        responseStream(seen, `openai:${request.target.model}`),
     })
 
     for await (const _event of registry.stream(request("anthropic", "claude")))
@@ -90,7 +92,7 @@ describe("provider registry", () => {
       void _event
 
     expect(registry.providers).toEqual(["anthropic", "openai"])
-    expect(seen).toEqual(["claude", "gpt"])
+    expect(seen).toEqual(["anthropic:claude", "openai:gpt"])
   })
 
   it("rejects an unregistered provider before transport", () => {

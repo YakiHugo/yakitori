@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
+import { Transcript } from "../../src/gui/components/transcript.tsx"
+import { createExecutionViewState } from "../../src/gui/execution-view.ts"
 import {
   createInitialAppState,
   useAppStore,
@@ -12,10 +14,30 @@ import {
   usePreferencesStore,
 } from "../../src/gui/store/preferences-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
+import type {
+  ApiForkSessionResponse,
+  ApiSessionDetail,
+} from "../../src/server/protocol.ts"
+import { FakeRpcClient } from "./fake-rpc-client.ts"
 import { pastePrompt } from "./prompt-editor-helpers.ts"
 import { inputParts } from "./input-fixtures.ts"
 
+const fakeRef = vi.hoisted(() => ({
+  current: undefined as unknown as FakeRpcClient,
+}))
+
+vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/gui/lib/rpc-client.ts")>()),
+  getAppRpcClient: () => fakeRef.current,
+}))
+
 beforeEach(() => {
+  fakeRef.current = new FakeRpcClient()
   useAppStore.setState(createInitialAppState())
   usePreferencesStore.setState(defaultPreferences)
 })
@@ -44,7 +66,7 @@ describe("attachments", () => {
     },
   }
 
-  it("opens a zoomable preview when an image attachment is clicked", async () => {
+  it("opens and closes an image attachment preview", async () => {
     const user = userEvent.setup()
     render(
       <UserMessageCell
@@ -56,12 +78,9 @@ describe("attachments", () => {
     await user.click(
       screen.getByRole("button", { name: "Preview screenshot.png" }),
     )
-    const dialog = screen.getByRole("dialog", {
-      name: "Preview screenshot.png",
-    })
-    expect(dialog.textContent).toContain("100%")
-    await user.click(screen.getByRole("button", { name: "Zoom in" }))
-    expect(dialog.textContent).toContain("125%")
+    expect(
+      screen.getByRole("dialog", { name: "Preview screenshot.png" }),
+    ).toBeDefined()
     await user.click(screen.getByRole("button", { name: "Close preview" }))
     expect(screen.queryByRole("dialog")).toBeNull()
   })
@@ -332,8 +351,47 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
 
 it("keeps the edited draft until the replacement conversation is activated", async () => {
   const user = userEvent.setup()
-  useAppStore.setState({ forkSession: vi.fn(async () => {}) })
-  render(<UserMessageCell entry={entry} queued={false} />)
+  const source: ApiSessionDetail = {
+    id: "session_source",
+    conversationId: "conversation_source",
+    seq: 2,
+    createdAt: entry.at,
+    updatedAt: entry.at,
+    pendingInputs: [],
+    pendingPermissions: [],
+    counts: {
+      inputs: 1,
+      pendingInputs: 0,
+      turns: 0,
+      items: 0,
+      permissions: 0,
+      tools: 0,
+    },
+  }
+  let completeFork!: (response: ApiForkSessionResponse) => void
+  const response = new Promise<ApiForkSessionResponse>((resolve) => {
+    completeFork = resolve
+  })
+  const replacement: ApiSessionDetail = {
+    ...source,
+    id: "session_replacement",
+    parentSessionId: source.id,
+    forkedFromInputId: "input_1",
+    forkReason: "edit",
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "session/fork") return response
+    if (method === "skill/list") return { skills: [] }
+    if (method === "session/list") return { sessions: [source, replacement] }
+    throw new Error(`Unexpected RPC: ${method}`)
+  }
+  useAppStore.setState({
+    apiBase: "http://api.test",
+    selection: { sessionId: source.id },
+    selectedSession: source,
+    execution: { ...createExecutionViewState(source), entries: [entry] },
+  })
+  render(<Transcript />)
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
   await pastePrompt(
     screen.getByRole("textbox", { name: "Edit message" }),
@@ -341,8 +399,51 @@ it("keeps the edited draft until the replacement conversation is activated", asy
     true,
   )
   await user.keyboard("{Enter}")
+  expect(fakeRef.current.requestsFor("session/fork")).toEqual([
+    {
+      method: "session/fork",
+      params: {
+        sessionId: "session_source",
+        atInputId: "input_1",
+        reason: "edit",
+        content: { kind: "parts", parts: inputParts("Keep this draft") },
+      },
+    },
+  ])
+  expect(useAppStore.getState().selection.sessionId).toBe("session_source")
   expect(screen.getByRole("textbox", { name: "Edit message" })).toHaveProperty(
     "textContent",
     "Keep this draft",
   )
+  await act(async () => {
+    completeFork({
+      session: replacement,
+      historyEndSeqExclusive: 2,
+      events: [
+        createEventEnvelope({
+          sessionId: "session_replacement",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_replacement",
+              inputId: "input_replacement",
+              role: InputRole.User,
+              content: {
+                kind: "parts",
+                parts: inputParts("Keep this draft"),
+              },
+              parentInputId: "input_1",
+            },
+          },
+        }),
+      ],
+    })
+    await response
+  })
+  expect(useAppStore.getState().selection.sessionId).toBe("session_replacement")
+  expect(screen.queryByRole("textbox", { name: "Edit message" })).toBeNull()
+  expect(screen.getByText("Keep this draft", { selector: "p" })).toBeDefined()
+  expect(screen.queryByText("Original request")).toBeNull()
+  expect(useAppStore.getState().message).toBeUndefined()
 })

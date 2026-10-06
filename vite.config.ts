@@ -70,12 +70,37 @@ export default defineConfig(({ mode }) => {
     // directly (the Electron shell appends ?api=<sidecar-url>), so a new
     // route can never silently 404 behind a missing proxy entry.
     test: {
-      include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
       setupFiles: [
         "test/server/setup-provider-env.ts",
         "test/server/setup-network.ts",
-        "test/gui/setup-localstorage.ts",
-        "test/gui/setup-app-store.ts",
+      ],
+      // Every test belongs to exactly one lane. Plain TypeScript contracts
+      // run without a DOM; renderer events/layout stay in the UI lane.
+      projects: [
+        {
+          extends: true,
+          test: {
+            name: "contracts",
+            environment: "node",
+            include: ["test/**/*.test.ts"],
+            exclude: ["test/gui/completion-notifications.test.ts"],
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: "ui",
+            environment: "happy-dom",
+            include: [
+              "test/**/*.test.tsx",
+              "test/gui/completion-notifications.test.ts",
+            ],
+            setupFiles: [
+              "test/gui/setup-localstorage.ts",
+              "test/gui/setup-app-store.ts",
+            ],
+          },
+        },
       ],
       restoreMocks: true,
       // Runtime integration tests poll in-process turn state that finishes

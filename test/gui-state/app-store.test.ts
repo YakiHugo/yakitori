@@ -1,5 +1,4 @@
-// @vitest-environment happy-dom
-
+import "./setup-store-environment.ts"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadGoal } from "../../src/core/goal.ts"
 import {
@@ -26,8 +25,11 @@ import type {
   ApiProviderSummary,
   ApiSessionDetail,
 } from "../../src/server/protocol.ts"
-import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
-import { inputParts } from "./input-fixtures.ts"
+import {
+  FakeRpcClient,
+  type FakeSessionStream,
+} from "../gui/fake-rpc-client.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -95,15 +97,47 @@ function makeProject(id: string, root: string, name = ""): ApiProject {
 }
 
 beforeEach(() => {
-  window.localStorage.clear()
+  globalThis.localStorage.clear()
   inputRecoveryMemory.clear()
   fakeRef.current = new FakeRpcClient()
-  useAppStore.setState(createInitialAppState())
+  useAppStore.setState(
+    { ...useAppStore.getInitialState(), ...createInitialAppState() },
+    true,
+  )
+  useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true)
   useAppStore.setState({ apiBase: "http://api.test" })
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe("app store initialization", () => {
+  it.each([
+    ["https://app.test/nested?view=chat#session", "https://app.test"],
+    [
+      "https://app.test/?api=http%3A%2F%2F127.0.0.1%3A4141",
+      "http://127.0.0.1:4141",
+    ],
+    ["https://app.test/?api=", "https://app.test"],
+  ])("selects its API origin from %s", (href, expected) => {
+    vi.stubGlobal("location", new URL(href))
+    expect(createInitialAppState().apiBase).toBe(expected)
+  })
+
+  it("rehydrates collapsed sections after closing and reopening them", () => {
+    useAppStore.getState().setSectionOpen("work", false)
+    useAppStore.getState().setSectionOpen("personal", false)
+    expect(createInitialAppState().collapsedSections).toEqual({
+      work: true,
+      personal: true,
+    })
+
+    useAppStore.getState().setSectionOpen("work", true)
+    expect(createInitialAppState().collapsedSections).toEqual({
+      personal: true,
+    })
+  })
 })
 
 describe("app store event stream", () => {
@@ -978,7 +1012,7 @@ describe("session drafts", () => {
 
 describe("fork session", () => {
   it("edits through one fork request and selects the new Session", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const activeSession: ApiSessionDetail = {
       ...sessionDetail,
       seq: 3,
@@ -1127,7 +1161,7 @@ describe("project state", () => {
   const projectB = makeProject("project_b", "/p/b")
 
   it("loads skills for a project draft and clears them when no project is selected", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const skill = {
       name: "review",
       description: "Review code",
@@ -1160,7 +1194,7 @@ describe("project state", () => {
   })
 
   it("ignores stale skill responses after the draft project changes", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const first = deferredResponse()
     const second = deferredResponse()
     const skillB = {
@@ -1202,7 +1236,7 @@ describe("project state", () => {
   })
 
   it("loads projects, falls back to the first project, and tolerates failures", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "project/list") {
         return { projects: [projectA, projectB] }
@@ -1223,8 +1257,8 @@ describe("project state", () => {
   })
 
   it("prefers a remembered project that is still registered", async () => {
-    window.localStorage.clear()
-    window.localStorage.setItem("yakitori.project", "project_b")
+    globalThis.localStorage.clear()
+    globalThis.localStorage.setItem("yakitori.project", "project_b")
     fakeRef.current.respond = (method) => {
       if (method === "project/list") {
         return { projects: [projectA, projectB] }
@@ -1238,7 +1272,7 @@ describe("project state", () => {
   })
 
   it("keeps an explicit no-project selection across list refreshes", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "project/list") {
         return { projects: [projectA, projectB] }
@@ -1250,7 +1284,7 @@ describe("project state", () => {
     expect(useAppStore.getState().currentProject).toBe("project_a")
 
     useAppStore.getState().setNewSessionProject(undefined)
-    expect(window.localStorage.getItem("yakitori.project")).toBe("")
+    expect(globalThis.localStorage.getItem("yakitori.project")).toBe("")
 
     await useAppStore.getState().loadProjects()
 
@@ -1307,7 +1341,7 @@ describe("project state", () => {
   })
 
   it("refreshes the project list on project/changed notifications", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     let listed = [projectA]
     fakeRef.current.respond = (method) => {
       if (method === "project/list") return { projects: listed }
@@ -1334,7 +1368,7 @@ describe("project state", () => {
   })
 
   it("expanding a project loads its sessions without changing the new-session target", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "session/list") {
         return { sessions: [] }
@@ -1351,8 +1385,10 @@ describe("project state", () => {
 
     expect(useAppStore.getState().currentProject).toBe("project_a")
     expect(useAppStore.getState().collapsedProjects).toEqual({})
-    expect(window.localStorage.getItem("yakitori.project")).toBeNull()
-    expect(window.localStorage.getItem("yakitori.collapsedProjects")).toBe("{}")
+    expect(globalThis.localStorage.getItem("yakitori.project")).toBeNull()
+    expect(globalThis.localStorage.getItem("yakitori.collapsedProjects")).toBe(
+      "{}",
+    )
     expect(fakeRef.current.requestsFor("session/list")).toEqual([
       {
         method: "session/list",
@@ -1366,9 +1402,9 @@ describe("project state", () => {
     expect(useAppStore.getState().collapsedProjects).toEqual({
       project_b: true,
     })
-    expect(window.localStorage.getItem("yakitori.collapsedProjects")).toContain(
-      "project_b",
-    )
+    expect(
+      globalThis.localStorage.getItem("yakitori.collapsedProjects"),
+    ).toContain("project_b")
     // Collapsing needs no further session load.
     expect(fakeRef.current.requestsFor("session/list")).toHaveLength(1)
   })
@@ -1409,7 +1445,7 @@ describe("project state", () => {
   })
 
   it("opening a project starts a draft and preserves the previous conversation draft", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "project/open") {
         return { project: projectB }
@@ -1553,7 +1589,7 @@ describe("project state", () => {
   })
 
   it("removeProject deletes, reloads, and retargets the current project", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "project/delete") return {}
       if (method === "project/list") return { projects: [projectB] }
@@ -1577,7 +1613,7 @@ describe("project state", () => {
   })
 
   it("createSession sends the current project id and its first root", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const created = createEventEnvelope({
       sessionId: "session_1",
       seq: 1,
@@ -1679,7 +1715,7 @@ describe("model selection", () => {
   })
 
   it("persists selections per session and rehydrates from localStorage", () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
 
     useAppStore.getState().setModelSelection("session_1", {
       provider: "openai",
@@ -1697,13 +1733,16 @@ describe("model selection", () => {
     expect(useAppStore.getState().modelSelections).toEqual(expected)
     expect(
       JSON.parse(
-        window.localStorage.getItem("yakitori.modelSelections") ?? "{}",
+        globalThis.localStorage.getItem("yakitori.modelSelections") ?? "{}",
       ),
     ).toEqual(expected)
     expect(createInitialAppState().modelSelections).toEqual(expected)
 
     useAppStore.getState().setModelSelection("session_1", undefined)
     expect(useAppStore.getState().modelSelections).toEqual({
+      session_2: { provider: "kimi", model: "k2" },
+    })
+    expect(createInitialAppState().modelSelections).toEqual({
       session_2: { provider: "kimi", model: "k2" },
     })
   })
@@ -1934,7 +1973,7 @@ describe("model selection", () => {
   })
 
   it("submits inline skill mentions unchanged and clears the admitted draft", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -1966,7 +2005,7 @@ describe("model selection", () => {
   })
 
   it("keeps inline mentions edited while an admission is in flight", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     let release: (() => void) | undefined
     fakeRef.current.respond = (method, params) => {
       if (method === "userPreference/write") return { userPreference: params }
@@ -2025,7 +2064,7 @@ describe("model selection", () => {
   })
 
   it("sends the saved modelSelection with admitted input", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -2055,7 +2094,7 @@ describe("model selection", () => {
   })
 
   it("steers follow-up input into the active turn", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = (method, params) => {
       if (method === "session/input/steer") {
         const body = params as { requestId: string; expectedTurnId: string }
@@ -2486,7 +2525,7 @@ describe("model selection", () => {
   })
 
   it("falls back to a queued admission when the active turn ended before steering", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const original = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -2568,7 +2607,7 @@ describe("model selection", () => {
   })
 
   it("clears pending admission recovery only when the durable event confirms the write", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       modelSelections: {
@@ -2665,7 +2704,7 @@ describe("model selection", () => {
   })
 
   it("restores a prompt rejected before its durable input event", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       modelSelections: {
@@ -2709,7 +2748,7 @@ describe("model selection", () => {
   })
 
   it("restores an unconfirmed submission and its attachments within the app", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder(() => ({
       kind: "parts",
       parts: inputParts("recover after reload", [promoted]),
@@ -2769,7 +2808,7 @@ describe("model selection", () => {
   })
 
   it("clears an attachment-only draft after admission", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder(() => ({
       kind: "parts",
       parts: inputParts("", [promoted]),
@@ -2854,7 +2893,7 @@ describe("model selection", () => {
   })
 
   it("uses a picker choice immediately for the pill, admission, and user preference", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -2896,7 +2935,7 @@ describe("model selection", () => {
   })
 
   it("restores old session current from its last turn without leaking across sessions", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = () => notFound()
     useAppStore.setState({
       modelSelections: {},
@@ -2953,7 +2992,7 @@ describe("model selection", () => {
     ).toEqual({ provider: "faux", model: "new-global-default" })
     expect(
       JSON.parse(
-        window.localStorage.getItem("yakitori.modelSelections") ?? "{}",
+        globalThis.localStorage.getItem("yakitori.modelSelections") ?? "{}",
       ),
     ).toMatchObject({
       session_1: {
@@ -2965,7 +3004,7 @@ describe("model selection", () => {
   })
 
   it("restores the Session model before admitting its next input", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       modelSelections: {},
@@ -2997,7 +3036,7 @@ describe("model selection", () => {
   })
 
   it("keeps a failed preference write scoped to the current Session", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = () => notFound()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -3024,7 +3063,7 @@ describe("model selection", () => {
   })
 
   it("unlocks admission when the user picks a model during restoration", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({ modelSelections: {} })
 
@@ -3081,7 +3120,7 @@ describe("model selection", () => {
   })
 
   it("stamps the user preference on a new session's first input", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -3305,7 +3344,7 @@ describe("new session drafts", () => {
   })
 
   it("creates on opening and carries the draft model into first admission", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const respond = admissionResponder()
     fakeRef.current.respond = (method, params) => {
       if (method === "session/create")
@@ -3424,7 +3463,7 @@ describe("new session drafts", () => {
   })
 
   it("queues one captured first prompt with images, excerpts, and model during creation", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const create = deferredResponse()
     const respond = admissionResponder(() => ({
       kind: "parts",
@@ -3813,7 +3852,7 @@ describe("new session drafts", () => {
   })
 
   it("admits the first input before the session list refresh finishes", async () => {
-    window.localStorage.clear()
+    globalThis.localStorage.clear()
     const list = deferredResponse()
     const respond = admissionResponder()
     fakeRef.current.respond = (method, params) => {
@@ -3866,7 +3905,7 @@ describe("new session drafts", () => {
 })
 
 it("preserves draft edits made while the first session is being created", async () => {
-  window.localStorage.clear()
+  globalThis.localStorage.clear()
   let release: () => void = () => {
     throw new Error("Creation has not started")
   }
