@@ -3136,6 +3136,17 @@ async function resolveRolloutAssetMedia(
   )
   const nativePdfBudget = createNativePdfBudget(
     userDocumentReading.nativePdfLimits ?? documentReading.nativePdfLimits,
+    // Images and PDF pages share Anthropic's allowance. Reserve all ordinary
+    // image occurrences first, including later messages, so an earlier PDF
+    // cannot displace them. History/cache reuse does not deduplicate the wire.
+    messages.reduce(
+      (count, message) =>
+        count +
+        (message.role === "user" || message.role === "tool"
+          ? message.content.filter((block) => block.type === "image").length
+          : 0),
+      0,
+    ),
   )
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
