@@ -797,6 +797,30 @@ async function runOrderedInputFlow(
     await checkOrder()
     await page.reload()
     await checkOrder()
+    await page
+      .getByRole("button", { name: "Preview ordered-smoke.png", exact: true })
+      .click()
+    const preview = page.getByRole("dialog", {
+      name: "Preview ordered-smoke.png",
+      exact: true,
+    })
+    const previewImage = preview.getByRole("img", { name: "ordered-smoke.png" })
+    const size = () =>
+      previewImage.evaluate((image) => {
+        const { width, height } = image.getBoundingClientRect()
+        return { width, height }
+      })
+    // This fixture is a real 16×16 PNG. Check browser layout, not only the
+    // percentage label or a style computed with the same zoom formula.
+    await expect.poll(size).toEqual({ width: 16, height: 16 })
+    await preview.getByRole("button", { name: "Zoom in" }).click()
+    await expect.poll(size).toEqual({ width: 20, height: 20 })
+    await preview.getByRole("button", { name: "Reset zoom" }).click()
+    await expect.poll(size).toEqual({ width: 16, height: 16 })
+    await preview.getByRole("button", { name: "Zoom out" }).click()
+    await expect.poll(size).toEqual({ width: 12, height: 12 })
+    await preview.getByRole("button", { name: "Close preview" }).click()
+    await expect(preview).toHaveCount(0)
     const screenshot = testInfo.outputPath("ordered-user-input.png")
     await page.screenshot({ path: screenshot, animations: "disabled" })
     await testInfo.attach("ordered-user-input", {

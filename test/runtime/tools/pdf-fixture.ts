@@ -1,13 +1,21 @@
 // A complete PDF with real cross-reference offsets and standard-font text,
 // generated locally so extraction tests do not depend on a reference checkout.
-export function pdfFixture(texts: string[]): Buffer {
+export function pdfFixture(
+  pages: (string | { text: string; color: [number, number, number] })[],
+): Buffer {
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
-    `<< /Type /Pages /Kids [${texts.map((_text, index) => `${4 + index * 2} 0 R`).join(" ")}] /Count ${texts.length} >>`,
+    `<< /Type /Pages /Kids [${pages.map((_page, index) => `${4 + index * 2} 0 R`).join(" ")}] /Count ${pages.length} >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ...texts.flatMap((text, index) => {
+    ...pages.flatMap((page, index) => {
+      const text = typeof page === "string" ? page : page.text
       const escaped = text.replace(/[\\()]/g, "\\$&")
-      const stream = `BT /F1 18 Tf 30 120 Td (${escaped}) Tj ET`
+      // A colored lower half gives raster tests a font-independent page identity.
+      const color =
+        typeof page === "string"
+          ? ""
+          : `q ${page.color.join(" ")} rg 0 0 240 80 re f Q `
+      const stream = `${color}BT /F1 18 Tf 30 120 Td (${escaped}) Tj ET`
       return [
         `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`,
         `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,

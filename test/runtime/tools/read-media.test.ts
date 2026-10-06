@@ -17,12 +17,18 @@ afterEach(async () => {
   )
 })
 
-async function context(texts = ["First page", "Second page", "Third page"]) {
+async function context(
+  pages: Parameters<typeof pdfFixture>[0] = [
+    "First page",
+    "Second page",
+    "Third page",
+  ],
+) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-pdf-"))
   roots.push(root)
   const rolloutId = createSessionId()
   await mkdir(join(root, "rollouts", rolloutId), { recursive: true })
-  await writeFile(join(root, "document.pdf"), pdfFixture(texts))
+  await writeFile(join(root, "document.pdf"), pdfFixture(pages))
   return {
     workspaceRoot: root,
     rolloutId,
@@ -59,7 +65,11 @@ describe("PDF document reading", () => {
 
   it("renders selected pages as durable images for image-capable providers", async () => {
     const ctx = {
-      ...(await context()),
+      ...(await context([
+        { text: "First page", color: [1, 0, 0] },
+        { text: "Second page", color: [0, 1, 0] },
+        { text: "Third page", color: [0, 0, 1] },
+      ])),
       documentReading: { nativePdf: false, images: true },
     }
     const result = await createReadDocumentTool().execute(
@@ -72,25 +82,33 @@ describe("PDF document reading", () => {
     })
     const projected = await finalizeToolOutput(result, budget, ctx)
     await rm(join(ctx.workspaceRoot, "document.pdf"))
-    expect(
-      projected.content.filter((block) => block.type === "image"),
-    ).toHaveLength(2)
+    const images = projected.content.filter((block) => block.type === "image")
+    expect(images).toHaveLength(2)
     expect(
       projected.content.filter((block) => block.type === "document"),
     ).toEqual([])
-    const image = projected.content.filter(
-      (block) => block.type === "image",
-    )?.[0]
-    if (image?.file === undefined) throw new Error("Missing page snapshot")
-    const bytes = await ctx.rolloutAssets.read(image.file)
-    expect(await sharp(bytes).metadata()).toMatchObject({
-      format: "jpeg",
-      width: 500,
-      height: 333,
-    })
-    const stats = await sharp(bytes).stats()
-    expect(stats.channels[0]?.min).toBeLessThan(100)
-    expect(stats.channels[0]?.max).toBe(255)
+    const colors = await Promise.all(
+      images.map(async (image) => {
+        if (image.file === undefined) throw new Error("Missing page snapshot")
+        const bytes = await ctx.rolloutAssets.read(image.file)
+        expect(await sharp(bytes).metadata()).toMatchObject({
+          format: "jpeg",
+          width: 500,
+          height: 333,
+        })
+        const pixel = await sharp(bytes)
+          .extract({ left: 250, top: 250, width: 1, height: 1 })
+          .raw()
+          .toBuffer()
+        return [...pixel]
+      }),
+    )
+    // JPEG compression may round channel values; green then blue still proves
+    // both selected pages' identities and order after the source is deleted.
+    expect(colors).toEqual([
+      [expect.closeTo(0, -1), expect.closeTo(255, -1), expect.closeTo(0, -1)],
+      [expect.closeTo(0, -1), expect.closeTo(0, -1), expect.closeTo(255, -1)],
+    ])
   })
 
   it("uses native PDF only for whole-document reads and honors explicit formats", async () => {
