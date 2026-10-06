@@ -42,7 +42,7 @@ export function createCompactionReplacementHistory(input: {
 
 // Codex local compaction retains recent user text independently of the summary
 // within a 20,000 approximate-token budget. Preserve Yakitori's envelope
-// attribution while dropping images from this text-only retained history.
+// attribution while dropping media from this text-only retained history.
 // Codex classifies contextual user fragments before charging that budget.
 // Yakitori identifies injected context by its typed source, not its text.
 export function retainCompactionUserMessages(
@@ -78,7 +78,7 @@ export function retainCompactionUserMessages(
   return retained.reverse()
 }
 
-// Codex remote v2 retains recent real user content (including images), then
+// Codex remote v2 retains recent real user content (including images and PDFs), then
 // appends one native checkpoint. Developer environment fragments are rebuilt.
 export function retainRemoteCompactionMessages(
   history: readonly ResponseItemEnvelope[],
@@ -105,7 +105,9 @@ export function retainRemoteCompactionMessages(
           tokens +
           (block.type === "image"
             ? estimateImageTokens(block)
-            : Math.ceil(Buffer.byteLength(block.text) / 4)),
+            : block.type === "document"
+              ? Math.ceil(block.sizeBytes / 4)
+              : Math.ceil(Buffer.byteLength(block.text) / 4)),
         0,
       ),
     )
@@ -116,14 +118,16 @@ export function retainRemoteCompactionMessages(
       continue
     }
     // Like Codex's reverse content traversal, preserve the newest suffix in
-    // its original order. Images are atomic; only a boundary text is truncated.
+    // its original order. Media blocks are atomic; only a boundary text is truncated.
     const content: ModelUserContentBlock[] = []
     for (const block of [...message.content].reverse()) {
       if (remaining === 0) break
       const cost =
         block.type === "image"
           ? estimateImageTokens(block)
-          : Math.ceil(Buffer.byteLength(block.text) / 4)
+          : block.type === "document"
+            ? Math.ceil(block.sizeBytes / 4)
+            : Math.ceil(Buffer.byteLength(block.text) / 4)
       if (cost <= remaining) {
         content.push(block)
         remaining -= cost

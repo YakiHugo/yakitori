@@ -18,6 +18,7 @@ import {
   type ModelToolCallBlock,
   type ModelUsage,
   requireModelImageData,
+  requireModelDocumentData,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -25,6 +26,7 @@ import {
   modelFailureFromUnknown,
 } from "./model-failure.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
@@ -68,6 +70,20 @@ async function* streamChatCompletions(
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield { type: "cancelled" }
+    return
+  }
+  const incompatibility = chatCompletionsIncompatibility(options, request)
+  if (incompatibility !== undefined) {
+    yield {
+      type: "failure",
+      failure: {
+        provider: request.target.provider,
+        wireApi: "openai_chat_completions",
+        stage: "request_build",
+        kind: "invalid_request",
+        message: incompatibility,
+      },
+    }
     return
   }
   let stage: "request_build" | "connect" | "response_body" = "request_build"
@@ -463,17 +479,25 @@ export function toChatCompletionsMessages(
         role: "user",
         content: message.content.every((block) => block.type === "text")
           ? message.content.map((block) => block.text).join("")
-          : message.content.map((block) =>
-              block.type === "text"
-                ? { type: "text" as const, text: block.text }
-                : {
-                    type: "image_url" as const,
-                    image_url: {
-                      url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                      detail: "high" as const,
-                    },
+          : message.content.map((block) => {
+              if (block.type === "text")
+                return { type: "text" as const, text: block.text }
+              if (block.type === "document")
+                return {
+                  type: "file" as const,
+                  file: {
+                    filename: block.name,
+                    file_data: `data:application/pdf;base64,${requireModelDocumentData(block)}`,
                   },
-            ),
+                }
+              return {
+                type: "image_url" as const,
+                image_url: {
+                  url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                  detail: "high" as const,
+                },
+              }
+            }),
       })
     } else if (message.role === "tool") {
       const text = message.content

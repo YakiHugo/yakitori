@@ -6,7 +6,7 @@ import {
 } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
@@ -32,6 +32,96 @@ import {
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 
 describe("Chat Completions provider", () => {
+  it.each([
+    { model: "gpt-6-astra", effort: "high", withTools: true },
+    { model: "gpt-6.1-sol", effort: "low", withTools: true },
+    { model: "gpt-6-sol", effort: "medium", withTools: true },
+    { model: "gpt-6-luna", effort: undefined, withTools: true },
+    { model: "gpt-5.1-codex", effort: undefined, withTools: false },
+  ])("rejects incompatible $model Chat requests locally before fetch", async ({
+    model,
+    effort,
+    withTools,
+  }) => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected fetch"))
+    const input = request({
+      target: {
+        provider: "personal-openai",
+        model,
+        instructionProfileId: "default",
+        ...(effort === undefined ? {} : { effort }),
+      },
+      ...(withTools ? {} : { tools: [] }),
+    })
+    const events = await collect(
+      createChatCompletionsProvider({
+        apiKey: "unused",
+        model: "fallback",
+        baseURL: "https://api.openai.com/v1",
+      })(input),
+    )
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          provider: "personal-openai",
+          wireApi: "openai_chat_completions",
+          stage: "request_build",
+          kind: "invalid_request",
+          message: expect.stringContaining("Responses API"),
+        },
+      },
+    ])
+    expect(fetch).not.toHaveBeenCalled()
+    expect(input.target.effort).toBe(effort)
+  })
+
+  it("rejects incompatible replayed Chat tool history even with an empty tool catalog", async () => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected fetch"))
+    const stream = createChatCompletionsProvider({
+      apiKey: "unused",
+      model: "gpt-6-astra",
+      baseURL: "https://api.openai.com/v1",
+    })
+    const events = await collect(
+      stream(
+        request({
+          target: {
+            provider: "personal",
+            model: "gpt-6-astra",
+            instructionProfileId: "default",
+          },
+          tools: [],
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_call", id: "read", name: "read_file", input: {} },
+              ],
+            },
+            {
+              role: "tool",
+              toolCallId: "read",
+              content: [{ type: "text", text: "contents" }],
+            },
+          ],
+        }),
+      ),
+    )
+    expect(events[0]).toMatchObject({
+      type: "failure",
+      failure: {
+        kind: "invalid_request",
+        message: expect.stringContaining("tool history"),
+      },
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it("streams channels and assembles interleaved calls with complete usage", async () => {
     let body: Record<string, unknown> | undefined
     await withServer(

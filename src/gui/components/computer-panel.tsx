@@ -1,7 +1,7 @@
 import { Check, LoaderCircle, Monitor, RefreshCw, Unplug } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
 import type { ComputerUseStatus } from "../../server/computer-use.ts"
-import { imageAttachmentUrl } from "../composer-attachments.ts"
+import { attachmentUrl } from "../composer-attachments.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { ImageLightbox } from "./image-lightbox.tsx"
@@ -158,7 +158,7 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
             className="block w-full rounded-lg border bg-muted/30 p-1"
           >
             <img
-              src={imageAttachmentUrl(image, apiBase)}
+              src={attachmentUrl(image, apiBase)}
               alt={image.name}
               className="max-h-72 w-full rounded object-contain"
             />
@@ -171,7 +171,7 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
       </div>
       {preview && image && (
         <ImageLightbox
-          src={imageAttachmentUrl(image, apiBase)}
+          src={attachmentUrl(image, apiBase)}
           name={image.name}
           onClose={() => setPreview(false)}
         />

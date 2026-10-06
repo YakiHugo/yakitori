@@ -1,26 +1,23 @@
 import type {
-  ImageAttachment,
+  UserAttachment,
   InputContent,
   InputPart,
 } from "../kernel/events.ts"
-import { inputContentImages } from "../kernel/input-content.ts"
+import { inputContentAttachments } from "../kernel/input-content.ts"
 
 // Editor Undo steps can outlive staging files. This renderer-local ownership
 // map resolves those references to the server's promoted assets; it never
 // changes authored parts or crosses API origins.
-export function createInputImageOwnership() {
-  const promoted = new Map<string, ImageAttachment["file"]>()
-  const key = (apiBase: string, image: ImageAttachment) => {
+export function createInputAttachmentOwnership() {
+  const promoted = new Map<string, UserAttachment["file"]>()
+  const key = (apiBase: string, image: UserAttachment) => {
     const base = new URL(apiBase)
     base.hash = ""
     base.search = ""
     if (!base.pathname.endsWith("/")) base.pathname += "/"
     return `${base.toString()}\0${image.file.rolloutId}\0${image.file.path}`
   }
-  const resolve = (
-    apiBase: string,
-    image: ImageAttachment,
-  ): ImageAttachment => {
+  const resolve = (apiBase: string, image: UserAttachment): UserAttachment => {
     const file = promoted.get(key(apiBase, image))
     return file === undefined ? image : { ...image, file: { ...file } }
   }
@@ -31,11 +28,13 @@ export function createInputImageOwnership() {
       apiBase: string,
       parts: readonly InputPart[],
     ): readonly InputPart[] {
-      return parts.map((part) =>
-        part.type === "image"
-          ? { ...resolve(apiBase, part), type: "image" }
-          : part,
-      )
+      return parts.map((part) => {
+        if (part.type === "text") return part
+        const attachment = resolve(apiBase, part)
+        return attachment.mediaType === "application/pdf"
+          ? { ...attachment, type: "document" }
+          : { ...attachment, type: "image" }
+      })
     },
     promote(
       apiBase: string,
@@ -48,16 +47,16 @@ export function createInputImageOwnership() {
           const other = accepted.parts[index]
           return part.type === "text"
             ? other?.type !== "text" || part.text !== other.text
-            : other?.type !== "image" ||
+            : other?.type !== part.type ||
                 part.name !== other.name ||
                 part.mediaType !== other.mediaType ||
                 part.sizeBytes !== other.sizeBytes
         })
       )
         throw new Error("Promoted input does not match submitted content.")
-      const originals = inputContentImages(original)
-      const acceptedImages = inputContentImages(accepted)
-      const updates: [string, ImageAttachment["file"]][] = []
+      const originals = inputContentAttachments(original)
+      const acceptedImages = inputContentAttachments(accepted)
+      const updates: [string, UserAttachment["file"]][] = []
       for (const [index, image] of originals.entries()) {
         // Durable history references keep their original owner. Only staging
         // paths disappear after admission and need an editor-history alias.
@@ -75,4 +74,4 @@ export function createInputImageOwnership() {
   }
 }
 
-export const inputImageOwnership = createInputImageOwnership()
+export const inputAttachmentOwnership = createInputAttachmentOwnership()

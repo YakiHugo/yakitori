@@ -1,6 +1,8 @@
 import { expect, it } from "vitest"
 import {
   parsePrompt,
+  parsePromptParts,
+  serializePromptParts,
   promptOffset,
   promptPosition,
   serializePrompt,
@@ -46,4 +48,30 @@ it("roundtrips inline file mentions and maps caret offsets across them", () => {
   expect(promptPosition(caret, 2)).toBe(3)
   expect(promptPosition(caret, 10)).toBe(4)
   expect(promptPosition(caret, 13)).toBe(8)
+})
+
+it("roundtrips text/PDF/image/text without textual placeholders in the submitted parts", () => {
+  const parts = [
+    { type: "text" as const, text: "a" },
+    {
+      type: "document" as const,
+      name: "x.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 10,
+      file: { rolloutId: "r", path: "attachments/staging/x.pdf" },
+    },
+    {
+      type: "image" as const,
+      name: "x.png",
+      mediaType: "image/png" as const,
+      sizeBytes: 10,
+      file: { rolloutId: "r", path: "attachments/staging/x.png" },
+    },
+    { type: "text" as const, text: "b" },
+  ]
+  const doc = parsePromptParts(parts)
+  expect(serializePromptParts(doc)).toEqual(parts)
+  expect(serializePrompt(doc)).toBe("a\uFFFC\uFFFCb")
+  expect(promptPosition(doc, 3)).toBe(4)
+  expect(promptOffset(doc, 4)).toBe(3)
 })

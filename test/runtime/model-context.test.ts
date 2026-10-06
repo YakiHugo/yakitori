@@ -6,6 +6,55 @@ import {
 } from "../../src/runtime/model-context.ts"
 
 describe("local compaction user history", () => {
+  it("retains PDFs atomically in the remote budget while local retention remains text-only", () => {
+    const document = {
+      type: "document" as const,
+      name: "report.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 128_000,
+      file: { rolloutId: "rollout_user", path: "attachments/report.pdf" },
+    }
+    const latest: ResponseItemEnvelope = {
+      ...user("latest", ""),
+      item: {
+        role: "user",
+        content: [
+          document,
+          { type: "text", text: "before" },
+          document,
+          { type: "text", text: "after" },
+          document,
+        ],
+      },
+    }
+    expect(
+      retainRemoteCompactionMessages([user("old", "old"), latest]),
+    ).toEqual([
+      {
+        ...latest,
+        item: {
+          role: "user",
+          content: [{ type: "text", text: "after" }, document],
+        },
+      },
+    ])
+    expect(retainCompactionUserMessages([latest])).toEqual([
+      {
+        ...latest,
+        item: {
+          role: "user",
+          content: [{ type: "text", text: "before\nafter" }],
+        },
+      },
+    ])
+    const pdfOnly: ResponseItemEnvelope = {
+      ...latest,
+      item: { role: "user", content: [document] },
+    }
+    expect(retainRemoteCompactionMessages([pdfOnly])).toEqual([pdfOnly])
+    expect(retainCompactionUserMessages([pdfOnly])).toEqual([])
+  })
+
   it("does not mistake internal agent traffic for retained user requests", () => {
     const direct = user(
       "direct",

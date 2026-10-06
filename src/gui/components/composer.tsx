@@ -1,5 +1,5 @@
 import {
-  inputContentImages,
+  inputContentAttachments,
   inputContentText,
 } from "../../kernel/input-content.ts"
 import {
@@ -10,7 +10,7 @@ import {
 import { useCallback, useContext, useRef, useState } from "react"
 import { GOAL_DIRECTIVE } from "../../kernel/events.ts"
 import {
-  discardDraftImages,
+  discardDraftAttachments,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
@@ -24,7 +24,7 @@ import {
 import { usePreferencesStore } from "../store/preferences-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
-  type ComposerImageImport,
+  type ComposerAttachmentImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
 import { ContextWindowIndicator } from "./context-window-indicator.tsx"
@@ -70,7 +70,7 @@ export function Composer() {
   const openGoalDialog = useAppStore((state) => state.openGoalDialog)
   const view = useExecutionView()
   const [attachmentError, setAttachmentError] = useState<string>()
-  const [readingImages, setReadingImages] = useState(false)
+  const [readingAttachments, setReadingAttachments] = useState(false)
   const fileSearchCwd = useAppStore(
     (state) =>
       state.selectedSession?.workingDirectory ??
@@ -162,9 +162,12 @@ export function Composer() {
       ? modelEntry?.effectiveContextWindowTokens
       : undefined)
 
-  const importImages: ComposerImageImport = async (prepare, validate) => {
-    if (readingImages) return
-    setReadingImages(true)
+  const importAttachments: ComposerAttachmentImport = async (
+    prepare,
+    validate,
+  ) => {
+    if (readingAttachments) return
+    setReadingAttachments(true)
     setAttachmentError(undefined)
     let importSessionId = sessionId
     const importIntentRevision =
@@ -191,7 +194,7 @@ export function Composer() {
             current.selection.sessionId !== undefined
           ))
       ) {
-        await discardDraftImages(next)
+        await discardDraftAttachments(next)
         return
       }
       return next
@@ -219,7 +222,7 @@ export function Composer() {
           )
         }
       }
-      setReadingImages(false)
+      setReadingAttachments(false)
     }
   }
 
@@ -264,7 +267,7 @@ export function Composer() {
       updatePromptExcerpt={updatePromptExcerpt}
       onSubmit={(parts, mode) => {
         const text = inputContentText({ kind: "parts", parts })
-        const images = inputContentImages({ kind: "parts", parts })
+        const images = inputContentAttachments({ kind: "parts", parts })
         conversationScroll?.jumpToBottom()
         if (images.length === 0 && excerpts.length === 0) {
           if (text === "/status" || text === "/mcp") {
@@ -356,7 +359,7 @@ export function Composer() {
               sessionId ?? (await useAppStore.getState().createSession())
             if (goalSessionId === undefined) return
             if (goalCommand === "") {
-              setPromptDraft(parts.filter((part) => part.type === "image"))
+              setPromptDraft(parts.filter((part) => part.type !== "text"))
               openGoalDialog()
               return
             }
@@ -374,7 +377,7 @@ export function Composer() {
                 parts,
               )
             )
-              setPromptDraft(parts.filter((part) => part.type === "image"))
+              setPromptDraft(parts.filter((part) => part.type !== "text"))
           })()
           return
         }
@@ -392,8 +395,8 @@ export function Composer() {
           <ModelSelector />
         </>
       }
-      importImages={importImages}
-      readingImages={readingImages}
+      importAttachments={importAttachments}
+      readingAttachments={readingAttachments}
       attachmentError={attachmentError}
       onAttachmentError={setAttachmentError}
       searchFiles={fileSearchCwd ? searchFiles : undefined}

@@ -38,18 +38,22 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
   pickProjectFolder() {
     return ipcRenderer.invoke("yakitori:pick-project-folder")
   },
-  pickImages() {
-    return ipcRenderer.invoke("yakitori:pick-images")
+  pickAttachments() {
+    return ipcRenderer.invoke("yakitori:pick-attachments")
   },
-  importPickedImages(input) {
-    return ipcRenderer.invoke("yakitori:import-picked-images", input)
+  importPickedAttachments(input) {
+    return ipcRenderer.invoke("yakitori:import-picked-attachments", input)
   },
-  discardPickedImages(input) {
-    return ipcRenderer.invoke("yakitori:discard-picked-images", input)
+  discardPickedAttachments(input) {
+    return ipcRenderer.invoke("yakitori:discard-picked-attachments", input)
   },
-  async importImageFiles(input) {
+  async importAttachmentFiles(input) {
     const items = []
     for (const file of input.files) {
+      // Match the main/sidecar transport safety boundary before allocating bytes.
+      if (file.size > 50_000_000) {
+        throw new Error("Attachment must be a file no larger than 50 MB.")
+      }
       const filePath = webUtils.getPathForFile(file)
       items.push(
         filePath === ""
@@ -60,13 +64,13 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
           : { name: file.name, filePath },
       )
     }
-    return ipcRenderer.invoke("yakitori:import-image-files", {
+    return ipcRenderer.invoke("yakitori:import-attachment-files", {
       ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       items,
     })
   },
-  discardDraftImages(input) {
-    return ipcRenderer.invoke("yakitori:discard-draft-images", input)
+  discardDraftAttachments(input) {
+    return ipcRenderer.invoke("yakitori:discard-draft-attachments", input)
   },
   openFile(input) {
     return ipcRenderer.invoke("yakitori:open-file", input)

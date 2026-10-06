@@ -33,6 +33,7 @@ import {
 import type { TurnProcessor } from "../core/session.ts"
 import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
+import { readPdf } from "../runtime/tools/read-pdf.ts"
 import {
   createMateKernel,
   createSqliteMateStore,
@@ -715,6 +716,12 @@ export async function createYakitoriApplication(
       }
     }
     const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
+      validatePdf: async (bytes) => {
+        const result = await readPdf({ bytes, format: "native" })
+        if (!result.ok) throw new Error(result.message)
+        if (!Number.isSafeInteger(result.totalPages) || result.totalPages <= 0)
+          throw new Error("PDF attachment must contain at least one page.")
+      },
       withMutationLease: async (rolloutId, mutate) => {
         if (
           rolloutId.startsWith("draft_") &&

@@ -4,6 +4,7 @@ import type {
   ModelCompactionBlock,
   ModelContentBlock,
   ModelDeveloperMessage,
+  ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
   ModelReasoningBlock,
@@ -22,6 +23,7 @@ export type {
   ModelCompactionBlock,
   ModelContentBlock,
   ModelDeveloperMessage,
+  ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
   ModelReasoningBlock,
@@ -248,4 +250,9 @@ export type StreamFn = (
 export function requireModelImageData(image: ModelImageBlock): string {
   if ("data" in image && image.data !== undefined) return image.data
   throw new Error("Model request contains an unresolved Session image.")
+}
+
+export function requireModelDocumentData(document: ModelDocumentBlock): string {
+  if (document.data !== undefined) return document.data
+  throw new Error("Model request contains an unresolved Session PDF.")
 }

@@ -14,6 +14,7 @@ import {
   type ModelStreamEvent,
   type ModelUsage,
   requireModelImageData,
+  requireModelDocumentData,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -23,6 +24,7 @@ import {
 import {
   GEMINI_INLINE_REQUEST_MAX_BYTES,
   supportsGeminiToolPdf,
+  supportsGeminiUserPdf,
 } from "./native-pdf-capabilities.ts"
 import { parseRetryAfterMs } from "./retry-after.ts"
 
@@ -39,7 +41,7 @@ class GeminiIncompleteStreamError extends Error {}
 class GeminiInlineRequestSizeError extends Error {
   constructor() {
     super(
-      "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages or smaller tool results.",
+      "The Gemini request exceeds the 100 MB inline limit. Retry with fewer PDF pages, smaller attachments or less request content.",
     )
   }
 }
@@ -122,10 +124,10 @@ async function* streamGemini(
     // Check the complete serialized UTF-8 request, including text, tools and
     // base64 expansion. Per-document raw limits alone do not bound this body.
     if (
-      supportsGeminiToolPdf(model) &&
       request.messages.some(
         (message) =>
-          message.role === "tool" &&
+          ((message.role === "tool" && supportsGeminiToolPdf(model)) ||
+            (message.role === "user" && supportsGeminiUserPdf(model))) &&
           message.content.some((block) => block.type === "document"),
       ) &&
       Buffer.byteLength(body, "utf8") > GEMINI_INLINE_REQUEST_MAX_BYTES
@@ -573,16 +575,27 @@ export function toGeminiContents(
       }
       if (parts.length > 0) contents.push({ role: "model", parts })
     } else {
-      const parts: JsonObject[] = message.content.map((block) =>
-        block.type === "text"
-          ? { text: block.text }
-          : {
-              inlineData: {
-                mimeType: block.mediaType,
-                data: requireModelImageData(block),
-              },
+      const parts: JsonObject[] = message.content.map((block) => {
+        if (block.type === "text") return { text: block.text }
+        if (block.type === "document") {
+          if (!supportsGeminiUserPdf(model ?? ""))
+            return {
+              text: `[Document ${block.name} was not sent: native PDF input is not enabled for Gemini.]`,
+            }
+          return {
+            inlineData: {
+              mimeType: "application/pdf",
+              data: requireModelDocumentData(block),
             },
-      )
+          }
+        }
+        return {
+          inlineData: {
+            mimeType: block.mediaType,
+            data: requireModelImageData(block),
+          },
+        }
+      })
       // Later developer messages are history instructions, not the top-level
       // system prompt; retain their position rather than hoist across turns.
       if (message.role === "developer")

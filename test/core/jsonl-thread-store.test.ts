@@ -169,12 +169,12 @@ describe("JsonlThreadStore", () => {
     const id = `thread_legacy_${type}`
     await createPersistentThread(store, metadata(id))
     const assets = createStoreAssets(root, store)
-    const staged = await assets.importImageBytes(id, "original", [
+    const staged = await assets.importAttachmentBytes(id, "original", [
       { name: "saved.png", data: pngBytes() },
     ])
     const {
       attachments: [attachment],
-    } = await assets.promoteImageAttachments(id, "saved", staged)
+    } = await assets.promoteAttachments(id, "saved", staged)
     if (attachment === undefined) throw new Error("Missing fixture image")
     await store.shutdownThread(id)
     const image = {
@@ -415,10 +415,12 @@ describe("JsonlThreadStore", () => {
     await writeFile(imagePath, bytes)
     const id = "thread_images"
     await store.createThread(metadata(id))
-    const [fromBytes] = await assets.importImageBytes(id, "bytes", [
+    const [fromBytes] = await assets.importAttachmentBytes(id, "bytes", [
       { name: "image.png", data: bytes },
     ])
-    const [fromPath] = await assets.importImagePaths(id, "path", [imagePath])
+    const [fromPath] = await assets.importAttachmentPaths(id, "path", [
+      imagePath,
+    ])
     if (fromBytes === undefined || fromPath === undefined)
       throw new Error("Missing staged image attachment.")
     expect(await assets.read(fromBytes.file)).toEqual(bytes)
@@ -437,7 +439,7 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread(id)
     const idle = "thread_idle_image"
     await store.createThread(metadata(idle))
-    const [discarded] = await assets.importImageBytes(idle, "draft", [
+    const [discarded] = await assets.importAttachmentBytes(idle, "draft", [
       { name: "image.png", data: bytes },
     ])
     if (discarded === undefined)
@@ -458,7 +460,7 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata(id))
     await store.appendItems(id, [response("turn_one", "original")])
     const bytes = pngBytes()
-    const [attachment] = await assets.importImageBytes(id, "draft", [
+    const [attachment] = await assets.importAttachmentBytes(id, "draft", [
       { name: "image.png", data: bytes },
     ])
     if (attachment === undefined)

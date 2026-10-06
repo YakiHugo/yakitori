@@ -6,6 +6,34 @@ import {
 } from "../../src/runtime/model-request-budget.ts"
 
 describe("complete model request budgeting", () => {
+  it("counts user PDF content bytes without charging base64 transport bytes", () => {
+    const document = {
+      type: "document" as const,
+      name: "report.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 8_000,
+      file: { rolloutId: "rollout_user", path: "attachments/report.pdf" },
+    }
+    const message = { role: "user" as const, content: [document] }
+    const hydrated = { ...message, content: [{ ...document, data: "" }] }
+    const largeTransport = {
+      ...message,
+      content: [{ ...document, data: "A".repeat(100_000) }],
+    }
+    expect(estimateHistoryTokens([message])).toBeGreaterThanOrEqual(2_000)
+    expect(estimateHistoryTokens([hydrated])).toBe(
+      estimateHistoryTokens([largeTransport]),
+    )
+    const smaller = { ...message, content: [{ ...document, sizeBytes: 4_000 }] }
+    expect(
+      estimateHistoryTokens([message]) - estimateHistoryTokens([smaller]),
+    ).toBe(1_000)
+    const request = { ...requestWithImage("high"), messages: [message] }
+    expect(estimateModelRequestBudget(request).messageTokens).toBe(
+      estimateHistoryTokens([message]),
+    )
+  })
+
   it("estimates newly added images without counting their base64 transport bytes", () => {
     const message = {
       role: "user" as const,

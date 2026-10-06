@@ -1,36 +1,36 @@
 import { createHash, randomUUID } from "node:crypto"
 import { constants, type ReadStream } from "node:fs"
 import {
-  copyFile,
   type FileHandle,
   link,
   mkdir,
   open,
   readFile,
+  readdir,
   rm,
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, posix, resolve, sep } from "node:path"
-import type { ImageAttachment, RolloutAssetReference } from "./events.ts"
+import type { UserAttachment, RolloutAssetReference } from "./events.ts"
 import { isStorageKey } from "./ids.ts"
 import { inspectImageBytes } from "./image-metadata.ts"
 
-// Grok Build applies the same per-image send boundary. This is a transport
-// safety limit, independent from model context accounting or attachment count.
-const MAX_IMAGE_FILE_BYTES = 50_000_000
+// Bound disk snapshots, allocations and parser input independently of provider
+// quotas. A request may contain multiple attachments subject to runtime budgets.
+const ATTACHMENT_FILE_SAFETY_BYTES = 50_000_000
 const MAX_IMAGE_METADATA_BYTES = 1024 * 1024
 
-export type ImageBytesInput = {
+export type AttachmentBytesInput = {
   readonly name: string
   readonly data: Uint8Array
 }
 
-export class ImageAttachmentConflictError extends Error {
-  override readonly name = "ImageAttachmentConflictError"
+export class AttachmentConflictError extends Error {
+  override readonly name = "AttachmentConflictError"
 }
 
-export type PreparedImageAttachments = {
-  readonly attachments: readonly ImageAttachment[]
+export type PreparedAttachments = {
+  readonly attachments: readonly UserAttachment[]
   rollback(): Promise<void>
 }
 
@@ -47,33 +47,28 @@ export type RolloutAssets = {
     bytes: Uint8Array,
   ): Promise<{ reference: RolloutAssetReference; path: string }>
 
-  importImagePaths(
+  importAttachmentPaths(
     rolloutId: string,
     ownerId: string,
     paths: readonly string[],
-  ): Promise<readonly ImageAttachment[]>
-  importImageBytes(
+  ): Promise<readonly UserAttachment[]>
+  importAttachmentBytes(
     rolloutId: string,
     ownerId: string,
-    images: readonly ImageBytesInput[],
-  ): Promise<readonly ImageAttachment[]>
-  promoteImageAttachments(
+    items: readonly AttachmentBytesInput[],
+  ): Promise<readonly UserAttachment[]>
+  promoteAttachments(
     rolloutId: string,
     ownerId: string,
-    attachments: readonly ImageAttachment[],
-  ): Promise<PreparedImageAttachments>
-  copyImageAttachments(
+    attachments: readonly UserAttachment[],
+  ): Promise<PreparedAttachments>
+  copyAttachments(
     rolloutId: string,
     ownerId: string,
-    attachments: readonly ImageAttachment[],
-  ): Promise<PreparedImageAttachments>
-  discardRequestImageAttachments(
-    rolloutId: string,
-    ownerId: string,
-  ): Promise<void>
-  discardDraftImageAttachments(
-    attachments: readonly ImageAttachment[],
-  ): Promise<void>
+    attachments: readonly UserAttachment[],
+  ): Promise<PreparedAttachments>
+  discardRequestAttachments(rolloutId: string, ownerId: string): Promise<void>
+  discardDraftAttachments(attachments: readonly UserAttachment[]): Promise<void>
   discardEphemeralRolloutFiles(rolloutId: string): Promise<void>
   read(reference: RolloutAssetReference): Promise<Buffer>
   openRead(
@@ -84,7 +79,10 @@ export type RolloutAssets = {
 
 export function createRolloutAssets(
   storageRoot: string,
-  options: { readonly withMutationLease: RolloutAssetMutationLease },
+  options: Readonly<{
+    withMutationLease: RolloutAssetMutationLease
+    validatePdf?: (bytes: Uint8Array) => Promise<void>
+  }>,
 ): RolloutAssets {
   const storageRootPath = resolve(storageRoot)
   const root = join(storageRootPath, "rollouts")
@@ -107,17 +105,19 @@ export function createRolloutAssets(
         rm(join(root, rolloutId), { recursive: true, force: true }),
       )
     },
-    async importImagePaths(rolloutId, ownerId, paths) {
+    async importAttachmentPaths(rolloutId, ownerId, paths) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const attachments: ImageAttachment[] = []
+        const attachments: UserAttachment[] = []
+        const createdPaths: string[] = []
         try {
           for (const [index, sourcePath] of paths.entries()) {
             const name = basename(sourcePath)
             requireAttachmentName(name)
-            const snapshot = await copyImageSnapshot({
+            const snapshot = await copyAttachmentSnapshot({
+              validatePdf: options.validatePdf,
               root: join(root, rolloutId),
               sourcePath,
               stagingDirectory: stagingOwnerDirectory(
@@ -126,88 +126,101 @@ export function createRolloutAssets(
                 ownerDirectory,
               ),
             })
-            const reference = imageReference(
+            const reference = attachmentReference(
               rolloutId,
               "staging",
               ownerDirectory,
               index,
               snapshot.mediaType,
             )
-            await linkTemporaryFile(
-              snapshot.path,
-              resolveReference(reference),
-              dirname(resolveReference(reference)),
-              snapshot.sizeBytes,
-            )
-            await rm(snapshot.path, { force: true })
+            const targetPath = resolveReference(reference)
+            try {
+              await requireMatchingAttachmentSlot(targetPath)
+              if (
+                await linkOnce(
+                  join(root, rolloutId),
+                  snapshot.path,
+                  targetPath,
+                  snapshot.sizeBytes,
+                )
+              )
+                createdPaths.push(targetPath)
+            } finally {
+              await rm(snapshot.path, { force: true })
+            }
             attachments.push({
               name,
               mediaType: snapshot.mediaType,
               sizeBytes: snapshot.sizeBytes,
-              detail: "high",
+              ...(snapshot.mediaType === "application/pdf"
+                ? {}
+                : { detail: "high" as const }),
               file: reference,
             })
           }
           return attachments
         } catch (error) {
-          await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
-            recursive: true,
-            force: true,
-          })
+          await Promise.all(
+            createdPaths.map((path) => rm(path, { force: true })),
+          )
           throw error
         }
       })
     },
 
-    async importImageBytes(rolloutId, ownerId, images) {
+    async importAttachmentBytes(rolloutId, ownerId, items) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const attachments: ImageAttachment[] = []
+        const attachments: UserAttachment[] = []
+        const createdPaths: string[] = []
         try {
-          for (const [index, image] of images.entries()) {
-            requireAttachmentName(image.name)
-            const bytes = Buffer.from(image.data)
-            requireImageSize(bytes.byteLength)
-            const { mediaType } = inspectImageBytes(bytes)
-            const reference = imageReference(
+          for (const [index, item] of items.entries()) {
+            requireAttachmentName(item.name)
+            requireAttachmentSize(item.data.byteLength)
+            const bytes = Buffer.from(item.data)
+            const { mediaType } = await inspectAttachmentBytes(
+              bytes,
+              options.validatePdf,
+            )
+            const reference = attachmentReference(
               rolloutId,
               "staging",
               ownerDirectory,
               index,
               mediaType,
             )
-            await writeOnce(
-              join(root, rolloutId),
-              resolveReference(reference),
-              bytes,
-            )
+            const targetPath = resolveReference(reference)
+            await requireMatchingAttachmentSlot(targetPath)
+            if (await writeOnce(join(root, rolloutId), targetPath, bytes))
+              createdPaths.push(targetPath)
             attachments.push({
-              name: image.name,
+              name: item.name,
               mediaType,
               sizeBytes: bytes.byteLength,
-              detail: "high",
+              ...(mediaType === "application/pdf"
+                ? {}
+                : { detail: "high" as const }),
               file: reference,
             })
           }
           return attachments
         } catch (error) {
-          await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
-            recursive: true,
-            force: true,
-          })
+          await Promise.all(
+            createdPaths.map((path) => rm(path, { force: true })),
+          )
           throw error
         }
       })
     },
 
-    async promoteImageAttachments(rolloutId, ownerId, attachments) {
+    async promoteAttachments(rolloutId, ownerId, attachments) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const promoted: ImageAttachment[] = []
+        const promoted: UserAttachment[] = []
         const createdPaths: string[] = []
         const rollback = () =>
           Promise.all(
@@ -215,8 +228,8 @@ export function createRolloutAssets(
           ).then(() => undefined)
         try {
           for (const [index, attachment] of attachments.entries()) {
-            requireDraftImageAttachment(rolloutId, attachment)
-            const file = imageReference(
+            requireDraftAttachment(rolloutId, attachment)
+            const file = attachmentReference(
               rolloutId,
               "requests",
               ownerDirectory,
@@ -224,20 +237,27 @@ export function createRolloutAssets(
               attachment.mediaType,
             )
             const targetPath = resolveReference(file)
-            const existing = await inspectStoredImageIfPresent(targetPath)
+            await requireMatchingAttachmentSlot(targetPath)
+            const existing = await inspectStoredAttachmentIfPresent(
+              targetPath,
+              options.validatePdf,
+            )
             if (existing !== undefined) {
-              requireMatchingImageMetadata(existing, attachment)
+              requireMatchingAttachmentMetadata(existing, attachment, true)
               const sourcePath = resolveReference(attachment.file)
-              const source = await inspectStoredImageIfPresent(sourcePath)
+              const source = await inspectStoredAttachmentIfPresent(
+                sourcePath,
+                options.validatePdf,
+              )
               if (source !== undefined) {
-                requireMatchingImageMetadata(source, attachment)
+                requireMatchingAttachmentMetadata(source, attachment)
                 const [sourceBytes, existingBytes] = await Promise.all([
                   readFile(sourcePath),
                   readFile(targetPath),
                 ])
                 if (!sourceBytes.equals(existingBytes)) {
-                  throw new ImageAttachmentConflictError(
-                    "A different image already exists for this request.",
+                  throw new AttachmentConflictError(
+                    "A different attachment already exists for this request.",
                   )
                 }
               }
@@ -245,8 +265,11 @@ export function createRolloutAssets(
               continue
             }
             const sourcePath = resolveReference(attachment.file)
-            const source = await inspectStoredImage(sourcePath)
-            requireMatchingImageMetadata(source, attachment)
+            const source = await inspectStoredAttachment(
+              sourcePath,
+              options.validatePdf,
+            )
+            requireMatchingAttachmentMetadata(source, attachment)
             if (
               await linkOnce(
                 join(root, rolloutId),
@@ -267,12 +290,12 @@ export function createRolloutAssets(
       })
     },
 
-    async copyImageAttachments(rolloutId, ownerId, attachments) {
+    async copyAttachments(rolloutId, ownerId, attachments) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const copied: ImageAttachment[] = []
+        const copied: UserAttachment[] = []
         const createdPaths: string[] = []
         const rollback = () =>
           Promise.all(
@@ -281,9 +304,7 @@ export function createRolloutAssets(
         try {
           for (const [index, attachment] of attachments.entries()) {
             const sourcePath = resolveReference(attachment.file)
-            const source = await inspectStoredImage(sourcePath)
-            requireMatchingImageMetadata(source, attachment)
-            const file = imageReference(
+            const file = attachmentReference(
               rolloutId,
               "requests",
               ownerDirectory,
@@ -291,7 +312,18 @@ export function createRolloutAssets(
               attachment.mediaType,
             )
             const targetPath = resolveReference(file)
-            const existing = await inspectStoredImageIfPresent(targetPath)
+            await requireMatchingAttachmentSlot(targetPath)
+            const existing = await inspectStoredAttachmentIfPresent(
+              targetPath,
+              options.validatePdf,
+            )
+            if (existing !== undefined)
+              requireMatchingAttachmentMetadata(existing, attachment, true)
+            const source = await inspectStoredAttachment(
+              sourcePath,
+              options.validatePdf,
+            )
+            requireMatchingAttachmentMetadata(source, attachment)
             if (existing === undefined) {
               if (
                 await linkOnce(
@@ -304,14 +336,13 @@ export function createRolloutAssets(
                 createdPaths.push(targetPath)
               }
             } else {
-              requireMatchingImageMetadata(existing, attachment)
               const [sourceBytes, existingBytes] = await Promise.all([
                 readFile(sourcePath),
                 readFile(targetPath),
               ])
               if (!sourceBytes.equals(existingBytes)) {
-                throw new ImageAttachmentConflictError(
-                  "A different image already exists for this request.",
+                throw new AttachmentConflictError(
+                  "A different attachment already exists for this request.",
                 )
               }
             }
@@ -325,7 +356,7 @@ export function createRolloutAssets(
       })
     },
 
-    async discardRequestImageAttachments(rolloutId, ownerId) {
+    async discardRequestAttachments(rolloutId, ownerId) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       await rm(
@@ -341,10 +372,10 @@ export function createRolloutAssets(
       )
     },
 
-    async discardDraftImageAttachments(attachments) {
+    async discardDraftAttachments(attachments) {
       await Promise.all(
         attachments.map(async (attachment) => {
-          requireDraftImageAttachment(attachment.file.rolloutId, attachment)
+          requireDraftAttachment(attachment.file.rolloutId, attachment)
           await rm(resolveReference(attachment.file), { force: true })
         }),
       )
@@ -404,12 +435,12 @@ function requireRolloutId(rolloutId: string): void {
   throw new Error(`Invalid rollout id ${rolloutId}.`)
 }
 
-function imageReference(
+function attachmentReference(
   rolloutId: string,
   namespace: "staging" | "requests",
   ownerDirectory: string,
   index: number,
-  mediaType: ImageAttachment["mediaType"],
+  mediaType: UserAttachment["mediaType"],
 ): RolloutAssetReference {
   return {
     rolloutId,
@@ -417,7 +448,7 @@ function imageReference(
       "attachments",
       namespace,
       ownerDirectory,
-      `${String(index + 1)}${imageExtension(mediaType)}`,
+      `${String(index + 1)}${attachmentExtension(mediaType)}`,
     ),
   }
 }
@@ -437,18 +468,43 @@ function stagingOwnerDirectory(
   )
 }
 
-async function inspectStoredImage(path: string) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+type PdfValidator = (bytes: Uint8Array) => Promise<void>
+
+async function inspectAttachmentBytes(
+  bytes: Buffer,
+  validatePdf: PdfValidator | undefined,
+): Promise<{ mediaType: UserAttachment["mediaType"] }> {
+  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-")
+    return inspectImageBytes(bytes)
+  if (validatePdf === undefined)
+    throw new Error("PDF attachment validation is unavailable.")
+  await validatePdf(Uint8Array.from(bytes))
+  return { mediaType: "application/pdf" }
+}
+
+async function inspectStoredAttachment(
+  path: string,
+  validatePdf?: PdfValidator,
+) {
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  )
   try {
     const file = await handle.stat()
-    if (!file.isFile() || file.size === 0) {
-      throw new Error("Draft image must be a non-empty regular file.")
-    }
-    requireImageSize(file.size)
+    if (!file.isFile())
+      throw new Error("Draft attachment must be a non-empty regular file.")
+    requireAttachmentSize(file.size)
     const header = Buffer.alloc(Math.min(file.size, MAX_IMAGE_METADATA_BYTES))
-    await handle.read(header, 0, header.byteLength, 0)
+    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0)
+    if (bytesRead !== header.byteLength)
+      throw new Error("Attachment changed while its metadata was being read.")
+    const bytes =
+      header.subarray(0, 5).toString("ascii") === "%PDF-"
+        ? await readBoundedAttachment(handle, file.size)
+        : header
     return {
-      mediaType: inspectImageBytes(header).mediaType,
+      mediaType: (await inspectAttachmentBytes(bytes, validatePdf)).mediaType,
       sizeBytes: file.size,
     }
   } finally {
@@ -456,24 +512,56 @@ async function inspectStoredImage(path: string) {
   }
 }
 
-async function inspectStoredImageIfPresent(path: string) {
+async function readBoundedAttachment(
+  handle: FileHandle,
+  sizeBytes: number,
+): Promise<Buffer> {
+  requireAttachmentSize(sizeBytes)
+  const bytes = Buffer.alloc(sizeBytes)
+  let offset = 0
+  while (offset < sizeBytes) {
+    const read = await handle.read(
+      bytes,
+      offset,
+      Math.min(64 * 1024, sizeBytes - offset),
+      offset,
+    )
+    if (read.bytesRead === 0)
+      throw new Error("Attachment changed while being read.")
+    offset += read.bytesRead
+  }
+  const extra = await handle.read(Buffer.alloc(1), 0, 1, sizeBytes)
+  if (extra.bytesRead !== 0)
+    throw new Error("Attachment changed while being read.")
+  return bytes
+}
+
+async function inspectStoredAttachmentIfPresent(
+  path: string,
+  validatePdf?: PdfValidator,
+) {
   try {
-    return await inspectStoredImage(path)
+    return await inspectStoredAttachment(path, validatePdf)
   } catch (error) {
     if (isNotFound(error)) return undefined
     throw error
   }
 }
 
-function requireMatchingImageMetadata(
-  stored: Awaited<ReturnType<typeof inspectStoredImage>>,
-  attachment: ImageAttachment,
+function requireMatchingAttachmentMetadata(
+  stored: Awaited<ReturnType<typeof inspectStoredAttachment>>,
+  attachment: UserAttachment,
+  conflictOnMismatch = false,
 ): void {
   if (
     stored.sizeBytes !== attachment.sizeBytes ||
     stored.mediaType !== attachment.mediaType
   ) {
-    throw new Error("Draft image metadata does not match its file.")
+    if (conflictOnMismatch)
+      throw new AttachmentConflictError(
+        "A different attachment already exists for this request.",
+      )
+    throw new Error("Draft attachment metadata does not match its file.")
   }
 }
 
@@ -483,24 +571,24 @@ function requireAttachmentName(name: string): void {
     Buffer.byteLength(name, "utf8") > 255 ||
     name.includes("\0")
   ) {
-    throw new Error("Image attachment name is invalid.")
+    throw new Error("Attachment name is invalid.")
   }
 }
 
-function requireDraftImageAttachment(
+function requireDraftAttachment(
   rolloutId: string,
-  attachment: ImageAttachment,
+  attachment: UserAttachment,
 ): void {
   if (
     attachment.file.rolloutId !== rolloutId ||
-    !isStagingImagePath(attachment.file.path)
+    !isStagingAttachmentPath(attachment.file.path)
   ) {
-    throw new Error("Image attachment is not a draft owned by this rollout.")
+    throw new Error("Attachment is not a draft owned by this rollout.")
   }
   requireAttachmentName(attachment.name)
 }
 
-function isStagingImagePath(path: string): boolean {
+function isStagingAttachmentPath(path: string): boolean {
   const segments = path.split("/")
   return (
     segments.length === 4 &&
@@ -511,36 +599,96 @@ function isStagingImagePath(path: string): boolean {
   )
 }
 
-function requireImageSize(sizeBytes: number): void {
-  if (sizeBytes <= 0 || sizeBytes > MAX_IMAGE_FILE_BYTES) {
-    throw new Error("Image must be a non-empty file no larger than 50 MB.")
+function requireAttachmentSize(sizeBytes: number): void {
+  if (
+    !Number.isSafeInteger(sizeBytes) ||
+    sizeBytes <= 0 ||
+    sizeBytes > ATTACHMENT_FILE_SAFETY_BYTES
+  ) {
+    throw new Error(
+      "Attachment must be a non-empty file within the 50 MB local safety boundary.",
+    )
   }
 }
 
-async function copyImageSnapshot(input: {
+async function copyAttachmentSnapshot(input: {
   readonly root: string
   readonly sourcePath: string
   readonly stagingDirectory: string
+  readonly validatePdf: PdfValidator | undefined
 }) {
-  await ensureDirectoryChain(input.root, input.stagingDirectory)
-  const temporaryPath = join(
-    input.stagingDirectory,
-    `.snapshot-${randomUUID()}.tmp`,
+  // Open and bound the source before creating a snapshot; copyFile would copy an
+  // arbitrarily large file, or a file growing during import, before validation.
+  const source = await open(
+    input.sourcePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   )
+  let temporaryPath: string | undefined
   try {
-    await copyFile(input.sourcePath, temporaryPath, constants.COPYFILE_EXCL)
-    const handle = await open(temporaryPath, constants.O_RDONLY)
+    const file = await source.stat()
+    if (!file.isFile()) throw new Error("Attachment must be a regular file.")
+    requireAttachmentSize(file.size)
+    await ensureDirectoryChain(input.root, input.stagingDirectory)
+    temporaryPath = join(
+      input.stagingDirectory,
+      `.snapshot-${randomUUID()}.tmp`,
+    )
+    const target = await open(temporaryPath, "wx", 0o600)
     try {
-      await handle.sync()
+      const chunk = Buffer.alloc(64 * 1024)
+      let offset = 0
+      while (true) {
+        const { bytesRead } = await source.read(
+          chunk,
+          0,
+          chunk.byteLength,
+          offset,
+        )
+        if (bytesRead === 0) break
+        requireAttachmentSize(offset + bytesRead)
+        await target.writeFile(chunk.subarray(0, bytesRead))
+        offset += bytesRead
+      }
+      await target.sync()
     } finally {
-      await handle.close()
+      await target.close()
     }
-    const metadata = await inspectStoredImage(temporaryPath)
+    const metadata = await inspectStoredAttachment(
+      temporaryPath,
+      input.validatePdf,
+    )
     return { ...metadata, path: temporaryPath }
   } catch (error) {
-    await rm(temporaryPath, { force: true })
+    if (temporaryPath !== undefined) await rm(temporaryPath, { force: true })
+    throw error
+  } finally {
+    await source.close()
+  }
+}
+
+// The caller holds the rollout mutation lease. Extensions identify media for
+// serving, but an ordered request slot has only one owner regardless of type.
+async function requireMatchingAttachmentSlot(path: string): Promise<void> {
+  let names: string[]
+  try {
+    names = await readdir(dirname(path))
+  } catch (error) {
+    if (isNotFound(error)) return
     throw error
   }
+  const name = basename(path)
+  const prefix = `${name.split(".")[0]}.`
+  if (
+    names.some(
+      (existing) =>
+        existing !== name &&
+        existing.startsWith(prefix) &&
+        !existing.endsWith(".tmp"),
+    )
+  )
+    throw new AttachmentConflictError(
+      "A different attachment already exists for this request.",
+    )
 }
 
 async function linkOnce(
@@ -566,29 +714,11 @@ async function linkOnce(
       readFile(path),
     ])
     if (!source.equals(target)) {
-      throw new ImageAttachmentConflictError(
-        "A different image already exists for this request.",
+      throw new AttachmentConflictError(
+        "A different attachment already exists for this request.",
       )
     }
     return false
-  }
-}
-
-async function linkTemporaryFile(
-  temporaryPath: string,
-  path: string,
-  directory: string,
-  sourceBytes: number,
-): Promise<void> {
-  try {
-    await link(temporaryPath, path)
-    await syncDirectory(directory)
-  } catch (error) {
-    if (!isAlreadyExists(error)) throw error
-    const existing = await stat(path)
-    if (!existing.isFile() || existing.size !== sourceBytes) {
-      throw new Error("A different rollout asset already exists at this path.")
-    }
   }
 }
 
@@ -596,7 +726,7 @@ async function writeOnce(
   root: string,
   path: string,
   bytes: Buffer,
-): Promise<void> {
+): Promise<boolean> {
   const directory = dirname(path)
   await ensureDirectoryChain(root, directory)
   const temporaryPath = `${path}.${randomUUID()}.tmp`
@@ -614,6 +744,7 @@ async function writeOnce(
     try {
       await link(temporaryPath, path)
       await syncDirectory(directory)
+      return true
     } catch (error) {
       if (!isAlreadyExists(error)) throw error
       const existing = await readFile(path)
@@ -623,6 +754,7 @@ async function writeOnce(
         )
       }
       await syncDirectory(directory)
+      return false
     }
   } finally {
     await handle?.close()
@@ -698,7 +830,8 @@ function fileNameForId(value: string): string {
   return `id-${createHash("sha256").update(value).digest("hex")}`
 }
 
-function imageExtension(mediaType: ImageAttachment["mediaType"]): string {
+function attachmentExtension(mediaType: UserAttachment["mediaType"]): string {
+  if (mediaType === "application/pdf") return ".pdf"
   if (mediaType === "image/jpeg") return ".jpg"
   return `.${mediaType.slice("image/".length)}`
 }

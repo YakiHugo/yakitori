@@ -1,3 +1,5 @@
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import type { PdfAttachment } from "../../src/kernel/events.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { once } from "node:events"
 import { createServer } from "node:http"
@@ -118,9 +120,15 @@ export async function runBudgetedGoal(page: Page): Promise<void> {
 
 // One process-boundary flow shared by browser and packaged Electron. All model
 // traffic stays on this local endpoint, including the explicit connection test.
+export const smokePdfBytes = pdfFixture(["Ordered PDF smoke original"])
+
 export async function runProviderFlow(
   page: Page,
   testInfo: TestInfo,
+  pdfOptions: Readonly<{
+    browserPdf?: PdfAttachment
+    downloadPdf?: () => Promise<Buffer>
+  }> = {},
 ): Promise<void> {
   const requests: {
     method: string | undefined
@@ -548,6 +556,28 @@ export async function runProviderFlow(
       { type: "text", text: "After attachment." },
     ])
 
+    await runPdfInputFlow(page, testInfo, pdfOptions)
+    const pdfRequest = JSON.parse(requests.at(-1)?.body ?? "{}") as {
+      messages: { role: string; content: unknown }[]
+    }
+    const pdfContent = pdfRequest.messages
+      .filter((message) => message.role === "user")
+      .at(-1)?.content
+    // Unknown custom endpoints remain conservative: request projection expands
+    // the PDF at its authored slot while durable history retains the original.
+    expect(pdfContent).toEqual([
+      { type: "text", text: "Before PDF. " },
+      { type: "text", text: expect.stringContaining("PDF ordered-smoke.pdf") },
+      {
+        type: "image_url",
+        image_url: {
+          url: expect.stringMatching(/^data:image\/jpeg;base64,/),
+          detail: "high",
+        },
+      },
+      { type: "text", text: "After PDF." },
+    ])
+
     await openProviderSettings(page)
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
     await page.getByRole("tab", { name: "Usage", exact: true }).click()
@@ -659,23 +689,26 @@ async function runOrderedInputFlow(
       if (!usesDesktop) {
         const path = new URL(sourceUrl).pathname
         const match = /^\/rollouts\/([^/]+)\/assets\/(.+)$/.exec(path)
-        if (!match) throw new Error("Smoke asset URL is not rollout-owned.")
+        if (!match?.[1] || !match[2])
+          throw new Error("Smoke asset URL is not rollout-owned.")
+        const rolloutId = decodeURIComponent(match[1])
+        const assetPath = match[2].split("/").map(decodeURIComponent).join("/")
         Object.defineProperty(window, "yakitoriDesktop", {
           configurable: true,
           value: {
-            importImageFiles: async () => [
+            importAttachmentFiles: async () => [
               {
                 name: "ordered-smoke.png",
                 mediaType: "image/png",
                 detail: "high",
                 sizeBytes: bytes.byteLength,
                 file: {
-                  rolloutId: decodeURIComponent(match[1]!),
-                  path: match[2]!.split("/").map(decodeURIComponent).join("/"),
+                  rolloutId,
+                  path: assetPath,
                 },
               },
             ],
-            discardDraftImages: async () => {},
+            discardDraftAttachments: async () => {},
           },
         })
       }
@@ -775,5 +808,146 @@ async function runOrderedInputFlow(
       await page.evaluate(() => {
         Reflect.deleteProperty(window, "yakitoriDesktop")
       })
+  }
+}
+
+async function runPdfInputFlow(
+  page: Page,
+  testInfo: TestInfo,
+  options: Readonly<{
+    browserPdf?: PdfAttachment
+    downloadPdf?: () => Promise<Buffer>
+  }>,
+): Promise<void> {
+  const usesDesktop = await page.evaluate(
+    () => window.yakitoriDesktop !== undefined,
+  )
+  if (!usesDesktop) {
+    if (options.browserPdf === undefined)
+      throw new Error("Browser PDF import fixture is missing.")
+    await page.evaluate(
+      (pdf) =>
+        Object.defineProperty(window, "yakitoriDesktop", {
+          configurable: true,
+          value: {
+            importAttachmentFiles: async () => [pdf],
+            discardDraftAttachments: async () => {},
+          },
+        }),
+      options.browserPdf,
+    )
+  }
+  try {
+    const editor = page.getByRole("textbox", {
+      name: "Message the Mate",
+      exact: true,
+    })
+    await editor.fill("Before PDF. After PDF.")
+    await editor.evaluate((node) => {
+      const text = node.querySelector("p")?.firstChild
+      if (text?.nodeType !== Node.TEXT_NODE)
+        throw new Error("PDF smoke editor text missing")
+      const range = document.createRange()
+      range.setStart(text, "Before PDF. ".length)
+      range.collapse(true)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    await editor.evaluate((node, base64) => {
+      const bytes = Uint8Array.from(atob(base64), (character) =>
+        character.charCodeAt(0),
+      )
+      const clipboardData = new DataTransfer()
+      clipboardData.items.add(
+        new File([bytes], "ordered-smoke.pdf", { type: "application/pdf" }),
+      )
+      node.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      )
+    }, smokePdfBytes.toString("base64"))
+    await expect(
+      editor.getByRole("button", {
+        name: "Open attached PDF ordered-smoke.pdf",
+      }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Remove ordered-smoke.pdf", exact: true })
+      .click()
+    await editor.focus()
+    await page.keyboard.press(
+      process.platform === "darwin" ? "Meta+z" : "Control+z",
+    )
+    await expect(
+      editor.getByRole("button", {
+        name: "Open attached PDF ordered-smoke.pdf",
+      }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByRole("region", { name: "Response", exact: true }),
+    ).toHaveCount(3)
+    await expect(
+      page.getByRole("button", { name: "Interrupt", exact: true }),
+    ).toHaveCount(0)
+    const checkOrder = async () => {
+      const before = page
+        .getByRole("main")
+        .locator(".message-bubble")
+        .filter({ hasText: "Before PDF." })
+      await expect(before).toBeVisible()
+      const message = before.locator("..")
+      expect(
+        await message
+          .locator(
+            ':scope > .message-bubble, :scope > section[aria-label="PDF attachment ordered-smoke.pdf"]',
+          )
+          .evaluateAll((nodes) =>
+            nodes.map((node) =>
+              node.tagName === "SECTION" ? "PDF" : node.textContent,
+            ),
+          ),
+      ).toEqual(["Before PDF. ", "PDF", "After PDF."])
+      await expect(
+        message.getByRole("link", { name: "Download PDF", exact: true }),
+      ).toBeVisible()
+    }
+    await checkOrder()
+    await page.reload()
+    await checkOrder()
+    let downloaded: Buffer
+    if (options.downloadPdf) downloaded = await options.downloadPdf()
+    else {
+      const pending = page.waitForEvent("download")
+      await page
+        .getByRole("main")
+        .getByRole("link", { name: "Download PDF", exact: true })
+        .click()
+      const download = await pending
+      expect(download.suggestedFilename()).toBe("ordered-smoke.pdf")
+      expect(await download.failure()).toBeNull()
+      const stream = await download.createReadStream()
+      if (stream === null) throw new Error("PDF download stream missing")
+      const chunks: Buffer[] = []
+      for await (const chunk of stream) chunks.push(Buffer.from(chunk))
+      downloaded = Buffer.concat(chunks)
+    }
+    expect(downloaded).toEqual(smokePdfBytes)
+    const screenshot = testInfo.outputPath("ordered-pdf-input.png")
+    await page.screenshot({ path: screenshot, animations: "disabled" })
+    await testInfo.attach("ordered-pdf-input", {
+      path: screenshot,
+      contentType: "image/png",
+    })
+  } finally {
+    if (!usesDesktop)
+      await page.evaluate(() =>
+        Reflect.deleteProperty(window, "yakitoriDesktop"),
+      )
   }
 }

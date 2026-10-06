@@ -10,6 +10,156 @@ import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
 describe("Step tool planning", () => {
   it.each([
+    {
+      wireApi: "gemini_generate_content",
+      model: "gemini-2.5-pro",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "gemini_generate_content",
+      model: "gemini-2.5-flash",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "gemini_generate_content",
+      model: "gemini-2.5-flash-lite",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "gemini_generate_content",
+      model: "models/gemini-3.8-flash",
+      user: true,
+      tool: true,
+    },
+    {
+      wireApi: "gemini_generate_content",
+      model: "gemini-4-custom",
+      user: false,
+      tool: false,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-6-astra",
+      effort: "high",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-6.1-sol",
+      effort: "low",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-6-sol",
+      effort: "none",
+      user: true,
+      tool: true,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-6-sol",
+      effort: "high",
+      user: true,
+      tool: false,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-5.1-codex",
+      user: false,
+      tool: false,
+    },
+    {
+      wireApi: "openai_chat_completions",
+      model: "gpt-custom",
+      user: false,
+      tool: false,
+    },
+    {
+      wireApi: "openai_responses",
+      model: "gpt-6-astra",
+      user: true,
+      tool: true,
+    },
+    {
+      wireApi: "anthropic_messages",
+      model: "claude-sonnet-4-6",
+      user: true,
+      tool: true,
+    },
+  ] as const)("separates user/tool PDF capability for $wireApi/$model", async (entry) => {
+    const provider = "personal"
+    const models = createConfiguredModelsManager({
+      provider,
+      catalogProvider:
+        entry.wireApi === "anthropic_messages" ? "anthropic" : "openai",
+      wireApi: entry.wireApi,
+      models: [
+        {
+          id: entry.model,
+          inputModalities: ["text", "image"],
+          efforts: ["none", "low", "high"],
+        },
+      ],
+    })
+    const registry = createToolRegistry([])
+    const selection = {
+      provider,
+      model: entry.model,
+      ...("effort" in entry ? { effort: entry.effort } : {}),
+    }
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "pdf",
+      },
+      models,
+    ).resolveStep(selection, models)
+    for (const nativePdf of [true, false]) {
+      const step = captureStepContext({
+        registry,
+        configuration,
+        wireApi: entry.wireApi,
+        nativePdf,
+      })
+      expect(step.documentReading.nativePdf).toBe(nativePdf && entry.tool)
+      expect(step.userDocumentReading.nativePdf).toBe(nativePdf && entry.user)
+      if (
+        nativePdf &&
+        entry.user &&
+        entry.wireApi === "gemini_generate_content"
+      ) {
+        expect(step.userDocumentReading.nativePdfLimits).toEqual({
+          maxFileBytes: 50_000_000,
+          maxRequestPages: 1_000,
+          maxInlineBytes: 100_000_000,
+        })
+      }
+      if (
+        nativePdf &&
+        entry.user &&
+        entry.wireApi === "openai_chat_completions"
+      ) {
+        expect(step.userDocumentReading.nativePdfLimits).toEqual({
+          maxFileBytes: 50_000_000,
+          fileLimitExclusive: true,
+          maxRequestBytes: 50_000_000,
+        })
+      }
+      await step.toolRouter.release()
+    }
+    await registry.dispose()
+  })
+
+  it.each([
     target("openai", "gpt-5", "codex"),
     target("anthropic", "claude-sonnet-4-6", "anthropic"),
     target("faux", "model", "default"),

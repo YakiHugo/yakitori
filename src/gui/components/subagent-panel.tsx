@@ -1,3 +1,4 @@
+import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { ArrowDown, ArrowLeft, ChevronRight } from "lucide-react"
 import {
@@ -9,7 +10,7 @@ import {
   useState,
 } from "react"
 import type { ApiSessionDetail } from "../../server/protocol.ts"
-import { imageAttachmentUrl } from "../composer-attachments.ts"
+import { attachmentUrl } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import {
   createExecutionViewState,
@@ -426,11 +427,18 @@ function TraceEntry({
               >
                 {part.text}
               </p>
+            ) : part.type === "document" ? (
+              <PdfAttachmentCard
+                // biome-ignore lint/suspicious/noArrayIndexKey: Part slots distinguish repeated references to the same asset.
+                key={`${entry.inputId}:${index}`}
+                attachment={part}
+                apiBase={apiBase}
+              />
             ) : (
               <a
                 // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this input ID.
                 key={`${entry.inputId}:${index}`}
-                href={imageAttachmentUrl(part, apiBase)}
+                href={attachmentUrl(part, apiBase)}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(event) => {
@@ -438,7 +446,7 @@ function TraceEntry({
                   setOpenError(undefined)
                   void openUrlTarget({
                     kind: "url",
-                    url: imageAttachmentUrl(part, apiBase),
+                    url: attachmentUrl(part, apiBase),
                   }).catch((error: unknown) =>
                     setOpenError(
                       error instanceof Error
@@ -449,7 +457,7 @@ function TraceEntry({
                 }}
               >
                 <img
-                  src={imageAttachmentUrl(part, apiBase)}
+                  src={attachmentUrl(part, apiBase)}
                   alt={part.name}
                   loading="lazy"
                 />

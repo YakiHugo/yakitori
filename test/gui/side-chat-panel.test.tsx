@@ -695,11 +695,11 @@ describe("side chat panel", () => {
       detail: "high" as const,
       file: { rolloutId: "side-chat", path: "images/diagram.png" },
     }
-    const importImageFiles = vi.fn(async () => [image])
-    const discardDraftImages = vi.fn(async () => {})
+    const importAttachmentFiles = vi.fn(async () => [image])
+    const discardDraftAttachments = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {
       configurable: true,
-      value: { importImageFiles, discardDraftImages },
+      value: { importAttachmentFiles, discardDraftAttachments },
     })
     client.request.mockImplementation(async (method) => {
       if (method === "sideChat/create") return snapshot()
@@ -718,7 +718,7 @@ describe("side chat panel", () => {
       },
     })
     await screen.findByRole("button", { name: "Preview diagram.png" })
-    expect(importImageFiles).toHaveBeenCalledWith({
+    expect(importAttachmentFiles).toHaveBeenCalledWith({
       sessionId: "side-chat",
       files: [file],
     })

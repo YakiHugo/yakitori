@@ -1,7 +1,7 @@
 import type { ApiAdmitInputResponse } from "../../server/protocol.ts"
-import { inputImageOwnership } from "../input-image-ownership.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import {
-  inputContentImages,
+  inputContentAttachments,
   inputContentText,
 } from "../../kernel/input-content.ts"
 import type { InputContent, InputPart } from "../../kernel/events.ts"
@@ -19,7 +19,7 @@ import type {
 } from "../../core/session-sidebar.ts"
 import {
   COMPACT_DIRECTIVE,
-  type ImageAttachment,
+  type UserAttachment,
   isKernelEvent,
   type ModelSelection,
   type StoredEventEnvelope,
@@ -595,24 +595,27 @@ export const useAppStore = create<AppStore>()((set, get) => {
     right: readonly InputPart[],
   ) =>
     sameInputParts(
-      inputImageOwnership.resolveParts(get().apiBase, left),
-      inputImageOwnership.resolveParts(get().apiBase, right),
+      inputAttachmentOwnership.resolveParts(get().apiBase, left),
+      inputAttachmentOwnership.resolveParts(get().apiBase, right),
     )
   const recordPromotedContent = (
     original: InputContent,
     accepted: InputContent,
   ) => {
-    if (!original.parts.some((part) => part.type === "image")) return
-    inputImageOwnership.promote(get().apiBase, original, accepted)
+    if (!original.parts.some((part) => part.type !== "text")) return
+    inputAttachmentOwnership.promote(get().apiBase, original, accepted)
     set((state) => ({
       promptDraft:
         state.promptDraft === undefined
           ? undefined
-          : inputImageOwnership.resolveParts(state.apiBase, state.promptDraft),
+          : inputAttachmentOwnership.resolveParts(
+              state.apiBase,
+              state.promptDraft,
+            ),
       newSessionPrompt:
         state.newSessionPrompt === undefined
           ? undefined
-          : inputImageOwnership.resolveParts(
+          : inputAttachmentOwnership.resolveParts(
               state.apiBase,
               state.newSessionPrompt,
             ),
@@ -624,7 +627,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             parts:
               draft.parts === undefined
                 ? undefined
-                : inputImageOwnership.resolveParts(state.apiBase, draft.parts),
+                : inputAttachmentOwnership.resolveParts(
+                    state.apiBase,
+                    draft.parts,
+                  ),
           },
         ]),
       ),
@@ -676,7 +682,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sameDraftParts(trimInputParts(draft.parts ?? []), last.content.parts)
       const toPrepend = alreadyInDraft ? restoring.slice(0, -1) : restoring
       const restored: SessionDraft = {
-        parts: inputImageOwnership.resolveParts(
+        parts: inputAttachmentOwnership.resolveParts(
           state.apiBase,
           joinInputDrafts([
             ...toPrepend.map((steer) => steer.content.parts),
@@ -739,7 +745,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const restored: SessionDraft = {
         parts: alreadyInDraft
           ? draft.parts
-          : inputImageOwnership.resolveParts(
+          : inputAttachmentOwnership.resolveParts(
               state.apiBase,
               joinInputDrafts([admission.content.parts, draft.parts]),
             ),
@@ -1280,7 +1286,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             selection: {},
             selectedSession: undefined,
             execution: createExecutionViewState(),
-            promptDraft: inputImageOwnership.resolveParts(
+            promptDraft: inputAttachmentOwnership.resolveParts(
               get().apiBase,
               pending.content.parts,
             ),
@@ -2132,7 +2138,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ...(excerpts.length ? { contextAttachments: excerpts } : {}),
       }
       const text = inputContentText(content)
-      const attachments = inputContentImages(content)
+      const attachments = inputContentAttachments(content)
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       let queuedModelSelection: ModelSelection | undefined
       let queuedForCreation = false
@@ -2326,19 +2332,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
               }))
             }
             if (alreadyRestored && acceptedContent !== undefined) {
-              const acceptedImages = inputContentImages(acceptedContent)
+              const acceptedAttachments =
+                inputContentAttachments(acceptedContent)
               const replaceParts = (
                 current: readonly InputPart[],
               ): readonly InputPart[] =>
                 current.map((part) => {
-                  if (part.type !== "image") return part
+                  if (part.type === "text") return part
                   const index = attachments.findIndex((original) =>
                     sameAttachments([original], [part]),
                   )
-                  const replacement = acceptedImages[index]
+                  const replacement = acceptedAttachments[index]
                   return replacement === undefined
                     ? part
-                    : { type: "image", ...replacement }
+                    : replacement.mediaType === "application/pdf"
+                      ? { type: "document", ...replacement }
+                      : { type: "image", ...replacement }
                 })
               set((state) =>
                 state.selection.sessionId === selection.sessionId
@@ -3415,8 +3424,8 @@ function takeSessionDraft(
 }
 
 function sameAttachments(
-  left: readonly ImageAttachment[],
-  right: readonly ImageAttachment[],
+  left: readonly UserAttachment[],
+  right: readonly UserAttachment[],
 ): boolean {
   return (
     left.length === right.length &&
@@ -3425,7 +3434,10 @@ function sameAttachments(
         attachment.name === right[index]?.name &&
         attachment.mediaType === right[index]?.mediaType &&
         attachment.sizeBytes === right[index]?.sizeBytes &&
-        attachment.detail === right[index]?.detail &&
+        ("detail" in attachment ? attachment.detail : undefined) ===
+          ("detail" in (right[index] ?? {})
+            ? (right[index] as { detail?: string }).detail
+            : undefined) &&
         attachment.file.rolloutId === right[index]?.file.rolloutId &&
         attachment.file.path === right[index]?.file.path,
     )

@@ -1,7 +1,7 @@
 import {
   inputContentText,
-  inputContentImages,
-  replaceInputImages,
+  inputContentAttachments,
+  replaceInputAttachments,
 } from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
@@ -12,7 +12,8 @@ import { Session, type TurnProcessor } from "../core/session.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
-  type ImageAttachment,
+  type UserAttachment,
+  type ModelDocumentBlock,
   isInputContent,
   type ModelMessage,
   type ModelImageBlock,
@@ -20,7 +21,10 @@ import {
   type InputContent,
 } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import type { RolloutAssets } from "../kernel/rollout-assets.ts"
+import type {
+  AttachmentBytesInput,
+  RolloutAssets,
+} from "../kernel/rollout-assets.ts"
 import type {
   PermissionGate,
   RuntimePermissionRequest,
@@ -74,11 +78,16 @@ export type SideChatService = {
     discardSession: () => Promise<void>,
   ): Promise<void>
   close(): Promise<void>
-  importImagePaths(
+  importAttachmentPaths(
     sideChatId: string,
     ownerId: string,
     paths: readonly string[],
-  ): Promise<readonly ImageAttachment[]>
+  ): Promise<readonly UserAttachment[]>
+  importAttachmentBytes(
+    sideChatId: string,
+    ownerId: string,
+    items: readonly AttachmentBytesInput[],
+  ): Promise<readonly UserAttachment[]>
   resolvePermission(input: {
     sideChatId: string
     turnId: string
@@ -163,6 +172,11 @@ export function createSideChatService(options: {
           input.sourceSessionId === undefined
             ? undefined
             : chats.get(input.sourceSessionId)
+        if (sourceChat?.closing)
+          throw new SideChatError(
+            "The source conversation is no longer available.",
+            "not_found",
+          )
         const source =
           input.sourceSessionId === undefined
             ? undefined
@@ -199,18 +213,16 @@ export function createSideChatService(options: {
                 )
                 .map((entry) => entry.item)),
         ]
-        // A completed fork owns its media bytes in memory. Parent deletion and
-        // rollout GC must not invalidate the reference context after creation.
-        const inheritedHistory: readonly ModelMessage[] = await Promise.all(
+        // Freeze image bytes now; PDFs receive independent asset references
+        // once the side conversation owns its ephemeral rollout below.
+        let inheritedHistory: readonly ModelMessage[] = await Promise.all(
           inherited.map(async (message) => {
             if (message.role !== "user" && message.role !== "tool")
               return message
             const resolveImage = async (image: ModelImageBlock) => {
               if (image.data !== undefined) return image
               if (options.rolloutAssets === undefined)
-                throw new SideChatError(
-                  "Image attachment storage is unavailable.",
-                )
+                throw new SideChatError("Attachment storage is unavailable.")
               const bytes = await options.rolloutAssets.read(image.file)
               if (bytes.byteLength !== image.sizeBytes)
                 throw new Error(
@@ -243,26 +255,32 @@ export function createSideChatService(options: {
             }
           }),
         )
-        let imageNumber = 0
-        const quoteImage = (image: ModelImageBlock) => ({
-          type: "image",
-          mediaType: image.mediaType,
-          referenceImage: ++imageNumber,
+        let attachmentNumber = 0
+        const quoteAttachment = (
+          block: ModelImageBlock | ModelDocumentBlock,
+        ) => ({
+          type: block.type,
+          mediaType: block.mediaType,
+          ...(block.type === "document" ? { name: block.name } : {}),
+          referenceAttachment: ++attachmentNumber,
         })
         const quotedHistory = inheritedHistory.map((message) => {
           if (message.role === "user" || message.role === "tool")
             return {
               ...message,
               content: message.content.map((block) =>
-                block.type === "image" ? quoteImage(block) : block,
+                block.type === "image" || block.type === "document"
+                  ? quoteAttachment(block)
+                  : block,
               ),
             }
           return message
         })
-        const referenceImages = inheritedHistory.flatMap((message) =>
+        const referenceAttachments = inheritedHistory.flatMap((message) =>
           message.role === "user" || message.role === "tool"
             ? [...message.content].filter(
-                (block): block is ModelImageBlock => block.type === "image",
+                (block): block is ModelImageBlock | ModelDocumentBlock =>
+                  block.type === "image" || block.type === "document",
               )
             : [],
         )
@@ -332,7 +350,7 @@ export function createSideChatService(options: {
             },
           },
         ]
-        if (referenceImages.length > 0)
+        if (referenceAttachments.length > 0)
           rollout.push({
             threadId: id,
             rolloutId: id,
@@ -341,7 +359,7 @@ export function createSideChatService(options: {
             item: {
               type: "response_item",
               item: {
-                id: `side_images_${id}`,
+                id: `side_attachments_${id}`,
                 turnId: `side_context_${id}`,
                 createdAt: createdAtIso,
                 item: {
@@ -349,9 +367,9 @@ export function createSideChatService(options: {
                   content: [
                     {
                       type: "text",
-                      text: "These images, in order, belong to the frozen parent conversation above. They are reference material, not a new request. Answer the new side-chat user message that follows.",
+                      text: "These attachments, in order, belong to the frozen parent conversation above. They are reference material, not a new request. Answer the new side-chat user message that follows.",
                     },
-                    ...referenceImages,
+                    ...referenceAttachments,
                   ],
                 },
               },
@@ -381,22 +399,89 @@ export function createSideChatService(options: {
           },
           async shutdownThread() {},
         }
-        const thread = new AgentThread(
-          new Session({
-            stored,
-            store,
-            processor: await options.createProcessor(stored),
-          }),
-        )
-        if (
-          parentSessionId !== undefined &&
-          deletingParents.has(parentSessionId)
-        ) {
-          await options.releaseAssets?.(id)
-          throw new SideChatError(
-            "The source conversation is no longer available.",
-            "not_found",
+        // Creating the processor establishes the ephemeral asset lease. PDFs
+        // must be copied afterwards: request projection rereads their files,
+        // so retaining inline bytes alone cannot freeze inherited documents.
+        const processor = await options.createProcessor(stored)
+        let thread: AgentThread
+        let rollbackDocuments: (() => Promise<void>) | undefined
+        try {
+          const documents = referenceAttachments.filter(
+            (block): block is ModelDocumentBlock => block.type === "document",
           )
+          if (documents.length > 0) {
+            if (options.rolloutAssets === undefined)
+              throw new SideChatError("Attachment storage is unavailable.")
+            const copied = await options.rolloutAssets.copyAttachments(
+              id,
+              `side_context_${id}`,
+              documents,
+            )
+            rollbackDocuments = copied.rollback
+            const replacements = new Map(
+              documents.map((document, index) => {
+                const attachment = copied.attachments[index]
+                if (attachment?.mediaType !== "application/pdf")
+                  throw new Error("Missing inherited PDF attachment copy.")
+                return [document, { type: "document" as const, ...attachment }]
+              }),
+            )
+            const replaceDocuments = (message: ModelMessage): ModelMessage => {
+              if (message.role !== "user" && message.role !== "tool")
+                return message
+              return {
+                ...message,
+                content: message.content.map((block) =>
+                  block.type === "document"
+                    ? (replacements.get(block) ?? block)
+                    : block,
+                ),
+              }
+            }
+            inheritedHistory = inheritedHistory.map(replaceDocuments)
+            for (const [index, record] of rollout.entries()) {
+              const item = record.item
+              if (
+                item.type === "response_item" &&
+                item.item.item.role === "user"
+              )
+                rollout[index] = {
+                  ...record,
+                  item: {
+                    ...item,
+                    item: {
+                      ...item.item,
+                      item: replaceDocuments(item.item.item),
+                    },
+                  },
+                }
+            }
+          }
+          if (closed)
+            throw new SideChatError(
+              "Side conversations are closed.",
+              "conflict",
+            )
+          if (
+            parentSessionId !== undefined &&
+            deletingParents.has(parentSessionId)
+          )
+            throw new SideChatError(
+              "The source conversation is no longer available.",
+              "not_found",
+            )
+          thread = new AgentThread(new Session({ stored, store, processor }))
+        } catch (error) {
+          try {
+            await processor.dispose?.()
+          } finally {
+            try {
+              await rollbackDocuments?.()
+            } finally {
+              await options.releaseAssets?.(id)
+            }
+          }
+          throw error
         }
         const chat: LiveChat = {
           ...(parentSessionId === undefined ? {} : { parentSessionId }),
@@ -428,10 +513,16 @@ export function createSideChatService(options: {
         return snapshot(chat)
       })()
       creating.add(operation)
-      void operation.then(
-        () => creating.delete(operation),
-        () => creating.delete(operation),
-      )
+      const sourceChat =
+        input.sourceSessionId === undefined
+          ? undefined
+          : chats.get(input.sourceSessionId)
+      sourceChat?.importing.add(operation)
+      const finish = () => {
+        creating.delete(operation)
+        sourceChat?.importing.delete(operation)
+      }
+      void operation.then(finish, finish)
       return operation
     },
     read(id) {
@@ -443,7 +534,7 @@ export function createSideChatService(options: {
         throw new SideChatError(
           "content must contain valid ordered input parts.",
         )
-      const attachments = inputContentImages(input.content)
+      const attachments = inputContentAttachments(input.content)
       if (
         (!inputContentText(input.content).trim() &&
           !input.content.contextAttachments?.length &&
@@ -482,17 +573,17 @@ export function createSideChatService(options: {
         const promotion =
           attachments.length === 0
             ? undefined
-            : await options.rolloutAssets?.promoteImageAttachments(
+            : await options.rolloutAssets?.promoteAttachments(
                 chat.snapshot.id,
                 input.requestId,
                 attachments,
               )
         if (attachments.length !== 0 && promotion === undefined)
-          throw new SideChatError("Image attachment storage is unavailable.")
+          throw new SideChatError("Attachment storage is unavailable.")
         const content =
           promotion === undefined
             ? originalContent
-            : replaceInputImages(originalContent, promotion.attachments)
+            : replaceInputAttachments(originalContent, promotion.attachments)
         // Promotion may outlive the deadline; admission must still happen before it.
         if (now() >= Date.parse(chat.snapshot.expiresAt)) {
           await promotion?.rollback()
@@ -522,7 +613,7 @@ export function createSideChatService(options: {
           modelSelection: structuredClone(selection),
         })
         if (promotion !== undefined)
-          await options.rolloutAssets?.discardDraftImageAttachments(attachments)
+          await options.rolloutAssets?.discardDraftAttachments(attachments)
         chat.snapshot.modelSelection = structuredClone(selection)
         if (
           !chat.snapshot.messages.some(
@@ -552,15 +643,32 @@ export function createSideChatService(options: {
         chat.importing.delete(operation)
       }
     },
-    async importImagePaths(id, ownerId, paths) {
+    async importAttachmentPaths(id, ownerId, paths) {
       const chat = requireChat(id)
       if (now() >= Date.parse(chat.snapshot.expiresAt)) throw expiredChatError()
       if (options.rolloutAssets === undefined)
-        throw new SideChatError("Image attachment storage is unavailable.")
-      const operation = options.rolloutAssets.importImagePaths(
+        throw new SideChatError("Attachment storage is unavailable.")
+      const operation = options.rolloutAssets.importAttachmentPaths(
         id,
         ownerId,
         paths,
+      )
+      chat.importing.add(operation)
+      try {
+        return await operation
+      } finally {
+        chat.importing.delete(operation)
+      }
+    },
+    async importAttachmentBytes(id, ownerId, items) {
+      const chat = requireChat(id)
+      if (now() >= Date.parse(chat.snapshot.expiresAt)) throw expiredChatError()
+      if (options.rolloutAssets === undefined)
+        throw new SideChatError("Attachment storage is unavailable.")
+      const operation = options.rolloutAssets.importAttachmentBytes(
+        id,
+        ownerId,
+        items,
       )
       chat.importing.add(operation)
       try {

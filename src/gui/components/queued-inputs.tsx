@@ -1,8 +1,9 @@
-import { imageAttachmentUrl } from "../composer-attachments.ts"
+import { openPdfAttachment } from "./pdf-attachment.tsx"
+import { attachmentUrl } from "../composer-attachments.ts"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import type { InputPart, ImageAttachment } from "../../kernel/events.ts"
 import {
-  inputContentImages,
+  inputContentAttachments,
   inputContentText,
 } from "../../kernel/input-content.ts"
 import { trimInputParts } from "../input-parts.ts"
@@ -23,6 +24,7 @@ export function QueuedInputs() {
   const reorderQueuedInputs = useAppStore((state) => state.reorderQueuedInputs)
   const startQueuedInput = useAppStore((state) => state.startQueuedInput)
   const [editingId, setEditingId] = useState<string>()
+  const [openError, setOpenError] = useState<string>()
   const [preview, setPreview] = useState<ImageAttachment>()
   const [editingParts, setEditingParts] = useState<readonly InputPart[]>([])
 
@@ -30,9 +32,10 @@ export function QueuedInputs() {
 
   return (
     <div className="space-y-1 border-t bg-muted/40 px-4 py-2">
+      {openError === undefined ? null : <p role="alert">{openError}</p>}
       {preview ? (
         <ImageLightbox
-          src={imageAttachmentUrl(preview, apiBase)}
+          src={attachmentUrl(preview, apiBase)}
           name={preview.name}
           onClose={() => setPreview(undefined)}
         />
@@ -59,6 +62,16 @@ export function QueuedInputs() {
                 value={editingParts}
                 onChange={setEditingParts}
                 onPreviewImage={setPreview}
+                onOpenDocument={(document) => {
+                  void openPdfAttachment(document, apiBase).catch(
+                    (error: unknown) =>
+                      setOpenError(
+                        error instanceof Error
+                          ? error.message
+                          : "Could not open PDF.",
+                      ),
+                  )
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     setEditingId(undefined)
@@ -92,8 +105,8 @@ export function QueuedInputs() {
             <>
               <span className="min-w-0 flex-1 truncate">
                 {inputContentText(item.input.content) || "Attachment"}
-                {inputContentImages(item.input.content).length > 0
-                  ? ` · ${inputContentImages(item.input.content).length} attachment(s)`
+                {inputContentAttachments(item.input.content).length > 0
+                  ? ` · ${inputContentAttachments(item.input.content).length} attachment(s)`
                   : ""}
               </span>
               <QueueButton

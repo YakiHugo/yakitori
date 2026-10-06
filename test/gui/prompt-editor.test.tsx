@@ -1,5 +1,10 @@
-import type { ImageAttachment, InputPart } from "../../src/kernel/events.ts"
-import { inputImageOwnership } from "../../src/gui/input-image-ownership.ts"
+import type {
+  ImageAttachment,
+  UserAttachment,
+  PdfAttachment,
+  InputPart,
+} from "../../src/kernel/events.ts"
+import { inputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
 import { textInputParts } from "../../src/gui/input-parts.ts"
 import { inputContentText } from "../../src/kernel/input-content.ts"
 // @vitest-environment happy-dom
@@ -264,7 +269,7 @@ function OrderedFixture({
 }: {
   initial: readonly InputPart[]
   handle: React.RefObject<PromptEditorHandle | null>
-  discard?: (images: readonly ImageAttachment[]) => void
+  discard?: (images: readonly UserAttachment[]) => void
   preview?: (image: ImageAttachment) => void
   apiBase?: string
 }) {
@@ -277,7 +282,7 @@ function OrderedFixture({
         apiBase={apiBase}
         value={parts}
         onChange={setParts}
-        {...(discard ? { onDiscardImages: discard } : {})}
+        {...(discard ? { onDiscardAttachments: discard } : {})}
         {...(preview ? { onPreviewImage: preview } : {})}
       />
       <output data-testid="parts">{JSON.stringify(parts)}</output>
@@ -307,7 +312,7 @@ it("inserts images between authored text and preserves mapped placement during a
       initial={[{ type: "text", text: "before" }]}
     />,
   )
-  const insertion = handle.current?.captureImageInsertion()
+  const insertion = handle.current?.captureAttachmentInsertion()
   pasteText(" after")
   act(() => {
     expect(insertion?.insert([stagedImage])).toBe(true)
@@ -330,7 +335,7 @@ it("invalidates pending image insertion when the draft is externally replaced", 
       initial={[{ type: "text", text: "old" }]}
     />,
   )
-  const insertion = handle.current?.captureImageInsertion()
+  const insertion = handle.current?.captureAttachmentInsertion()
   fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
   act(() => {
     expect(insertion?.insert([stagedImage])).toBe(false)
@@ -352,7 +357,7 @@ it("retains removed image bytes for Undo and releases only unused staging assets
       ]}
     />,
   )
-  act(() => handle.current?.removeImage(0))
+  act(() => handle.current?.removeAttachment(0))
   expect(editedParts()).toEqual([{ type: "text", text: "beforeafter" }])
   expect(discard).not.toHaveBeenCalled()
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
@@ -361,7 +366,7 @@ it("retains removed image bytes for Undo and releases only unused staging assets
     { ...stagedImage, type: "image" },
     { type: "text", text: "after" },
   ])
-  act(() => handle.current?.removeImage(0))
+  act(() => handle.current?.removeAttachment(0))
   fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
   expect(discard).toHaveBeenCalledExactlyOnceWith([stagedImage])
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
@@ -391,8 +396,8 @@ it("resolves image atoms restored by Undo after their staging bytes were promote
       preview={preview}
     />,
   )
-  act(() => handle.current?.removeImage(0))
-  inputImageOwnership.promote(
+  act(() => handle.current?.removeAttachment(0))
+  inputAttachmentOwnership.promote(
     apiBase,
     { kind: "parts", parts: original },
     { kind: "parts", parts: accepted },
@@ -417,4 +422,108 @@ it("resolves image atoms restored by Undo after their staging bytes were promote
     shiftKey: true,
   })
   expect(editedParts()).toEqual([])
+})
+
+const stagedPdf: PdfAttachment = {
+  name: "manual.pdf",
+  mediaType: "application/pdf",
+  sizeBytes: 500,
+  file: {
+    rolloutId: "rollout_editor",
+    path: "attachments/staging/pdf/manual.pdf",
+  },
+}
+it("preserves mixed PDF/image placement, image detail indexing and PDF Undo ownership", () => {
+  const handle = createRef<PromptEditorHandle>()
+  const discard = vi.fn()
+  render(
+    <OrderedFixture
+      handle={handle}
+      discard={discard}
+      initial={[{ type: "text", text: "before" }]}
+    />,
+  )
+  const insertion = handle.current?.captureAttachmentInsertion()
+  pasteText("after")
+  act(() => {
+    expect(insertion?.insert([stagedPdf, stagedImage])).toBe(true)
+  })
+  expect(editedParts()).toEqual([
+    { type: "text", text: "before" },
+    { ...stagedPdf, type: "document" },
+    { ...stagedImage, type: "image" },
+    { type: "text", text: "after" },
+  ])
+  act(() => handle.current?.setImageDetail(1, "high"))
+  expect(editedParts()).toEqual([
+    { type: "text", text: "before" },
+    { ...stagedPdf, type: "document" },
+    { ...stagedImage, type: "image", detail: "high" },
+    { type: "text", text: "after" },
+  ])
+  act(() => handle.current?.removeAttachment(0))
+  expect(
+    screen.queryByRole("button", { name: "Open attached PDF manual.pdf" }),
+  ).toBeNull()
+  expect(discard).not.toHaveBeenCalled()
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
+  expect(
+    screen.getByRole("button", { name: "Open attached PDF manual.pdf" }),
+  ).toBeTruthy()
+  act(() => handle.current?.removeAttachment(0))
+  fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
+  expect(discard.mock.calls.flat(2)).toContainEqual(stagedPdf)
+})
+it("resolves promoted PDF atoms for both mouse and keyboard activation", () => {
+  const open = vi.fn()
+  const apiBase = "http://pdf-editor.test/"
+  const accepted = {
+    ...stagedPdf,
+    file: {
+      rolloutId: "rollout_editor",
+      path: "attachments/requests/pdf/manual.pdf",
+    },
+  }
+  inputAttachmentOwnership.promote(
+    apiBase,
+    { kind: "parts", parts: [{ ...stagedPdf, type: "document" }] },
+    { kind: "parts", parts: [{ ...accepted, type: "document" }] },
+  )
+  render(
+    <PromptEditor
+      label="PDF prompt"
+      value={[{ ...stagedPdf, type: "document" }]}
+      apiBase={apiBase}
+      onChange={() => {}}
+      onOpenDocument={open}
+    />,
+  )
+  const chip = screen.getByRole("button", {
+    name: "Open attached PDF manual.pdf",
+  })
+  fireEvent.click(chip)
+  fireEvent.keyDown(chip, { key: "Enter" })
+  expect(open).toHaveBeenCalledTimes(2)
+  expect(open).toHaveBeenLastCalledWith({ ...accepted, type: "document" })
+})
+it("passes every dropped file in order so unsupported content is reported rather than silently lost", () => {
+  const paste = vi.fn()
+  render(
+    <PromptEditor
+      label="PDF prompt"
+      value={[]}
+      apiBase="http://localhost"
+      onChange={() => {}}
+      onPasteAttachments={paste}
+    />,
+  )
+  const files = [
+    new File(["pdf"], "a.pdf", { type: "application/pdf" }),
+    new File(["png"], "b.png", { type: "image/png" }),
+    new File(["exe"], "c.exe", { type: "application/octet-stream" }),
+  ]
+  fireEvent.paste(screen.getByRole("textbox"), {
+    clipboardData: { files, getData: () => "" },
+  })
+  expect(paste).toHaveBeenCalledExactlyOnceWith(files)
 })

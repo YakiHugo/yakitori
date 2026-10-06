@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { ImageAttachment, InputContent } from "../../src/kernel/events.ts"
-import { createInputImageOwnership } from "../../src/gui/input-image-ownership.ts"
+import { createInputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
 
 const image: ImageAttachment = {
   name: "photo.png",
@@ -35,7 +35,7 @@ const accepted: InputContent = {
 
 describe("renderer input image ownership", () => {
   it("resolves staging references in place without changing text, detail or another API's ownership", () => {
-    const ownership = createInputImageOwnership()
+    const ownership = createInputAttachmentOwnership()
     ownership.promote("http://localhost:1234/base/", source, accepted)
     expect(
       ownership.resolveParts("http://localhost:1234/base", source.parts),
@@ -56,7 +56,7 @@ describe("renderer input image ownership", () => {
   })
 
   it("never redirects existing durable history to another conversation's copy", () => {
-    const ownership = createInputImageOwnership()
+    const ownership = createInputAttachmentOwnership()
     const durable = { ...image, file: promoted }
     const original: InputContent = {
       kind: "parts",
@@ -79,7 +79,7 @@ describe("renderer input image ownership", () => {
   })
 
   it("rejects changed ordering, text and metadata instead of assigning unrelated assets", () => {
-    const ownership = createInputImageOwnership()
+    const ownership = createInputAttachmentOwnership()
     expect(() =>
       ownership.promote("http://localhost/", source, {
         ...accepted,
@@ -110,7 +110,7 @@ describe("renderer input image ownership", () => {
   })
 
   it("validates the whole promotion before updating any reference and owns copies of metadata", () => {
-    const ownership = createInputImageOwnership()
+    const ownership = createInputAttachmentOwnership()
     const other = {
       ...image,
       file: {

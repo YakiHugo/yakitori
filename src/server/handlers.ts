@@ -1,8 +1,8 @@
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import {
   inputContentText,
-  inputContentImages,
-  replaceInputImages,
+  inputContentAttachments,
+  replaceInputAttachments,
 } from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
@@ -29,7 +29,8 @@ import {
   ForkReason,
   IdPrefix,
   type ImageAttachment,
-  ImageAttachmentConflictError,
+  type PdfAttachment,
+  AttachmentConflictError,
   InputRole,
   isIdWithPrefix,
   isJsonValue,
@@ -687,12 +688,12 @@ export function createThreadServerHandlers(
     requestId: string,
     content: InputContent,
   ): Promise<PromotedContent> => {
-    const attachments = inputContentImages(content)
+    const attachments = inputContentAttachments(content)
     if (attachments.length === 0) {
       return { content, rollback: undefined }
     }
     if (options.rolloutAssets === undefined) {
-      throw invalidInput("Image attachments require rollout asset storage.")
+      throw invalidInput("Attachments require rollout asset storage.")
     }
     try {
       const allStagedInSession = attachments.every(
@@ -701,22 +702,22 @@ export function createThreadServerHandlers(
           attachment.file.path.startsWith("attachments/staging/"),
       )
       const promotion = allStagedInSession
-        ? await options.rolloutAssets.promoteImageAttachments(
+        ? await options.rolloutAssets.promoteAttachments(
             rolloutId,
             requestId,
             attachments,
           )
-        : await options.rolloutAssets.copyImageAttachments(
+        : await options.rolloutAssets.copyAttachments(
             rolloutId,
             requestId,
             attachments,
           )
       return {
-        content: replaceInputImages(content, promotion.attachments),
+        content: replaceInputAttachments(content, promotion.attachments),
         rollback: promotion.rollback,
       }
     } catch (error) {
-      if (error instanceof ImageAttachmentConflictError) {
+      if (error instanceof AttachmentConflictError) {
         throw conflict("Input was not submitted: request_conflict.", {
           reason: "request_conflict",
         })
@@ -730,12 +731,12 @@ export function createThreadServerHandlers(
     requestId: string,
     content: InputContent,
   ) => {
-    const drafts = inputContentImages(content).filter((attachment) =>
+    const drafts = inputContentAttachments(content).filter((attachment) =>
       attachment.file.path.startsWith("attachments/staging/"),
     )
     if (drafts.length === 0) return
     try {
-      await options.rolloutAssets?.discardDraftImageAttachments(drafts)
+      await options.rolloutAssets?.discardDraftAttachments(drafts)
       options.releaseDraftRolloutAssets?.(
         drafts.map((attachment) => attachment.file.rolloutId),
       )
@@ -756,7 +757,7 @@ export function createThreadServerHandlers(
     requestId: string,
   ) => {
     try {
-      await options.rolloutAssets?.discardRequestImageAttachments(
+      await options.rolloutAssets?.discardRequestAttachments(
         rolloutId,
         requestId,
       )
@@ -800,7 +801,7 @@ export function createThreadServerHandlers(
         let rollbackPromotion = promoted.rollback
         // Session may have appended an admission even when its durability
         // fence failed. Keep promoted files for a retry with the same request
-        // ID; deleting them would leave a durable queued image dangling.
+        // ID; deleting them would leave a durable queued attachment dangling.
         const draftKey = `${request.sessionId}\0${request.requestId}`
         const submitted = await submit(thread, content)
         if (submitted.type === "not_submitted") {
@@ -812,15 +813,16 @@ export function createThreadServerHandlers(
         if (submitted.type === "steered") {
           throw internalError("Admission unexpectedly returned steering.")
         }
-        const hasImages = inputContentImages(request.content).length !== 0
-        if (hasImages)
+        const hasAttachments =
+          inputContentAttachments(request.content).length !== 0
+        if (hasAttachments)
           pendingInitialDrafts.set(draftKey, [
             ...(pendingInitialDrafts.get(draftKey) ?? []),
             request.content,
           ])
         // A fast Turn can publish before draft tracking is installed. Reading
         // after acceptance also covers retries after the original cleanup event.
-        if (submitted.type === "replayed" || hasImages) {
+        if (submitted.type === "replayed" || hasAttachments) {
           const stored = await options.store.readThread(request.sessionId)
           const accepted = stored?.rollout.some(
             ({ item }) =>
@@ -1378,7 +1380,7 @@ export function createThreadServerHandlers(
           )
             throw invalidInput("Fork input must be a user message.")
           const sourceContent = modelUserInputContent(sourceInput.item.item)
-          const sourceAttachments = inputContentImages(sourceContent)
+          const sourceAttachments = inputContentAttachments(sourceContent)
           forkContent = {
             ...request.content,
             ...(request.content.contextAttachments === undefined &&
@@ -1386,19 +1388,19 @@ export function createThreadServerHandlers(
               ? { contextAttachments: sourceContent.contextAttachments }
               : {}),
           }
-          for (const image of inputContentImages(forkContent)) {
+          for (const attachment of inputContentAttachments(forkContent)) {
             if (
               !sourceAttachments.some(
                 (original) =>
-                  original.file.rolloutId === image.file.rolloutId &&
-                  original.file.path === image.file.path &&
-                  original.name === image.name &&
-                  original.mediaType === image.mediaType &&
-                  original.sizeBytes === image.sizeBytes,
+                  original.file.rolloutId === attachment.file.rolloutId &&
+                  original.file.path === attachment.file.path &&
+                  original.name === attachment.name &&
+                  original.mediaType === attachment.mediaType &&
+                  original.sizeBytes === attachment.sizeBytes,
               )
             )
               throw invalidInput(
-                "Fork images must reference images from the edited source input.",
+                "Fork attachments must reference attachments from the edited source input.",
               )
           }
         }
@@ -1427,11 +1429,11 @@ export function createThreadServerHandlers(
           await ensureEventPump(forked.thread)
           if (forkContent !== undefined) {
             submissionId = createRequestId()
-            const attachments = inputContentImages(forkContent)
+            const attachments = inputContentAttachments(forkContent)
             const copied =
               attachments.length === 0
                 ? undefined
-                : await requireRolloutAssets(options).copyImageAttachments(
+                : await requireRolloutAssets(options).copyAttachments(
                     forkRolloutId,
                     submissionId,
                     attachments,
@@ -1441,13 +1443,13 @@ export function createThreadServerHandlers(
               content:
                 copied === undefined
                   ? forkContent
-                  : replaceInputImages(forkContent, copied.attachments),
+                  : replaceInputAttachments(forkContent, copied.attachments),
               ...(request.modelSelection === undefined
                 ? {}
                 : { modelSelection: request.modelSelection }),
             })
             if (submitted.type !== "started") {
-              await options.rolloutAssets?.discardRequestImageAttachments(
+              await options.rolloutAssets?.discardRequestAttachments(
                 forkRolloutId,
                 submissionId,
               )
@@ -1678,8 +1680,8 @@ export function createThreadServerHandlers(
           )
           const rolloutId = stored.metadata.rolloutId
           const sameAttachments =
-            JSON.stringify(inputContentImages(request.content)) ===
-            JSON.stringify(inputContentImages(existing.input.content))
+            JSON.stringify(inputContentAttachments(request.content)) ===
+            JSON.stringify(inputContentAttachments(existing.input.content))
           if (
             !sameAttachments &&
             request.requestId === existing.input.submissionId
@@ -1863,7 +1865,7 @@ export function createThreadServerHandlers(
             reason: submitted.reason,
           })
         }
-        if (inputContentImages(request.content).length !== 0) {
+        if (inputContentAttachments(request.content).length !== 0) {
           pendingSteerDrafts.set(steerKey, [
             ...(pendingSteerDrafts.get(steerKey) ?? []),
             request.content,
@@ -2361,7 +2363,7 @@ async function requireStoredThread(
 function requestAttachmentOwners(content: InputContent): readonly string[] {
   return [
     ...new Set(
-      inputContentImages(content).flatMap((attachment) => {
+      inputContentAttachments(content).flatMap((attachment) => {
         const match = /^attachments\/requests\/([^/]+)\//.exec(
           attachment.file.path,
         )
@@ -2393,8 +2395,16 @@ function modelUserInputContent(
       if (part.type === "text") return { type: "text", text: part.text }
       if (part.file === undefined || part.sizeBytes === undefined)
         throw invalidInput(
-          "Input images require stored rollout asset references.",
+          "Input attachments require stored rollout asset references.",
         )
+      if (part.type === "document")
+        return {
+          type: "document",
+          name: part.name,
+          mediaType: part.mediaType,
+          sizeBytes: part.sizeBytes,
+          file: part.file,
+        }
       return {
         type: "image",
         name: part.name ?? part.file.path.split("/").at(-1) ?? "image",
@@ -2414,7 +2424,7 @@ function requireRolloutAssets(
   options: ThreadServerHandlerOptions,
 ): RolloutAssets {
   if (options.rolloutAssets !== undefined) return options.rolloutAssets
-  throw invalidInput("Forked image input requires rollout asset storage.")
+  throw invalidInput("Forked input attachments require rollout asset storage.")
 }
 
 function addUsage(left: TokenUsage | undefined, right: TokenUsage): TokenUsage {
@@ -2944,7 +2954,7 @@ function requireAdmissionInputContent(
   const parts = value.parts.map((part: unknown, index: number) => {
     if (!isRecord(part))
       throw invalidInput(
-        `content.parts[${index}] must be a text or image object.`,
+        `content.parts[${index}] must be a text, image or document object.`,
       )
     if (
       part.type === "text" &&
@@ -2968,8 +2978,15 @@ function requireAdmissionInputContent(
       )
     )
       return { type: "image" as const, ...requireImageAttachment(part, index) }
+    if (
+      part.type === "document" &&
+      Object.keys(part).every((key) =>
+        ["type", "name", "mediaType", "sizeBytes", "file"].includes(key),
+      )
+    )
+      return { type: "document" as const, ...requirePdfAttachment(part, index) }
     throw invalidInput(
-      `content.parts[${index}] must be a text or image object.`,
+      `content.parts[${index}] must be a text, image or document object.`,
     )
   })
   if (
@@ -3034,6 +3051,30 @@ function requireImageAttachment(
     name,
     mediaType,
     detail,
+    sizeBytes: value.sizeBytes as number,
+    file: requireRolloutAssetReference(value.file, index),
+  }
+}
+
+function requirePdfAttachment(
+  value: Record<string, unknown>,
+  index: number,
+): PdfAttachment {
+  const name = requireString(value.name, `content.parts[${index}].name`)
+  if (Buffer.byteLength(name, "utf8") > 255)
+    throw invalidInput(`content.parts[${index}].name is too long.`)
+  if (value.mediaType !== "application/pdf")
+    throw invalidInput(
+      `content.parts[${index}].mediaType must be application/pdf.`,
+    )
+  if (
+    !Number.isSafeInteger(value.sizeBytes) ||
+    (value.sizeBytes as number) <= 0
+  )
+    throw invalidInput(`content.parts[${index}].sizeBytes must be positive.`)
+  return {
+    name,
+    mediaType: "application/pdf",
     sizeBytes: value.sizeBytes as number,
     file: requireRolloutAssetReference(value.file, index),
   }

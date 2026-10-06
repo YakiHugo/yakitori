@@ -1,10 +1,16 @@
+import { strict as assert } from "node:assert"
 import { describe, expect, it } from "vitest"
-import { isInputContent, type InputContent } from "../../src/kernel/events.ts"
+import {
+  isInputContent,
+  isModelMessage,
+  type InputContent,
+} from "../../src/kernel/events.ts"
 import {
   inputContentText,
+  inputContentAttachments,
   inputContentToModelMessage,
   readStoredInputContent,
-  replaceInputImages,
+  replaceInputAttachments,
 } from "../../src/kernel/input-content.ts"
 import {
   fingerprintInputAdmission,
@@ -23,6 +29,88 @@ const image = {
 }
 
 describe("ordered user input", () => {
+  it("retains document slots through extraction, promotion and durable model history", () => {
+    const document = {
+      type: "document" as const,
+      name: "spec.pdf",
+      mediaType: "application/pdf" as const,
+      sizeBytes: 123,
+      file: {
+        rolloutId: "rollout_saved",
+        path: "attachments/staging/draft/2.pdf",
+      },
+    }
+    const content: InputContent = {
+      kind: "parts",
+      parts: [image, { type: "text", text: "between" }, document, image],
+    }
+    expect(isInputContent(content)).toBe(true)
+    const attachments = inputContentAttachments(content)
+    expect(attachments.map((attachment) => attachment.name)).toEqual([
+      "first.png",
+      "spec.pdf",
+      "first.png",
+    ])
+    const promoted = replaceInputAttachments(
+      content,
+      attachments.map((attachment, index) => ({
+        ...attachment,
+        file: {
+          rolloutId: "rollout_target",
+          path: `attachments/requests/send/${index}`,
+        },
+      })),
+    )
+    expect(promoted.parts.map((part) => part.type)).toEqual([
+      "image",
+      "text",
+      "document",
+      "image",
+    ])
+    const message = inputContentToModelMessage(promoted)
+    expect(isModelMessage(message)).toBe(true)
+    expect(message.content[2]).toEqual({
+      ...document,
+      file: {
+        rolloutId: "rollout_target",
+        path: "attachments/requests/send/1",
+      },
+    })
+    for (const malformed of [
+      { ...document, data: "base64" },
+      { ...document, detail: "high" },
+      { ...document, sizeBytes: 0 },
+      { ...document, sizeBytes: Number.MAX_SAFE_INTEGER + 1 },
+    ])
+      expect(isInputContent({ kind: "parts", parts: [malformed] })).toBe(false)
+    expect(
+      isModelMessage({
+        role: "user",
+        content: [{ ...document, data: "base64" }],
+      }),
+    ).toBe(false)
+    const [firstAttachment, documentAttachment, lastAttachment] = attachments
+    assert(
+      firstAttachment !== undefined &&
+        documentAttachment !== undefined &&
+        lastAttachment !== undefined,
+    )
+    expect(() =>
+      replaceInputAttachments(content, [
+        documentAttachment,
+        firstAttachment,
+        lastAttachment,
+      ]),
+    ).toThrow("type does not match")
+    expect(() =>
+      readStoredInputContent({
+        kind: "text",
+        text: "old",
+        attachments: [attachments[1]],
+      }),
+    ).toThrow("Invalid stored")
+  })
+
   it("maps authored order, exact text, image names and promotion slots into model history", () => {
     const content: InputContent = {
       kind: "parts",
@@ -34,7 +122,7 @@ describe("ordered user input", () => {
       ],
     }
     expect(inputContentText(content)).toBe("beforeafter\n")
-    const promoted = replaceInputImages(content, [
+    const promoted = replaceInputAttachments(content, [
       { ...image, file: { rolloutId: "session_new", path: "first.png" } },
       {
         ...image,
@@ -61,7 +149,9 @@ describe("ordered user input", () => {
       ],
     })
     expect(content.parts[1]).toEqual(image)
-    expect(() => replaceInputImages(content, [])).toThrow("Missing replacement")
+    expect(() => replaceInputAttachments(content, [])).toThrow(
+      "Missing replacement",
+    )
   })
 
   it("admits only text and stored image parts, with no competing side arrays or provider metadata", () => {

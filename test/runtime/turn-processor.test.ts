@@ -4985,6 +4985,12 @@ it("reprojects persisted MCP PDFs when switching between image, text, and native
 
 it.each([
   {
+    provider: "openai-responses-work",
+    model: "gpt-6-astra",
+    wireApi: "openai_responses",
+    catalogProvider: "openai",
+  },
+  {
     provider: "anthropic-work",
     model: "claude-sonnet-4-6",
     wireApi: "anthropic_messages",
@@ -5002,7 +5008,7 @@ it.each([
     wireApi: "gemini_generate_content",
     catalogProvider: undefined,
   },
-] as const)("uses $wireApi native PDF capability for tool reads, retries, history, and compaction", async ({
+] as const)("uses $wireApi native PDF capability for user attachments, tool reads, retries, history, and compaction", async ({
   provider,
   model,
   wireApi,
@@ -5080,11 +5086,29 @@ it.each([
   )
   await writeFile(join(runtime.root, "report.pdf"), bytes)
   const thread = await runtime.createThread()
+  const uploaded = await assets.saveToolFile(
+    thread.id,
+    "user_pdf",
+    "upload.pdf",
+    bytes,
+  )
+  const userDocument = {
+    type: "document" as const,
+    name: "upload.pdf",
+    mediaType: "application/pdf" as const,
+    file: uploaded.reference,
+    sizeBytes: bytes.length,
+  }
   for (const text of ["Read the report", "Review the same report"]) {
     await thread.startIfIdle({
       content: {
         kind: "parts" as const,
-        parts: [{ type: "text" as const, text: text }],
+        parts: [
+          { type: "text" as const, text },
+          ...(text === "Read the report"
+            ? [userDocument, { type: "text" as const, text: "after upload" }]
+            : []),
+        ],
       },
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
@@ -5113,6 +5137,21 @@ it.each([
     type: "turn.completed",
   })
   expect(requests).toHaveLength(4)
+  for (const request of requests) {
+    expect(
+      request.messages.find(
+        (message) =>
+          message.role === "user" &&
+          message.content.some((block) => block.type === "document"),
+      ),
+    ).toMatchObject({
+      content: [
+        { type: "text", text: "Read the report" },
+        { ...userDocument, data: bytes.toString("base64") },
+        { type: "text", text: "after upload" },
+      ],
+    })
+  }
   expect(requests[1]?.attempt?.number).toBe(2)
   expect(requests[3]?.compaction).toBe("local")
   for (const request of requests.slice(1)) {
@@ -5596,7 +5635,7 @@ function identifiedDeferredTool(content: string): RuntimeTool {
   }
 }
 
-it("shares Gemini's PDF page budget across parallel tool results and retains both original assets", async () => {
+it("shares Gemini's PDF page budget across user attachments and parallel tool results while retaining every original", async () => {
   const assetsRoot = await mkdtemp(
     join(tmpdir(), "yakitori-pdf-request-pages-"),
   )
@@ -5655,10 +5694,30 @@ it("shares Gemini's PDF page budget across parallel tool results and retains bot
   )
   await writeFile(join(runtime.root, "report.pdf"), bytes)
   const thread = await runtime.createThread()
+  const userBytes = pdfFixture(
+    Array.from({ length: 499 }, () => "Uploaded original"),
+  )
+  const uploaded = await assets.saveToolFile(
+    thread.id,
+    "user_pdf",
+    "upload.pdf",
+    userBytes,
+  )
+  const userDocument = {
+    type: "document" as const,
+    name: "upload.pdf",
+    mediaType: "application/pdf" as const,
+    file: uploaded.reference,
+    sizeBytes: userBytes.length,
+  }
   await thread.startIfIdle({
     content: {
       kind: "parts",
-      parts: [{ type: "text", text: "Read both copies" }],
+      parts: [
+        { type: "text", text: "Read both copies" },
+        userDocument,
+        { type: "text", text: "after upload" },
+      ],
     },
   })
   expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
@@ -5666,6 +5725,22 @@ it("shares Gemini's PDF page budget across parallel tool results and retains bot
     type: "turn.completed",
   })
   expect(faux.callCount).toBe(2)
+  for (const request of faux.requests) {
+    expect(
+      request.messages.find(
+        (message) =>
+          message.role === "user" &&
+          message.content.some((block) => block.type === "document"),
+      ),
+    ).toMatchObject({
+      content: [
+        { type: "text", text: "Read both copies" },
+        { ...userDocument, data: userBytes.toString("base64") },
+        { type: "text", text: "after upload" },
+      ],
+    })
+  }
+  expect(await assets.read(userDocument.file)).toEqual(userBytes)
   const projected =
     faux.requests[1]?.messages.filter((message) => message.role === "tool") ??
     []
@@ -5694,4 +5769,172 @@ it("shares Gemini's PDF page budget across parallel tool results and retains bot
     expect(document.data).toBeUndefined()
     expect(await assets.read(document.file)).toEqual(bytes)
   }
+})
+
+it("reprojects ordered user PDFs across native, text, image and unknown-model capabilities without changing durable content", async () => {
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-user-pdf-history-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(["Original user PDF content"])
+  const selections = [
+    {
+      provider: "gemini-user",
+      model: "gemini-2.5-pro",
+      inputModalities: ["text", "image"],
+      nativePdf: true,
+      wireApi: "gemini_generate_content",
+    },
+    {
+      provider: "text-only",
+      model: "text",
+      inputModalities: ["text"],
+      nativePdf: false,
+      wireApi: "unknown",
+    },
+    {
+      provider: "custom-vision",
+      model: "custom",
+      inputModalities: ["text", "image"],
+      nativePdf: false,
+      wireApi: "openai_responses",
+    },
+    {
+      provider: "gemini-unknown",
+      model: "gemini-4-custom",
+      inputModalities: ["text", "image"],
+      nativePdf: true,
+      wireApi: "gemini_generate_content",
+    },
+    {
+      provider: "gemini-user",
+      model: "gemini-2.5-pro",
+      inputModalities: ["text", "image"],
+      nativePdf: true,
+      wireApi: "gemini_generate_content",
+    },
+  ] as const
+  const faux = createFauxProvider(
+    selections.map(() => ({ content: [{ type: "text", text: "Read" }] })),
+  )
+  const client = createProviderRegistry(
+    Object.fromEntries(
+      selections.map((selection) => [
+        selection.provider,
+        createModelProvider({
+          info: {
+            id: selection.provider,
+            wireApi: selection.wireApi,
+            capabilities: {
+              remoteCompaction: false,
+              nativePdf: selection.nativePdf,
+            },
+          },
+          models: createConfiguredModelsManager({
+            provider: selection.provider,
+            models: [
+              {
+                id: selection.model,
+                inputModalities: selection.inputModalities,
+              },
+            ],
+          }),
+          stream: faux.stream,
+        }),
+      ]),
+    ),
+  ).createClient()
+  const runtime = await createRuntime(faux.stream, createToolRegistry([]), {
+    modelClient: client,
+    rolloutAssets: assets,
+    provider: "gemini-user",
+    model: "gemini-2.5-pro",
+  })
+  const thread = await runtime.createThread()
+  const uploaded = await assets.saveToolFile(
+    thread.id,
+    "user_pdf",
+    "upload.pdf",
+    bytes,
+  )
+  const document = {
+    type: "document" as const,
+    name: "upload.pdf",
+    mediaType: "application/pdf" as const,
+    file: uploaded.reference,
+    sizeBytes: bytes.length,
+  }
+  const content = {
+    kind: "parts" as const,
+    parts: [
+      { type: "text" as const, text: "before user PDF" },
+      document,
+      { type: "text" as const, text: "after user PDF" },
+    ],
+  }
+  for (const [index, selection] of selections.entries()) {
+    await thread.startIfIdle({
+      content:
+        index === 0
+          ? content
+          : { kind: "parts", parts: [{ type: "text", text: "Read again" }] },
+      modelSelection: { provider: selection.provider, model: selection.model },
+    })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    const completed = await nextLifecycleEvent(thread)
+    expect(completed, JSON.stringify(completed)).toMatchObject({
+      type: "turn.completed",
+    })
+  }
+  const projected = faux.requests.map((request) =>
+    request.messages.find(
+      (message) =>
+        message.role === "user" &&
+        message.content.some(
+          (block) => block.type === "text" && block.text === "before user PDF",
+        ),
+    ),
+  )
+  const before = { type: "text", text: "before user PDF" }
+  const after = { type: "text", text: "after user PDF" }
+  for (const index of [0, 4])
+    expect(projected[index]?.content).toEqual([
+      before,
+      { ...document, data: bytes.toString("base64") },
+      after,
+    ])
+  expect(projected[1]?.content).toEqual([
+    before,
+    {
+      type: "text",
+      text: expect.stringContaining("Original user PDF content"),
+    },
+    after,
+  ])
+  for (const index of [2, 3])
+    expect(projected[index]?.content).toEqual([
+      before,
+      { type: "text", text: expect.stringContaining("Rendered pages 1") },
+      {
+        type: "image",
+        mediaType: "image/jpeg",
+        data: expect.any(String),
+        detail: "high",
+      },
+      after,
+    ])
+  expect(
+    thread
+      .snapshot()
+      .context.history.find(
+        ({ item }) =>
+          item.role === "user" &&
+          item.content.some((block) => block.type === "document"),
+      )?.item,
+  ).toEqual({ role: "user", content: content.parts })
+  expect(await assets.read(document.file)).toEqual(bytes)
 })

@@ -221,7 +221,26 @@ async function handleRequest(
         rolloutId: route.rolloutId,
         path: route.path,
       })
+      const downloadName = url.searchParams.get("download")
+      const download =
+        downloadName !== null &&
+        downloadName.length > 0 &&
+        downloadName.length <= 255 &&
+        ![...downloadName].some(
+          (character) =>
+            character.charCodeAt(0) < 32 ||
+            character.charCodeAt(0) === 127 ||
+            character === "/" ||
+            character === "\\",
+        ) &&
+        downloadName !== "." &&
+        downloadName !== ".."
       response.writeHead(200, {
+        ...(download
+          ? {
+              "Content-Disposition": `attachment; filename="download.pdf"; filename*=UTF-8''${encodeURIComponent(downloadName).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+            }
+          : {}),
         "Cache-Control": "private, no-store",
         "Content-Length": file.totalBytes,
         "Content-Type": rolloutAssetContentType(route.path),

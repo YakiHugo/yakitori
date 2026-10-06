@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { realpath } from "node:fs/promises"
+import { realpath, readFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
@@ -14,6 +14,7 @@ import {
   runBudgetedGoal,
   runFauxTurn,
   runProviderFlow,
+  smokePdfBytes,
 } from "./fixtures.ts"
 
 const execFileAsync = promisify(execFile)
@@ -100,7 +101,40 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     expect(["granted", "unsupported"]).toContain(bridge.permission)
     await runFauxTurn(page)
     await runBudgetedGoal(page)
-    await runProviderFlow(page, testInfo)
+    const downloadPath = testInfo.outputPath("ordered-smoke.pdf")
+    await application.evaluate(({ BrowserWindow }, path) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      if (!window) throw new Error("Desktop window missing")
+      window.webContents.session.once("will-download", (_event, item) =>
+        item.setSavePath(path),
+      )
+    }, downloadPath)
+    await runProviderFlow(page, testInfo, {
+      downloadPdf: async () => {
+        if (page === undefined) throw new Error("Desktop page missing")
+        await page
+          .getByRole("main")
+          .getByRole("link", { name: "Download PDF", exact: true })
+          .click()
+        await expect
+          .poll(async () => {
+            try {
+              return (await readFile(downloadPath)).equals(smokePdfBytes)
+            } catch (error) {
+              if (
+                typeof error === "object" &&
+                error !== null &&
+                "code" in error &&
+                error.code === "ENOENT"
+              )
+                return false
+              throw error
+            }
+          })
+          .toBe(true)
+        return readFile(downloadPath)
+      },
+    })
     expect(rendererErrors).toEqual([])
 
     // Playwright's graceful close invokes the real app.quit(). It must finish

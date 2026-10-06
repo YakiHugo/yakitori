@@ -1,8 +1,20 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { strict as assert } from "node:assert"
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSessionId } from "../../src/kernel/ids.ts"
+import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 
 const roots: string[] = []
@@ -14,13 +26,221 @@ afterEach(async () => {
 })
 
 describe("rollout assets", () => {
+  it("preserves mixed attachment order, original PDF bytes and lost-response retries", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_mixed"
+    const files = await createTestRolloutAssets(root, rolloutId)
+    const pdf = pdfFixture(["original PDF content"])
+    const source = join(root, "document.pdf")
+    await writeFile(source, pdf)
+    const drafts = await files.importAttachmentBytes(rolloutId, "mixed", [
+      { name: "first.png", data: pngBytes() },
+      { name: "middle.pdf", data: pdf },
+      { name: "last.png", data: pngBytes() },
+    ])
+    expect(drafts.map((draft) => draft.file.path)).toEqual([
+      "attachments/staging/mixed/1.png",
+      "attachments/staging/mixed/2.pdf",
+      "attachments/staging/mixed/3.png",
+    ])
+    expect(drafts[1]).toEqual({
+      name: "middle.pdf",
+      mediaType: "application/pdf",
+      sizeBytes: pdf.byteLength,
+      file: { rolloutId, path: "attachments/staging/mixed/2.pdf" },
+    })
+    const first = await files.promoteAttachments(rolloutId, "request", drafts)
+    await files.discardDraftAttachments(drafts)
+    const retry = await files.promoteAttachments(rolloutId, "request", drafts)
+    expect(retry.attachments).toEqual(first.attachments)
+    await retry.rollback()
+    const firstPdf = first.attachments[1]
+    assert(firstPdf !== undefined)
+    expect(await files.read(firstPdf.file)).toEqual(pdf)
+    const [snapshot] = await files.importAttachmentPaths(
+      rolloutId,
+      "snapshot",
+      [source],
+    )
+    await writeFile(source, "source replaced after import")
+    assert(snapshot !== undefined)
+    expect(await files.read(snapshot.file)).toEqual(pdf)
+  })
+
+  it("validates real PDF parsing and fails closed when no validator is composed", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_validation"
+    const files = await createTestRolloutAssets(root, rolloutId)
+    for (const [index, bytes] of [
+      Buffer.from("%PDF-1.4\ninvalid"),
+      pdfFixture([]),
+    ].entries()) {
+      await expect(
+        files.importAttachmentBytes(rolloutId, `invalid_${index}`, [
+          { name: "invalid.pdf", data: bytes },
+        ]),
+      ).rejects.toThrow()
+    }
+    const encrypted = pdfFixture(["private"])
+      .toString("utf8")
+      .replace(
+        "/Root 1 0 R",
+        `/Root 1 0 R /Encrypt << /Filter /Standard /V 1 /R 2 /Length 40 /P -4 /O <${"00".repeat(32)}> /U <${"00".repeat(32)}> >> /ID [<${"00".repeat(16)}> <${"00".repeat(16)}>]`,
+      )
+    await expect(
+      files.importAttachmentBytes(rolloutId, "encrypted", [
+        { name: "encrypted.pdf", data: Buffer.from(encrypted) },
+      ]),
+    ).rejects.toThrow(/password/i)
+    const unconfigured = createRolloutAssets(root, {
+      withMutationLease: async (_id, mutate) => mutate(),
+    })
+    await expect(
+      unconfigured.importAttachmentBytes(rolloutId, "unconfigured", [
+        { name: "valid.pdf", data: pdfFixture(["valid"]) },
+      ]),
+    ).rejects.toThrow("validation is unavailable")
+    const [largeDocument] = await files.importAttachmentBytes(
+      rolloutId,
+      "many_pages",
+      [
+        {
+          name: "many-pages.pdf",
+          data: pdfFixture(Array.from({ length: 1001 }, () => "page")),
+        },
+      ],
+    )
+    expect(largeDocument?.mediaType).toBe("application/pdf")
+  })
+
+  it("rejects oversized native files before creating a snapshot", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_bounded"
+    const files = await createTestRolloutAssets(root, rolloutId)
+    const source = join(root, "oversized.pdf")
+    const handle = await open(source, "w")
+    await handle.truncate(50_000_001)
+    await handle.close()
+    await expect(
+      files.importAttachmentPaths(rolloutId, "bounded", [source]),
+    ).rejects.toThrow("local safety boundary")
+    await expect(
+      stat(join(root, "rollouts", rolloutId, "files")),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("retains existing staging assets when a repeated mixed import later fails", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_retry"
+    const files = await createTestRolloutAssets(root, rolloutId)
+    const pdf = pdfFixture(["unchanged"])
+    const [existing] = await files.importAttachmentBytes(rolloutId, "retry", [
+      { name: "existing.pdf", data: pdf },
+    ])
+    await expect(
+      files.importAttachmentBytes(rolloutId, "retry", [
+        { name: "existing.pdf", data: pdf },
+        { name: "new.png", data: pngBytes() },
+        { name: "invalid.pdf", data: Buffer.from("%PDF-invalid") },
+      ]),
+    ).rejects.toThrow()
+    assert(existing !== undefined)
+    expect(await files.read(existing.file)).toEqual(pdf)
+    expect(
+      await readdir(
+        join(
+          root,
+          "rollouts",
+          rolloutId,
+          "files",
+          "attachments",
+          "staging",
+          "retry",
+        ),
+      ),
+    ).toEqual(["1.pdf"])
+  })
+
+  it("rejects changed PDF bytes and metadata without removing durable request files", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_pdf_conflict"
+    const files = await createTestRolloutAssets(root, rolloutId)
+    const original = pdfFixture(["first"])
+    const changed = pdfFixture(["other"])
+    expect(changed.byteLength).toBe(original.byteLength)
+    const drafts = await files.importAttachmentBytes(rolloutId, "first", [
+      { name: "document.pdf", data: original },
+    ])
+    const stored = await files.promoteAttachments(rolloutId, "same", drafts)
+    const replacements = await files.importAttachmentBytes(rolloutId, "other", [
+      { name: "document.pdf", data: changed },
+    ])
+    await expect(
+      files.promoteAttachments(rolloutId, "same", replacements),
+    ).rejects.toThrow("different attachment")
+    const draft = drafts[0]
+    const durable = stored.attachments[0]
+    assert(draft !== undefined && durable !== undefined)
+    await expect(
+      files.promoteAttachments(rolloutId, "bad_metadata", [
+        { ...draft, sizeBytes: original.byteLength + 1 },
+      ]),
+    ).rejects.toThrow("metadata does not match")
+    expect(await files.read(durable.file)).toEqual(original)
+    const target = "rollout_independent"
+    await createTestRolloutAssets(root, target)
+    const copied = await files.copyAttachments(
+      target,
+      "copy",
+      stored.attachments,
+    )
+    await rm(join(root, "rollouts", rolloutId), { recursive: true })
+    const copy = copied.attachments[0]
+    assert(copy !== undefined)
+    expect(await files.read(copy.file)).toEqual(original)
+  })
+
+  it("rejects reordered media slots on a retry after draft cleanup", async () => {
+    const root = await makeRoot()
+    const rolloutId = "rollout_slot_conflict"
+    const target = "rollout_copy_conflict"
+    const files = await createTestRolloutAssets(root, rolloutId, target)
+    const drafts = await files.importAttachmentBytes(rolloutId, "mixed", [
+      { name: "first.pdf", data: pdfFixture(["first"]) },
+      { name: "second.png", data: pngBytes() },
+    ])
+    const durable = await files.promoteAttachments(rolloutId, "request", drafts)
+    const copied = await files.copyAttachments(target, "request", drafts)
+    await files.discardDraftAttachments(drafts)
+    const changedSize = drafts.map((attachment) => ({
+      ...attachment,
+      sizeBytes: attachment.sizeBytes + 1,
+    }))
+    await expect(
+      files.promoteAttachments(rolloutId, "request", changedSize),
+    ).rejects.toThrow("different attachment")
+    await expect(
+      files.copyAttachments(target, "request", changedSize),
+    ).rejects.toThrow("different attachment")
+    await expect(
+      files.promoteAttachments(rolloutId, "request", [...drafts].reverse()),
+    ).rejects.toThrow("different attachment")
+    await expect(
+      files.copyAttachments(target, "request", [...drafts].reverse()),
+    ).rejects.toThrow("different attachment")
+    for (const attachment of [...durable.attachments, ...copied.attachments])
+      expect((await files.read(attachment.file)).byteLength).toBe(
+        attachment.sizeBytes,
+      )
+  })
+
   it("separates staging images from idempotent request snapshots", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = await createTestRolloutAssets(root, sessionId)
     const data = pngBytes()
 
-    const draft = await files.importImageBytes(sessionId, "attachment_1", [
+    const draft = await files.importAttachmentBytes(sessionId, "attachment_1", [
       { name: "screen.png", data },
     ])
     expect(draft[0]?.file.path).toBe("attachments/staging/attachment_1/1.png")
@@ -28,13 +248,13 @@ describe("rollout assets", () => {
       ...attachment,
       detail: "original" as const,
     }))
-    const first = await files.promoteImageAttachments(
+    const first = await files.promoteAttachments(
       sessionId,
       "attachment_1",
       detailed,
     )
-    await files.discardDraftImageAttachments(detailed)
-    const second = await files.promoteImageAttachments(
+    await files.discardDraftAttachments(detailed)
+    const second = await files.promoteAttachments(
       sessionId,
       "attachment_1",
       detailed,
@@ -73,7 +293,7 @@ describe("rollout assets", () => {
       ),
     ).toEqual(data)
     await expect(
-      files.discardDraftImageAttachments(first.attachments),
+      files.discardDraftAttachments(first.attachments),
     ).rejects.toThrow("not a draft")
   })
 
@@ -85,24 +305,22 @@ describe("rollout assets", () => {
     const replacement = Buffer.from(original)
     replacement[12] = 1
 
-    const firstDraft = await files.importImageBytes(sessionId, "draft_first", [
-      { name: "screen.png", data: original },
-    ])
-    await files.promoteImageAttachments(sessionId, "request_same", firstDraft)
-    await files.discardDraftImageAttachments(firstDraft)
-    const replacementDraft = await files.importImageBytes(
+    const firstDraft = await files.importAttachmentBytes(
+      sessionId,
+      "draft_first",
+      [{ name: "screen.png", data: original }],
+    )
+    await files.promoteAttachments(sessionId, "request_same", firstDraft)
+    await files.discardDraftAttachments(firstDraft)
+    const replacementDraft = await files.importAttachmentBytes(
       sessionId,
       "draft_replacement",
       [{ name: "screen.png", data: replacement }],
     )
 
     await expect(
-      files.promoteImageAttachments(
-        sessionId,
-        "request_same",
-        replacementDraft,
-      ),
-    ).rejects.toThrow("different image")
+      files.promoteAttachments(sessionId, "request_same", replacementDraft),
+    ).rejects.toThrow("different attachment")
   })
 
   it("gives a concurrent promotion exclusive rollback ownership", async () => {
@@ -113,25 +331,17 @@ describe("rollout assets", () => {
     const secondBytes = Buffer.from(firstBytes)
     secondBytes[12] = 1
     const [firstDraft, secondDraft] = await Promise.all([
-      files.importImageBytes(sessionId, "draft_concurrent_first", [
+      files.importAttachmentBytes(sessionId, "draft_concurrent_first", [
         { name: "screen.png", data: firstBytes },
       ]),
-      files.importImageBytes(sessionId, "draft_concurrent_second", [
+      files.importAttachmentBytes(sessionId, "draft_concurrent_second", [
         { name: "screen.png", data: secondBytes },
       ]),
     ])
 
     const results = await Promise.allSettled([
-      files.promoteImageAttachments(
-        sessionId,
-        "request_concurrent",
-        firstDraft,
-      ),
-      files.promoteImageAttachments(
-        sessionId,
-        "request_concurrent",
-        secondDraft,
-      ),
+      files.promoteAttachments(sessionId, "request_concurrent", firstDraft),
+      files.promoteAttachments(sessionId, "request_concurrent", secondDraft),
     ])
 
     expect(
@@ -157,7 +367,7 @@ describe("rollout assets", () => {
       sourceSessionId,
       targetSessionId,
     )
-    const [source] = await files.importImageBytes(
+    const [source] = await files.importAttachmentBytes(
       sourceSessionId,
       "draft_source",
       [{ name: "screen.png", data: pngBytes() }],
@@ -172,10 +382,7 @@ describe("rollout assets", () => {
     }
 
     await expect(
-      files.copyImageAttachments(targetSessionId, "request_copy", [
-        source,
-        missing,
-      ]),
+      files.copyAttachments(targetSessionId, "request_copy", [source, missing]),
     ).rejects.toMatchObject({ code: "ENOENT" })
     await expect(
       readFile(
@@ -202,15 +409,17 @@ describe("rollout assets", () => {
       sourceSessionId,
       targetSessionId,
     )
-    const [source] = await files.importImageBytes(sourceSessionId, "draft", [
-      { name: "screen.png", data: pngBytes() },
-    ])
+    const [source] = await files.importAttachmentBytes(
+      sourceSessionId,
+      "draft",
+      [{ name: "screen.png", data: pngBytes() }],
+    )
     if (source === undefined) throw new Error("missing source attachment")
 
-    const first = await files.copyImageAttachments(targetSessionId, "retry", [
+    const first = await files.copyAttachments(targetSessionId, "retry", [
       source,
     ])
-    const retry = await files.copyImageAttachments(targetSessionId, "retry", [
+    const retry = await files.copyAttachments(targetSessionId, "retry", [
       source,
     ])
     await retry.rollback()
@@ -233,29 +442,25 @@ describe("rollout assets", () => {
     const original = pngBytes()
     const replacement = Buffer.from(original)
     replacement[12] = 1
-    const firstSource = await files.importImageBytes(
+    const firstSource = await files.importAttachmentBytes(
       sourceRolloutId,
       "first_source",
       [{ name: "screen.png", data: original }],
     )
-    const replacementSource = await files.importImageBytes(
+    const replacementSource = await files.importAttachmentBytes(
       sourceRolloutId,
       "replacement_source",
       [{ name: "screen.png", data: replacement }],
     )
-    const first = await files.copyImageAttachments(
+    const first = await files.copyAttachments(
       targetRolloutId,
       "request_same",
       firstSource,
     )
 
     await expect(
-      files.copyImageAttachments(
-        targetRolloutId,
-        "request_same",
-        replacementSource,
-      ),
-    ).rejects.toThrow("A different image already exists for this request.")
+      files.copyAttachments(targetRolloutId, "request_same", replacementSource),
+    ).rejects.toThrow("A different attachment already exists for this request.")
     const copied = first.attachments[0]
     if (copied === undefined) throw new Error("missing original copy")
     await expect(files.read(copied.file)).resolves.toEqual(original)
@@ -268,7 +473,7 @@ describe("rollout assets", () => {
     await writeFile(sourcePath, pngBytes())
     const files = await createTestRolloutAssets(root, sessionId)
 
-    const [attachment] = await files.importImagePaths(
+    const [attachment] = await files.importAttachmentPaths(
       sessionId,
       "draft_abandoned",
       [sourcePath],
@@ -276,7 +481,7 @@ describe("rollout assets", () => {
     if (attachment === undefined) throw new Error("missing imported attachment")
     await expect(files.read(attachment.file)).resolves.toEqual(pngBytes())
 
-    await files.discardDraftImageAttachments([attachment])
+    await files.discardDraftAttachments([attachment])
     await expect(files.read(attachment.file)).rejects.toMatchObject({
       code: "ENOENT",
     })
@@ -306,7 +511,7 @@ describe("rollout assets", () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = await createTestRolloutAssets(root, sessionId)
-    const stored = await files.importImageBytes(sessionId, "request:1", [
+    const stored = await files.importAttachmentBytes(sessionId, "request:1", [
       { name: "screen.png", data: pngBytes() },
     ])
     const attachment = stored[0]
@@ -332,7 +537,7 @@ describe("rollout assets", () => {
     const files = await createTestRolloutAssets(root, sessionId)
 
     await expect(
-      files.importImageBytes(sessionId, "atomic_batch", [
+      files.importAttachmentBytes(sessionId, "atomic_batch", [
         { name: "valid.png", data: pngBytes() },
         {
           name: "truncated.png",
@@ -409,6 +614,11 @@ async function createTestRolloutAssets(root: string, ...rolloutIds: string[]) {
 
 function createTestAssetStore(root: string) {
   return createRolloutAssets(root, {
+    async validatePdf(bytes) {
+      const parsed = await readPdf({ bytes, format: "native" })
+      if (!parsed.ok) throw new Error(parsed.message)
+      if (parsed.totalPages <= 0) throw new Error("PDF has no pages.")
+    },
     async withMutationLease(rolloutId, mutate) {
       const journal = await stat(
         join(root, "rollouts", rolloutId, "rollout.jsonl"),

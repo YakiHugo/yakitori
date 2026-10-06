@@ -1,3 +1,5 @@
+import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { execFile } from "node:child_process"
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -110,6 +112,31 @@ describe("thread server handlers", () => {
           content: { kind: "parts", parts: [], text: "parallel" },
         }),
       ).toMatchObject({ ok: false, status: 400 })
+      const document = {
+        type: "document",
+        name: "report.pdf",
+        mediaType: "application/pdf",
+        sizeBytes: 128,
+        file: {
+          rolloutId: "session_fixture",
+          path: "attachments/staging/draft/1.pdf",
+        },
+      }
+      for (const invalid of [
+        { ...document, mediaType: "text/plain" },
+        { ...document, sizeBytes: 0 },
+        { ...document, sizeBytes: 1.5 },
+        { ...document, name: "x".repeat(256) },
+        { ...document, file: { ...document.file, rolloutId: "../escape" } },
+        { ...document, data: "inline payload" },
+        { ...document, detail: "high" },
+      ])
+        expect(
+          await method({
+            ...request,
+            content: { kind: "parts", parts: [invalid] },
+          }),
+        ).toMatchObject({ ok: false, status: 400 })
     }
   })
 
@@ -585,10 +612,20 @@ describe("thread server handlers", () => {
     })
   })
 
-  it("queues input durably while a turn runs and cancels it through the RPC", async () => {
+  it.each([
+    "image",
+    "document",
+  ] as const)("queues %s input durably and releases replaced and cancelled request assets", async (attachmentType) => {
+    const extension = attachmentType === "image" ? "png" : "pdf"
+    const bytes =
+      attachmentType === "image" ? pngBytes() : pdfFixture(["Queued PDF"])
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-queue-"))
     const store = new MemoryThreadStore()
     const rolloutAssets = createRolloutAssets(workspace, {
+      async validatePdf(bytes) {
+        const result = await readPdf({ bytes, format: "native" })
+        if (!result.ok) throw new Error(result.message)
+      },
       async withMutationLease(_rolloutId, mutate) {
         return mutate()
       },
@@ -654,10 +691,10 @@ describe("thread server handlers", () => {
     await waitForValue(() => (requests.length === 1 ? true : undefined))
 
     await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
-    const attachments = await rolloutAssets.importImageBytes(
+    const attachments = await rolloutAssets.importAttachmentBytes(
       sessionId,
       "draft_queue_cancel",
-      [{ name: "queued.png", data: pngBytes() }],
+      [{ name: `queued.${extension}`, data: bytes }],
     )
 
     const queued = await handlers.queueInput({
@@ -667,7 +704,7 @@ describe("thread server handlers", () => {
         kind: "parts" as const,
         parts: [
           { type: "text" as const, text: "run after" },
-          ...attachments.map((image) => ({ type: "image" as const, ...image })),
+          ...attachments.map((image) => ({ type: attachmentType, ...image })),
         ],
       },
     })
@@ -687,7 +724,10 @@ describe("thread server handlers", () => {
           content: expect.objectContaining({
             parts: [
               { type: "text", text: "run after" },
-              expect.objectContaining({ type: "image", name: "queued.png" }),
+              expect.objectContaining({
+                type: attachmentType,
+                name: `queued.${extension}`,
+              }),
             ],
           }),
         }),
@@ -700,10 +740,10 @@ describe("thread server handlers", () => {
       ),
     ).toBe(false)
 
-    const editedAttachments = await rolloutAssets.importImageBytes(
+    const editedAttachments = await rolloutAssets.importAttachmentBytes(
       sessionId,
       "draft_queue_edit",
-      [{ name: "edited.png", data: pngBytes() }],
+      [{ name: `edited.${extension}`, data: bytes }],
     )
     const edited = await handlers.updateQueuedInput({
       sessionId,
@@ -714,7 +754,7 @@ describe("thread server handlers", () => {
         parts: [
           { type: "text" as const, text: "run after" },
           ...editedAttachments.map((image) => ({
-            type: "image" as const,
+            type: attachmentType,
             ...image,
           })),
         ],
@@ -725,7 +765,7 @@ describe("thread server handlers", () => {
     await expect(
       rolloutAssets.read({
         rolloutId: sessionId,
-        path: "attachments/requests/request_queued/1.png",
+        path: `attachments/requests/request_queued/1.${extension}`,
       }),
     ).rejects.toMatchObject({ code: "ENOENT" })
 
@@ -748,7 +788,7 @@ describe("thread server handlers", () => {
     await expect(
       rolloutAssets.read({
         rolloutId: sessionId,
-        path: "attachments/requests/request_queued_edit/1.png",
+        path: `attachments/requests/request_queued_edit/1.${extension}`,
       }),
     ).rejects.toMatchObject({ code: "ENOENT" })
 
@@ -764,10 +804,10 @@ describe("thread server handlers", () => {
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.status).toBe(409)
 
-    const nextAttachments = await rolloutAssets.importImageBytes(
+    const nextAttachments = await rolloutAssets.importAttachmentBytes(
       sessionId,
       "draft_queue_dispatch",
-      [{ name: "original-name.png", data: pngBytes() }],
+      [{ name: `original-name.${extension}`, data: bytes }],
     )
     const next = await handlers.queueInput({
       sessionId,
@@ -777,7 +817,7 @@ describe("thread server handlers", () => {
         parts: [
           { type: "text" as const, text: "run second" },
           ...nextAttachments.map((image) => ({
-            type: "image" as const,
+            type: attachmentType,
             ...image,
           })),
         ],
@@ -809,8 +849,8 @@ describe("thread server handlers", () => {
           parts: [
             { type: "text", text: "run second" },
             expect.objectContaining({
-              type: "image",
-              name: "original-name.png",
+              type: attachmentType,
+              name: `original-name.${extension}`,
             }),
           ],
         },
@@ -981,7 +1021,7 @@ describe("thread server handlers", () => {
     const sessionId = created.body.session.id
     expect(await manager.closeThread(sessionId)).toBe(true)
     await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
-    const attachment = await rolloutAssets.importImageBytes(
+    const attachment = await rolloutAssets.importAttachmentBytes(
       sessionId,
       "draft_cold_queue",
       [{ name: "cold.png", data: pngBytes() }],
@@ -1918,7 +1958,7 @@ describe("thread server handlers", () => {
         return mutate()
       },
     })
-    const attachments = await rolloutAssets.importImageBytes(
+    const attachments = await rolloutAssets.importAttachmentBytes(
       rolloutId,
       "draft_physical",
       [{ name: "screen.png", data: pngBytes() }],
@@ -2046,7 +2086,7 @@ describe("thread server handlers", () => {
     const rolloutId = (await store.readThread(sessionId))?.metadata.rolloutId
     if (rolloutId === undefined) throw new Error("Missing rollout id.")
     await mkdir(join(workspace, "rollouts", rolloutId), { recursive: true })
-    const [draft] = await rolloutAssets.importImageBytes(
+    const [draft] = await rolloutAssets.importAttachmentBytes(
       rolloutId,
       "draft_rejected",
       [{ name: "screen.png", data: pngBytes() }],
@@ -2162,7 +2202,7 @@ describe("thread server handlers", () => {
       join(workspace, "rollouts", sessionId, "rollout.jsonl"),
       "fixture\n",
     )
-    const draft = await rolloutAssets.importImageBytes(
+    const draft = await rolloutAssets.importAttachmentBytes(
       sessionId,
       "draft_steer",
       [{ name: "original.png", data: pngBytes() }],

@@ -101,14 +101,15 @@ function estimateMessageTextTokens(message: ModelMessage): number {
   if (message.role !== "assistant")
     return (
       estimateTextTokens(JSON.stringify(message, omitImagePayload)) +
-      (message.role === "tool"
-        ? message.content
-            .filter((block) => block.type === "document")
-            .reduce(
-              (total, document) =>
-                total + Math.ceil(document.sizeBytes / APPROX_BYTES_PER_TOKEN),
-              0,
-            )
+      (message.role === "tool" || message.role === "user"
+        ? message.content.reduce(
+            (total, block) =>
+              total +
+              (block.type === "document"
+                ? Math.ceil(block.sizeBytes / APPROX_BYTES_PER_TOKEN)
+                : 0),
+            0,
+          )
         : 0)
     )
   const native = message.content.filter((block) => block.type === "compaction")
