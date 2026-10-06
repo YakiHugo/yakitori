@@ -5,8 +5,9 @@ named `gui` does not imply that a contract needs a rendered component.
 
 ## Ownership
 
-- **Execution and recovery:** `runtime/turn-processor.test.ts` owns turn
-  lifecycle, cancellation, tool effects and recovery. Use the real JSONL store
+- **Execution and recovery:** `runtime/turn-processor.test.ts` and
+  `runtime/durable-turn-contracts.test.ts` own turn lifecycle, cancellation,
+  tool effects and recovery. Use the real JSONL store
   when claiming durability; reopen it with a new manager when claiming restart
   recovery. A transport retry is not a promise of exactly-once external effects
   across an arbitrary process crash.

@@ -279,20 +279,35 @@ describe("JsonlThreadStore", () => {
     const { root, store } = await createStore()
     const id = "thread_ordered_content"
     await createPersistentThread(store, metadata(id))
-    const images = [
-      {
-        type: "image" as const,
-        mediaType: "image/png" as const,
-        file: { rolloutId: id, path: "attachments/first.png" },
-        sizeBytes: 24,
-      },
-      {
-        type: "image" as const,
-        mediaType: "image/jpeg" as const,
-        file: { rolloutId: id, path: "attachments/second.jpg" },
-        sizeBytes: 24,
-      },
-    ] as const
+    const assets = createStoreAssets(root, store)
+    const firstBytes = pngBytes()
+    const secondBytes = Buffer.from(
+      "ffd8ffc00011080001000103011100021100031100ffd9",
+      "hex",
+    )
+    const drafts = await assets.importAttachmentBytes(id, "ordered", [
+      { name: "first.png", data: firstBytes },
+      { name: "second.jpg", data: secondBytes },
+    ])
+    const { attachments } = await assets.promoteAttachments(
+      id,
+      "ordered",
+      drafts,
+    )
+    await assets.discardDraftAttachments(drafts)
+    const images = attachments.map((attachment) => {
+      if (attachment.mediaType === "application/pdf")
+        throw new Error("Expected an image")
+      return { type: "image" as const, ...attachment }
+    })
+    expect(images.map((image) => image.mediaType)).toEqual([
+      "image/png",
+      "image/jpeg",
+    ])
+    const firstImage = images[0]
+    const secondImage = images[1]
+    if (firstImage === undefined || secondImage === undefined)
+      throw new Error("Missing ordered images")
     const item: ResponseItemEnvelope = {
       id: "ordered_user",
       turnId: "turn_ordered",
@@ -300,9 +315,9 @@ describe("JsonlThreadStore", () => {
       item: {
         role: "user",
         content: [
-          images[0],
+          firstImage,
           { type: "text", text: "between images" },
-          images[1],
+          secondImage,
         ],
       },
     }
@@ -324,6 +339,11 @@ describe("JsonlThreadStore", () => {
     expect(
       await readFile(join(root, "rollouts", id, "rollout.jsonl"), "utf8"),
     ).not.toContain('"images":')
+    const reopenedAssets = createStoreAssets(root, reopened)
+    expect(await reopenedAssets.read(firstImage.file)).toEqual(firstBytes)
+    expect(await reopenedAssets.read(secondImage.file)).toEqual(secondBytes)
+    expect(firstImage.file.rolloutId).toBe(id)
+    expect(secondImage.file.rolloutId).toBe(id)
     await reopened.shutdownThread(id)
   })
 
@@ -1326,41 +1346,83 @@ describe("JsonlThreadStore", () => {
     expect(repaired.unavailableThreads).toBeUndefined()
   })
 
-  it("keeps referenced rollout history after deleting the visible source thread", async () => {
+  it("retains inherited media after source deletion and removes it only after the last referencing thread", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_source"))
+    const assets = createStoreAssets(root, store)
+    const saved = await assets.saveToolFile(
+      "thread_source",
+      "read_image",
+      "screen.png",
+      pngBytes(),
+    )
+    const media: RolloutItem = {
+      type: "response_item",
+      item: {
+        id: "tool_image",
+        turnId: "turn_one",
+        createdAt: "2026-09-07T00:00:00Z",
+        item: {
+          role: "tool",
+          toolCallId: "read_image",
+          content: [
+            { type: "text", text: "saved image" },
+            {
+              type: "image",
+              mediaType: "image/png",
+              file: saved.reference,
+              sizeBytes: pngBytes().byteLength,
+            },
+          ],
+        },
+      },
+    }
     await store.appendItems("thread_source", [
       response("turn_one", "one"),
+      media,
       terminal("turn_one"),
     ])
-    const prepared = await store.prepareFork({
-      sourceThreadId: "thread_source",
-      boundary: { type: "latest" },
-    })
-    await store.createFork({
-      prepared,
-      target: metadata("thread_child", { parentThreadId: "thread_source" }),
-    })
+    for (const child of ["thread_child", "thread_sibling"]) {
+      const prepared = await store.prepareFork({
+        sourceThreadId: "thread_source",
+        boundary: { type: "latest" },
+      })
+      await store.createFork({
+        prepared,
+        target: metadata(child, { parentThreadId: "thread_source" }),
+      })
+      await store.shutdownThread(child)
+    }
     await store.shutdownThread("thread_source")
-
     await store.deleteThread("thread_source")
     expect(await store.readThread("thread_source")).toBeUndefined()
-    expect(
-      (await store.readThread("thread_child"))?.rollout.some(
-        (entry) =>
-          entry.item.type === "response_item" &&
-          entry.item.item.turnId === "turn_one",
-      ),
-    ).toBe(true)
-    await expect(
-      access(join(root, "rollouts", "thread_source", "rollout.jsonl")),
-    ).resolves.toBeUndefined()
 
-    await store.shutdownThread("thread_child")
-    await store.deleteThread("thread_child")
+    const reopened = new JsonlThreadStore({ root })
+    const surviving = await reopened.readThread("thread_child")
+    expect(surviving?.rollout.map((entry) => entry.item)).toContainEqual(media)
+    expect(
+      surviving &&
+        ContextManager.fromStoredThread(surviving)
+          .snapshot()
+          .history.map((entry) => entry.item),
+    ).toContainEqual(media.item.item)
+    expect(
+      await createStoreAssets(root, reopened).read(saved.reference),
+    ).toEqual(pngBytes())
+    await reopened.deleteThread("thread_child")
+    expect(await assets.read(saved.reference)).toEqual(pngBytes())
+    expect(
+      (await reopened.readThread("thread_sibling"))?.rollout.map(
+        (entry) => entry.item,
+      ),
+    ).toContainEqual(media)
+    await reopened.deleteThread("thread_sibling")
     await expect(
-      access(join(root, "rollouts", "thread_source", "rollout.jsonl")),
+      access(join(root, "rollouts", "thread_source")),
     ).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(assets.read(saved.reference)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
   })
 
   it("serializes asset creation with deletion and cannot revive a bundle", async () => {
