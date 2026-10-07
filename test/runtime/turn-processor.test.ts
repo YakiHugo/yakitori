@@ -3148,8 +3148,8 @@ describe("Turn processor", () => {
     const toolResultAt = events.findIndex(
       (event) =>
         event.type === "rollout.appended" &&
-        event.items.some(
-          (item) =>
+        event.records.some(
+          ({ item }) =>
             item.type === "response_item" && item.item.item.role === "tool",
         ),
     )
@@ -3221,8 +3221,8 @@ describe("Turn processor", () => {
     const toolCallAt = events.findIndex(
       (event) =>
         event.type === "rollout.appended" &&
-        event.items.some(
-          (item) =>
+        event.records.some(
+          ({ item }) =>
             item.type === "response_item" &&
             item.item.item.role === "assistant" &&
             item.item.item.content.some(
@@ -3245,8 +3245,8 @@ describe("Turn processor", () => {
     const toolResultAt = events.findIndex(
       (event) =>
         event.type === "rollout.appended" &&
-        event.items.some(
-          (item) =>
+        event.records.some(
+          ({ item }) =>
             item.type === "response_item" && item.item.item.role === "tool",
         ),
     )

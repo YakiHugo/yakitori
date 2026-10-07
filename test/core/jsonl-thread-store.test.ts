@@ -730,7 +730,10 @@ describe("JsonlThreadStore", () => {
         item: { role: "user", content: [{ type: "text", text: "go" }] },
       },
     }
-    expect(await store.appendItems(id, [item])).toBe(2)
+    expect(await store.appendItems(id, [item])).toMatchObject({
+      throughSeq: 2,
+      records: [{ seq: 1, item }],
+    })
     const reopened = new JsonlThreadStore({ root })
     expect((await reopened.readThread(id))?.rollout[1]?.item).toEqual(item)
     await store.shutdownThread(id)
@@ -769,7 +772,10 @@ describe("JsonlThreadStore", () => {
     expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
       [0],
     )
-    expect(await store.appendItems(id, [item])).toBe(2)
+    expect(await store.appendItems(id, [item])).toMatchObject({
+      throughSeq: 2,
+      records: [{ seq: 1, item }],
+    })
     await store.shutdownThread(id)
     const reopened = new JsonlThreadStore({ root })
     expect(

@@ -1707,9 +1707,15 @@ describe("thread server handlers", () => {
     })
   })
 
-  it("publishes each rollout event only through its append fence", async () => {
+  it.each([
+    { behavior: "without rereading history", auxiliary: false },
+    {
+      behavior: "after replaying an auxiliary writer's missing record",
+      auxiliary: true,
+    },
+  ])("publishes appended records in order $behavior", async ({ auxiliary }) => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-fence-"))
-    const store = new MemoryThreadStore()
+    const store = new JsonlThreadStore({ root: join(workspace, "store") })
     const provider = createFauxProvider([
       {
         snapshots: ["final answer"],
@@ -1744,25 +1750,42 @@ describe("thread server handlers", () => {
     if (!created.ok) throw new Error(created.body.error.message)
     const sessionId = created.body.session.id
     const deliveries: string[] = []
+    const durable: { seq: number; type: string }[] = []
     const subscription = eventHub.subscribe(sessionId, (delivery) => {
       if (delivery.kind === "transient") {
         deliveries.push(delivery.event.type)
         return
       }
       deliveries.push(...delivery.events.map((event) => event.type))
+      durable.push(...delivery.events.map(({ seq, type }) => ({ seq, type })))
     })
     cleanups.push(async () => subscription.close())
 
+    const extra = auxiliary
+      ? await store.appendItems(sessionId, [
+          {
+            type: "auxiliary_usage",
+            source: "session_title",
+            requestId: "title_request",
+            occurredAt: "2026-10-07T00:00:00Z",
+            provider: "faux",
+            model: "faux-model",
+            usage: {
+              inputTokens: 10,
+              outputTokens: 2,
+              cacheReadInputTokens: 0,
+              cacheWriteInputTokens: 0,
+            },
+          },
+        ])
+      : undefined
     const originalRead = store.readThread.bind(store)
-    const readStarted = deferred<void>()
-    const releaseReads = deferred<void>()
-    let blockReads = true
-    store.readThread = async (threadId) => {
-      if (blockReads) {
-        readStarted.resolve()
-        await releaseReads.promise
-      }
-      return originalRead(threadId)
+    let reads = 0
+    store.readThread = async () => {
+      reads++
+      if (!auxiliary)
+        throw new Error("Live publication must not reread the rollout.")
+      return originalRead(sessionId)
     }
 
     const admitted = handlers.admitInput({
@@ -1773,17 +1796,14 @@ describe("thread server handlers", () => {
         parts: [{ type: "text" as const, text: "answer" }],
       },
     })
-    await readStarted.promise
-    await waitForValue(() =>
-      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
-    )
-    blockReads = false
-    releaseReads.resolve()
     const result = await admitted
     if (!result.ok) throw new Error(result.body.error.message)
     await waitForValue(() =>
       deliveries.includes("turn.completed") ? true : undefined,
     )
+    expect(reads).toBe(auxiliary ? 1 : 0)
+    if (extra !== undefined)
+      expect(durable[0]).toEqual({ seq: 2, type: "rollout.item" })
 
     expect(deliveries.indexOf("turn.started")).toBeLessThan(
       deliveries.indexOf("assistant.delta"),
@@ -1795,8 +1815,14 @@ describe("thread server handlers", () => {
       deliveries.indexOf("turn.completed"),
     )
 
+    store.readThread = originalRead
     const replay = await handlers.readSessionEvents({ sessionId })
     if (!replay.ok) throw new Error(replay.body.error.message)
+    expect(durable).toEqual(
+      replay.body.events
+        .filter(({ seq }) => seq > 1)
+        .map(({ seq, type }) => ({ seq, type })),
+    )
     expect(
       replay.body.events.find(
         (event) => isKernelEvent(event) && event.type === "turn.completed",

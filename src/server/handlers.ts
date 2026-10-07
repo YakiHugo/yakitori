@@ -228,6 +228,13 @@ export type ThreadServerHandlers = ServerHandlers & {
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
 
+type RolloutPublication = {
+  rolloutId: string
+  firstUserInputId: string | undefined
+  processedThrough: number
+  turns: Map<string, { inputItemId: string; accepted: boolean }>
+}
+
 // App-server projection over the live Session actor and canonical rollout.
 // It translates host DTOs only; execution never reads this projection.
 export function createThreadServerHandlers(
@@ -270,23 +277,62 @@ export function createThreadServerHandlers(
 
   async function publishNewRollout(
     threadId: string,
-    throughSeq: number,
+    append: import("../core/thread-store.ts").RolloutAppend,
+    publication: RolloutPublication,
   ): Promise<void> {
-    const stored = await options.store.readThread(threadId)
-    if (stored === undefined) return
-    const after = publishedThrough.get(threadId) ?? 0
-    const records = stored.rollout.filter((record) => {
+    // A fork response can publish a replay before this pump consumes its
+    // queued receipts. Side effects must still process each receipt once.
+    const after = publication.processedThrough
+    let records = append.records.filter((record) => {
       const seq = hostSeq(record)
-      return seq > after && seq <= throughSeq
+      return seq > after && seq <= append.throughSeq
     })
+    // Auxiliary writers or a failed delivery can leave a gap. Replay only
+    // then; ordinary Session appends already carry their persisted records.
+    const first = records[0]
+    if (
+      append.throughSeq > after &&
+      (first === undefined || hostSeq(first) !== after + 1)
+    ) {
+      const stored = await options.store.readThread(threadId)
+      if (stored === undefined) return
+      const replayed = stored.rollout.filter(
+        (record) =>
+          hostSeq(record) > after && hostSeq(record) <= append.throughSeq,
+      )
+      // A staged rollout read omits pending Turn records. The append receipt
+      // still owns their assigned identities, so retain it when filling gaps.
+      records = [
+        ...new Map(
+          [...replayed, ...records].map((record) => [record.seq, record]),
+        ).values(),
+      ].sort((left, right) => left.seq - right.seq)
+    }
     if (records.length === 0) return
+    if (records.some((record, index) => hostSeq(record) !== after + index + 1))
+      throw new Error("Rollout publication contains a sequence gap.")
     options.eventHub?.publishDurable(
-      records.map((record) => mapRolloutEvent(record, threadId)),
+      records
+        .filter(
+          (record) => hostSeq(record) > (publishedThrough.get(threadId) ?? 0),
+        )
+        .map((record) => mapRolloutEvent(record, threadId)),
     )
     const last = records.at(-1)
-    if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
-    maybeGenerateSessionTitle(threadId, stored, records)
+    if (last !== undefined) {
+      publication.processedThrough = hostSeq(last)
+      publishedThrough.set(
+        threadId,
+        Math.max(publishedThrough.get(threadId) ?? 0, hostSeq(last)),
+      )
+    }
     for (const record of records) {
+      recordTurnInput(publication, record.item)
+      if (isInitialUserInput(record)) {
+        publication.firstUserInputId ??= record.item.item.id
+        if (publication.firstUserInputId === record.item.item.id)
+          maybeGenerateSessionTitle(threadId, record)
+      }
       if (record.item.type === "turn_completed") {
         const requestId = record.item.turnId
         const key = `${threadId}\0${requestId}`
@@ -294,24 +340,17 @@ export function createThreadServerHandlers(
         pendingInitialDrafts.delete(key)
         const queuedContent = startingQueuedInputs.get(key)
         startingQueuedInputs.delete(key)
-        const started = stored.rollout.find(
-          (entry) =>
-            entry.item.type === "turn_started" &&
-            entry.item.turnId === requestId,
-        )?.item
-        if (started?.type === "turn_started") {
-          const accepted = stored.rollout.some(
-            (entry) =>
-              entry.item.type === "response_item" &&
-              entry.item.item.id === started.inputItemId,
-          )
+        const started = publication.turns.get(requestId)
+        publication.turns.delete(requestId)
+        if (started !== undefined) {
+          const accepted = started.accepted
           if (accepted && draft !== undefined)
             for (const content of draft)
               void discardAdmittedDraftAttachments(threadId, requestId, content)
           if (!accepted)
             void discardUnacceptedRequestAttachments(
               threadId,
-              stored.metadata.rolloutId,
+              publication.rolloutId,
               requestId,
             )
           if (!accepted && queuedContent !== undefined) {
@@ -319,7 +358,7 @@ export function createThreadServerHandlers(
               if (ownerId !== requestId)
                 void discardUnacceptedRequestAttachments(
                   threadId,
-                  stored.metadata.rolloutId,
+                  publication.rolloutId,
                   ownerId,
                 )
           }
@@ -360,25 +399,11 @@ export function createThreadServerHandlers(
   // never blocks the pump.
   function maybeGenerateSessionTitle(
     threadId: string,
-    stored: StoredThread,
-    records: readonly StoredRolloutItem[],
+    admitted: StoredRolloutItem & {
+      item: Extract<RolloutItem, { type: "response_item" }>
+    },
   ) {
     if (options.sessionTitle === undefined) return
-    const isUserInput = (
-      record: StoredRolloutItem,
-    ): record is StoredRolloutItem & {
-      item: Extract<RolloutItem, { readonly type: "response_item" }>
-    } =>
-      record.item.type === "response_item" &&
-      record.item.item.id.startsWith("input_") &&
-      record.item.item.item.role === "user" &&
-      record.item.item.item.context === undefined
-    const admitted = records.find(isUserInput)
-    if (admitted === undefined) return
-    const first = stored.rollout.find(isUserInput)
-    if (first === undefined || first.item.item.id !== admitted.item.item.id) {
-      return
-    }
     const message = admitted.item.item.item
     if (message.role !== "user") return
     const text = message.content
@@ -414,6 +439,19 @@ export function createThreadServerHandlers(
           stored === undefined ? 0 : threadSeq(stored),
         )
       }
+      const publication = {
+        rolloutId: thread.snapshot().metadata.rolloutId,
+        firstUserInputId:
+          stored?.rollout.find(isInitialUserInput)?.item.item.id,
+        processedThrough: publishedThrough.get(thread.id) ?? 0,
+        turns: new Map<string, { inputItemId: string; accepted: boolean }>(),
+      }
+      for (const record of stored?.rollout ?? []) {
+        if (hostSeq(record) > (publishedThrough.get(thread.id) ?? 0)) break
+        recordTurnInput(publication, record.item)
+        if (record.item.type === "turn_completed")
+          publication.turns.delete(record.item.turnId)
+      }
       const pump = (async () => {
         const streams = new Map<
           string,
@@ -428,7 +466,7 @@ export function createThreadServerHandlers(
           if (event.type === "rollout.appended") {
             for (const publisher of streams.values()) publisher.flush()
             try {
-              await publishNewRollout(thread.id, event.throughSeq)
+              await publishNewRollout(thread.id, event, publication)
             } catch (error) {
               reportOperationalFailure(reporter, {
                 component: "thread-event-pump",
@@ -2345,6 +2383,34 @@ function mapRolloutEvent(
 function threadSeq(stored: StoredThread): number {
   const last = stored.rollout.at(-1)
   return last === undefined ? 0 : hostSeq(last)
+}
+
+function recordTurnInput(
+  publication: RolloutPublication,
+  item: RolloutItem,
+): void {
+  if (item.type === "turn_started") {
+    publication.turns.set(item.turnId, {
+      inputItemId: item.inputItemId,
+      accepted: false,
+    })
+  } else if (item.type === "response_item" && item.item.item.role === "user") {
+    const turn = publication.turns.get(item.item.turnId)
+    if (turn?.inputItemId === item.item.id) turn.accepted = true
+  }
+}
+
+function isInitialUserInput(
+  record: StoredRolloutItem,
+): record is StoredRolloutItem & {
+  item: Extract<RolloutItem, { type: "response_item" }>
+} {
+  return (
+    record.item.type === "response_item" &&
+    record.item.item.id.startsWith("input_") &&
+    record.item.item.item.role === "user" &&
+    record.item.item.item.context === undefined
+  )
 }
 
 function hostSeq(record: StoredRolloutItem): number {

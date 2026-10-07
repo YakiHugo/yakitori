@@ -12,7 +12,7 @@ import type {
   TurnCompletion,
 } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
-import type { RolloutItem } from "./rollout.ts"
+import type { StoredRolloutItem } from "./rollout.ts"
 
 export const SessionStatus = {
   Idle: "idle",
@@ -155,12 +155,12 @@ export type SessionOp =
   | { readonly type: "shutdown" }
 
 export type SessionEvent =
-  | {
-      readonly type: "rollout.appended"
-      readonly threadId: string
-      readonly throughSeq: number
-      readonly items: readonly RolloutItem[]
-    }
+  | Readonly<{
+      type: "rollout.appended"
+      threadId: string
+      throughSeq: number
+      records: readonly StoredRolloutItem[]
+    }>
   | {
       readonly type: "model.stream"
       readonly threadId: string
