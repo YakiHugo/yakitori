@@ -34,6 +34,62 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("retains full tool results and rebuilds their captured history budget on resume", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_tool_history"
+    await createPersistentThread(store, metadata(id))
+    const result: ResponseItemEnvelope = {
+      id: "result",
+      turnId: "turn",
+      createdAt: "2026-10-07T00:00:00Z",
+      historyOutputBudget: { maxBytes: 64, maxLines: 4 },
+      toolContentBlockCount: 1,
+      item: {
+        role: "tool",
+        toolCallId: "read",
+        content: [
+          { type: "text", text: "complete file" },
+          { type: "text", text: "hook context\n".repeat(100) },
+        ],
+        fileObservations: [
+          { path: "source.ts", kind: "whole_file_read", complete: true },
+        ],
+      },
+    }
+    const append = await store.appendItems(id, [
+      { type: "response_item", item: result },
+    ])
+    expect(append.throughSeq).toBe(2)
+    const stored = await store.readThread(id)
+    expect(append.records).toEqual(stored?.rollout.slice(1))
+    expect(append.records[0]?.item).toEqual({
+      type: "response_item",
+      item: result,
+    })
+    const live = new ContextManager()
+    live.record([result])
+    await store.shutdownThread(id)
+    const reopened = new JsonlThreadStore({ root })
+    const restored = await reopened.resumeThread(id)
+    if (restored === undefined) throw new Error("Missing tool history")
+    expect(restored.rollout[1]?.item).toEqual({
+      type: "response_item",
+      item: result,
+    })
+    const history = ContextManager.fromStoredThread(restored).snapshot().history
+    expect(history).toEqual(live.snapshot().history)
+    expect(history[0]?.item).toMatchObject({
+      fileObservations: [
+        { path: "source.ts", kind: "whole_file_read", complete: true },
+      ],
+      content: [
+        { type: "text", text: "complete file" },
+        { type: "text", text: expect.stringContaining("[Output truncated.]") },
+      ],
+    })
+    await reopened.shutdownThread(id)
+  })
+
   it.each([
     "response_item",
     "agent_message",

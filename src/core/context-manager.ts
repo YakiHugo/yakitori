@@ -1,7 +1,8 @@
-import type { JsonObject } from "../kernel/events.ts"
+import type { JsonObject, ModelToolContentBlock } from "../kernel/events.ts"
 import { applyJsonMergePatch } from "../kernel/json-equality.ts"
 import type {
   ModelContextSettings,
+  HistoryOutputBudget,
   ResponseItemEnvelope,
   StoredThread,
 } from "./rollout.ts"
@@ -72,7 +73,7 @@ export class ContextManager {
       const item = record.item
       if (item.type === "model_context") previousModel = item.settings
       if (item.type === "response_item" || item.type === "agent_message") {
-        history.push(item.item)
+        history.push(projectHistoryItem(item.item))
       } else if (item.type === "compacted") {
         activeContextTokens = undefined
         autoCompactPrefillTokens = undefined
@@ -81,7 +82,7 @@ export class ContextManager {
         contextTokenHistoryAnchorTokens = undefined
         contextTokenProvider = undefined
         contextTokenModel = undefined
-        history = structuredClone([...item.replacement])
+        history = item.replacement.map(projectHistoryItem)
         worldStateBaseline = undefined
       } else if (item.type === "token_count") {
         activeContextTokens = item.activeContextTokens
@@ -164,7 +165,7 @@ export class ContextManager {
   }
 
   record(items: readonly ResponseItemEnvelope[]): void {
-    this.#history.push(...structuredClone([...items]))
+    this.#history.push(...items.map(projectHistoryItem))
   }
 
   replace(items: readonly ResponseItemEnvelope[]): void {
@@ -175,7 +176,7 @@ export class ContextManager {
     this.#contextTokenHistoryAnchorTokens = undefined
     this.#contextTokenProvider = undefined
     this.#contextTokenModel = undefined
-    this.#history = structuredClone([...items])
+    this.#history = items.map(projectHistoryItem)
     this.#worldStateBaseline = undefined
   }
 
@@ -250,4 +251,90 @@ export class ContextManager {
   setPreviousModel(settings: ModelContextSettings): void {
     this.#previousModel = { ...settings }
   }
+}
+
+// Rollouts retain the original result. Live and restored history both use the
+// budget captured at tool completion; a later model change cannot enlarge it.
+function projectHistoryItem(
+  envelope: ResponseItemEnvelope,
+): ResponseItemEnvelope {
+  const copied = structuredClone(envelope)
+  const budget = copied.historyOutputBudget
+  if (copied.item.role !== "tool" || budget === undefined) return copied
+  let remainingBytes = budget.maxBytes
+  let remainingLines = budget.maxLines
+  let toolContentTruncated = false
+  let textBlockCount = 0
+  let retainedToolContentBlockCount = 0
+  const content = copied.item.content.flatMap<ModelToolContentBlock>(
+    (block, index) => {
+      const isToolContent =
+        index < (copied.toolContentBlockCount ?? copied.item.content.length)
+      if (block.type !== "text") {
+        if (isToolContent) retainedToolContentBlockCount++
+        return [block]
+      }
+      const separatorBytes = textBlockCount > 0 ? 1 : 0
+      const text = truncateHistoryText(block.text, {
+        maxBytes: Math.max(0, remainingBytes - separatorBytes),
+        maxLines: remainingLines,
+      })
+      if (isToolContent) {
+        toolContentTruncated ||= text !== block.text
+      }
+      if (text === "") return []
+      if (isToolContent) retainedToolContentBlockCount++
+      textBlockCount++
+      remainingBytes = Math.max(
+        0,
+        remainingBytes - Buffer.byteLength(text) - separatorBytes,
+      )
+      remainingLines = Math.max(0, remainingLines - text.split("\n").length)
+      return [{ ...block, text }]
+    },
+  )
+  const item = { ...copied.item, content }
+  if (toolContentTruncated) delete item.fileObservations
+  return {
+    ...copied,
+    item,
+    ...(copied.toolContentBlockCount === undefined
+      ? {}
+      : { toolContentBlockCount: retainedToolContentBlockCount }),
+  }
+}
+
+function truncateHistoryText(
+  text: string,
+  budget: HistoryOutputBudget,
+): string {
+  const lines = text.split("\n")
+  if (
+    Buffer.byteLength(text) <= budget.maxBytes &&
+    lines.length <= budget.maxLines
+  )
+    return text
+  if (budget.maxBytes === 0 || budget.maxLines === 0) return ""
+  const marker = "[Output truncated.]"
+  if (budget.maxBytes < Buffer.byteLength(marker)) return ""
+  if (budget.maxLines === 1) return marker
+  const bytes = budget.maxBytes - Buffer.byteLength(marker) - 2
+  if (bytes <= 0) return marker
+  const headLines = Math.floor((budget.maxLines - 1) / 2)
+  const head = Buffer.from(lines.slice(0, headLines).join("\n"))
+  let headEnd = Math.min(head.length, Math.floor(bytes / 2))
+  while (headEnd > 0 && ((head[headEnd] ?? 0) & 0xc0) === 0x80) headEnd--
+  const tail = Buffer.from(
+    lines.slice(-Math.max(1, budget.maxLines - 1 - headLines)).join("\n"),
+  )
+  let tailStart = Math.max(0, tail.length - (bytes - headEnd))
+  while (tailStart < tail.length && ((tail[tailStart] ?? 0) & 0xc0) === 0x80)
+    tailStart++
+  return [
+    head.subarray(0, headEnd).toString("utf8"),
+    marker,
+    tail.subarray(tailStart).toString("utf8"),
+  ]
+    .filter((part) => part !== "")
+    .join("\n")
 }

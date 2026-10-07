@@ -88,6 +88,7 @@ import {
   resolveModelRequestPolicy,
   type ResolvedStepConfiguration,
   SessionConfiguration,
+  toolHistoryOutputBudget,
 } from "./session-configuration.ts"
 import {
   createSkillsLoader,
@@ -1387,44 +1388,55 @@ async function executeTurnModelLoop(
             toolCalls += calls.length
             for await (const { call, item, result } of results) {
               await previousResults
-              const { toolContentTruncated, ...modelContent } =
-                await finalizeToolOutput(
-                  result,
-                  {
-                    maxBytes:
-                      executionStep.executionPolicy.modelVisibleToolResultBytes,
-                    maxLines:
-                      executionStep.executionPolicy.modelVisibleToolResultLines,
-                  },
-                  {
-                    workspaceRoot,
-                    rolloutId: metadata.rolloutId,
-                    toolCallId: call.id,
-                    ...(input.options.rolloutAssets === undefined
-                      ? {}
-                      : { rolloutAssets: input.options.rolloutAssets }),
-                  },
-                )
+              const {
+                toolContentTruncated,
+                toolContentBlockCount,
+                ...modelContent
+              } = await finalizeToolOutput(
+                result,
+                {
+                  maxBytes: Number.MAX_SAFE_INTEGER,
+                  maxLines: Number.MAX_SAFE_INTEGER,
+                },
+                {
+                  workspaceRoot,
+                  rolloutId: metadata.rolloutId,
+                  toolCallId: call.id,
+                  ...(input.options.rolloutAssets === undefined
+                    ? {}
+                    : { rolloutAssets: input.options.rolloutAssets }),
+                },
+              )
               const fileObservations =
                 toolContentTruncated !== true
                   ? toolFileObservations(result)
                   : []
-              const resultItem = envelope(input.input.submissionId, {
-                role: "tool",
-                toolCallId: call.id,
-                ...modelContent,
-                ...(!result.ok ? { isError: true } : {}),
-                ...(call.toolKind === "tool_search"
-                  ? {
-                      toolSearch: {
-                        tools: result.ok
-                          ? discoveredTools(toolPlan, call.input)
-                          : [],
-                      },
-                    }
-                  : {}),
-                ...(fileObservations.length === 0 ? {} : { fileObservations }),
-              })
+              const resultItem = {
+                ...envelope(input.input.submissionId, {
+                  role: "tool",
+                  toolCallId: call.id,
+                  ...modelContent,
+                  ...(!result.ok ? { isError: true } : {}),
+                  ...(call.toolKind === "tool_search"
+                    ? {
+                        toolSearch: {
+                          tools: result.ok
+                            ? discoveredTools(toolPlan, call.input)
+                            : [],
+                        },
+                      }
+                    : {}),
+                  ...(fileObservations.length === 0
+                    ? {}
+                    : { fileObservations }),
+                }),
+                historyOutputBudget: toolHistoryOutputBudget(
+                  executionStep.configuration,
+                ),
+                ...(toolContentBlockCount === undefined
+                  ? {}
+                  : { toolContentBlockCount }),
+              }
               await input.runtime.recordToolResult(
                 resultItem,
                 completeToolItem(
@@ -2989,7 +3001,11 @@ async function executePreparedTool(
               },
               projectionContext,
             )
-            return { ...body, content: [...body.content, ...hook.content] }
+            return {
+              ...body,
+              toolContentBlockCount: body.content.length,
+              content: [...body.content, ...hook.content],
+            }
           },
         },
       }

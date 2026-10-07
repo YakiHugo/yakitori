@@ -47,20 +47,28 @@ export type ThreadMetadata = {
   readonly metadata?: EventMetadata
 }
 
-export type ResponseItemEnvelope = {
-  readonly id: string
-  readonly turnId: string
-  readonly createdAt: string
-  readonly item: ModelMessage
-  readonly providerMetadata?: JsonObject
-  readonly submissionMetadata?: Readonly<{
+export type HistoryOutputBudget = Readonly<{
+  maxBytes: number
+  maxLines: number
+}>
+
+export type ResponseItemEnvelope = Readonly<{
+  id: string
+  turnId: string
+  createdAt: string
+  item: ModelMessage
+  historyOutputBudget?: HistoryOutputBudget
+  // Hook context follows these blocks and does not establish file observations.
+  toolContentBlockCount?: number
+  providerMetadata?: JsonObject
+  submissionMetadata?: Readonly<{
     modelSelection?: ModelSelection
     parentInputId?: string
     metadata?: EventMetadata
     // Admission identity belongs to the host, never model-visible content.
     requestFingerprint?: string
   }>
-}
+}>
 
 export type TurnContextItem = {
   readonly turnId: string

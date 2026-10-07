@@ -2419,11 +2419,30 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
       "item",
       "providerMetadata",
       "submissionMetadata",
+      "historyOutputBudget",
+      "toolContentBlockCount",
     ]) &&
     typeof value.id === "string" &&
     typeof value.turnId === "string" &&
     typeof value.createdAt === "string" &&
     isModelMessage(value.item) &&
+    (value.toolContentBlockCount === undefined ||
+      (typeof value.toolContentBlockCount === "number" &&
+        Number.isSafeInteger(value.toolContentBlockCount) &&
+        value.toolContentBlockCount >= 0 &&
+        value.toolContentBlockCount <= value.item.content.length)) &&
+    (value.historyOutputBudget === undefined ||
+      (isRecord(value.historyOutputBudget) &&
+        hasOnlyKeys(value.historyOutputBudget, ["maxBytes", "maxLines"]) &&
+        [
+          value.historyOutputBudget.maxBytes,
+          value.historyOutputBudget.maxLines,
+        ].every(
+          (limit) =>
+            typeof limit === "number" &&
+            Number.isSafeInteger(limit) &&
+            limit >= 0,
+        ))) &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata)) &&
     (value.submissionMetadata === undefined ||

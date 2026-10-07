@@ -16,6 +16,7 @@ import {
 } from "./limits.ts"
 import {
   catalogModelCapacity,
+  DefaultToolOutputTruncation,
   type ResolvedModel,
   resolveModel,
   validateModelSelection,
@@ -455,5 +456,23 @@ export function stepExecutionLimits(
     modelVisibleToolResultBytes: executionPolicy.modelVisibleToolResultBytes,
     modelVisibleToolResultLines: executionPolicy.modelVisibleToolResultLines,
     assistantResponseBytes: executionPolicy.assistantResponseBytes,
+  }
+}
+
+export function toolHistoryOutputBudget(
+  configuration: ResolvedStepConfiguration,
+): import("../core/rollout.ts").HistoryOutputBudget {
+  const policy =
+    configuration.modelInfo.toolOutputTruncation ?? DefaultToolOutputTruncation
+  // Match Codex's four-byte token estimate and 20% serialization allowance.
+  const maxBytes =
+    Math.ceil(policy.limit * 1.2) * (policy.mode === "tokens" ? 4 : 1)
+  return {
+    maxBytes: Math.min(
+      maxBytes,
+      Number.MAX_SAFE_INTEGER,
+      configuration.executionPolicy.modelVisibleToolResultBytes,
+    ),
+    maxLines: configuration.executionPolicy.modelVisibleToolResultLines,
   }
 }

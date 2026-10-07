@@ -3,6 +3,8 @@ import {
   type CatalogModel,
   listCatalogModels,
   type ModelCapacity,
+  type ModelCapabilities,
+  type ModelToolOutputTruncation,
   type ModelInputModality,
   type ResolvedModel,
   resolveModel,
@@ -31,6 +33,8 @@ export type ModelsManager = {
 }
 
 export type DiscoveredModel = Readonly<{
+  toolOutputTruncation?: ModelToolOutputTruncation
+  capabilities?: ModelCapabilities
   instructions?: string
   efforts?: readonly string[]
   inputModalities?: readonly ModelInputModality[]
@@ -181,7 +185,7 @@ export function createDiscoveringModelsManager(input: {
           )
           .map((model) => {
             const base = staticById.get(model.id.toLowerCase())
-            return {
+            const resolved = {
               ...(base ??
                 fallback.resolve({
                   provider: input.provider,
@@ -194,6 +198,10 @@ export function createDiscoveringModelsManager(input: {
               ...(model.inputModalities === undefined
                 ? {}
                 : { inputModalities: model.inputModalities }),
+              ...model.capabilities,
+              ...(model.toolOutputTruncation === undefined
+                ? {}
+                : { toolOutputTruncation: model.toolOutputTruncation }),
               ...(model.displayName === undefined
                 ? {}
                 : { displayName: model.displayName }),
@@ -204,6 +212,12 @@ export function createDiscoveringModelsManager(input: {
                 ? {}
                 : { compactionHash: model.compactionHash }),
             }
+            if (
+              model.capabilities !== undefined &&
+              model.capabilities.applyPatchToolType === undefined
+            )
+              delete resolved.applyPatchToolType
+            return resolved
           }),
         ...staticModels.filter(
           (model) => !(cache?.models.has(model.model.toLowerCase()) ?? false),
@@ -215,11 +229,15 @@ export function createDiscoveringModelsManager(input: {
       const base = fallback.resolve(selection)
       const model = discovered(selection.model)
       if (model === undefined) return base
-      return {
+      const resolved = {
         ...base,
         ...(model.inputModalities === undefined
           ? {}
           : { inputModalities: model.inputModalities }),
+        ...model.capabilities,
+        ...(model.toolOutputTruncation === undefined
+          ? {}
+          : { toolOutputTruncation: model.toolOutputTruncation }),
         ...(model.instructions === undefined
           ? {}
           : { instructions: model.instructions }),
@@ -229,8 +247,15 @@ export function createDiscoveringModelsManager(input: {
         ...(model.compactionHash === undefined
           ? {}
           : { compactionHash: model.compactionHash }),
-        usedFallbackModelMetadata: base.usedFallbackModelMetadata,
+        usedFallbackModelMetadata:
+          model.capabilities === undefined && base.usedFallbackModelMetadata,
       }
+      if (
+        model.capabilities !== undefined &&
+        model.capabilities.applyPatchToolType === undefined
+      )
+        delete resolved.applyPatchToolType
+      return resolved
     },
     validate(selection) {
       requireProvider(input.provider, selection.provider)

@@ -76,7 +76,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "codex",
@@ -95,7 +96,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "codex",
@@ -114,7 +116,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "openai",
@@ -253,7 +256,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "codex",
@@ -272,7 +276,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "codex",
@@ -291,7 +296,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "codex",
@@ -310,7 +316,8 @@
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 272000,
-      "effectiveContextWindowPercent": 95
+      "effectiveContextWindowPercent": 95,
+      "toolOutputTruncation": { "mode": "tokens", "limit": 10000 }
     },
     {
       "provider": "grok",

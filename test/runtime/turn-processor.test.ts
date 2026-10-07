@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { ContextManager } from "../../src/core/context-manager.ts"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
@@ -3031,7 +3032,7 @@ describe("Turn processor", () => {
             content: expect.arrayContaining([
               expect.objectContaining({
                 type: "text",
-                text: expect.stringContaining("Read preview truncated"),
+                text: expect.stringContaining("[Output truncated.]"),
               }),
             ]),
           })
@@ -4458,7 +4459,7 @@ it.each([
   "none",
   "bytes",
   "lines",
-])("persists tool images and bounds %s hook context for the next model step", async (hookKind) => {
+])("retains tool images and full %s hook context while bounding model history", async (hookKind) => {
   const hookText =
     hookKind === "bytes"
       ? "x".repeat(70_000)
@@ -4535,6 +4536,16 @@ it.each([
   const completed = await nextLifecycleEvent(thread)
   expect(completed?.type).toBe("turn.completed")
   expect(provider.callCount).toBe(2)
+  const visible = provider.requests[1]?.messages.find(
+    (message) => message.role === "tool" && message.toolCallId === "call_image",
+  )
+  if (visible?.role !== "tool")
+    throw new Error("Missing model-visible image result")
+  expect(
+    Buffer.byteLength(toolContentText(visible.content)),
+  ).toBeLessThanOrEqual(12_000)
+  if (hookText !== undefined)
+    expect(toolContentText(visible.content)).toContain("[Output truncated.]")
   const stored = await runtime.store.readThread(thread.id)
   const record = stored?.rollout.find(
     (record) =>
@@ -4560,24 +4571,25 @@ it.each([
       content: { kind: "tool_result", parts: toolResult.content },
     },
   })
-  expect(
-    Buffer.byteLength(toolContentText(toolResult.content)),
-  ).toBeLessThanOrEqual(50 * 1024)
-  expect(
-    toolContentText(toolResult.content).split("\n").length,
-  ).toBeLessThanOrEqual(2000)
   expect(toolContentText(toolResult.content)).toContain(
     "Read image: screen.png",
   )
   if (hookText !== undefined) {
-    const path = toolContentText(toolResult.content).match(
-      /saved to (.+?)\. Use/,
-    )?.[1]
-    if (path === undefined) throw new Error("Missing hook recovery path")
-    expect(await readFile(path, "utf8")).toBe(
+    expect(toolContentText(toolResult.content)).toContain(
       `<hook_context>\n${hookText}\n</hook_context>`,
     )
   }
+  if (stored === undefined) throw new Error("Missing rollout")
+  const restored = ContextManager.fromStoredThread(stored).snapshot()
+  expect(restored.history).toEqual(thread.snapshot().context.history)
+  const restoredResult = restored.history.find(
+    ({ item }) => item.role === "tool" && item.toolCallId === "call_image",
+  )
+  if (restoredResult?.item.role !== "tool")
+    throw new Error("Missing restored result")
+  expect(
+    Buffer.byteLength(toolContentText(restoredResult.item.content)),
+  ).toBeLessThanOrEqual(12_000)
   const image = toolResult.content.filter(
     (block) => block.type === "image",
   )?.[0]

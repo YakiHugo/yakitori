@@ -290,7 +290,20 @@ describe("persisted models cache", () => {
       provider: "codex",
       identity: async () => "account",
       discover: async () => [
-        { id: "gpt-persisted", contextWindowTokens: 321_000 },
+        {
+          id: "gpt-persisted",
+          contextWindowTokens: 321_000,
+          toolOutputTruncation: { mode: "bytes", limit: 8_000 },
+          capabilities: {
+            inputModalities: ["text", "image"],
+            imageDetailModes: ["high"],
+            shellToolType: "unified_exec",
+            applyPatchToolType: "custom",
+            fileEditingToolType: "none",
+            supportsNativeToolSearch: true,
+            supportsCustomTools: true,
+          },
+        },
       ],
       cacheStore: store,
     })
@@ -309,6 +322,14 @@ describe("persisted models cache", () => {
     expect(
       second.capacity({ provider: "codex", model: "gpt-persisted" }),
     ).toMatchObject({ contextWindowTokens: 321_000 })
+    expect(
+      second.resolve({ provider: "codex", model: "gpt-persisted" }),
+    ).toMatchObject({
+      toolOutputTruncation: { mode: "bytes", limit: 8_000 },
+      inputModalities: ["text", "image"],
+      applyPatchToolType: "custom",
+      usedFallbackModelMetadata: false,
+    })
     expect(discover).not.toHaveBeenCalled()
   })
 
