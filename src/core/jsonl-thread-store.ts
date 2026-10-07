@@ -74,6 +74,7 @@ import {
   PersistContext,
   type PreparedFork,
   type PrepareForkInput,
+  type RolloutAppend,
   type ThreadStore,
   type ThreadStoreForkResult,
   type ThreadStoreListInput,
@@ -106,7 +107,7 @@ type StagedThread = {
   shutdownPromise: Promise<void> | undefined
   sidebar: SessionPresentation | undefined
   pendingDurableAppend:
-    | { readonly items: readonly RolloutItem[]; readonly throughSeq: number }
+    | (RolloutAppend & { readonly items: readonly RolloutItem[] })
     | undefined
   accepting: boolean
 }
@@ -336,7 +337,7 @@ export class JsonlThreadStore implements ThreadStore {
   appendItems(
     threadId: string,
     items: readonly RolloutItem[],
-  ): Promise<number> {
+  ): Promise<RolloutAppend> {
     const staged = this.#staged.get(threadId)
     if (staged !== undefined) {
       if (!staged.accepting) throw new Error(`Thread ${threadId} is closing.`)
@@ -352,9 +353,15 @@ export class JsonlThreadStore implements ThreadStore {
           JSON.stringify(copied) === JSON.stringify(pending.items)
         staged.materializing = this.#materializeStagedThread(threadId, staged)
         return staged.materializing.then(() =>
-          sameBatch ? pending.throughSeq : this.appendItems(threadId, items),
+          sameBatch
+            ? {
+                throughSeq: pending.throughSeq,
+                records: structuredClone(pending.records),
+              }
+            : this.appendItems(threadId, items),
         )
       }
+      const firstSeq = staged.rollout.length
       for (const item of copied) {
         staged.rollout.push({
           threadId,
@@ -365,18 +372,20 @@ export class JsonlThreadStore implements ThreadStore {
         })
       }
       const throughSeq = staged.rollout.length
+      const records = structuredClone(staged.rollout.slice(firstSeq))
       if (
         copied.some(
           ({ type }) => type === "agent_message" || type === "agent_status",
         )
       ) {
-        staged.pendingDurableAppend = { items: copied, throughSeq }
+        staged.pendingDurableAppend = { items: copied, throughSeq, records }
         staged.materializing = this.#materializeStagedThread(threadId, staged)
-        return staged.materializing.then(() => throughSeq)
+        return staged.materializing.then(() => ({ throughSeq, records }))
       }
-      return Promise.resolve(throughSeq)
+      return Promise.resolve({ throughSeq, records })
     }
     const writer = this.#requireWriter(threadId)
+    const records: StoredRolloutItem[] = []
     for (const item of structuredClone([...items])) {
       const entry: StoredRolloutItem = {
         threadId,
@@ -386,6 +395,7 @@ export class JsonlThreadStore implements ThreadStore {
         item,
       }
       writer.nextSeq += 1
+      records.push(entry)
       writer.pending.push({
         entry,
         bytes: Buffer.from(`${JSON.stringify(entry)}\n`),
@@ -395,7 +405,7 @@ export class JsonlThreadStore implements ThreadStore {
     const endSeqExclusive = writer.nextSeq
     return this.#enqueue(writer, async () => {
       await this.#drain(threadId, writer, endSeqExclusive)
-      return endSeqExclusive
+      return { throughSeq: endSeqExclusive, records: structuredClone(records) }
     })
   }
 
@@ -2409,11 +2419,30 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
       "item",
       "providerMetadata",
       "submissionMetadata",
+      "historyOutputBudget",
+      "toolContentBlockCount",
     ]) &&
     typeof value.id === "string" &&
     typeof value.turnId === "string" &&
     typeof value.createdAt === "string" &&
     isModelMessage(value.item) &&
+    (value.toolContentBlockCount === undefined ||
+      (typeof value.toolContentBlockCount === "number" &&
+        Number.isSafeInteger(value.toolContentBlockCount) &&
+        value.toolContentBlockCount >= 0 &&
+        value.toolContentBlockCount <= value.item.content.length)) &&
+    (value.historyOutputBudget === undefined ||
+      (isRecord(value.historyOutputBudget) &&
+        hasOnlyKeys(value.historyOutputBudget, ["maxBytes", "maxLines"]) &&
+        [
+          value.historyOutputBudget.maxBytes,
+          value.historyOutputBudget.maxLines,
+        ].every(
+          (limit) =>
+            typeof limit === "number" &&
+            Number.isSafeInteger(limit) &&
+            limit >= 0,
+        ))) &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata)) &&
     (value.submissionMetadata === undefined ||

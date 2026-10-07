@@ -2,9 +2,58 @@ import { describe, expect, it } from "vitest"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import type {
   RolloutItem,
+  ResponseItemEnvelope,
   StoredThread,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
+
+describe("ContextManager tool history", () => {
+  it("shares a UTF-8 budget across text blocks while retaining media order", () => {
+    const image = {
+      type: "image" as const,
+      mediaType: "image/png" as const,
+      data: "cGl4ZWxz",
+    }
+    const envelope: ResponseItemEnvelope = {
+      id: "result",
+      turnId: "turn",
+      createdAt: "2026-10-07T00:00:00Z",
+      historyOutputBudget: { maxBytes: 64, maxLines: 4 },
+      toolContentBlockCount: 5,
+      item: {
+        role: "tool",
+        toolCallId: "call",
+        content: [
+          { type: "text", text: "start" },
+          image,
+          { type: "text", text: "正文🙂\n".repeat(100) },
+          image,
+          { type: "text", text: "end" },
+        ],
+      },
+    }
+    const manager = new ContextManager()
+    manager.record([envelope])
+    const result = manager.snapshot().history[0]?.item
+    if (result?.role !== "tool") throw new Error("Missing tool history")
+    const text = toolContentText(result.content)
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(64)
+    expect(text.split("\n").length).toBeLessThanOrEqual(4)
+    expect(text).toContain("[Output truncated.]")
+    expect(text).not.toContain("�")
+    expect(result.content.filter((block) => block.type === "image")).toEqual([
+      image,
+      image,
+    ])
+    expect(result.content[0]).toEqual({ type: "text", text: "start" })
+    expect(envelope.item.content).toHaveLength(5)
+    const projected = manager.snapshot().history
+    expect(projected[0]?.toolContentBlockCount).toBe(result.content.length)
+    manager.replace(projected)
+    expect(manager.snapshot().history).toEqual(projected)
+  })
+})
 
 describe("ContextManager world-state reconstruction", () => {
   it("applies patches to the last full baseline in rollout order", () => {

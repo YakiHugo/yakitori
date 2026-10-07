@@ -4,6 +4,7 @@ import instructionManifest from "./prompts/manifest.json" with { type: "json" }
 export type InstructionProfileId = keyof typeof instructionManifest
 
 export type ResolvedModel = Readonly<{
+  toolOutputTruncation?: ModelToolOutputTruncation
   instructions?: string
   autoCompactTokenLimit?: number
   compactionHash?: string
@@ -25,6 +26,7 @@ export type ResolvedModel = Readonly<{
 }>
 
 export type CatalogModel = Readonly<{
+  toolOutputTruncation?: ModelToolOutputTruncation
   autoCompactTokenLimit?: number
   compactionHash?: string
   defaultOutputTokens?: number
@@ -47,6 +49,17 @@ export type CatalogModel = Readonly<{
 }>
 
 export type ModelInputModality = "image" | "text" | "video"
+export type ModelToolOutputTruncation = Readonly<{
+  mode: "bytes" | "tokens"
+  limit: number
+}>
+
+// Codex's fallback model history budget; this is harness policy, not a
+// provider quota. A discovered model's truncation_policy takes precedence.
+export const DefaultToolOutputTruncation: ModelToolOutputTruncation = {
+  mode: "bytes",
+  limit: 10_000,
+}
 export type ModelImageDetailMode = "high" | "original"
 export type ModelShellToolType = "disabled" | "unified_exec"
 export type ModelApplyPatchToolType = "custom"
@@ -77,6 +90,13 @@ export function listCatalogModels(provider: string): CatalogModel[] {
     .map((entry) => ({
       model: entry.model,
       ...catalogOutputTokens(entry),
+      ...("toolOutputTruncation" in entry
+        ? {
+            toolOutputTruncation: requireToolOutputTruncation(
+              entry.toolOutputTruncation,
+            ),
+          }
+        : {}),
       ...("autoCompactTokenLimit" in entry &&
       typeof entry.autoCompactTokenLimit === "number"
         ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
@@ -167,6 +187,13 @@ export function resolveModel(input: {
     return {
       ...input,
       ...catalogOutputTokens(entry),
+      ...("toolOutputTruncation" in entry
+        ? {
+            toolOutputTruncation: requireToolOutputTruncation(
+              entry.toolOutputTruncation,
+            ),
+          }
+        : {}),
       ...("autoCompactTokenLimit" in entry &&
       typeof entry.autoCompactTokenLimit === "number"
         ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
@@ -206,6 +233,23 @@ export function resolveModel(input: {
     supportsCustomTools: false,
     usedFallbackModelMetadata: true,
   }
+}
+
+function requireToolOutputTruncation(
+  value: unknown,
+): ModelToolOutputTruncation {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("mode" in value) ||
+    !("limit" in value) ||
+    (value.mode !== "bytes" && value.mode !== "tokens") ||
+    typeof value.limit !== "number" ||
+    !Number.isSafeInteger(value.limit) ||
+    value.limit < 0
+  )
+    throw new Error("Invalid model tool-output truncation policy.")
+  return { mode: value.mode, limit: value.limit }
 }
 
 export function validateModelSelection(input: {

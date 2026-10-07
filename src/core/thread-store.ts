@@ -1,6 +1,7 @@
 import type {
   HistoryPosition,
   RolloutItem,
+  StoredRolloutItem,
   StoredThread,
   ThreadMetadata,
   ThreadSummary,
@@ -91,13 +92,22 @@ export type ThreadStoreOccurrenceSearchResult = Readonly<{
   nextCursor?: string
 }>
 
+export type RolloutAppend = Readonly<{
+  // Exclusive rollout sequence reached by this append, including staged items.
+  throughSeq: number
+  records: readonly StoredRolloutItem[]
+}>
+
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
   retainEphemeralRolloutAssets?(rolloutId: string): () => void
   createThread(metadata: CreateThreadMetadata): Promise<StoredThread>
   resumeThread(threadId: string): Promise<StoredThread | undefined>
-  appendItems(threadId: string, items: readonly RolloutItem[]): Promise<number>
+  appendItems(
+    threadId: string,
+    items: readonly RolloutItem[],
+  ): Promise<RolloutAppend>
   persistThread(threadId: string, context: PersistContext): Promise<void>
   flushThread(threadId: string): Promise<void>
   shutdownThread(threadId: string): Promise<void>

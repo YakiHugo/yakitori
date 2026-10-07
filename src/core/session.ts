@@ -39,7 +39,11 @@ import {
   fingerprintTurnInput,
   type TurnInputSubmission,
 } from "./session-io.ts"
-import { PersistContext, type SessionRolloutStore } from "./thread-store.ts"
+import {
+  PersistContext,
+  type SessionRolloutStore,
+  type RolloutAppend,
+} from "./thread-store.ts"
 
 export type { TurnCompletion } from "../kernel/events.ts"
 
@@ -172,7 +176,7 @@ type SessionCommand = SessionOp | ForkBarrierCommand
 type AcceptedAgentMessage = {
   readonly envelope: ResponseItemEnvelope
   readonly items: readonly RolloutItem[]
-  throughSeq?: number
+  append?: RolloutAppend
 }
 
 type PendingTurnStart = {
@@ -181,7 +185,7 @@ type PendingTurnStart = {
   readonly inputItem: ResponseItemEnvelope
   readonly items: readonly RolloutItem[]
   readonly requestFingerprint: string
-  throughSeq?: number
+  append?: RolloutAppend
 }
 
 export class Session {
@@ -613,7 +617,7 @@ export class Session {
   ): Promise<void> {
     const input = pending.input
     try {
-      pending.throughSeq = await this.#store.appendItems(this.id, pending.items)
+      pending.append = await this.#store.appendItems(this.id, pending.items)
     } catch {
       // A rejected append may already have queued or written the batch. Drain
       // and inspect it before deciding whether to append again.
@@ -639,7 +643,10 @@ export class Session {
           )
           if (inputRecord !== undefined || contextRecord?.seq !== start.seq + 1)
             throw new Error("The pending Turn has incomplete stored start.")
-          pending.throughSeq = contextRecord.seq + 1
+          pending.append = {
+            throughSeq: contextRecord.seq + 1,
+            records: [start, contextRecord],
+          }
         } else {
           const inputPresent = rollout.some(
             (entry) =>
@@ -654,10 +661,7 @@ export class Session {
           const partial = inputPresent || contextPresent
           if (partial)
             throw new Error("The pending Turn has incomplete stored start.")
-          pending.throughSeq = await this.#store.appendItems(
-            this.id,
-            pending.items,
-          )
+          pending.append = await this.#store.appendItems(this.id, pending.items)
         }
       } catch (error) {
         this.#reportPersistenceError(error)
@@ -665,13 +669,12 @@ export class Session {
       }
     }
     if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
-    if (pending.throughSeq === undefined)
+    if (pending.append === undefined)
       throw new Error("A persisted Turn has no rollout sequence.")
     this.#events.send({
       type: "rollout.appended",
       threadId: this.id,
-      throughSeq: pending.throughSeq,
-      items: structuredClone(pending.items),
+      ...pending.append,
     })
 
     let taskHandle: TurnTask
@@ -921,9 +924,9 @@ export class Session {
           ]
           this.#contextManager.record([active.inputItem])
           active.inputRecorded = true
-          let throughSeq: number
+          let append: RolloutAppend
           try {
-            throughSeq = await this.#store.appendItems(this.id, items)
+            append = await this.#store.appendItems(this.id, items)
           } catch (error) {
             this.#reportPersistenceError(error)
             try {
@@ -934,10 +937,10 @@ export class Session {
                   item.type === "response_item" &&
                   item.item.id === active.inputItem.id,
               )
-              throughSeq =
+              append =
                 existing === undefined
                   ? await this.#store.appendItems(this.id, items)
-                  : existing.seq + 1
+                  : { throughSeq: existing.seq + 1, records: [existing] }
             } catch (recoveryError) {
               this.#reportPersistenceError(recoveryError)
               this.#events.send({
@@ -963,8 +966,7 @@ export class Session {
           this.#events.send({
             type: "rollout.appended",
             threadId: this.id,
-            throughSeq,
-            items: structuredClone(items),
+            ...append,
           })
         })
       },
@@ -992,13 +994,12 @@ export class Session {
             },
           ]
           try {
-            const throughSeq = await this.#store.appendItems(this.id, items)
+            const append = await this.#store.appendItems(this.id, items)
             await this.#store.flushThread(this.id)
             this.#events.send({
               type: "rollout.appended",
               threadId: this.id,
-              throughSeq,
-              items,
+              ...append,
             })
           } catch (error) {
             this.#reportPersistenceError(error)
@@ -1222,9 +1223,9 @@ export class Session {
                   },
                 ]),
           ]
-          let throughSeq: number
+          let append: RolloutAppend
           try {
-            throughSeq = await this.#store.appendItems(this.id, items)
+            append = await this.#store.appendItems(this.id, items)
             await this.#store.flushThread(this.id)
           } catch (error) {
             this.#reportPersistenceError(error)
@@ -1239,8 +1240,7 @@ export class Session {
           this.#events.send({
             type: "rollout.appended",
             threadId: this.id,
-            throughSeq,
-            items: structuredClone(items),
+            ...append,
           })
           return true
         })
@@ -1264,12 +1264,11 @@ export class Session {
 
   async #appendRollout(items: readonly RolloutItem[]): Promise<void> {
     try {
-      const throughSeq = await this.#store.appendItems(this.id, items)
+      const append = await this.#store.appendItems(this.id, items)
       this.#events.send({
         type: "rollout.appended",
         threadId: this.id,
-        throughSeq,
-        items: structuredClone(items),
+        ...append,
       })
     } catch (error) {
       this.#reportPersistenceError(error)
@@ -1351,13 +1350,12 @@ export class Session {
       { type: "agent_status", status: "errored", error: message },
     ]
     try {
-      const throughSeq = await this.#store.appendItems(this.id, items)
+      const append = await this.#store.appendItems(this.id, items)
       await this.#store.flushThread(this.id)
       this.#events.send({
         type: "rollout.appended",
         threadId: this.id,
-        throughSeq,
-        items,
+        ...append,
       })
     } catch (error) {
       this.#reportPersistenceError(error)
@@ -1386,7 +1384,7 @@ export class Session {
           this.#acceptedAgentMessages.set(messageId, accepted)
           this.#contextManager.record([envelope])
           try {
-            accepted.throughSeq = await append
+            accepted.append = await append
           } catch {
             // The batch may already be in the writer's retry buffer. Persist
             // it before acknowledging an out-of-band agent message.
@@ -1394,7 +1392,7 @@ export class Session {
           }
         }
         await this.#store.flushThread(this.id)
-        if (accepted.throughSeq === undefined) {
+        if (accepted.append === undefined) {
           await this.#store.persistThread(this.id, PersistContext.TurnStart)
           const stored = await this.#store.readThread(this.id)
           const record = stored?.rollout.find(
@@ -1402,9 +1400,10 @@ export class Session {
               entry.item.type === "agent_message" &&
               entry.item.messageId === messageId,
           )
-          if (record !== undefined) accepted.throughSeq = record.seq + 1
+          if (record !== undefined)
+            accepted.append = { throughSeq: record.seq + 1, records: [record] }
           else {
-            accepted.throughSeq = await this.#store.appendItems(
+            accepted.append = await this.#store.appendItems(
               this.id,
               accepted.items,
             )
@@ -1417,12 +1416,11 @@ export class Session {
       }
       this.#acceptedAgentMessages.delete(messageId)
       this.#receivedAgentMessageIds.add(messageId)
-      if (accepted.throughSeq !== undefined) {
+      if (accepted.append !== undefined) {
         this.#events.send({
           type: "rollout.appended",
           threadId: this.id,
-          throughSeq: accepted.throughSeq,
-          items: accepted.items,
+          ...accepted.append,
         })
       }
     })

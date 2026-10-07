@@ -62,6 +62,7 @@ export type ToolModelContent = Pick<ModelToolResultMessage, "content"> &
   Readonly<{
     // Projection-only metadata; hook additions do not change body completeness.
     toolContentTruncated?: boolean
+    toolContentBlockCount?: number
   }>
 export type ToolResultPresentation = Readonly<{
   // The result owns its model projection; the Session never switches on tool names.

@@ -4,8 +4,134 @@ import {
   discoverOpenAiCompatibleModels,
 } from "../../src/runtime/model-discovery.ts"
 import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
+import {
+  SessionConfiguration,
+  toolHistoryOutputBudget,
+} from "../../src/runtime/session-configuration.ts"
+import {
+  createDefaultTools,
+  createToolRegistry,
+} from "../../src/runtime/tools/registry.ts"
+import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 
 describe("provider model discovery", () => {
+  it("uses discovered capabilities to plan tools for a new Codex model", async () => {
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover: () =>
+        discoverCodexModels({
+          baseUrl: "https://chatgpt.example/backend-api/codex",
+          accessToken: "test",
+          fetchFn: async () =>
+            new Response(
+              JSON.stringify({
+                models: [
+                  {
+                    slug: "gpt-new-coder",
+                    model_messages: {
+                      instructions_template: "Official instructions",
+                    },
+                    input_modalities: ["text", "image"],
+                    supports_image_detail_original: true,
+                    shell_type: "shell_command",
+                    apply_patch_tool_type: "freeform",
+                    supports_search_tool: true,
+                    supported_reasoning_levels: [
+                      { effort: "low" },
+                      { effort: "xhigh" },
+                    ],
+                    comp_hash: "compatible-v3",
+                    truncation_policy: { mode: "tokens", limit: 2_000 },
+                  },
+                ],
+              }),
+            ),
+        }),
+    })
+    const listed = await manager.listModels()
+    expect(listed[0]).toMatchObject({
+      model: "gpt-new-coder",
+      inputModalities: ["text", "image"],
+      applyPatchToolType: "custom",
+      efforts: ["low", "xhigh"],
+    })
+    const selection = { provider: "codex", model: "gpt-new-coder" }
+    expect(manager.resolve(selection)).toMatchObject({
+      compactionHash: "compatible-v3",
+      inputModalities: ["text", "image"],
+      imageDetailModes: ["high", "original"],
+      applyPatchToolType: "custom",
+      supportsNativeToolSearch: true,
+      usedFallbackModelMetadata: false,
+    })
+    const registry = createToolRegistry(createDefaultTools())
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: process.cwd(),
+        promptCacheKey: "test",
+        enabledTools: registry.trustedToolNames(),
+        approvalPolicy: "always_approve",
+      },
+      manager,
+    ).resolveStep(selection, manager)
+    const step = captureStepContext({
+      registry,
+      configuration,
+      wireApi: "openai_responses",
+    })
+    expect(toolHistoryOutputBudget(configuration)).toEqual({
+      maxBytes: 9_600,
+      maxLines: Number.MAX_SAFE_INTEGER,
+    })
+    expect(step.toolRouter.modelDefinitions.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["apply_patch", "view_image", "exec_command"]),
+    )
+    expect(() => manager.validate({ ...selection, effort: "high" })).toThrow(
+      "not supported",
+    )
+  })
+
+  it("lets discovered disabled capabilities override a known model's bundled tools", async () => {
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover: () =>
+        discoverCodexModels({
+          baseUrl: "https://chatgpt.example/backend-api/codex",
+          accessToken: "test",
+          fetchFn: async () =>
+            new Response(
+              JSON.stringify({
+                models: [
+                  {
+                    slug: "gpt-6-astra",
+                    input_modalities: ["text"],
+                    shell_type: "disabled",
+                    apply_patch_tool_type: null,
+                    supports_search_tool: false,
+                  },
+                ],
+              }),
+            ),
+        }),
+    })
+    await manager.refresh()
+    expect(
+      manager.resolve({ provider: "codex", model: "gpt-6-astra" }),
+    ).toMatchObject({
+      inputModalities: ["text"],
+      imageDetailModes: [],
+      shellToolType: "disabled",
+      supportsNativeToolSearch: false,
+      supportsCustomTools: false,
+    })
+    expect(
+      manager.resolve({ provider: "codex", model: "gpt-6-astra" })
+        .applyPatchToolType,
+    ).toBeUndefined()
+  })
   it("reads Codex capacity and compaction metadata from the authenticated catalog", async () => {
     const fetchFn = vi.fn<typeof fetch>(
       async () =>
@@ -19,7 +145,7 @@ describe("provider model discovery", () => {
                 max_context_window: 900_000,
                 effective_context_window_percent: 95,
                 auto_compact_token_limit: 250_000,
-                compaction_hash: "compact-v2",
+                comp_hash: "compact-v2",
               },
             ],
           }),
@@ -93,6 +219,7 @@ describe("provider model discovery", () => {
   })
 
   it.each([
+    { messages: { instructions_template: "" }, expected: "" },
     {
       messages: { instructions_template: "Astra literal {{ personality }}" },
       expected: "Astra literal {{ personality }}",
@@ -102,14 +229,14 @@ describe("provider model discovery", () => {
         instructions_template: "Astra {{ personality }}",
         instructions_variables: { personality_default: "precise" },
       },
-      expected: "Astra precise",
+      expected: "Astra {{ personality }}",
     },
     {
       messages: {
         instructions_template: "Astra {{ personality }}",
         instructions_variables: {},
       },
-      expected: "Astra ",
+      expected: "Astra {{ personality }}",
     },
   ])("resolves each model's instruction template: $expected", async ({
     messages,

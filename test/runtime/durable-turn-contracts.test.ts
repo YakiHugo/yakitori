@@ -567,8 +567,14 @@ async function assertDurableTerminal(
   expect(events.slice(0, -1)).toContainEqual(
     expect.objectContaining({
       type: "rollout.appended",
-      items: expect.arrayContaining([
-        expect.objectContaining({ type: "turn_completed", turnId, outcome }),
+      records: expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            type: "turn_completed",
+            turnId,
+            outcome,
+          }),
+        }),
       ]),
     }),
   )

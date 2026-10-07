@@ -1,8 +1,10 @@
 import type { SessionExecutionPolicyDefaultsSnapshot } from "../kernel/events.ts"
 
 export const SessionExecutionPolicyDefaults = {
-  modelVisibleToolResultBytes: 50 * 1024,
-  modelVisibleToolResultLines: 2_000,
+  // Defaults leave truncation to model metadata. These fields remain explicit
+  // per-session overrides, rather than a second global tool-output cap.
+  modelVisibleToolResultBytes: Number.MAX_SAFE_INTEGER,
+  modelVisibleToolResultLines: Number.MAX_SAFE_INTEGER,
   assistantResponseBytes: 256 * 1024,
 } as const satisfies SessionExecutionPolicyDefaultsSnapshot
 
@@ -32,7 +34,7 @@ export const ToolLimitDefaults = {
 
 export const RunnerTimingDefaults = {
   permissionWaitTimeoutMs: 10 * 60 * 1000,
-  // This bounds transient SSE/renderer churn, not model sampling or fsync.
+  // This bounds transient RPC/renderer churn, not model sampling or fsync.
   assistantSnapshotPublicationsPerSecond: 10,
 } as const satisfies RunnerTimingPolicy
 

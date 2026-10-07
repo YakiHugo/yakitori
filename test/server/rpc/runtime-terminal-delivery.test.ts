@@ -248,7 +248,7 @@ describe("runtime terminal delivery", () => {
     }
   })
 
-  it("delivers runtime finish and an error when history reads keep failing", async () => {
+  it("delivers runtime finish and an error when a publication gap cannot be replayed", async () => {
     const store = new MemoryThreadStore()
     const mayFinish = deferred<void>()
     const manager = new ThreadManager({
@@ -301,6 +301,14 @@ describe("runtime terminal delivery", () => {
             "turn.started",
       )
       const deliveredBeforeFinish = client.notifications("session/event")
+      await store.appendItems(sessionId, [
+        {
+          type: "world_state",
+          turnId,
+          full: true,
+          state: { source: "auxiliary writer" },
+        },
+      ])
       store.readThread = async () => {
         throw new Error("history unavailable")
       }

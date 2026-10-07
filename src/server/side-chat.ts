@@ -382,15 +382,17 @@ export function createSideChatService(options: {
         let nextSeq = rollout.length
         const store: SessionRolloutStore = {
           async appendItems(_id, items) {
+            const records: StoredRolloutItem[] = []
             for (const item of items)
-              rollout.push({
+              records.push({
                 threadId: id,
                 rolloutId: id,
                 seq: nextSeq++,
                 createdAt: new Date().toISOString(),
                 item: structuredClone(item),
               })
-            return nextSeq
+            rollout.push(...records)
+            return { throughSeq: nextSeq, records: structuredClone(records) }
           },
           async persistThread() {},
           async flushThread() {},
@@ -796,7 +798,7 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
   }
   if (event.type === "rollout.appended") {
     let changed = false
-    for (const item of event.items) {
+    for (const { item } of event.records) {
       if (item.type !== "response_item" || item.item.item.role !== "assistant")
         continue
       const text = item.item.item.content

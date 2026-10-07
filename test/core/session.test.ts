@@ -1020,7 +1020,7 @@ describe("live Session actor", () => {
       override async appendItems(
         threadId: string,
         items: readonly RolloutItem[],
-      ): Promise<number> {
+      ): Promise<import("../../src/core/thread-store.ts").RolloutAppend> {
         const isInput =
           items[0]?.type === "response_item" &&
           items[0].item.id.startsWith("input_")

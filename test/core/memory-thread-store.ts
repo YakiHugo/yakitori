@@ -140,13 +140,21 @@ export class MemoryThreadStore implements ThreadStore {
   appendItems(
     threadId: string,
     items: readonly RolloutItem[],
-  ): Promise<number> {
+  ): Promise<import("../../src/core/thread-store.ts").RolloutAppend> {
     const writer = this.#requireWriter(threadId)
     const pending = structuredClone([...items])
     return this.#enqueue(writer, async () => {
       writer.pending.push(...pending)
       await this.#drain(threadId, writer, "append")
-      return writer.nextSeq
+      return {
+        throughSeq: writer.nextSeq,
+        records:
+          pending.length === 0
+            ? []
+            : structuredClone(
+                this.#requireThread(threadId).rollout.slice(-pending.length),
+              ),
+      }
     })
   }
 

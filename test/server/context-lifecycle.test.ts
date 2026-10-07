@@ -693,6 +693,45 @@ describe("structured context and ephemeral forks", () => {
       },
     })
     expect(await context.app.threadStore.listThreadIds()).toEqual(beforeInvalid)
+    let releaseReceipt!: () => void
+    const receiptGate = new Promise<void>((resolve) => {
+      releaseReceipt = resolve
+    })
+    let finishPublication!: () => void
+    const publicationFinished = new Promise<void>((resolve) => {
+      finishPublication = resolve
+    })
+    let heldReceipt = false
+    const forkThread = context.app.threadManager.forkThread.bind(
+      context.app.threadManager,
+    )
+    const forkSpy = vi
+      .spyOn(context.app.threadManager, "forkThread")
+      .mockImplementationOnce(async (input) => {
+        const forked = await forkThread(input)
+        const nextEvent = forked.thread.nextEvent.bind(forked.thread)
+        forked.thread.nextEvent = async () => {
+          const event = await nextEvent()
+          if (
+            event?.type === "rollout.appended" &&
+            event.records.some(
+              ({ item }) =>
+                item.type === "response_item" && item.item.item.role === "user",
+            )
+          ) {
+            heldReceipt = true
+            // The fork response publishes its replay while this receipt is queued.
+            await receiptGate
+          }
+          if (event?.type === "turn.completed") finishPublication()
+          return event
+        }
+        return forked
+      })
+    cleanups.push(async () => {
+      releaseReceipt()
+      forkSpy.mockRestore()
+    })
     const edited = await context.app.handlers.forkSession({
       sessionId: id,
       atInputId: initial.body.inputId,
@@ -710,6 +749,10 @@ describe("structured context and ephemeral forks", () => {
       },
     })
     if (!edited.ok) throw new Error(edited.body.error.message)
+    await until(() => heldReceipt)
+    releaseReceipt()
+    await publicationFinished
+    forkSpy.mockRestore()
     const childId = edited.body.session.id
     await until(
       () => context.app.threadManager.getThread(childId)?.status === "idle",

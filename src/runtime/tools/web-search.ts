@@ -6,8 +6,9 @@ import {
   webSearchExecution,
 } from "./execution-descriptors.ts"
 
-// Zero-configuration default, mirroring opencode: Exa's anonymous MCP
-// endpoint (free tier, no account or handshake — a direct tools/call POST).
+// Exa's public MCP is the intentional cross-provider default: free access
+// without separate search credentials or a paid search-model request.
+// https://exa.ai/mcp — a direct tools/call POST requires no handshake.
 // EXA_API_KEY raises the quota; it is sent as a query parameter because that
 // is the endpoint's auth mechanism, so the key appears in the request URL
 // and in any URL logging. This is an accepted tradeoff.
