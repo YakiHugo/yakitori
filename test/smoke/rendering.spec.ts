@@ -3,7 +3,7 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createServer, type ServerResponse } from "node:http"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import { expect, type Locator, type Page, test as base } from "@playwright/test"
+import { expect, type Locator, test as base } from "@playwright/test"
 import { stringify } from "smol-toml"
 import {
   type ServerProcess,
@@ -15,6 +15,7 @@ type RenderingApp = {
   workspace: string
   imageURL: string
   imageDataURL: string
+  send(prompt: string): Promise<void>
   append(prompt: string, text: string): Promise<void>
   finish(prompt: string): Promise<void>
 }
@@ -29,6 +30,7 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
       { response: ServerResponse; completionId: string }
     >()
     let completionSequence = 0
+    let expectedPrompt: string | undefined
     const errors: string[] = []
     const logs: string[] = []
     let server: ServerProcess | undefined
@@ -91,15 +93,25 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
           )
           return
         }
-        const prompt = sent.messages
+        const userMessages = sent.messages
           .filter((message) => message.role === "user")
-          .at(-1)?.content
-        if (typeof prompt !== "string") {
-          errors.push("Rendering provider received no text prompt.")
+          .map((message) => message.content)
+        logs.push(
+          `Rendering provider user messages: ${JSON.stringify(userMessages)}`,
+        )
+        // The runtime appends environment context as another user message.
+        // Match the explicit input for this turn without assuming it is last.
+        if (
+          expectedPrompt === undefined ||
+          !userMessages.includes(expectedPrompt)
+        ) {
+          errors.push(
+            "Rendering provider did not receive the expected turn input.",
+          )
           response.end(`${chunk(completionId, "", true)}data: [DONE]\n\n`)
           return
         }
-        streams.set(prompt, { response, completionId })
+        streams.set(expectedPrompt, { response, completionId })
       })
     })
     try {
@@ -146,14 +158,25 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
         workspace,
         imageURL: `${origin}/smoke.png`,
         imageDataURL: `data:image/png;base64,${imageBytes.toString("base64")}`,
+        async send(prompt) {
+          expectedPrompt = prompt
+          await page
+            .getByRole("textbox", { name: "Message the Mate" })
+            .fill(prompt)
+          await page.getByRole("button", { name: "Send", exact: true }).click()
+        },
         async append(prompt, text) {
-          await expect.poll(() => streams.has(prompt)).toBe(true)
+          await expect
+            .poll(() => ({ received: streams.has(prompt), errors }))
+            .toEqual({ received: true, errors: [] })
           const stream = streams.get(prompt)
           if (!stream) throw new Error("Rendering stream disappeared.")
           stream.response.write(chunk(stream.completionId, text))
         },
         async finish(prompt) {
-          await expect.poll(() => streams.has(prompt)).toBe(true)
+          await expect
+            .poll(() => ({ received: streams.has(prompt), errors }))
+            .toEqual({ received: true, errors: [] })
           const stream = streams.get(prompt)
           if (!stream) throw new Error("Rendering stream disappeared.")
           stream.response.end(
@@ -189,11 +212,6 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
     }
   },
 })
-
-async function send(page: Page, prompt: string) {
-  await page.getByRole("textbox", { name: "Message the Mate" }).fill(prompt)
-  await page.getByRole("button", { name: "Send", exact: true }).click()
-}
 
 async function expectLoadedPNG(image: Locator) {
   await expect(image).toBeVisible()
@@ -235,7 +253,7 @@ test("Markdown images load local, inline and HTTP sources during streaming and a
     join(renderingApp.workspace, "smoke.png"),
     join(renderingApp.workspace, "space image.png"),
   )
-  await send(page, prompt)
+  await renderingApp.send(prompt)
   await renderingApp.append(prompt, "![Streaming workspace](smoke")
   const current = page.getByRole("region", {
     name: "Current response",
@@ -290,7 +308,7 @@ test("Markdown file previews resolve images relative to the document directory",
     "# Rendering guide\n\n![Document image](assets/diagram.png)\n\n![Workspace parent](../smoke.png)\n\n![Missing document image](assets/missing.png)\n",
   )
   const prompt = "Open the rendering guide."
-  await send(page, prompt)
+  await renderingApp.send(prompt)
   await renderingApp.append(prompt, "[Rendering guide](docs/README.md)")
   await renderingApp.finish(prompt)
   await page
@@ -318,7 +336,7 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
   renderingApp,
 }) => {
   const prompt = "Stream a Mermaid diagram."
-  await send(page, prompt)
+  await renderingApp.send(prompt)
   await renderingApp.append(prompt, "```mermaid\ngraph TD\n  A[Start] -->")
   const current = page.getByRole("region", {
     name: "Current response",
@@ -361,7 +379,7 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
   )
 
   const invalid = "Show an invalid Mermaid diagram."
-  await send(page, invalid)
+  await renderingApp.send(invalid)
   await renderingApp.append(invalid, "```mermaid\ngraph TD\n  A[Unclosed\n```")
   await renderingApp.finish(invalid)
   await expect(responses.nth(1).getByRole("status")).toContainText(
@@ -373,7 +391,7 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
   ).toHaveCount(0)
 
   const recovered = "Show another valid Mermaid diagram."
-  await send(page, recovered)
+  await renderingApp.send(recovered)
   // CommonMark accepts an unclosed fence at end of a completed response.
   await renderingApp.append(
     recovered,
@@ -412,7 +430,7 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
     ).join(" --> "),
   )
   const prompt = "Show a large Mermaid layout."
-  await send(page, prompt)
+  await renderingApp.send(prompt)
   await renderingApp.append(
     prompt,
     `\`\`\`mermaid\nflowchart LR\n${lanes.join("\n")}\n\`\`\``,
