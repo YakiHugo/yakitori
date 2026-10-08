@@ -65,8 +65,8 @@ type OccurrenceCursor = Readonly<{
   occurrenceIndex: number
 }>
 
-// Rebuild disposable text projections after switching to CommonMark/GFM parsing.
-const schemaVersion = 3
+// Rebuild disposable text projections after preserving user message source text.
+const schemaVersion = 4
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -445,12 +445,12 @@ function applyEntries(
           envelope.turnId,
           envelope.id,
           "user",
-          markdownVisibleText(
-            message.content
-              .filter((block) => block.type === "text")
-              .map((block) => block.text)
-              .join("\n"),
-          ),
+          // User messages are displayed verbatim; only assistant answers render
+          // Markdown. Keep source punctuation, destinations and whitespace.
+          message.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("\n"),
         )
       } else if (message.role === "tool") {
         database
