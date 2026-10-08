@@ -194,6 +194,9 @@ export class QueuedItemService {
     // Replay means this request was already accepted before queue cleanup.
     if (submission.type === "started" || submission.type === "replayed") {
       this.delete(thread.id, item.id)
+      // A replay removes an accepted head without another Turn or idle event.
+      // Continue through the same session tail so later inputs still dispatch.
+      if (submission.type === "replayed") this.wake(thread)
     }
     return submission
   }

@@ -380,3 +380,33 @@ it("destroys native pages when tabs close and removes IPC when the window closes
   })
   expect(electron.handlers.size).toBe(0)
 })
+
+it("does not publish or cache a capture from a superseded page navigation", async () => {
+  const { call } = setup()
+  call("create", { tabId: "a", url: "https://first.example" })
+  const view = electron.views[0]
+  if (!view) throw new Error("Missing page")
+  const viewport = {
+    tabId: "a",
+    visible: true,
+    occluded: true,
+    x: 500,
+    y: 50,
+    width: 500,
+    height: 700,
+  }
+  let complete!: (image: { toDataURL(): string }) => void
+  view.webContents.capturePage.mockReturnValueOnce(
+    new Promise((resolve) => {
+      complete = resolve
+    }),
+  )
+  const capture = call("viewport", viewport)
+  call("navigate", { tabId: "a", url: "https://second.example" })
+  complete({ toDataURL: () => "first-page" })
+  expect(await capture).toBeUndefined()
+  expect(await call("viewport", viewport)).toBe(
+    "data:image/png;base64,cGFnZQ==",
+  )
+  expect(view.webContents.capturePage).toHaveBeenCalledTimes(2)
+})

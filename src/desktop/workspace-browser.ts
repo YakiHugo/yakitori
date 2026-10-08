@@ -316,14 +316,20 @@ export function registerWorkspaceBrowser(window: BrowserWindow): void {
         // native view may no longer have a composited surface to capture.
         if (tab.preview?.navigation === tab.navigation)
           return tab.preview.dataUrl
+        const navigation = tab.navigation
         try {
           const image = await tab.view.webContents.capturePage(undefined, {
             stayHidden: true,
             stayAwake: true,
           })
-          if (tabs.get(tabId) !== tab || tab.layout !== layout) return
+          if (
+            tabs.get(tabId) !== tab ||
+            tab.layout !== layout ||
+            tab.navigation !== navigation
+          )
+            return
           const dataUrl = image.toDataURL()
-          tab.preview = { navigation: tab.navigation, dataUrl }
+          tab.preview = { navigation, dataUrl }
           return dataUrl
         } finally {
           if (tabs.get(tabId) === tab && tab.layout === layout)

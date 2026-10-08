@@ -1074,6 +1074,87 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it("keeps failed start finalization ahead of a new Turn's admission", async () => {
+    const failureRecording = deferred<void>()
+    const releaseFailure = deferred<void>()
+    const running = deferred<void>()
+    const finish = deferred<void>()
+    class FailedStartStore extends MemoryThreadStore {
+      override async appendItems(
+        threadId: string,
+        items: readonly RolloutItem[],
+      ) {
+        if (
+          items.some(
+            (item) =>
+              item.type === "turn_started" &&
+              item.turnId === "turn_start_failed",
+          )
+        ) {
+          throw new Error("start could not be stored")
+        }
+        if (items.some((item) => item.type === "agent_status")) {
+          failureRecording.resolve()
+          await releaseFailure.promise
+        }
+        return super.appendItems(threadId, items)
+      }
+    }
+    const manager = createManager(
+      {
+        async run() {
+          running.resolve()
+          await finish.promise
+        },
+      },
+      new FailedStartStore(),
+    )
+    try {
+      const thread = await manager.createThread()
+      await thread.startIfIdle({
+        submissionId: "turn_start_failed",
+        content: createUserInput("first"),
+      })
+      await failureRecording.promise
+      expect(
+        await thread.steer(
+          {
+            submissionId: "steer_failed",
+            content: createUserInput("followup"),
+          },
+          "turn_start_failed",
+        ),
+      ).toEqual({ type: "not_submitted", reason: "no_active_turn" })
+      expect(
+        await thread.startIfIdle({
+          submissionId: "turn_next",
+          content: createUserInput("next"),
+        }),
+      ).toEqual({ type: "not_submitted", reason: "not_idle" })
+      releaseFailure.resolve()
+      await waitForValue(() =>
+        thread.status === SessionStatus.Idle ? true : undefined,
+      )
+      expect(thread.agentStatus).toEqual({
+        errored: "start could not be stored",
+      })
+      expect(
+        await thread.startIfIdle({
+          submissionId: "turn_next",
+          content: createUserInput("next"),
+        }),
+      ).toMatchObject({ type: "started" })
+      await running.promise
+      expect(thread.agentStatus).toBe("running")
+      finish.resolve()
+      await nextEventOfType(thread, "turn.completed")
+    } finally {
+      releaseFailure.resolve()
+      finish.resolve()
+      await manager.shutdown()
+    }
+  })
+
   it("waits for an acknowledged Turn's persistence fence before disposing its processor", async () => {
     const store = new MemoryThreadStore()
     const flushStarted = deferred<void>()

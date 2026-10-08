@@ -87,6 +87,7 @@ export function createMcpConnectionManager(
       fingerprint: string
       generation: number
       promise: Promise<void>
+      cancellation: AbortController
     }>
   >()
   const clients = new Set<McpClient>()
@@ -188,11 +189,30 @@ export function createMcpConnectionManager(
   ): Promise<void> => {
     const active = connecting.get(name)
     if (active?.generation === generation) return active.promise
-    const promise = connectOnce(name, config, identity, generation, signal)
-    connecting.set(name, { fingerprint: identity, generation, promise })
+    const cancellation = new AbortController()
+    const startupSignal =
+      signal === undefined
+        ? cancellation.signal
+        : AbortSignal.any([signal, cancellation.signal])
+    const promise = connectOnce(
+      name,
+      config,
+      identity,
+      generation,
+      startupSignal,
+    )
+    connecting.set(name, {
+      fingerprint: identity,
+      generation,
+      promise,
+      cancellation,
+    })
     notifyStatus()
     await promise.finally(() => {
-      if (connecting.get(name)?.promise === promise) connecting.delete(name)
+      if (connecting.get(name)?.promise === promise) {
+        connecting.delete(name)
+        notifyStatus()
+      }
     })
   }
 
@@ -374,13 +394,20 @@ export function createMcpConnectionManager(
     for (const name of [...failures.keys()]) {
       if (!keep.has(name)) failures.delete(name)
     }
+    const cancelledConnections: Promise<void>[] = []
     for (const name of [...configuredServers.keys()]) {
       if (!keep.has(name)) configuredServers.delete(name)
       if (!keep.has(name)) {
         generations.set(name, (generations.get(name) ?? 0) + 1)
         restartAttempts.delete(name)
+        const pending = connecting.get(name)
+        if (pending !== undefined) {
+          pending.cancellation.abort()
+          cancelledConnections.push(pending.promise)
+        }
       }
     }
+    await Promise.all(cancelledConnections)
 
     // Required servers are awaited and fail the caller when they cannot
     // connect; optional servers connect in the background so a slow or
@@ -403,6 +430,10 @@ export function createMcpConnectionManager(
       restartAttempts.delete(name)
       const generation = (generations.get(name) ?? 0) + 1
       generations.set(name, generation)
+      if (pending !== undefined) {
+        pending.cancellation.abort()
+        await pending.promise
+      }
       if (current !== undefined) {
         await current.client.release()
         connections.delete(name)
@@ -467,6 +498,11 @@ export function createMcpConnectionManager(
         restartAttempts.delete(name)
         const generation = (generations.get(name) ?? 0) + 1
         generations.set(name, generation)
+        const pending = connecting.get(name)
+        if (pending !== undefined) {
+          pending.cancellation.abort()
+          await pending.promise
+        }
         const current = connections.get(name)
         if (current) {
           await current.client.release()

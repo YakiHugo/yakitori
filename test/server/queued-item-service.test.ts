@@ -83,6 +83,88 @@ describe("queued item service", () => {
     }
   })
 
+  it.each([
+    "automatic",
+    "explicit",
+  ])("continues %s dispatch after removing an already accepted queue head", async (mode) => {
+    const queue = new InputQueue()
+    const seen: string[] = []
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: async function* (request) {
+            seen.push(
+              request.messages
+                .flatMap((message) =>
+                  message.role === "user" ? message.content : [],
+                )
+                .flatMap((block) =>
+                  block.type === "text" &&
+                  (block.text === "first" || block.text === "next")
+                    ? [block.text]
+                    : [],
+                )
+                .at(-1) ?? "",
+            )
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [{ type: "text", text: "done" }],
+              },
+            }
+          },
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const service = new QueuedItemService({
+      queue,
+      manager,
+      reporter: () => undefined,
+    })
+    try {
+      const thread = await manager.createThread({
+        workingDirectory: process.cwd(),
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      const first = {
+        submissionId: "accepted_before_cleanup",
+        content: inputFixture([{ type: "text", text: "first" }]),
+      }
+      expect((await thread.startIfIdle(first)).type).toBe("started")
+      await waitForValue(() => (thread.status === "idle" ? true : undefined))
+      // This is the restart/retry window between core acceptance and queue deletion.
+      queue.enqueue(thread.id, first)
+      queue.enqueue(thread.id, {
+        submissionId: "next_input",
+        content: inputFixture([{ type: "text", text: "next" }]),
+      })
+      if (mode === "automatic") service.install(thread)
+      else {
+        const head = queue.list(thread.id)[0]
+        if (head === undefined) throw new Error("Missing queue head.")
+        const result = await service.withLock(thread.id, () =>
+          service.start(thread, head),
+        )
+        expect(result.type).toBe("replayed")
+      }
+      await waitForValue(() =>
+        seen.length === 2 && queue.list(thread.id).length === 0
+          ? true
+          : undefined,
+      )
+      expect(queue.list(thread.id)).toEqual([])
+      expect(seen).toEqual(["first", "next"])
+    } finally {
+      await service.close()
+      await manager.shutdown()
+      queue.close()
+    }
+  })
+
   it("notices an external SQLite writer and dispatches a loaded idle thread", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-queue-external-"))
     const path = join(root, "queue.sqlite")
