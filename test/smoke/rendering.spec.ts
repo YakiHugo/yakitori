@@ -226,7 +226,11 @@ async function expectLoadedPNG(image: Locator) {
     .toEqual({ width: 16, height: 16, complete: true })
 }
 
-async function expectMermaidDiagram(image: Locator, labels: string[]) {
+async function expectMermaidDiagram(
+  image: Locator,
+  labels: string[],
+  expectedNodeCount?: number,
+) {
   await expect(image).toBeVisible()
   await expect(image).toHaveAttribute("src", /^data:image\/svg\+xml[;,]/)
   await expect
@@ -237,11 +241,27 @@ async function expectMermaidDiagram(image: Locator, labels: string[]) {
       ),
     )
     .toBe(true)
-  const svg = await image.evaluate(async (node: HTMLImageElement) =>
-    (await fetch(node.src)).text(),
-  )
-  expect(svg).toContain("<svg")
-  for (const label of labels) expect(svg).toContain(label)
+  const nodeLabels = await image.evaluate(async (node: HTMLImageElement) => {
+    const svg = new DOMParser().parseFromString(
+      await (await fetch(node.src)).text(),
+      "image/svg+xml",
+    )
+    if (
+      svg.documentElement.localName !== "svg" ||
+      svg.querySelector("parsererror")
+    )
+      throw new Error("Mermaid image did not contain a valid SVG document.")
+    // Mermaid may split a visible label across nested tspans. Assert decoded
+    // node text rather than a substring of the serialized XML markup.
+    return Array.from(svg.querySelectorAll(".node"), (element) =>
+      (element.querySelector(".label")?.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+  })
+  for (const label of labels) expect(nodeLabels).toContain(label)
+  if (expectedNodeCount !== undefined)
+    expect(nodeLabels).toHaveLength(expectedNodeCount)
 }
 
 test("Markdown images load local, inline and HTTP sources during streaming and after reload", async ({
@@ -440,6 +460,7 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
   await expectMermaidDiagram(
     response.getByRole("img", { name: "Mermaid diagram", exact: true }),
     ["Lane 1 stage 1", "Lane 9 stage 9"],
+    81,
   )
   const expand = response.getByRole("button", {
     name: "Expand Mermaid diagram",
@@ -535,6 +556,33 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
   await expect
     .poll(async () => Math.abs((await geometry()).width - fittedWidth))
     .toBeLessThan(1)
+  await page.setViewportSize({ width: 700, height: 520 })
+  await expect.poll(async () => (await geometry()).fits).toBe(true)
+  await expect
+    .poll(async () => (await geometry()).width)
+    .toBeLessThan(fittedWidth)
+  const narrowFittedWidth = (await geometry()).width
+  await preview
+    .getByRole("button", { name: "Actual size", exact: true })
+    .click()
+  await expect.poll(async () => (await geometry()).actualSize).toBe(true)
+  const zoomBeforeResize = await preview
+    .getByRole("button", { name: "Reset zoom", exact: true })
+    .innerText()
+  await page.setViewportSize({ width: 850, height: 600 })
+  // Wait for the resized fit measurement before checking 1:1 pixels.
+  await expect(
+    preview.getByRole("button", { name: "Reset zoom", exact: true }),
+  ).not.toHaveText(zoomBeforeResize)
+  await expect.poll(async () => (await geometry()).actualSize).toBe(true)
+  await preview.getByRole("button", { name: "Reset zoom", exact: true }).click()
+  await expect.poll(async () => (await geometry()).fits).toBe(true)
+  await expect
+    .poll(async () => (await geometry()).width)
+    .toBeGreaterThan(narrowFittedWidth)
+  await expect
+    .poll(async () => (await geometry()).width)
+    .toBeLessThan(fittedWidth)
   await preview
     .getByRole("button", { name: "Close preview", exact: true })
     .click()
