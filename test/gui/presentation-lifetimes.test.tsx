@@ -52,10 +52,10 @@ it("fits a loaded image, bounds zoom, and releases its Escape listener on unmoun
   })
   const parent = image.parentElement
   if (!parent) throw new Error("Expected image viewport")
-  vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
-    width: 800,
-    height: 300,
-  } as DOMRect)
+  Object.defineProperties(parent, {
+    clientWidth: { value: 800 },
+    clientHeight: { value: 300 },
+  })
   fireEvent.load(image)
   expect(image.style.width).toBe("600px")
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }))

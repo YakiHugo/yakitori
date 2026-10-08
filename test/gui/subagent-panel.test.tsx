@@ -116,6 +116,34 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+it("keeps a streaming child Mermaid answer as source until the answer completes", () => {
+  const { container } = mount()
+  act(() => {
+    start()
+    stream.emitTransient({
+      type: "item.started",
+      sessionId: "child",
+      turnId: "turn",
+      item: { type: "agent_message", itemId: "answer" },
+      createdAt: at,
+    })
+    stream.emitTransient({
+      type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
+      sessionId: "child",
+      turnId: "turn",
+      itemId: "answer",
+      delta: "```mermaid\nflowchart LR\nA[",
+      createdAt: at,
+    })
+  })
+  expect(container.querySelector("pre")?.textContent).toContain("A[")
+  expect(screen.queryByText(/Rendering Mermaid diagram/)).toBeNull()
+  expect(screen.queryByText(/Could not render Mermaid diagram/)).toBeNull()
+  expect(screen.queryByRole("img", { name: "Mermaid diagram" })).toBeNull()
+})
+
 it("replays a child with readable markdown answers and disclosed activity without changing the parent", () => {
   const before = useAppStore.getState()
   mount()

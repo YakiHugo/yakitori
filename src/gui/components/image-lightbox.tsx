@@ -19,6 +19,7 @@ export function ImageLightbox({
 }>) {
   const [zoom, setZoom] = useState(1)
   const [fittedWidth, setFittedWidth] = useState<number>()
+  const [naturalWidth, setNaturalWidth] = useState<number>()
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -56,20 +57,39 @@ export function ImageLightbox({
       </div>
       <div
         data-backdrop
-        className="grid min-h-0 flex-1 place-items-center overflow-auto px-10 pb-4"
+        className="grid min-h-0 flex-1 overflow-auto px-10 pb-4"
+        style={{ placeItems: "safe center" }}
       >
         <img
           src={src}
           alt={name}
           onLoad={(event) => {
             const image = event.currentTarget
-            const box = image.parentElement?.getBoundingClientRect()
-            if (!box || image.naturalWidth === 0) return
+            const viewport = image.parentElement
+            if (
+              !viewport ||
+              image.naturalWidth === 0 ||
+              image.naturalHeight === 0
+            )
+              return
+            const style = getComputedStyle(viewport)
+            // client dimensions exclude borders/scrollbars but include padding.
+            // Fit to the content box so the first view and reset show every edge.
+            const width =
+              viewport.clientWidth -
+              (Number.parseFloat(style.paddingLeft) || 0) -
+              (Number.parseFloat(style.paddingRight) || 0)
+            const height =
+              viewport.clientHeight -
+              (Number.parseFloat(style.paddingTop) || 0) -
+              (Number.parseFloat(style.paddingBottom) || 0)
+            if (width <= 0 || height <= 0) return
+            setNaturalWidth(image.naturalWidth)
             setFittedWidth(
               Math.min(
                 image.naturalWidth,
-                (image.naturalWidth / image.naturalHeight) * box.height,
-                box.width,
+                (image.naturalWidth / image.naturalHeight) * height,
+                width,
               ),
             )
           }}
@@ -77,7 +97,7 @@ export function ImageLightbox({
           style={
             fittedWidth === undefined
               ? { maxWidth: "100%", maxHeight: "100%" }
-              : { width: fittedWidth * zoom }
+              : { width: fittedWidth * zoom, maxWidth: "none" }
           }
         />
       </div>
@@ -102,6 +122,19 @@ export function ImageLightbox({
             className="min-w-12 rounded-full px-1 py-1 text-center text-[13px] font-medium tabular-nums transition-colors hover:bg-black/10"
           >
             {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            aria-label="Actual size"
+            title="Actual size"
+            disabled={naturalWidth === undefined || fittedWidth === undefined}
+            onClick={() => {
+              if (naturalWidth !== undefined && fittedWidth !== undefined)
+                setZoom(naturalWidth / fittedWidth)
+            }}
+            className="rounded-full px-2 py-1 text-[13px] font-medium transition-colors hover:bg-black/10 disabled:opacity-40"
+          >
+            1:1
           </button>
           <button
             type="button"

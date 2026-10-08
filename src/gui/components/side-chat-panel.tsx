@@ -511,6 +511,7 @@ export function SideChatPanel({
                   {inputDisplayParts(message.content).map((part, index) =>
                     part.type === "text" ? (
                       <MarkdownView
+                        apiBase={apiBase}
                         // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
                         key={`${message.id}:${index}`}
                         text={part.text}
@@ -544,7 +545,9 @@ export function SideChatPanel({
                 </>
               ) : (
                 <MarkdownView
+                  apiBase={apiBase}
                   text={message.text}
+                  streaming={message.streaming}
                   className="markdown"
                   workspaceRoot={chat.cwd}
                 />

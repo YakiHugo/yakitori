@@ -16,7 +16,11 @@ export default defineConfig({
   projects: [
     {
       name: "browser",
-      testMatch: ["browser.spec.ts", "chatgpt-connections.spec.ts"],
+      testMatch: [
+        "browser.spec.ts",
+        "chatgpt-connections.spec.ts",
+        "rendering.spec.ts",
+      ],
       use: { ...devices["Desktop Chrome"] },
     },
     { name: "desktop", testMatch: "desktop.spec.ts" },
