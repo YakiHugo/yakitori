@@ -186,7 +186,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
       setReconnectingAccountId(next.attempt?.accountId ?? params.accountId)
       apply(next)
     } catch {
-      if (mounted.current)
+      if (mounted.current && revision === epoch.current)
         setError(
           "ChatGPT sign-in could not be completed. Try again from this panel.",
         )

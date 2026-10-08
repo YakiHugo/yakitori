@@ -748,3 +748,27 @@ it("reconciles a terminal sign-in after early dismissal without reopening the di
   expect(await screen.findByText("ChatGPT plan usage enabled")).toBeDefined()
   expect(screen.queryByRole("dialog")).toBeNull()
 })
+
+it("ignores a failed browser launch after the sign-in was dismissed", async () => {
+  let rejectLaunch: ((error: Error) => void) | undefined
+  request.mockImplementation(async (method) => {
+    if (method === "chatgpt/read") return empty
+    if (method === "chatgpt/signIn")
+      return new Promise((_resolve, reject) => {
+        rejectLaunch = reject
+      })
+    throw new Error(method)
+  })
+  const user = userEvent.setup()
+  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  await user.click(
+    await screen.findByRole("button", { name: "Continue with ChatGPT" }),
+  )
+  await user.click(screen.getByRole("button", { name: "Cancel sign-in" }))
+  await act(async () => rejectLaunch?.(new Error("Browser launch failed")))
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(screen.queryByRole("alert")).toBeNull()
+  expect(
+    screen.getByRole("button", { name: "Continue with ChatGPT" }),
+  ).toHaveProperty("disabled", false)
+})

@@ -180,6 +180,7 @@ function SummaryPopover({
     setLoading(true)
     setStatus(undefined)
     setPullRequests(undefined)
+    setPullRequestsLoading(false)
     setError(undefined)
     const client = getAppRpcClient(apiBase)
     const loadPullRequests = (branch: string) => {

@@ -339,6 +339,23 @@ describe("side chat panel", () => {
     expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
       draft: inputParts("Explain"),
     })
+    act(() => {
+      useWorkspaceStore.getState().askInSideChat(
+        {
+          id: "next-question",
+          kind: "selection",
+          text: "Explain another detail",
+          source: { kind: "message", label: "Main response" },
+        },
+        "main-session",
+      )
+    })
+    expect(useWorkspaceStore.getState().activeId).not.toBe("chat-tab")
+    expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({ excerpts: [] })
+    expect(useWorkspaceStore.getState().tabs[1]).toMatchObject({
+      kind: "chat",
+      excerpts: [{ id: "next-question" }],
+    })
   })
 
   it("resumes the composer when a newer snapshot extends the expiry", async () => {
@@ -365,6 +382,22 @@ describe("side chat panel", () => {
     expect(
       screen.queryByRole("button", { name: "Start new side chat" }),
     ).toBeNull()
+    act(() => {
+      useWorkspaceStore.getState().askInSideChat(
+        {
+          id: "renewed-question",
+          kind: "selection",
+          text: "Continue here",
+          source: { kind: "message", label: "Main response" },
+        },
+        "main-session",
+      )
+    })
+    expect(useWorkspaceStore.getState().activeId).toBe("chat-tab")
+    expect(useWorkspaceStore.getState().tabs).toHaveLength(1)
+    expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
+      excerpts: [{ id: "renewed-question" }],
+    })
   })
 
   it("renders consecutive turns with markdown spacing and bounded user bubbles", async () => {

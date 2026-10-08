@@ -38,6 +38,7 @@ export type WorkspaceTab = (
       hasMessages?: boolean
       activeTurnId?: string
       expiresAt?: string
+      expired?: boolean
       error?: string
     }
 ) & { workspaceSessionId?: string | undefined }
@@ -80,6 +81,7 @@ type WorkspaceStore = {
       hasMessages: boolean
       activeTurnId?: string
       expiresAt?: string
+      expired?: boolean
       error?: string
     },
   ): void
@@ -340,6 +342,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         tab.id !== sourceTabId &&
         tab.workspaceSessionId === state.sessionId &&
         !tab.activeTurnId &&
+        !tab.expired &&
         (tab.expiresAt === undefined ||
           Date.now() < Date.parse(tab.expiresAt)) &&
         tab.sourceSessionId === sourceSessionId,
@@ -403,6 +406,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       const {
         activeTurnId: _active,
         expiresAt: _expires,
+        expired: _expired,
         error: _error,
         ...rest
       } = tab
@@ -415,6 +419,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       (tab.hasMessages === status.hasMessages &&
         tab.activeTurnId === status.activeTurnId &&
         tab.expiresAt === status.expiresAt &&
+        tab.expired === status.expired &&
         tab.error === status.error)
     )
       return

@@ -49,6 +49,7 @@ export function ProviderModels({
       id,
     }
     onChange({
+      ...(all ? { modelSelection: "all" } : {}),
       models: [
         ...configuration.models.filter((model) => model.id !== id),
         { ...before, ...patch },
@@ -61,6 +62,7 @@ export function ProviderModels({
     }
     delete next[key]
     onChange({
+      ...(all ? { modelSelection: "all" } : {}),
       models: [
         ...configuration.models.filter((model) => model.id !== id),
         next,
@@ -68,12 +70,25 @@ export function ProviderModels({
     })
   }
   const add = () => {
-    const id = typed.trim()
-    if (!id) return
-    const model = choices.find((entry) => entry.id === id) ?? { id }
+    const typedId = typed.trim()
+    if (!typedId) return
+    // Match the connection validator's case-insensitive ID uniqueness.
+    const existing =
+      configuration.models.find(
+        (entry) => entry.id.toLowerCase() === typedId.toLowerCase(),
+      ) ??
+      choices.find((entry) => entry.id.toLowerCase() === typedId.toLowerCase())
+    const id = existing?.id ?? typedId
+    if (existing && selected(existing)) {
+      setTyped("")
+      setQuery("")
+      return
+    }
+    const model = existing ?? { id }
+    // Keep identity only; configuration edits and live catalog facts own metadata.
     setExtras((previous) => [
       ...previous.filter((entry) => entry.id !== id),
-      model,
+      { id },
     ])
     if (!configuration.models.some((entry) => entry.id === id))
       onChange({

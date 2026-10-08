@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadGoal } from "../../src/core/goal.ts"
@@ -192,4 +192,138 @@ describe("session goal", () => {
       objective: "Ship the feature and test it",
     })
   })
+})
+
+it("keeps goal saves scoped to their conversation while the editor switches sessions", async () => {
+  const pending: ((value: unknown) => void)[] = []
+  fakeRef.current.respond = (method) => {
+    if (method !== "goal/set") throw new Error(method)
+    return new Promise((resolve) => pending.push(resolve))
+  }
+  render(<GoalEditor />)
+  act(() => useAppStore.getState().openGoalDialog())
+  fireEvent.change(screen.getByRole("textbox", { name: "Goal" }), {
+    target: { value: "Save first goal" },
+  })
+  fireEvent.click(screen.getByRole("button", { name: "Save" }))
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session_2" },
+      selectedSession: {
+        ...session,
+        id: "session_2",
+        goal: { ...goal, threadId: "session_2", objective: "Second goal" },
+      },
+    }),
+  )
+  fireEvent.change(screen.getByRole("textbox", { name: "Goal" }), {
+    target: { value: "Save second goal" },
+  })
+  expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+    "disabled",
+    false,
+  )
+  fireEvent.click(screen.getByRole("button", { name: "Save" }))
+  expect(
+    fakeRef.current.requestsFor("goal/set").map((request) => request.params),
+  ).toEqual([
+    { sessionId: "session_1", objective: "Save first goal" },
+    { sessionId: "session_2", objective: "Save second goal" },
+  ])
+  await act(async () =>
+    pending[0]?.({ goal: { ...goal, objective: "Save first goal" } }),
+  )
+  expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+    "disabled",
+    true,
+  )
+  expect(screen.getByRole("textbox", { name: "Goal" })).toHaveProperty(
+    "value",
+    "Save second goal",
+  )
+  await act(async () =>
+    pending[1]?.({
+      goal: { ...goal, threadId: "session_2", objective: "Save second goal" },
+    }),
+  )
+  fireEvent.change(screen.getByRole("textbox", { name: "Goal" }), {
+    target: { value: "Third edit" },
+  })
+  expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+    "disabled",
+    false,
+  )
+})
+
+it("does not mark a superseded goal write as the saved draft", async () => {
+  useAppStore.setState({
+    loadSidebar: async () => {},
+    loadProviders: async () => {},
+    loadProjects: async () => {},
+    loadSessions: async () => false,
+  })
+  await useAppStore.getState().boot()
+  let finish: ((value: unknown) => void) | undefined
+  fakeRef.current.respond = (method) => {
+    if (method !== "goal/set") throw new Error(method)
+    return new Promise((resolve) => {
+      finish = resolve
+    })
+  }
+  render(<GoalEditor />)
+  act(() => useAppStore.getState().openGoalDialog())
+  fireEvent.change(screen.getByRole("textbox", { name: "Goal" }), {
+    target: { value: "My pending change" },
+  })
+  fireEvent.click(screen.getByRole("button", { name: "Save" }))
+  act(() =>
+    fakeRef.current.emitGoalChanged({
+      sessionId: session.id,
+      goal: { ...goal, objective: "New authoritative goal" },
+    }),
+  )
+  await act(async () =>
+    finish?.({ goal: { ...goal, objective: "My pending change" } }),
+  )
+  expect(useAppStore.getState().selectedSession?.goal?.objective).toBe(
+    "New authoritative goal",
+  )
+  expect(screen.getByRole("textbox", { name: "Goal" })).toHaveProperty(
+    "value",
+    "My pending change",
+  )
+  expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+    "disabled",
+    false,
+  )
+  fireEvent.click(screen.getByRole("button", { name: "Revert" }))
+  expect(screen.getByRole("textbox", { name: "Goal" })).toHaveProperty(
+    "value",
+    "New authoritative goal",
+  )
+})
+
+it.each([
+  "00100",
+  "100.0",
+  "1e2",
+])("successful numeric budget %s is clean after canonical server save", async (budget) => {
+  render(<GoalEditor />)
+  act(() => useAppStore.getState().openGoalDialog())
+  fireEvent.change(
+    screen.getByRole("spinbutton", { name: "Token budget (optional)" }),
+    { target: { value: budget } },
+  )
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: "Save" })),
+  )
+  expect(useAppStore.getState().selectedSession?.goal?.tokenBudget).toBe(100)
+  expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+    "disabled",
+    true,
+  )
+  expect(screen.getByRole("button", { name: "Revert" })).toHaveProperty(
+    "disabled",
+    true,
+  )
 })

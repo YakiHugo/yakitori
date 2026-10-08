@@ -265,3 +265,67 @@ it("asks in a distinct side chat and does not choose between unrelated idle draf
     useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "chat"),
   ).toHaveLength(3)
 })
+
+it("repairs an inactive session's selection without changing the active session", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("first")
+  const fallback = store.addTab("files")
+  const removed = store.addTab("browser")
+  store.setSession("second")
+  const second = store.addTab("computer")
+  store.closeTab(removed)
+  expect(useWorkspaceStore.getState().activeId).toBe(second)
+  store.setSession("first")
+  expect(useWorkspaceStore.getState().activeId).toBe(fallback)
+  expect(
+    useWorkspaceStore.getState().tabs.some((tab) => tab.id === removed),
+  ).toBe(false)
+})
+
+it("cannot activate or add excerpts to a tab owned by another session", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("first")
+  const first = store.addTab("chat", "first")
+  store.setSession("second")
+  const second = store.addTab("chat", "second")
+  store.activate(first)
+  store.addChatExcerpt(first, {
+    id: "quote",
+    kind: "selection",
+    text: "Text",
+    source: { kind: "message", label: "Response" },
+  })
+  expect(useWorkspaceStore.getState().activeId).toBe(second)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ excerpts: [] })
+})
+
+it("replaces background chat status without retaining ended turns or old errors", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("first")
+  const first = store.addTab("chat", "first")
+  store.updateChatStatus(first, {
+    hasMessages: true,
+    activeTurnId: "turn",
+    error: "Old failure",
+    expired: true,
+  })
+  store.setSession("second")
+  const second = useWorkspaceStore.getState().activeId
+  store.updateChatStatus(first, { hasMessages: true, expired: false })
+  const tab = useWorkspaceStore.getState().tabs.find((tab) => tab.id === first)
+  expect(tab).not.toHaveProperty("activeTurnId")
+  expect(tab).not.toHaveProperty("error")
+  expect(tab).toMatchObject({ hasMessages: true, expired: false })
+  expect(useWorkspaceStore.getState().activeId).toBe(second)
+})

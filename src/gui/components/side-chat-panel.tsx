@@ -216,6 +216,7 @@ export function SideChatPanel({
     const currentError = error ?? chat?.error
     updateStatus(tab.id, {
       hasMessages: (chat?.messages.length ?? 0) > 0,
+      expired,
       ...(chat?.activeTurnId ? { activeTurnId: chat.activeTurnId } : {}),
       ...(chat?.expiresAt ? { expiresAt: chat.expiresAt } : {}),
       ...(currentError === undefined ? {} : { error: currentError }),
@@ -226,6 +227,7 @@ export function SideChatPanel({
     chat?.activeTurnId,
     chat?.expiresAt,
     chat?.error,
+    expired,
     error,
     updateStatus,
   ])

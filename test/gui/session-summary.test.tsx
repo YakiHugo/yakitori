@@ -1,5 +1,12 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen, within } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { SessionSummary } from "../../src/gui/components/session-summary.tsx"
@@ -433,4 +440,49 @@ it("opens the session's subagents without changing the main conversation", async
     tabs: [{ kind: "agents", sourceSessionId: "session-1" }],
   })
   expect(useAppStore.getState().selectedSession?.id).toBe("session-1")
+})
+
+it("clears an invalidated pull-request load when refreshed Git status has no branch", async () => {
+  let finishPrevious!: (value: unknown) => void
+  let statusReads = 0
+  request.mockImplementation(async (method) => {
+    if (method === "session/read") return { session: session() }
+    if (method === "git/pullRequests")
+      return new Promise((resolve) => {
+        finishPrevious = resolve
+      })
+    if (method === "git/status") {
+      statusReads += 1
+      return statusReads === 1
+        ? { repository: true, branch: "old", entries: [] }
+        : { repository: false, entries: [] }
+    }
+    throw new Error(`Unexpected method ${method}`)
+  })
+  render(<SessionSummary />)
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Session context" }))
+  await screen.findByText("Loading pull requests…")
+  fireEvent.focus(window)
+  await screen.findByText("Not a Git repository")
+  expect(screen.queryByText("Loading pull requests…")).toBeNull()
+  await act(async () =>
+    finishPrevious({
+      available: true,
+      pullRequests: [
+        {
+          number: 999,
+          title: "Old request",
+          state: "OPEN",
+          isDraft: false,
+          url: "https://example.com/pull/999",
+          headRefName: "old",
+          updatedAt: "2026-10-08T00:00:00Z",
+        },
+      ],
+    }),
+  )
+  expect(screen.queryByText(/Old request/)).toBeNull()
+  expect(screen.queryByText("Loading pull requests…")).toBeNull()
 })
