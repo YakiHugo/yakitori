@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react"
 import { Search } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { ApiSearchSessionsResponse } from "../../server/protocol.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -32,6 +32,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           },
         )
         if (revision.current !== requestRevision) return
+        if (cursor === undefined) setActive(0)
         setResult((previous) => ({
           ...response,
           data:

@@ -62,7 +62,12 @@ it("commits one move on release and suppresses the click after a drag", async ()
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 40,
+  })
   await waitFor(() =>
     expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
   )
@@ -89,7 +94,12 @@ it("cancels with Escape and preserves ordinary row clicks below the drag thresho
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 41, clientY: 80 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 41,
+    clientY: 80,
+  })
   fireEvent.pointerUp(window, { pointerId: 1, clientX: 41, clientY: 80 })
   fireEvent.click(source)
   expect(select).toHaveBeenCalledTimes(1)
@@ -99,7 +109,12 @@ it("cancels with Escape and preserves ordinary row clicks below the drag thresho
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 60, clientY: 40 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 60,
+    clientY: 40,
+  })
   await waitFor(() =>
     expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
   )
@@ -146,7 +161,12 @@ it("dropping on the lower half of a row moves after it", async () => {
     clientX: 40,
     clientY: 120,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 64 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 64,
+  })
   await waitFor(() =>
     expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
   )
@@ -173,7 +193,12 @@ it("ignores pointer down while a sidebar update is in flight", async () => {
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 40,
+  })
   expect(document.querySelector(".sidebar-drag-ghost")).toBeNull()
   expect(
     document.documentElement.classList.contains("sidebar-is-dragging"),
@@ -195,7 +220,12 @@ it("ignores pointer down while a sidebar update is in flight", async () => {
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 40,
+  })
   await waitFor(() =>
     expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
   )
@@ -228,11 +258,64 @@ it("scrolls the real sidebar near its edges during an item drag", async () => {
     clientX: 40,
     clientY: 80,
   })
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 195 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 195,
+  })
   await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0))
   const scrolled = viewport.scrollTop
-  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 5 })
+  fireEvent.pointerMove(window, {
+    buttons: 1,
+    pointerId: 1,
+    clientX: 40,
+    clientY: 5,
+  })
   await waitFor(() => expect(viewport.scrollTop).toBeLessThan(scrolled))
   fireEvent.keyDown(window, { key: "Escape" })
+  expect(move).not.toHaveBeenCalled()
+})
+
+it.each([
+  false,
+  true,
+])("cancels a %s active drag after a release outside the window", async (activate) => {
+  render(<App />)
+  const source = screen.getByRole("button", { name: "Task b" })
+  const target = screen.getByRole("button", { name: "Task a" })
+  vi.spyOn(document, "elementFromPoint").mockReturnValue(target)
+  fireEvent.pointerDown(source, {
+    button: 0,
+    buttons: 1,
+    pointerId: 1,
+    pointerType: "mouse",
+    clientX: 40,
+    clientY: 80,
+  })
+  if (activate) {
+    fireEvent.pointerMove(window, {
+      buttons: 1,
+      pointerId: 1,
+      clientX: 40,
+      clientY: 40,
+    })
+    await waitFor(() =>
+      expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
+    )
+  }
+  // A release outside the window need not deliver pointerup or blur here.
+  fireEvent.pointerMove(window, {
+    buttons: 0,
+    pointerId: 1,
+    clientX: 60,
+    clientY: 40,
+  })
+  expect(document.querySelector(".sidebar-drag-ghost")).toBeNull()
+  expect(source.hasAttribute("data-dragging")).toBe(false)
+  expect(
+    document.documentElement.classList.contains("sidebar-is-dragging"),
+  ).toBe(false)
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 60, clientY: 40 })
   expect(move).not.toHaveBeenCalled()
 })

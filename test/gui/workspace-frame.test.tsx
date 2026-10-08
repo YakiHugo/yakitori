@@ -897,3 +897,42 @@ it("ignores delayed native selections after tab or session changes and accepts o
     useWorkspaceStore.getState().tabs.find((tab) => tab.kind === "chat"),
   ).toMatchObject({ excerpts: [] })
 })
+
+it("rebinds native shortcuts to the selected session and releases listeners on unmount", () => {
+  const listeners = new Set<(action: "new-side-chat") => void>()
+  vi.stubGlobal("yakitoriDesktop", {
+    browser: {
+      onShortcut: (listener: (action: "new-side-chat") => void) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    },
+  })
+  const view = render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  try {
+    act(() => {
+      useAppStore.setState({ selection: { sessionId: "second" } })
+    })
+    act(() => {
+      for (const listener of listeners) listener("new-side-chat")
+    })
+    expect(listeners.size).toBe(1)
+    expect(
+      useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "chat"),
+    ).toMatchObject([
+      { workspaceSessionId: "second", sourceSessionId: "second" },
+    ])
+    view.unmount()
+    expect(listeners.size).toBe(0)
+    const before = useWorkspaceStore.getState().tabs
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true })
+    expect(useWorkspaceStore.getState().tabs).toBe(before)
+  } finally {
+    view.unmount()
+    vi.unstubAllGlobals()
+  }
+})

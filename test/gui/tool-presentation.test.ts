@@ -359,6 +359,42 @@ describe("tool presentation", () => {
     })
   })
 
+  it("counts hunk lines beginning with pluses and minuses as source changes", () => {
+    expect(
+      presentTool(
+        entry("edit_file", {
+          input: { path: "src/counter.ts" },
+          output: { path: "src/counter.ts", created: false },
+          diff: {
+            text: "--- a/src/counter.ts\n+++ b/src/counter.ts\n@@ -1,2 +1,2 @@\n---counter\n--- otherCounter\n+++counter\n+++ otherCounter\n",
+            truncated: false,
+          },
+        }),
+      ),
+    ).toMatchObject({ meta: ["+2 −2"] })
+  })
+
+  it("counts visible truncated hunk rows and excludes later file headers", () => {
+    for (const [text, truncated, expected] of [
+      ["@@ -1,3 +1,3 @@\n---counter\n+++counter", true, "+1 −1"],
+      [
+        "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n---counter\n+++counter\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1 @@\n-old\n+new",
+        false,
+        "+2 −2",
+      ],
+    ] as const) {
+      expect(
+        presentTool(
+          entry("edit_file", {
+            input: { path: "a.ts" },
+            output: { path: "a.ts", created: false },
+            diff: { text, truncated },
+          }),
+        ).meta,
+      ).toEqual(truncated ? [expected, "partial"] : [expected])
+    }
+  })
+
   it("summarizes diffs and command results without status badges", () => {
     expect(
       presentTool(

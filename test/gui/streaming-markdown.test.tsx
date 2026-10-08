@@ -36,3 +36,32 @@ it("resolves a definition added after a cached fenced block", () => {
     "https://example.com/reference",
   )
 })
+
+it.each([
+  "\n\n- [x] done\n- [ ] later\n\n| Key | Value |\n| --- | --- |\n| A | **B** |",
+  "\n\n> quote\n>\n> second\n\n~~~text\nnext\n~~~\n\nTail",
+  "\n\n[linked][target]\n\n[target]: https://example.com/reference",
+  "\n\nFootnote[^a].\n\n[^a]: A **note**",
+  "\r\n\r\nChanged line endings\r\n",
+])("renders appended Markdown identically to a completed parse: %j", (suffix) => {
+  const prefix = "Intro\n\n```text\nliteral <&>\n```\n\nTail"
+  const live = render(<MarkdownView text={prefix} streaming />)
+  live.rerender(<MarkdownView text={prefix + suffix} streaming />)
+  const completed = render(<MarkdownView text={prefix + suffix} />)
+  // Code copy controls are part of the real renderer on both paths.
+  expect(live.container.innerHTML).toBe(completed.container.innerHTML)
+})
+
+it("drops a cached prefix when a streaming response is replaced or finalized", () => {
+  const prefix = "Old\n\n```text\nold code\n```\n\nTail"
+  const { container, rerender } = render(
+    <MarkdownView text={prefix} streaming />,
+  )
+  const replacement = "New\n\n```text\nnew code\n```\n\n**done**"
+  rerender(<MarkdownView text={replacement} streaming />)
+  expect(container.textContent).not.toContain("old")
+  expect(container.querySelector("strong")?.textContent).toBe("done")
+  rerender(<MarkdownView text={replacement} />)
+  expect(container.textContent).not.toContain("old")
+  expect(container.querySelectorAll("pre")).toHaveLength(1)
+})

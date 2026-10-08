@@ -75,18 +75,20 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
     let current = true
     const client = getAppRpcClient(apiBase)
     if (kind === "mcp") {
+      let sequence = 0
       const refresh = () => {
+        const request = ++sequence
         void client
           .request("mcp/status", selectedId ? { sessionId: selectedId } : {})
           .then(
             (response) => {
-              if (current) {
+              if (current && request === sequence) {
                 setServers(response.servers)
                 setMcpError(undefined)
               }
             },
             (cause: unknown) => {
-              if (current)
+              if (current && request === sequence)
                 setMcpError(
                   cause instanceof Error
                     ? cause.message

@@ -79,7 +79,9 @@ export function GoalEditor() {
     session?.goal?.tokenBudget?.toString() ?? "",
   )
   const [savedBudget, setSavedBudget] = useState(budgetDraft)
-  const [saving, setSaving] = useState(false)
+  const saving = useAppStore((state) =>
+    state.inFlightActions.has(`goal:${session?.id}`),
+  )
   const [now, setNow] = useState(() => Date.now())
   const [editorSessionId, setEditorSessionId] = useState(session?.id)
   const [lastSyncedGoal, setLastSyncedGoal] = useState(session?.goal)
@@ -167,7 +169,6 @@ export function GoalEditor() {
             onClick={() => {
               const text = draft.trim()
               if (!text || !validBudget) return
-              setSaving(true)
               void setGoal({
                 sessionId: session.id,
                 objective: text,
@@ -179,14 +180,18 @@ export function GoalEditor() {
                   ? {}
                   : { tokenBudget }),
               }).then((done) => {
-                setSaving(false)
                 if (
                   !done ||
                   useAppStore.getState().selection.sessionId !== session.id
                 )
                   return
-                setSavedObjective(text)
-                setSavedBudget(budgetDraft.trim())
+                const saved = useAppStore.getState().selectedSession?.goal
+                setSavedObjective(saved?.objective ?? "")
+                setSavedBudget(
+                  saved?.tokenBudget === tokenBudget
+                    ? budgetDraft.trim()
+                    : (saved?.tokenBudget?.toString() ?? ""),
+                )
               })
             }}
           >

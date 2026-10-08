@@ -1,13 +1,13 @@
 import {
   createContext,
+  type ReactNode,
   useEffect,
   useRef,
   useState,
-  type ReactNode,
 } from "react"
 import { createPortal } from "react-dom"
-import { sessionListKey, useAppStore } from "../store/app-store.ts"
 import type { SidebarChange } from "../../core/session-sidebar.ts"
+import { sessionListKey, useAppStore } from "../store/app-store.ts"
 
 export const SidebarDragKind = createContext<string | undefined>(undefined)
 
@@ -271,6 +271,11 @@ export function SidebarDragSurface({
     const move = (event: PointerEvent) => {
       const drag = pending.current
       if (!drag || event.pointerId !== drag.pointerId) return
+      // Releasing outside the window can omit pointerup without blurring it.
+      if ((event.buttons & 1) === 0) {
+        finish(false)
+        return
+      }
       drag.x = event.clientX
       drag.y = event.clientY
       if (

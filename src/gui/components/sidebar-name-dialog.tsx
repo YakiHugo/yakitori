@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
 
@@ -15,6 +15,13 @@ export function SidebarNameDialog({
 }>) {
   const [name, setName] = useState(initialName)
   const [saving, setSaving] = useState(false)
+  const active = useRef(true)
+  useEffect(() => {
+    active.current = true
+    return () => {
+      active.current = false
+    }
+  }, [])
   return (
     <SidebarDialog title={title} onClose={onClose}>
       <form
@@ -23,6 +30,7 @@ export function SidebarNameDialog({
           if (saving || !name.trim()) return
           setSaving(true)
           void onSave(name.trim()).then((done) => {
+            if (!active.current) return
             setSaving(false)
             if (done) onClose()
           })

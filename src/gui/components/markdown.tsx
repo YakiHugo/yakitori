@@ -1,11 +1,11 @@
 import type { MouseEvent, ReactNode } from "react"
 import { isValidElement, memo, useEffect, useMemo, useState } from "react"
 import type { Components } from "react-markdown"
-import Markdown from "react-markdown"
+import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { HighlighterCore } from "shiki/core"
-import { createStreamingMarkdownPlugin } from "../lib/streaming-markdown.ts"
 import { openFileTarget, openUrlTarget } from "../lib/open-resource.ts"
+import { createStreamingMarkdownPlugin } from "../lib/streaming-markdown.ts"
 import {
   type BundledLanguage,
   normalizeLanguage,
@@ -108,6 +108,18 @@ function parseFileHref(href: string): { path: string; line?: number } {
   return line === undefined ? { path } : { path, line }
 }
 
+function isLocalFileHref(href: string): boolean {
+  return (
+    /^file:\/\/\//i.test(href) || /^[^:/?#]*\.[^:/?#]+:\d+(?::\d+)?$/.test(href)
+  )
+}
+
+function markdownUrlTransform(url: string, key: string): string {
+  // Preserve the file targets this renderer handles itself; react-markdown
+  // otherwise treats a root filename followed by a line as an unknown scheme.
+  return key === "href" && isLocalFileHref(url) ? url : defaultUrlTransform(url)
+}
+
 function MarkdownLink({
   href,
   children,
@@ -138,7 +150,7 @@ function MarkdownLink({
   }
   if (href.startsWith("#")) return <a href={href}>{children}</a>
   const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(href)
-  if (hasScheme && !/^file:/i.test(href)) {
+  if (hasScheme && !isLocalFileHref(href)) {
     // mailto:, intent:, and other schemes never navigate the app shell.
     return (
       <a
@@ -250,7 +262,11 @@ export const MarkdownView = memo(function MarkdownView({
   )
   return (
     <div className={className}>
-      <Markdown remarkPlugins={remarkPlugins} components={components}>
+      <Markdown
+        remarkPlugins={remarkPlugins}
+        components={components}
+        urlTransform={markdownUrlTransform}
+      >
         {text}
       </Markdown>
     </div>

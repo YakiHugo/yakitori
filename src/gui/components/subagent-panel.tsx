@@ -67,6 +67,9 @@ function ChildTrace({
   const [attempt, setAttempt] = useState(0)
   const clientRef = useRef<AppRpcClient | undefined>(undefined)
   const executionRef = useRef(execution)
+  // A snapshot watermark can precede undelivered history. Only received
+  // durable events advance the cursor used when replacing the connection.
+  const lastReceivedEventSeq = useRef(0)
   const scroll = usePinnedScroll(sessionId)
   const view = useMemo(() => projectExecutionView(execution), [execution])
   const dispatch = useCallback((action: ExecutionViewAction) => {
@@ -87,7 +90,7 @@ function ChildTrace({
     setError(undefined)
     const stream = client.openSessionStream(
       sessionId,
-      executionRef.current.lastSeq,
+      lastReceivedEventSeq.current,
       {
         onSnapshot: ({ session: snapshot }) => {
           if (disposed) return
@@ -98,6 +101,10 @@ function ChildTrace({
         },
         onEvent: (event) => {
           if (disposed || event.sessionId !== sessionId) return
+          lastReceivedEventSeq.current = Math.max(
+            lastReceivedEventSeq.current,
+            event.seq,
+          )
           dispatch({ type: "durable", event })
         },
         onTransient: (event) => {

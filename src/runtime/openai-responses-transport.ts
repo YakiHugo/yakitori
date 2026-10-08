@@ -116,7 +116,7 @@ export function createOpenAIResponsesTransport(client: OpenAI) {
         if (message.type === "response.completed") {
           if (
             warmup &&
-            message.response.output.length === 0 &&
+            (message.response.output ?? []).length === 0 &&
             generation === epoch &&
             !signal?.aborted
           ) {

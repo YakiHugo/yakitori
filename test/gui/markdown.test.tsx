@@ -121,6 +121,31 @@ describe("links", () => {
     })
   })
 
+  it.each([
+    ["README.md:12", "README.md", "/repo", 12],
+    ["README.md:12:3", "README.md", "/repo", 12],
+    ["file:///repo/README.md:12", "/repo/README.md", "/repo", 12],
+  ])("keeps authored file target %s actionable through Markdown URL handling", async (href, path, workspaceRoot, line) => {
+    const openFile = vi.fn(async () => {})
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: { openFile },
+    })
+    const user = userEvent.setup()
+    render(
+      <MarkdownView text={`[Readme](${href})`} workspaceRoot={workspaceRoot} />,
+    )
+    const link = screen.getByRole("link", { name: "Readme" })
+    await user.keyboard("{Control>}")
+    await user.click(link)
+    await user.keyboard("{/Control}")
+    expect(openFile).toHaveBeenCalledExactlyOnceWith({
+      path,
+      workspaceRoot,
+      line,
+    })
+  })
+
   it("resolves document links from the file directory before opening a preview", async () => {
     const user = userEvent.setup()
     render(
@@ -155,11 +180,12 @@ describe("links", () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null)
     const user = userEvent.setup()
     render(
-      <MarkdownView text="[click](javascript:alert(1)) and [mail](mailto:a@b.c)" />,
+      <MarkdownView text="[click](javascript:alert(1)) and [mail](mailto:a@b.c) and [phone](tel:123)" />,
     )
 
     // react-markdown strips the javascript: href, so it renders without a
     // link role at all; only the mailto: anchor is clickable.
+    expect(screen.getByText("phone").getAttribute("href")).toBeNull()
     const links = screen.getAllByRole("link")
     expect(links).toHaveLength(1)
     await user.click(links[0] as HTMLElement)

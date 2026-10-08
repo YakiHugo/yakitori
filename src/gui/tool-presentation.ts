@@ -577,10 +577,29 @@ function diffCounts(text: string): {
 } {
   let added = 0
   let deleted = 0
+  let oldRemaining = 0
+  let newRemaining = 0
   for (const line of text.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue
-    if (line.startsWith("+")) added += 1
-    if (line.startsWith("-")) deleted += 1
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line)
+    if (hunk) {
+      oldRemaining = Number(hunk[1] ?? 1)
+      newRemaining = Number(hunk[2] ?? 1)
+      continue
+    }
+    // Header-looking text inside a hunk is still changed source. Keep the
+    // visible-row counts useful when a result is cut off partway through it.
+    const inHunk = oldRemaining > 0 || newRemaining > 0
+    if (!inHunk && (line.startsWith("+++") || line.startsWith("---"))) continue
+    if (line.startsWith("+")) {
+      added += 1
+      newRemaining -= 1
+    } else if (line.startsWith("-")) {
+      deleted += 1
+      oldRemaining -= 1
+    } else if (line.startsWith(" ") && inHunk) {
+      oldRemaining -= 1
+      newRemaining -= 1
+    }
   }
   return { added, deleted }
 }
