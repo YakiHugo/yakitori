@@ -1763,6 +1763,59 @@ describe("JsonlThreadStore", () => {
   })
 
   it.each([
+    "partial",
+    "complete",
+  ] as const)("reconciles an uncertain %s retry before a later flush", async (writeKind) => {
+    const { root, store } = await createStore()
+    const id = "thread_second_write_failure"
+    await createPersistentThread(store, metadata(id))
+    const probe = await open(join(root, "probe-second-write"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as {
+      write(
+        buffer: Buffer,
+        offset: number,
+        length: number,
+      ): Promise<{ readonly bytesWritten: number; readonly buffer: Buffer }>
+    }
+    const originalWrite = prototype.write
+    let attempts = 0
+    prototype.write = async function write(buffer, offset, length) {
+      attempts += 1
+      if (attempts === 1) throw new Error("first write failed")
+      if (attempts === 2) {
+        await originalWrite.call(
+          this,
+          buffer,
+          offset,
+          writeKind === "partial" ? Math.min(length, 17) : length,
+        )
+        throw new Error("retry write acknowledgement lost")
+      }
+      return originalWrite.call(this, buffer, offset, length)
+    }
+    try {
+      await expect(
+        store.appendItems(id, [response("turn_retried", "only once")]),
+      ).rejects.toThrow("retry write acknowledgement lost")
+    } finally {
+      prototype.write = originalWrite
+      await probe.close()
+    }
+    try {
+      await store.flushThread(id)
+      await store.shutdownThread(id)
+      const reopened = new JsonlThreadStore({ root })
+      expect(
+        (await reopened.readThread(id))?.rollout.flatMap(({ item }) =>
+          item.type === "response_item" ? [item.item.turnId] : [],
+        ),
+      ).toEqual(["turn_retried"])
+    } finally {
+      await store.discardThread(id)
+    }
+  })
+
+  it.each([
     ["temporary file sync", 1],
     ["rollout directory sync", 2],
     ["metadata directory sync", 4],

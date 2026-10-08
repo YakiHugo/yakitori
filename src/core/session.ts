@@ -1154,8 +1154,9 @@ export class Session {
         ) {
           throw new Error("Tool result does not match its completion and Turn.")
         }
+        // Admission happened before joining the mutation queue. Finalization
+        // waits for this queue, so retain the result even if it starts meanwhile.
         await this.#withContextMutation(async () => {
-          requireActive()
           await this.#appendRollout([
             { type: "response_item", item: response },
             {
