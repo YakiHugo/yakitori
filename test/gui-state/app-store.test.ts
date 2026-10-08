@@ -115,6 +115,30 @@ afterEach(() => {
 
 describe("app store initialization", () => {
   it.each([
+    "{broken",
+    "null",
+    "[]",
+    '"invalid"',
+    "42",
+  ])("starts with expanded sections when the cached preference is %s", (raw) => {
+    globalThis.localStorage.setItem("yakitori.collapsedSections", raw)
+    globalThis.localStorage.setItem("unrelated.preference", "keep")
+    expect(createInitialAppState().collapsedSections).toEqual({})
+    expect(globalThis.localStorage.getItem("unrelated.preference")).toBe("keep")
+    expect(globalThis.localStorage.getItem("yakitori.collapsedSections")).toBe(
+      raw,
+    )
+  })
+
+  it("restores only collapsed flags from a cached section record", () => {
+    globalThis.localStorage.setItem(
+      "yakitori.collapsedSections",
+      JSON.stringify({ work: true, personal: false, invalid: "true" }),
+    )
+    expect(createInitialAppState().collapsedSections).toEqual({ work: true })
+  })
+
+  it.each([
     ["https://app.test/nested?view=chat#session", "https://app.test"],
     [
       "https://app.test/?api=http%3A%2F%2F127.0.0.1%3A4141",

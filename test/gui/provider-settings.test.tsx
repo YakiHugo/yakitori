@@ -834,3 +834,51 @@ it.each([
     false,
   )
 })
+
+it.each([
+  "documentation",
+  "sign-in",
+] as const)("opens provider %s links through the desktop browser bridge", async (kind) => {
+  const openUrl = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(window, "yakitoriDesktop", {
+    configurable: true,
+    value: { openUrl },
+  })
+  const url =
+    kind === "documentation"
+      ? preset.documentationURL
+      : "https://auth.example.com/authorize"
+  request.mockImplementation(async (method) => {
+    const subscriptions = [
+      {
+        id: "grok",
+        name: "Grok CLI",
+        available: false,
+        login: { state: "running", url },
+      },
+    ]
+    return method === "provider/subscription/login"
+      ? subscriptions
+      : { providers: [], presets: [preset], subscriptions }
+  })
+  try {
+    render(<ProviderSettings />)
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: kind === "documentation" ? "DeepSeek" : "Grok CLI",
+      }),
+    )
+    const link = await screen.findByRole("link", {
+      name: kind === "documentation" ? "API docs ↗" : "Open sign-in page ↗",
+    })
+    // Suppress the test DOM's real navigation; the bridge is the contract.
+    link.addEventListener("click", (event) => event.preventDefault())
+    fireEvent.click(link)
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith({ url }))
+  } finally {
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: undefined,
+    })
+  }
+})

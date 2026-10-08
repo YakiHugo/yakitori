@@ -86,7 +86,10 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
           </div>
         )}
       </div>
-      <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="sidebar-scroll min-h-0 flex-1 overflow-y-auto"
+        data-sidebar-scroll-viewport
+      >
         <nav ref={navRef} aria-label="Sessions" className="px-2 pb-4">
           <SidebarGroups
             pinnedProjects={projects

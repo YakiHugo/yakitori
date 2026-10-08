@@ -206,7 +206,7 @@ export function SidebarDragSurface({
       const delta = previousTime === 0 ? 16 : Math.min(32, now - previousTime)
       previousTime = now
       const viewport = root.current?.querySelector<HTMLElement>(
-        "[data-radix-scroll-area-viewport]",
+        "[data-sidebar-scroll-viewport]",
       )
       if (viewport) {
         const rect = viewport.getBoundingClientRect()

@@ -3,6 +3,7 @@ import { Check } from "lucide-react"
 import { type FormEvent, useState } from "react"
 import type { ProviderPreset } from "../../runtime/provider-presets.ts"
 import type { ProviderConfiguration } from "../../server/provider-configuration.ts"
+import { openUrlTarget } from "../lib/open-resource.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { ProviderModels } from "./provider-models.tsx"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
@@ -51,6 +52,7 @@ export function ProviderEditor({
   catalog?: import("../../server/provider-configuration.ts").ApiConfiguredProvider["catalog"]
 }>) {
   const [confirmRemove, setConfirmRemove] = useState(false)
+  const [openError, setOpenError] = useState<string>()
   const custom = draft.configuration.preset === undefined
   const update = (patch: Partial<ProviderConfiguration>) => {
     const configuration = { ...draft.configuration, ...patch }
@@ -83,7 +85,25 @@ export function ProviderEditor({
               : "Add your API key to start using this provider."}
         </p>
         {preset ? (
-          <a href={preset.documentationURL} target="_blank" rel="noreferrer">
+          <a
+            href={preset.documentationURL}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => {
+              event.preventDefault()
+              setOpenError(undefined)
+              void openUrlTarget({
+                kind: "url",
+                url: preset.documentationURL,
+              }).catch((cause: unknown) =>
+                setOpenError(
+                  cause instanceof Error
+                    ? cause.message
+                    : "Could not open API documentation.",
+                ),
+              )
+            }}
+          >
             API docs ↗
           </a>
         ) : null}
@@ -253,9 +273,9 @@ export function ProviderEditor({
             </details>
           </FieldGroup>
         </fieldset>
-        {error ? (
+        {error || openError ? (
           <p role="alert" className="provider-message text-destructive">
-            {error}
+            {error ?? openError}
           </p>
         ) : null}
         {testStatus ? (

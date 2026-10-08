@@ -266,14 +266,13 @@ export function createSessionTitleGenerator(options: {
             },
           )
           if (title === undefined || controller.signal.aborted) return
-          // Re-check under the sidebar lock's ordering: a rename admitted while
-          // the model call was in flight must not be overwritten.
           if (!(await untitled())) return
-          await options.store.updateSessionSidebar({
-            type: "session",
-            sessionId: input.sessionId,
-            title,
-          })
+          // The store also checks absence under its mutation lock, so a manual
+          // rename cannot slip between a separate check and this write.
+          await options.store.updateSessionSidebar(
+            { type: "session", sessionId: input.sessionId, title },
+            { onlyIfUntitled: true },
+          )
           options.notifySidebarChanged?.()
         } catch (error) {
           reportOperationalFailure(

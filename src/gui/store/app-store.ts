@@ -240,7 +240,7 @@ export type AppStoreActions = {
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   refreshQueuedInputs(): Promise<void>
-  updateQueuedInput(inputId: string, parts: InputDraft): Promise<void>
+  updateQueuedInput(inputId: string, parts: InputDraft): Promise<boolean>
   reorderQueuedInputs(inputIds: readonly string[]): Promise<void>
   startQueuedInput(inputId: string): Promise<void>
   resolvePermission(
@@ -299,9 +299,7 @@ function subscriptionUsageLoading(
 export function createInitialAppState(): AppStoreData {
   return {
     sidebar: { sections: [], entries: {} },
-    collapsedSections: JSON.parse(
-      globalThis.localStorage.getItem("yakitori.collapsedSections") ?? "{}",
-    ) as Record<string, boolean>,
+    collapsedSections: initialCollapsedFlags("yakitori.collapsedSections"),
     apiBase: initialApiBase(),
     busy: false,
     composerFocusRevision: 0,
@@ -337,7 +335,7 @@ export function createInitialAppState(): AppStoreData {
     sessionsByProject: {},
     stream: undefined,
     currentProject: undefined,
-    collapsedProjects: initialCollapsedProjects(),
+    collapsedProjects: initialCollapsedFlags("yakitori.collapsedProjects"),
     settingsSection: undefined,
     usage: { loading: false },
     goalDialogRevision: 0,
@@ -2669,11 +2667,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     updateQueuedInput: async (inputId, parts) => {
       const selection = currentSelection()
-      if (!selection) return
+      if (!selection) return false
       const item = get().queuedItems.find((entry) => entry.id === inputId)
-      if (item === undefined) return
+      if (item === undefined) return false
       const requestId = createRequestId()
-      await runTask(
+      return runTask(
         async () => {
           await getAppRpcClient(get().apiBase).request("session/queue/update", {
             sessionId: selection.sessionId,
@@ -3502,8 +3500,8 @@ function persistModelSelections(
   )
 }
 
-function initialCollapsedProjects(): Record<string, boolean> {
-  const raw = globalThis.localStorage.getItem("yakitori.collapsedProjects")
+function initialCollapsedFlags(storageKey: string): Record<string, boolean> {
+  const raw = globalThis.localStorage.getItem(storageKey)
   if (raw === null) return {}
   try {
     const parsed: unknown = JSON.parse(raw)
