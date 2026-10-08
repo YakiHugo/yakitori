@@ -1,4 +1,3 @@
-import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   ChevronDown,
   FileText,
@@ -12,9 +11,10 @@ import {
 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import { assetSourceKey } from "../../core/asset-types.ts"
+import type { ContextExcerpt } from "../../core/input-context.ts"
 import type { SessionCacheExpiry } from "../../core/session-cache-expiry.ts"
 import type { UserAttachment } from "../../kernel/events.ts"
-import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type {
   GitPullRequestsResponse,
   GitStatusResponse,
@@ -25,6 +25,7 @@ import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import { TelemetryRail } from "./telemetry-rail.tsx"
 import "./session-summary.css"
 
@@ -95,13 +96,8 @@ function SummaryPopover({
     const excerpts = new Map<string, ContextExcerpt>()
     for (const entry of entries) {
       if (entry.kind !== "user_input") continue
-      for (const attachment of entry.parts.filter(
-        (part) => part.type !== "text",
-      ))
-        images.set(
-          `${attachment.file.rolloutId}:${attachment.file.path}`,
-          attachment,
-        )
+      for (const attachment of entry.content.attachments)
+        images.set(assetSourceKey(attachment.file), attachment)
       for (const excerpt of entry.contextAttachments ?? [])
         excerpts.set(excerpt.id, excerpt)
     }
@@ -523,9 +519,7 @@ function SummaryPopover({
                       </details>
                     ))}
                     {sources.images.map((attachment) => (
-                      <details
-                        key={`${attachment.file.rolloutId}:${attachment.file.path}`}
-                      >
+                      <details key={assetSourceKey(attachment.file)}>
                         <summary>
                           <Image size={14} aria-hidden="true" />
                           <span>{attachment.name}</span>

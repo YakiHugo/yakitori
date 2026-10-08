@@ -1,17 +1,10 @@
 import { isJsonObject, type ModelTextBlock } from "../kernel/events.ts"
 
-export type CitationOrigin = Readonly<{
-  provider: "openai" | "anthropic" | "chatCompletions"
-  blockIndex: number
-  // Kept in the original text block's coordinates, never the joined message.
-  range?: Readonly<{ start: number; end: number }>
-}>
 export type CitationSource = Readonly<{
   id: string
   label: string
   url?: string
   location?: string
-  origins: readonly CitationOrigin[]
 }>
 
 export function citationSources(
@@ -86,69 +79,24 @@ export function citationSources(
             location = `from page ${annotation.start_page_number}`
         }
         if (label === undefined) continue
-        const start = value.start_index
-        const end = value.end_index
-        const boundary = (index: number) =>
-          index === 0 ||
-          index === block.text.length ||
-          !(
-            block.text.charCodeAt(index) >= 0xdc00 &&
-            block.text.charCodeAt(index) <= 0xdfff &&
-            block.text.charCodeAt(index - 1) >= 0xd800 &&
-            block.text.charCodeAt(index - 1) <= 0xdbff
-          )
-        const range =
-          typeof start === "number" &&
-          typeof end === "number" &&
-          Number.isInteger(start) &&
-          Number.isInteger(end) &&
-          start >= 0 &&
-          end > start &&
-          end <= block.text.length &&
-          boundary(start) &&
-          boundary(end)
-            ? { start, end }
-            : undefined
-        const origin: CitationOrigin = {
-          provider,
-          blockIndex,
-          ...(range === undefined ? {} : { range }),
-        }
-        // URL identity can merge display rows while retaining every block origin.
+        // Sources is a display list; native annotations stay on the response blocks.
         // Matching local titles alone cannot prove that two documents are equal.
-        const existing =
-          url === undefined
-            ? -1
-            : sources.findIndex(
-                (source) =>
-                  source.url === url &&
-                  source.label === label &&
-                  source.location === location,
-              )
-        const source = sources[existing]
-        if (source !== undefined) {
-          if (
-            !source.origins.some(
-              (item) =>
-                item.provider === provider &&
-                item.blockIndex === blockIndex &&
-                item.range?.start === range?.start &&
-                item.range?.end === range?.end,
-            )
+        if (
+          url !== undefined &&
+          sources.some(
+            (source) =>
+              source.url === url &&
+              source.label === label &&
+              source.location === location,
           )
-            sources[existing] = {
-              ...source,
-              origins: [...source.origins, origin],
-            }
-        } else {
-          sources.push({
-            id: `citation_${blockIndex}_${provider}_${annotationIndex}`,
-            label,
-            ...(url === undefined ? {} : { url }),
-            ...(location === undefined ? {} : { location }),
-            origins: [origin],
-          })
-        }
+        )
+          continue
+        sources.push({
+          id: `citation_${blockIndex}_${provider}_${annotationIndex}`,
+          label,
+          ...(url === undefined ? {} : { url }),
+          ...(location === undefined ? {} : { location }),
+        })
       }
     }
   }

@@ -235,11 +235,8 @@ export class QueuedItemService {
 
 function validateQueuedText(input: QueuedInput["input"]): void {
   let chars = 0
-  for (const part of input.content.parts) {
-    if (part.type !== "text") continue
-    for (const _character of part.text) {
-      if (++chars > MAX_QUEUED_INPUT_TEXT_CHARS)
-        throw new QueuedInputTooLargeError()
-    }
+  for (const _character of input.content.text) {
+    if (++chars > MAX_QUEUED_INPUT_TEXT_CHARS)
+      throw new QueuedInputTooLargeError()
   }
 }

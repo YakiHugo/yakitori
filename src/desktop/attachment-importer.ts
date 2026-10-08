@@ -9,6 +9,7 @@ import {
   type UserAttachment,
 } from "../kernel/events.ts"
 import { isStorageKey } from "../kernel/ids.ts"
+import { rolloutAssetUrl } from "../server/asset-url.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 import type { ServerProcess } from "./server-process.ts"
 
@@ -192,8 +193,9 @@ async function validateImportedAttachments(
 }
 
 function attachmentUrl(serverUrl: string, attachment: UserAttachment): string {
-  const path = attachment.file.path.split("/").map(encodeURIComponent).join("/")
-  return `${serverUrl}/rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${path}`
+  const url = rolloutAssetUrl(attachment.file, serverUrl)
+  if (url === undefined) throw new Error("Invalid attachment source.")
+  return url
 }
 
 function createDraftOwnerId(): string {

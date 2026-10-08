@@ -1,19 +1,21 @@
+import { useCallback, useContext, useRef, useState } from "react"
 import {
+  inputContent,
   inputContentAttachments,
   inputContentText,
-} from "../../kernel/input-content.ts"
-import {
-  sameInputParts,
-  textInputParts,
-  trimInputParts,
-} from "../input-parts.ts"
-import { useCallback, useContext, useRef, useState } from "react"
+} from "../../core/user-input.ts"
 import { GOAL_DIRECTIVE } from "../../kernel/events.ts"
 import {
   discardDraftAttachments,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
+import {
+  attachmentInputDraft,
+  sameInputDraft,
+  textInputDraft,
+  trimInputDraft,
+} from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
   normalizeKimiModelSelection,
@@ -33,7 +35,7 @@ import { SessionCommandPanel } from "./session-command-panel.tsx"
 
 export function Composer() {
   const conversationScroll = useContext(ConversationScrollContext)
-  const draft = useAppStore((state) => state.promptDraft) ?? []
+  const draft = useAppStore((state) => state.promptDraft) ?? textInputDraft("")
   const excerpts = useAppStore((state) => state.promptExcerpts)
   const removePromptExcerpt = useAppStore((state) => state.removePromptExcerpt)
   const updatePromptExcerpt = useAppStore((state) => state.updatePromptExcerpt)
@@ -260,45 +262,45 @@ export function Composer() {
       supportsImages={supportsImages}
       supportsOriginal={supportsOriginal}
       historyParts={view.entries.flatMap((entry) =>
-        entry.kind === "user_input" ? [entry.parts] : [],
+        entry.kind === "user_input" ? [entry.content] : [],
       )}
       setPromptDraft={setPromptDraft}
       removePromptExcerpt={removePromptExcerpt}
       updatePromptExcerpt={updatePromptExcerpt}
       onSubmit={(parts, mode) => {
-        const text = inputContentText({ kind: "parts", parts })
-        const images = inputContentAttachments({ kind: "parts", parts })
+        const text = inputContentText(inputContent(parts))
+        const images = inputContentAttachments(inputContent(parts))
         conversationScroll?.jumpToBottom()
         if (images.length === 0 && excerpts.length === 0) {
           if (text === "/status" || text === "/mcp") {
             useAppStore
               .getState()
               .openCommandPanel(text.slice(1) as "status" | "mcp")
-            setPromptDraft([])
+            setPromptDraft(textInputDraft(""))
             return
           }
           if (text === "/model") {
             useAppStore.getState().openModelPicker()
-            setPromptDraft([])
+            setPromptDraft(textInputDraft(""))
             return
           }
           if (text === "/skills") {
-            setPromptDraft(textInputParts("$"))
+            setPromptDraft(textInputDraft("$"))
             return
           }
           if (text === "/rename" && sessionId) {
             useAppStore.getState().openRenameDialog()
-            setPromptDraft([])
+            setPromptDraft(textInputDraft(""))
             return
           }
           if (text === "/usage") {
             useAppStore.getState().openSettings("subscriptions")
-            setPromptDraft([])
+            setPromptDraft(textInputDraft(""))
             return
           }
           if (text === "/side") {
             useWorkspaceStore.getState().addTab("chat", sessionId)
-            setPromptDraft([])
+            setPromptDraft(textInputDraft(""))
             return
           }
           if (sessionId && (text === "/archive" || text === "/pin")) {
@@ -316,12 +318,14 @@ export function Composer() {
             }).then((changed) => {
               if (
                 changed &&
-                sameInputParts(
-                  trimInputParts(useAppStore.getState().promptDraft ?? []),
+                sameInputDraft(
+                  trimInputDraft(
+                    useAppStore.getState().promptDraft ?? textInputDraft(""),
+                  ),
                   parts,
                 )
               )
-                setPromptDraft([])
+                setPromptDraft(textInputDraft(""))
             })
             return
           }
@@ -342,8 +346,8 @@ export function Composer() {
             }
             const prompt =
               "Create an AGENTS.md file for this project. Inspect the repository and its existing instructions first, then write concise guidance that reflects how this project actually works."
-            setPromptDraft(textInputParts(prompt))
-            void admitInput(textInputParts(prompt))
+            setPromptDraft(textInputDraft(prompt))
+            void admitInput(textInputDraft(prompt))
             return
           }
         }
@@ -359,7 +363,7 @@ export function Composer() {
               sessionId ?? (await useAppStore.getState().createSession())
             if (goalSessionId === undefined) return
             if (goalCommand === "") {
-              setPromptDraft(parts.filter((part) => part.type !== "text"))
+              setPromptDraft(attachmentInputDraft(parts.attachments))
               openGoalDialog()
               return
             }
@@ -372,12 +376,14 @@ export function Composer() {
             if (
               saved &&
               useAppStore.getState().selection.sessionId === goalSessionId &&
-              sameInputParts(
-                trimInputParts(useAppStore.getState().promptDraft ?? []),
+              sameInputDraft(
+                trimInputDraft(
+                  useAppStore.getState().promptDraft ?? textInputDraft(""),
+                ),
                 parts,
               )
             )
-              setPromptDraft(parts.filter((part) => part.type !== "text"))
+              setPromptDraft(attachmentInputDraft(parts.attachments))
           })()
           return
         }

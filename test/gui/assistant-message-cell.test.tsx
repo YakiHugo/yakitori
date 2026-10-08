@@ -34,18 +34,15 @@ const entry: Extract<ExecutionEntry, { kind: "assistant" }> = {
       id: "web",
       label: "Web source",
       url: "https://example.com/source",
-      origins: [{ provider: "openai", blockIndex: 0 }],
     },
     {
       id: "file",
       label: "report.pdf",
-      origins: [{ provider: "openai", blockIndex: 0 }],
     },
     {
       id: "pages",
       label: "Annual report",
       location: "from page 2",
-      origins: [{ provider: "anthropic", blockIndex: 1 }],
     },
   ],
 }
@@ -115,7 +112,7 @@ describe("assistant message sources", () => {
       <AssistantMessageCell
         entry={{
           ...entry,
-          sources: [{ id: "unsafe", label: "Unsafe source", url, origins: [] }],
+          sources: [{ id: "unsafe", label: "Unsafe source", url }],
         }}
       />,
     )

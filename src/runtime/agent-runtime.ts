@@ -1,24 +1,24 @@
 import type { AgentGraphStore } from "../core/agent-graph-store.ts"
 import { ThreadSpawnEdgeStatus } from "../core/agent-graph-store.ts"
-import type { AgentStatus } from "../core/session-io.ts"
-import type { StoredThread, ThreadMetadata } from "../core/rollout.ts"
 import type { AgentThread } from "../core/agent-thread.ts"
+import type { StoredThread, ThreadMetadata } from "../core/rollout.ts"
 import { agentStatusFromStoredThread } from "../core/session.ts"
+import type { AgentStatus } from "../core/session-io.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
+import { createUserInput } from "../core/user-input.ts"
 import type { ModelSelection } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import type { RolloutBudgetConfig } from "./rollout-budget.ts"
 import {
   type AgentControl,
   type AgentControlAdapter,
   type AgentRegistration,
   type AgentSummary,
-  createAgentControl,
   type AgentType,
+  createAgentControl,
   type ForkTurns,
 } from "./agent-control.ts"
-
 import { estimateHistoryTokens } from "./model-request-budget.ts"
+import type { RolloutBudgetConfig } from "./rollout-budget.ts"
 
 export type AgentRuntime = Readonly<{
   listAgents(stored: StoredThread): Promise<readonly AgentSummary[]>
@@ -130,10 +130,7 @@ export function createAgentRuntime(input: {
         request.sessionId,
       )
       const submission = await thread.startIfIdle({
-        content: {
-          kind: "parts",
-          parts: [{ type: "text", text: request.message }],
-        },
+        content: createUserInput(request.message),
         modelSelection: toModelSelection(request.target),
       })
       if (submission.type !== "started" && submission.type !== "replayed") {

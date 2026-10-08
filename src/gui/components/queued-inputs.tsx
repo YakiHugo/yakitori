@@ -1,16 +1,17 @@
-import { openPdfAttachment } from "./pdf-attachment.tsx"
-import { attachmentUrl } from "../composer-attachments.ts"
-import { ImageLightbox } from "./image-lightbox.tsx"
-import type { InputPart, ImageAttachment } from "../../kernel/events.ts"
+import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
+import { useState } from "react"
+import type { InputDraft } from "../../core/user-input.ts"
 import {
   inputContentAttachments,
   inputContentText,
-} from "../../kernel/input-content.ts"
-import { trimInputParts } from "../input-parts.ts"
-import { PromptEditor } from "./prompt-editor.tsx"
-import { useState } from "react"
-import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
+} from "../../core/user-input.ts"
+import type { ImageAttachment } from "../../kernel/events.ts"
+import { attachmentUrl } from "../composer-attachments.ts"
+import { textInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { ImageLightbox } from "./image-lightbox.tsx"
+import { openPdfAttachment } from "./pdf-attachment.tsx"
+import { PromptEditor } from "./prompt-editor.tsx"
 import { Badge } from "./ui/badge.tsx"
 import { Button } from "./ui/button.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
@@ -26,7 +27,9 @@ export function QueuedInputs() {
   const [editingId, setEditingId] = useState<string>()
   const [openError, setOpenError] = useState<string>()
   const [preview, setPreview] = useState<ImageAttachment>()
-  const [editingParts, setEditingParts] = useState<readonly InputPart[]>([])
+  const [editingParts, setEditingParts] = useState<InputDraft>(
+    textInputDraft(""),
+  )
 
   if (queued.length === 0) return null
 
@@ -51,7 +54,7 @@ export function QueuedInputs() {
               className="flex min-w-0 flex-1 gap-1"
               onSubmit={(event) => {
                 event.preventDefault()
-                void updateQueuedInput(item.id, trimInputParts(editingParts))
+                void updateQueuedInput(item.id, trimInputDraft(editingParts))
                 setEditingId(undefined)
               }}
             >
@@ -81,7 +84,7 @@ export function QueuedInputs() {
                     event.preventDefault()
                     void updateQueuedInput(
                       item.id,
-                      trimInputParts(editingParts),
+                      trimInputDraft(editingParts),
                     )
                     setEditingId(undefined)
                     return true
@@ -113,7 +116,7 @@ export function QueuedInputs() {
                 label="Edit queued input"
                 onClick={() => {
                   setEditingId(item.id)
-                  setEditingParts(item.input.content.parts)
+                  setEditingParts(item.input.content)
                 }}
               >
                 <Pencil />

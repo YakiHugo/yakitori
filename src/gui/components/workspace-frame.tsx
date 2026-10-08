@@ -1,4 +1,3 @@
-import { trimInputParts } from "../input-parts.ts"
 import {
   Files,
   GitCompareArrows,
@@ -21,6 +20,7 @@ import {
   useState,
 } from "react"
 import type { ContextExcerpt } from "../conversation-context.ts"
+import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {
   useWorkspaceStore,
@@ -128,7 +128,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       tab.kind === "chat" &&
       (tab.hasMessages ||
         tab.activeTurnId ||
-        trimInputParts(tab.draft).length ||
+        hasInputDraft(trimInputDraft(tab.draft)) ||
         tab.excerpts.length)
     )
       setClosing(tab)

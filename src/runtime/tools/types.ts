@@ -1,10 +1,10 @@
+import type { RolloutAssets } from "../../core/rollout-assets.ts"
 import type {
   JsonObject,
   JsonValue,
   ModelToolResultMessage,
   ToolExecutionDescriptor,
 } from "../../kernel/index.ts"
-import type { RolloutAssets } from "../../kernel/rollout-assets.ts"
 import type { BoundAgentControl } from "../agent-control.ts"
 import type { ModelToolInputFormat } from "../model.ts"
 import type { ToolName } from "./tool-name.ts"

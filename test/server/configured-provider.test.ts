@@ -1,10 +1,9 @@
-import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { prepareModelDocuments } from "../../src/runtime/prepare-model-document.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
@@ -12,6 +11,7 @@ import { createReadDocumentTool } from "../../src/runtime/tools/read-media.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 
 const directories: string[] = []
@@ -269,8 +269,14 @@ it.each([
       step.documentReading,
     )
     if (connection.nativePdf) {
-      expect(media.documents).toMatchObject([
-        { data: bytes.toString("base64") },
+      expect(media.documents).toEqual([
+        {
+          type: "document",
+          name: "report.pdf",
+          mediaType: "application/pdf",
+          sizeBytes: bytes.length,
+          file: saved.reference,
+        },
       ])
       expect(media.images).toEqual([])
     } else {

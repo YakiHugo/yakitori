@@ -5,14 +5,15 @@ import type {
 } from "../../src/core/agent-graph-store.ts"
 import type { TurnProcessor } from "../../src/core/session.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
 import type { AgentControl } from "../../src/runtime/agent-control.ts"
 import { createAgentRuntime } from "../../src/runtime/agent-runtime.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
-import { createSessionId } from "../../src/kernel/ids.ts"
+import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 
 const TARGET = { provider: "faux", model: "scripted" }
 
@@ -136,10 +137,7 @@ describe("agent runtime", () => {
         mateRevisionId: "mate_revision_test",
       })
       await root.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Start." }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "Start." }]),
       })
       await expect
         .poll(() => root.agentStatus)
@@ -164,10 +162,7 @@ describe("agent runtime", () => {
         "20 weighted tokens",
       )
       await root.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Try again." }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "Try again." }]),
       })
       await expect
         .poll(() => root.agentStatus)

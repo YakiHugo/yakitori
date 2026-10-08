@@ -1,17 +1,17 @@
-import { toolContentText } from "../../../src/runtime/model-tool-content.ts"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { createRolloutAssets } from "../../../src/core/rollout-assets.ts"
 import {
   isModelMessage,
   type ModelToolResultMessage,
 } from "../../../src/kernel/events.ts"
 import { createSessionId } from "../../../src/kernel/ids.ts"
 import type { JsonValue } from "../../../src/kernel/index.ts"
-import { createRolloutAssets } from "../../../src/kernel/rollout-assets.ts"
 import { toAnthropicMessages } from "../../../src/runtime/anthropic-provider.ts"
+import { toolContentText } from "../../../src/runtime/model-tool-content.ts"
 import { toOpenAIInput } from "../../../src/runtime/openai-provider.ts"
 import { mcpResult } from "../../../src/runtime/tools/mcp-result.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
@@ -429,12 +429,9 @@ describe("tool result persistence and model projection", () => {
     expect(JSON.stringify(toAnthropicMessages([message]))).toContain(
       '"type":"document"',
     )
-    expect(JSON.stringify(toOpenAIInput([message], false, "grok"))).toContain(
-      "was not sent",
+    expect(toOpenAIInput([message], false, "custom")).toEqual(
+      toOpenAIInput([message], false, "openai"),
     )
-    expect(
-      JSON.stringify(toOpenAIInput([message], false, "grok")),
-    ).not.toContain(bytes.toString("base64"))
   })
 
   it("saves the entire fetched page before applying its own preview cap", async () => {

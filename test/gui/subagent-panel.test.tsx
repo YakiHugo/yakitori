@@ -16,6 +16,7 @@ import {
   type TurnOutcome,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -79,7 +80,7 @@ function start() {
       requestId: "request",
       inputId: "input",
       role: "user",
-      content: { kind: "parts", parts: inputParts("Review the renderer") },
+      content: inputFixture(inputParts("Review the renderer")),
     },
   })
   emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
@@ -244,7 +245,7 @@ it("replays a continued code block as one completed answer", () => {
         requestId: "request",
         inputId: "input",
         role: "user",
-        content: { kind: "parts", parts: inputParts("Review the renderer") },
+        content: inputFixture(inputParts("Review the renderer")),
       },
     })
     emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })

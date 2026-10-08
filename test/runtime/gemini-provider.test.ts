@@ -15,7 +15,6 @@ import {
   createGeminiProvider,
   toGeminiContents,
 } from "../../src/runtime/gemini-provider.ts"
-import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import {
@@ -23,6 +22,8 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const signedParts = [
   { text: "Plan", thought: true, thoughtSignature: "reasoning-signature" },
@@ -221,10 +222,7 @@ describe("native Gemini provider", () => {
             mateRevisionId: "revision_test",
           })
           await thread.startIfIdle({
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "Inspect" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "Inspect" }]),
           })
           await expect
             .poll(() => thread.agentStatus)
@@ -926,7 +924,7 @@ describe("native Gemini provider", () => {
     expect(events).toMatchObject([
       {
         type: "failure",
-        failure: { kind: "protocol_error", stage: "request_build" },
+        failure: { kind: "invalid_request", stage: "request_build" },
       },
     ])
     expect(requests).toBe(0)

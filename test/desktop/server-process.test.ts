@@ -2,6 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 
@@ -140,7 +141,7 @@ describe("spawnServerProcess", () => {
       if (storedPdf === undefined) throw new Error("No PDF attachment")
       expect(storedPdf).not.toHaveProperty("pageCount")
       expect(storedPdf).not.toHaveProperty("detail")
-      const pdfUrl = `${server.url}/rollouts/${storedPdf.file.rolloutId}/assets/${storedPdf.file.path}`
+      const pdfUrl = `${server.url}/rollouts/${requireStoredAssetSource(storedPdf.file).rolloutId}/assets/${requireStoredAssetSource(storedPdf.file).path}`
       await writeFile(pdfPath, "%PDF-1.4\ninvalid")
       const stored = await fetch(pdfUrl)
       expect(stored.status).toBe(200)

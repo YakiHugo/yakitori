@@ -2,14 +2,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
-import { createThreadServerHandlers } from "../../src/server/handlers.ts"
-import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
-import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
@@ -23,6 +22,8 @@ import {
 } from "../../src/runtime/tools/registry.ts"
 import { createWriteFileTool } from "../../src/runtime/tools/write-file.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createThreadServerHandlers } from "../../src/server/handlers.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -118,10 +119,7 @@ describe("Turn recovery", () => {
     const thread = await runtime.createThread()
     try {
       await thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "run" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "run" }]),
       })
       await expect.poll(() => executions).toBe(1)
       await entered.promise
@@ -146,10 +144,7 @@ describe("Turn recovery", () => {
       const resumed = await runtime.manager.resumeThread(thread.id)
       if (!resumed) throw new Error("Missing thread")
       await resumed.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "continue" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "continue" }]),
       })
       await expect
         .poll(() => resumed.agentStatus)
@@ -231,10 +226,7 @@ describe("Turn recovery", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "run" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
     await waiting.promise
     await finished.promise
@@ -244,10 +236,7 @@ describe("Turn recovery", () => {
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (!resumed) throw new Error("Missing thread")
     await resumed.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     await expect
       .poll(() => resumed.agentStatus)
@@ -339,10 +328,7 @@ describe("Turn recovery", () => {
     await writeFile(join(runtime.root, "existing.txt"), "original")
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "update file" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "update file" }]),
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(await readFile(join(runtime.root, "existing.txt"), "utf8")).toBe(
@@ -438,10 +424,7 @@ describe("Turn recovery", () => {
     }
     try {
       await thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "read" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "read" }]),
       })
       await entered.promise
       const before = await replay()
@@ -531,10 +514,9 @@ describe("Turn recovery", () => {
     ])
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "write then wait" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "write then wait" },
+      ]),
     })
     await waiting.promise
     expect(await readFile(join(runtime.root, "result.txt"), "utf8")).toBe(
@@ -555,10 +537,7 @@ describe("Turn recovery", () => {
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Missing persisted thread")
     await resumed.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     await expect
       .poll(() => resumed.agentStatus)
@@ -610,10 +589,9 @@ describe("Turn recovery", () => {
     await writeFile(join(runtime.root, "existing.txt"), "known content")
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "read while waiting" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "read while waiting" },
+      ]),
     })
     await waiting.promise
     await readCompleted.promise
@@ -699,10 +677,7 @@ describe("Turn recovery", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "recover" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "recover" }]),
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(executions).toBe(1)

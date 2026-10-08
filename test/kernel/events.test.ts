@@ -8,6 +8,7 @@ import {
   isTurnCompletion,
   isTurnMetrics,
 } from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 describe("kernel facts", () => {
   it("preserves optional JSON provider metadata on canonical text blocks", () => {
@@ -176,10 +177,7 @@ describe("kernel facts", () => {
             requestId: "request-1",
             inputId: "input_1",
             role: InputRole.User,
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "hello" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "hello" }]),
             extra: true,
           },
         } as never,
@@ -315,13 +313,10 @@ describe("kernel facts", () => {
           requestId: "request-1",
           inputId: "input_1",
           role: InputRole.User,
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "image" },
-              { type: "image" as const, ...attachment },
-            ],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "image" },
+            { type: "image" as const, ...attachment },
+          ]),
         },
       })
 
@@ -387,10 +382,7 @@ describe("kernel facts", () => {
           requestId: "request-1",
           inputId: "input_1",
           role: InputRole.User,
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "hello" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "hello" }]),
           modelSelection,
         },
       })

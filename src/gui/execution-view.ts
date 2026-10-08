@@ -1,9 +1,9 @@
-import { inputContentText } from "../kernel/input-content.ts"
-import { citationSources, type CitationSource } from "./citation-sources.ts"
+import type { ContextExcerpt } from "../core/input-context.ts"
+import type { InputDraft } from "../core/user-input.ts"
+import { inputContentText } from "../core/user-input.ts"
 import {
-  type InputPart,
-  type ModelToolContentBlock,
   isKernelEvent,
+  type ModelToolContentBlock,
   type RuntimeEventEnvelope,
   type StoredEventEnvelope,
   type TokenUsage,
@@ -11,7 +11,6 @@ import {
   type TurnMetrics,
   type TurnOutcome,
 } from "../kernel/events.ts"
-import type { ContextExcerpt } from "../kernel/input-context.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import type { ModelFailureKind } from "../runtime/model.ts"
 import type {
@@ -19,6 +18,7 @@ import type {
   ApiPendingPermission,
   ApiSessionDetail,
 } from "../server/protocol.ts"
+import { type CitationSource, citationSources } from "./citation-sources.ts"
 
 export type ExecutionEntry =
   | {
@@ -28,7 +28,7 @@ export type ExecutionEntry =
       readonly questionId?: string
       readonly steered?: boolean
       readonly text: string
-      readonly parts: readonly InputPart[]
+      readonly content: InputDraft
       readonly at: string
     }
   | {
@@ -726,12 +726,11 @@ function applyDurable(
                     ? { questionId: event.data.metadata.userQuestionId }
                     : {}),
                   text: inputContentText(event.data.content),
-                  parts: event.data.content.parts,
-                  ...(event.data.content.contextAttachments === undefined
+                  content: event.data.content,
+                  ...(event.data.content.references === undefined
                     ? {}
                     : {
-                        contextAttachments:
-                          event.data.content.contextAttachments,
+                        contextAttachments: event.data.content.references,
                       }),
                   at: event.createdAt,
                 },

@@ -9,6 +9,7 @@ import {
   createElicitationBroker,
   createSessionInteractions,
 } from "../../src/server/user-interactions.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { initializeConnection, openTestConnection } from "./rpc/testkit.ts"
 
 describe("session user interactions", () => {
@@ -65,10 +66,9 @@ describe("session user interactions", () => {
       const admitted = await app.handlers.admitInput({
         sessionId,
         requestId: "prepare_report",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Prepare a report" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "Prepare a report" },
+        ]),
       })
       expect(admitted.ok).toBe(true)
       await vi.waitFor(() =>

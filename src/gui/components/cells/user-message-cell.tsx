@@ -1,6 +1,3 @@
-import { PdfAttachmentCard, openPdfAttachment } from "../pdf-attachment.tsx"
-import { inputContentAttachments } from "../../../kernel/input-content.ts"
-import { trimInputParts } from "../../input-parts.ts"
 import {
   FileText,
   ImageOff,
@@ -18,14 +15,25 @@ import {
   useState,
 } from "react"
 import { createPortal } from "react-dom"
-import type { ContextExcerpt } from "../../../kernel/input-context.ts"
+import { assetSourceKey } from "../../../core/asset-types.ts"
+import type { ContextExcerpt } from "../../../core/input-context.ts"
+import {
+  inputContent,
+  inputContentAttachments,
+} from "../../../core/user-input.ts"
 import { attachmentUrl } from "../../composer-attachments.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
+import {
+  hasInputDraft,
+  inputDisplayParts,
+  trimInputDraft,
+} from "../../input-draft.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { ImageLightbox } from "../image-lightbox.tsx"
+import { openPdfAttachment, PdfAttachmentCard } from "../pdf-attachment.tsx"
 import { parsePrompt } from "../prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
 import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
@@ -94,20 +102,17 @@ export function UserMessageCell({
   const forkSession = useAppStore((state) => state.forkSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
-  const [draft, setDraft] = useState(entry.parts)
+  const [draft, setDraft] = useState(entry.content)
   const [previewIndex, setPreviewIndex] = useState<number>()
   const [openError, setOpenError] = useState<string>()
-  const edited = trimInputParts(draft)
+  const edited = trimInputDraft(draft)
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
     if (mode === "edit") {
       editorRef.current?.focus(true)
     }
   }, [mode])
-  const attachments = inputContentAttachments({
-    kind: "parts",
-    parts: entry.parts,
-  })
+  const attachments = inputContentAttachments(inputContent(entry.content))
   const contextAttachments = entry.contextAttachments ?? []
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]
@@ -124,7 +129,7 @@ export function UserMessageCell({
               <MessageSources excerpts={contextAttachments} />
             </section>
           ) : null}
-          {entry.parts.map((part, index) => {
+          {inputDisplayParts(entry.content).map((part, index) => {
             const key = `${entry.inputId}:${index}`
             if (part.type === "document")
               return (
@@ -144,8 +149,8 @@ export function UserMessageCell({
                       setPreviewIndex(
                         attachments.findIndex(
                           (image) =>
-                            image.file.rolloutId === part.file.rolloutId &&
-                            image.file.path === part.file.path,
+                            assetSourceKey(image.file) ===
+                            assetSourceKey(part.file),
                         ),
                       )
                     }
@@ -204,7 +209,7 @@ export function UserMessageCell({
                   aria-label="Edit & resubmit"
                   title="Edit & resubmit"
                   onClick={() => {
-                    setDraft(entry.parts)
+                    setDraft(entry.content)
                     setMode("edit")
                   }}
                   className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
@@ -265,14 +270,11 @@ export function UserMessageCell({
           onSubmit={(event) => {
             event.preventDefault()
             if (
-              (edited.length === 0 && contextAttachments.length === 0) ||
+              (!hasInputDraft(edited) && contextAttachments.length === 0) ||
               busy
             )
               return
-            void forkSession(entry.inputId, "edit", {
-              kind: "parts",
-              parts: edited,
-            })
+            void forkSession(entry.inputId, "edit", inputContent(edited))
           }}
         >
           <PromptEditor
@@ -296,8 +298,8 @@ export function UserMessageCell({
               setPreviewIndex(
                 attachments.findIndex(
                   (candidate) =>
-                    candidate.file.rolloutId === image.file.rolloutId &&
-                    candidate.file.path === image.file.path,
+                    assetSourceKey(candidate.file) ===
+                    assetSourceKey(image.file),
                 ),
               )
             }
@@ -314,12 +316,9 @@ export function UserMessageCell({
               ) {
                 if (
                   !busy &&
-                  (edited.length > 0 || contextAttachments.length > 0)
+                  (hasInputDraft(edited) || contextAttachments.length > 0)
                 )
-                  void forkSession(entry.inputId, "edit", {
-                    kind: "parts",
-                    parts: edited,
-                  })
+                  void forkSession(entry.inputId, "edit", inputContent(edited))
                 return true
               }
               return false
@@ -339,7 +338,8 @@ export function UserMessageCell({
               type="submit"
               size="sm"
               disabled={
-                busy || (edited.length === 0 && contextAttachments.length === 0)
+                busy ||
+                (!hasInputDraft(edited) && contextAttachments.length === 0)
               }
             >
               Send

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { ThreadManager } from "../../../src/core/thread-manager.ts"
+import type { InputContent } from "../../../src/core/user-input.ts"
 import { EventType } from "../../../src/kernel/events.ts"
 import { createSessionId } from "../../../src/kernel/ids.ts"
 import { createPermissionGate } from "../../../src/runtime/permission-gate.ts"
@@ -47,6 +48,7 @@ import {
 } from "../../../src/server/sqlite-project-store.ts"
 import { createUserConfigStore } from "../../../src/server/user-config.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
+import { inputFixture } from "../../fixtures/user-input.ts"
 import {
   initializeConnection,
   openTestConnection,
@@ -155,10 +157,9 @@ describe("session methods over real handlers", () => {
     await rpc(connection, "session/input", {
       sessionId: created.session.id,
       requestId: "request_search_rpc",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "needle message" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "needle message" },
+      ]),
     })
 
     const tasks = await rpc<ApiSearchSessionsResponse>(
@@ -249,10 +250,7 @@ describe("session methods over real handlers", () => {
       {
         sessionId,
         requestId: "request_rpc_fork",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "undo this" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "undo this" }]),
       },
     )
 
@@ -262,10 +260,7 @@ describe("session methods over real handlers", () => {
       {
         atInputId: admitted.inputId,
         reason: "undo",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "not allowed" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "not allowed" }]),
       },
       {
         atInputId: admitted.inputId,
@@ -335,10 +330,7 @@ describe("session methods over real handlers", () => {
     const request = {
       sessionId,
       requestId: "request_rpc-retry",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "persist once" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "persist once" }]),
     }
 
     const first = await rpc(connection, "session/input", request)
@@ -347,10 +339,9 @@ describe("session methods over real handlers", () => {
 
     const conflict = await rpcError(connection, "session/input", {
       ...request,
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "persist something else" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "persist something else" },
+      ]),
     })
     expect(conflict).toMatchObject({
       code: INTERNAL_ERROR,
@@ -375,10 +366,7 @@ describe("session methods over real handlers", () => {
       {
         sessionId,
         requestId: "request_rpc-cancel-input",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "cancel me" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "cancel me" }]),
       },
     )
 
@@ -446,10 +434,7 @@ describe("session methods over real handlers", () => {
     await rpc(connection, "session/input", {
       sessionId,
       requestId: "request_rpc-stream",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "tail this" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "tail this" }]),
     })
     await connection.waitForFrame(
       (frame) =>
@@ -472,10 +457,7 @@ describe("session methods over real handlers", () => {
       event: {
         type: string
         data: {
-          content: {
-            kind: "parts"
-            parts: readonly { type: "text"; text: string }[]
-          }
+          content: InputContent
         }
       }
     }
@@ -485,10 +467,7 @@ describe("session methods over real handlers", () => {
       event: {
         type: EventType.InputAdmitted,
         data: {
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "tail this" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "tail this" }]),
         },
       },
     })
@@ -506,10 +485,7 @@ describe("session methods over real handlers", () => {
       await rpc(connection, "session/input", {
         sessionId,
         requestId,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: requestId }],
-        },
+        content: inputFixture([{ type: "text" as const, text: requestId }]),
       })
       await expect
         .poll(async () => {
@@ -1143,10 +1119,7 @@ it("publishes sidebar changes across connections and requires restoring an archi
   const error = await rpcError(connection, "session/input", {
     sessionId: session.id,
     requestId: "request_archived",
-    content: {
-      kind: "parts" as const,
-      parts: [{ type: "text" as const, text: "hello" }],
-    },
+    content: inputFixture([{ type: "text" as const, text: "hello" }]),
   })
   expect(error.message).toContain("Restore this conversation")
   expect(

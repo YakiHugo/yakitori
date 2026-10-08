@@ -1,3 +1,4 @@
+import { inputFixture } from "../fixtures/user-input.ts"
 import "./setup-store-environment.ts"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadGoal } from "../../src/core/goal.ts"
@@ -17,8 +18,8 @@ import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import {
   createEventEnvelope,
   EventType,
-  InputRole,
   type InputContent,
+  InputRole,
 } from "../../src/kernel/events.ts"
 import type {
   ApiProject,
@@ -495,7 +496,7 @@ describe("app store event stream", () => {
           requestId: "request:1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("hello") },
+          content: inputFixture(inputParts("hello")),
         },
       },
     })
@@ -507,7 +508,7 @@ describe("app store event stream", () => {
       expect.objectContaining({
         kind: "user_input",
         text: "hello",
-        parts: inputParts("hello"),
+        content: inputParts("hello"),
       }),
     ])
     expect(useAppStore.getState().selectedSession?.counts.inputs).toBe(1)
@@ -547,7 +548,7 @@ describe("app store event stream", () => {
       expect.objectContaining({
         kind: "user_input",
         text: "hello",
-        parts: inputParts("hello"),
+        content: inputParts("hello"),
       }),
       expect.objectContaining({
         kind: "assistant",
@@ -601,7 +602,7 @@ describe("app store event stream", () => {
       expect.objectContaining({
         kind: "user_input",
         text: "hello",
-        parts: inputParts("hello"),
+        content: inputParts("hello"),
       }),
       expect.objectContaining({
         kind: "assistant",
@@ -716,7 +717,7 @@ describe("app store event stream", () => {
             requestId: "request:a",
             inputId: "input_a",
             role: InputRole.User,
-            content: { kind: "parts", parts: inputParts("stale") },
+            content: inputFixture(inputParts("stale")),
           },
         },
       }),
@@ -737,7 +738,7 @@ describe("cancel queued input", () => {
         sessionId: "session_1",
         input: {
           submissionId: "request_1",
-          content: { kind: "parts", parts: inputParts("hello") },
+          content: inputFixture(inputParts("hello")),
         },
         createdAt: sessionDetail.createdAt,
       },
@@ -1050,7 +1051,7 @@ describe("fork session", () => {
             requestId: "request:replacement",
             inputId: "input_replacement",
             role: InputRole.User,
-            content: { kind: "parts", parts: inputParts("replacement") },
+            content: inputFixture(inputParts("replacement")),
             parentInputId: "input_1",
             modelSelection: {
               provider: "openai",
@@ -1093,7 +1094,7 @@ describe("fork session", () => {
             requestId: "request:fork",
             inputId: "input_1",
             role: InputRole.User,
-            content: { kind: "parts", parts: inputParts("original") },
+            content: inputFixture(inputParts("original")),
           },
         },
       }),
@@ -1109,10 +1110,9 @@ describe("fork session", () => {
       }),
     )
 
-    await useAppStore.getState().forkSession("input_1", "edit", {
-      kind: "parts",
-      parts: inputParts("replacement"),
-    })
+    await useAppStore
+      .getState()
+      .forkSession("input_1", "edit", inputFixture(inputParts("replacement")))
 
     expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([])
     expect(fakeRef.current.requestsFor("session/fork")).toEqual([
@@ -1122,7 +1122,7 @@ describe("fork session", () => {
           sessionId: "session_1",
           atInputId: "input_1",
           reason: "edit",
-          content: { kind: "parts", parts: inputParts("replacement") },
+          content: inputFixture(inputParts("replacement")),
           modelSelection: {
             provider: "openai",
             model: "gpt-test",
@@ -1146,7 +1146,7 @@ describe("fork session", () => {
         kind: "user_input",
         inputId: "input_replacement",
         text: "replacement",
-        parts: inputParts("replacement"),
+        content: inputParts("replacement"),
       }),
     ])
     expect(stream?.closed).toBe(true)
@@ -1475,7 +1475,7 @@ describe("project state", () => {
     expect(useAppStore.getState().currentProject).toBe("project_b")
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(
-      useAppStore.getState().sessionDrafts.session_existing?.parts,
+      useAppStore.getState().sessionDrafts.session_existing?.content,
     ).toEqual(inputParts("unfinished message"))
     expect(useAppStore.getState().collapsedProjects.project_b).toBeUndefined()
     expect(fakeRef.current.requestsFor("session/create")).toEqual([
@@ -1994,12 +1994,11 @@ describe("model selection", () => {
     expect(admissions).toHaveLength(1)
     expect(admissions[0]?.params).toMatchObject({
       sessionId: "session_1",
-      content: {
-        kind: "parts",
-        parts: inputParts(
+      content: inputFixture(
+        inputParts(
           "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
         ),
-      },
+      ),
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
@@ -2027,10 +2026,7 @@ describe("model selection", () => {
                     requestId: body.requestId,
                     inputId: "input_1",
                     role: InputRole.User,
-                    content: {
-                      kind: "parts",
-                      parts: inputParts("hello [$A](/a)"),
-                    },
+                    content: inputFixture(inputParts("hello [$A](/a)")),
                   },
                 },
               }),
@@ -2083,7 +2079,7 @@ describe("model selection", () => {
     expect(admissions).toHaveLength(1)
     expect(admissions[0]?.params).toMatchObject({
       sessionId: "session_1",
-      content: { kind: "parts", parts: inputParts("hello") },
+      content: inputFixture(inputParts("hello")),
       modelSelection: {
         provider: "openai",
         model: "gpt-5.1-codex",
@@ -2120,7 +2116,7 @@ describe("model selection", () => {
     expect(steers[0]?.params).toMatchObject({
       sessionId: "session_1",
       expectedTurnId: "turn_1",
-      content: { kind: "parts", parts: inputParts("follow up") },
+      content: inputFixture(inputParts("follow up")),
     })
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
     expect(useAppStore.getState().promptDraft).toBeUndefined()
@@ -2166,7 +2162,7 @@ describe("model selection", () => {
             inputId: "input_1",
             role: InputRole.User,
             steered: true,
-            content: { kind: "parts", parts: inputParts("first") },
+            content: inputFixture(inputParts("first")),
           },
         },
       }),
@@ -2185,11 +2181,13 @@ describe("model selection", () => {
         },
       }),
     )
-    expect(useAppStore.getState().promptDraft).toEqual([
-      { type: "text", text: "second" },
-      { type: "text", text: "\n" },
-      { type: "text", text: "new draft" },
-    ])
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputFixture([
+        { type: "text", text: "second" },
+        { type: "text", text: "\n" },
+        { type: "text", text: "new draft" },
+      ]),
+    )
     expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
     expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(0)
   })
@@ -2232,7 +2230,7 @@ describe("model selection", () => {
             inputId: "input_1",
             role: InputRole.User,
             steered: true,
-            content: { kind: "parts", parts: inputParts("first") },
+            content: inputFixture(inputParts("first")),
           },
         },
       }),
@@ -2367,10 +2365,7 @@ describe("model selection", () => {
         return {
           requestId: body.requestId,
           turnId: body.expectedTurnId,
-          content: {
-            kind: "parts",
-            parts: inputParts("inspect image", [promoted]),
-          },
+          content: inputFixture(inputParts("inspect image", [promoted])),
         }
       }
       if (method === "session/input/queue") {
@@ -2416,10 +2411,7 @@ describe("model selection", () => {
     expect(
       fakeRef.current.requestsFor("session/input/queue")[0]?.params,
     ).toMatchObject({
-      content: {
-        kind: "parts",
-        parts: inputParts("inspect image", [promoted]),
-      },
+      content: inputFixture(inputParts("inspect image", [promoted])),
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
@@ -2491,19 +2483,16 @@ describe("model selection", () => {
     emitSnapshot(replay, { ...sessionDetail, seq: 3 })
     replay?.emitReplayComplete()
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts("", [original]))
+    ).toEqual(inputParts("", [original]).attachments)
     const steer = fakeRef.current.requestsFor("session/input/steer")[0]
       ?.params as { requestId: string }
     response.resolve({
       requestId: steer.requestId,
       turnId: "turn_1",
-      content: {
-        kind: "parts",
-        parts: inputParts("inspect image", [promoted]),
-      },
+      content: inputFixture(inputParts("inspect image", [promoted])),
     })
     await submission
     expect(useAppStore.getState().promptDraft).toEqual(
@@ -2518,10 +2507,10 @@ describe("model selection", () => {
     emitSnapshot(fakeRef.current.streams.at(-1), { ...sessionDetail, seq: 3 })
     fakeRef.current.streams.at(-1)?.emitReplayComplete()
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts("", [promoted]))
+    ).toEqual(inputParts("", [promoted]).attachments)
   })
 
   it("falls back to a queued admission when the active turn ended before steering", async () => {
@@ -2542,9 +2531,8 @@ describe("model selection", () => {
       if (method === "session/input/queue") {
         const body = params as { requestId: string }
         return {
-          content: {
-            kind: "parts",
-            parts: inputParts("follow up", [
+          content: inputFixture(
+            inputParts("follow up", [
               {
                 ...original,
                 file: {
@@ -2553,7 +2541,7 @@ describe("model selection", () => {
                 },
               },
             ]),
-          },
+          ),
           requestId: body.requestId,
           inputId: "input_2",
           event: createEventEnvelope({
@@ -2565,9 +2553,8 @@ describe("model selection", () => {
                 requestId: body.requestId,
                 inputId: "input_2",
                 role: InputRole.User,
-                content: {
-                  kind: "parts",
-                  parts: inputParts("follow up", [
+                content: inputFixture(
+                  inputParts("follow up", [
                     {
                       ...original,
                       file: {
@@ -2576,7 +2563,7 @@ describe("model selection", () => {
                       },
                     },
                   ]),
-                },
+                ),
               },
             },
           }),
@@ -2599,7 +2586,7 @@ describe("model selection", () => {
     expect(
       fakeRef.current.requestsFor("session/input/queue")[0]?.params,
     ).toMatchObject({
-      content: { kind: "parts", parts: inputParts("follow up", [original]) },
+      content: inputFixture(inputParts("follow up", [original])),
     })
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
     expect(useAppStore.getState().promptDraft).toBeUndefined()
@@ -2645,7 +2632,7 @@ describe("model selection", () => {
             requestId,
             inputId: "input_1",
             role: InputRole.User,
-            content: { kind: "parts", parts: inputParts("hello") },
+            content: inputFixture(inputParts("hello")),
           },
         },
       }),
@@ -2671,7 +2658,7 @@ describe("model selection", () => {
             sessionId: "session_1",
             input: {
               submissionId: body.requestId,
-              content: { kind: "parts", parts: inputParts("run later") },
+              content: inputFixture(inputParts("run later")),
             },
             createdAt: sessionDetail.createdAt,
           },
@@ -2749,10 +2736,9 @@ describe("model selection", () => {
 
   it("restores an unconfirmed submission and its attachments within the app", async () => {
     globalThis.localStorage.clear()
-    fakeRef.current.respond = admissionResponder(() => ({
-      kind: "parts",
-      parts: inputParts("recover after reload", [promoted]),
-    }))
+    fakeRef.current.respond = admissionResponder(() =>
+      inputFixture(inputParts("recover after reload", [promoted])),
+    )
     const attachment = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -2801,18 +2787,17 @@ describe("model selection", () => {
       ),
     )
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts("", [promoted]))
+    ).toEqual(inputParts("", [promoted]).attachments)
   })
 
   it("clears an attachment-only draft after admission", async () => {
     globalThis.localStorage.clear()
-    fakeRef.current.respond = admissionResponder(() => ({
-      kind: "parts",
-      parts: inputParts("", [promoted]),
-    }))
+    fakeRef.current.respond = admissionResponder(() =>
+      inputFixture(inputParts("", [promoted])),
+    )
     const attachment = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -2838,10 +2823,10 @@ describe("model selection", () => {
     await useAppStore.getState().admitInput(inputParts("", [attachment]))
 
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts(""))
+    ).toEqual(inputParts("").attachments)
   })
 
   it.each([
@@ -3191,10 +3176,9 @@ it("resumes the source event stream after an edit request fails", async () => {
   const first = fakeRef.current.streams[0]
   emitSnapshot(first)
   first?.emitReplayComplete()
-  await useAppStore.getState().forkSession("input_1", "edit", {
-    kind: "parts",
-    parts: inputParts("Replacement"),
-  })
+  await useAppStore
+    .getState()
+    .forkSession("input_1", "edit", inputFixture(inputParts("Replacement")))
   expect(useAppStore.getState().selection.sessionId).toBe("session_1")
   expect(useAppStore.getState().message).toBe("Edit failed")
   const resumed = fakeRef.current.streams[1]
@@ -3209,7 +3193,7 @@ it("resumes the source event stream after an edit request fails", async () => {
           requestId: "late",
           inputId: "input_late",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("Input during edit") },
+          content: inputFixture(inputParts("Input during edit")),
         },
       },
     }),
@@ -3255,10 +3239,7 @@ describe("new session drafts", () => {
     expect(pending).toEqual([
       expect.objectContaining({
         sessionId: "draft_first_input",
-        content: {
-          kind: "parts",
-          parts: inputParts("first send", [attachment]),
-        },
+        content: inputFixture(inputParts("first send", [attachment])),
       }),
     ])
     creation.reject(new ApiRequestError("Creation failed", "internal_error"))
@@ -3286,10 +3267,7 @@ describe("new session drafts", () => {
         const input = fakeRef.current.requestsFor("session/input").at(-1)
           ?.params as { requestId: string }
         return {
-          content: {
-            kind: "parts",
-            parts: inputParts("first send", [promoted]),
-          },
+          content: inputFixture(inputParts("first send", [promoted])),
           requestId: input.requestId,
           inputId: "input_1",
         }
@@ -3374,7 +3352,7 @@ describe("new session drafts", () => {
       fakeRef.current.requestsFor("session/input")[0]?.params,
     ).toMatchObject({
       sessionId: "session_1",
-      content: { kind: "parts", parts: inputParts("hello") },
+      content: inputFixture(inputParts("hello")),
       modelSelection: { provider: "faux", model: "scripted" },
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
@@ -3465,19 +3443,20 @@ describe("new session drafts", () => {
   it("queues one captured first prompt with images, excerpts, and model during creation", async () => {
     globalThis.localStorage.clear()
     const create = deferredResponse()
-    const respond = admissionResponder(() => ({
-      kind: "parts",
-      parts: inputParts("first", [
-        {
-          ...image,
-          file: {
-            rolloutId: "session_1",
-            path: "attachments/requests/captured/1.png",
+    const respond = admissionResponder(() =>
+      inputFixture(
+        inputParts("first", [
+          {
+            ...image,
+            file: {
+              rolloutId: "session_1",
+              path: "attachments/requests/captured/1.png",
+            },
           },
-        },
-      ]),
-      contextAttachments: [excerpt],
-    }))
+        ]),
+        { references: [excerpt] }.references,
+      ),
+    )
     fakeRef.current.respond = (method, params) =>
       method === "session/create" ? create.promise : respond(method, params)
     useAppStore.getState().startNewSession()
@@ -3511,14 +3490,7 @@ describe("new session drafts", () => {
       .getState()
       .admitInput(inputParts("first", [image]))
     useAppStore.getState().setPromptDraft(inputParts("next"))
-    useAppStore
-      .getState()
-      .setPromptDraft([
-        ...(useAppStore.getState().promptDraft ?? []).filter(
-          (part) => part.type === "text",
-        ),
-        ...inputParts(""),
-      ])
+    useAppStore.getState().setPromptDraft(inputParts("next"))
     useAppStore.getState().removePromptExcerpt(excerpt.id)
     useAppStore
       .getState()
@@ -3538,11 +3510,10 @@ describe("new session drafts", () => {
     expect(
       fakeRef.current.requestsFor("session/input")[0]?.params,
     ).toMatchObject({
-      content: {
-        kind: "parts",
-        parts: inputParts("first", [image]),
-        contextAttachments: [excerpt],
-      },
+      content: inputFixture(
+        inputParts("first", [image]),
+        { references: [excerpt] }.references,
+      ),
       modelSelection: { provider: "faux", model: "first" },
     })
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("next"))
@@ -3942,7 +3913,7 @@ it("preserves draft edits made while the first session is being created", async 
     inputParts("hello with another thought"),
   )
   expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
-    { content: { kind: "parts", parts: inputParts("hello") } },
+    { content: inputFixture(inputParts("hello")) },
   )
 })
 
@@ -4740,7 +4711,7 @@ it.each(
           requestId: request.requestId,
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("hi") },
+          content: inputFixture(inputParts("hi")),
         },
       },
     }),
@@ -4825,11 +4796,13 @@ it.each([
     stream.emitReplayComplete()
   }
   await vi.waitFor(() =>
-    expect(useAppStore.getState().promptDraft).toEqual([
-      { type: "text", text: "hi" },
-      { type: "text", text: "\n" },
-      { type: "text", text: "Next question" },
-    ]),
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputFixture([
+        { type: "text", text: "hi" },
+        { type: "text", text: "\n" },
+        { type: "text", text: "Next question" },
+      ]),
+    ),
   )
   expect(
     useAppStore.getState().execution.admittedRequestIds[request.requestId],

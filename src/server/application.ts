@@ -1,15 +1,4 @@
-import {
-  createChatGPTConnections,
-  type ChatGPTConnections,
-} from "./chatgpt-connections.ts"
-import {
-  createChatGPTModelConnections,
-  ChatGPTModelCatalogError,
-} from "./chatgpt-model-connections.ts"
 import { createHash } from "node:crypto"
-import { createSubscriptionAccountStore } from "./subscription-accounts.ts"
-import { defaultCodexAuthPath } from "../runtime/codex-credentials.ts"
-import { resolveGrokCredentials } from "../runtime/grok-credentials.ts"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -33,7 +22,6 @@ import {
 import type { TurnProcessor } from "../core/session.ts"
 import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
-import { readPdf } from "../runtime/tools/read-pdf.ts"
 import {
   createMateKernel,
   createSqliteMateStore,
@@ -50,14 +38,16 @@ import {
   sidebarChangedMethod,
   sideChatChangedMethod,
 } from "../protocol/rpc-wire.ts"
+import { defaultCodexAuthPath } from "../runtime/codex-credentials.ts"
 import { GoalRuntime } from "../runtime/goal-runtime.ts"
+import { resolveGrokCredentials } from "../runtime/grok-credentials.ts"
 import {
   type AgentRuntime,
   type ApprovalPolicy,
   acquireRuntimeLock,
   type CodexLogin,
   createAgentRuntime,
-  createAnthropicProvider,
+  createAnthropicTurnTransport,
   createCodexProvider,
   createDefaultTools,
   createDiscoveringModelsManager,
@@ -66,6 +56,7 @@ import {
   createMcpConnectionManager,
   createModelProvider,
   createOpenAIProvider,
+  createOpenAITurnTransport,
   createPermissionGate,
   createProviderContinuationScope,
   createProviderRegistry,
@@ -93,15 +84,18 @@ import {
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
-import { createModelSourceTool } from "./model-source-tools.ts"
-import {
-  createSubscriptionConnections,
-  type SubscriptionConnections,
-} from "./subscription-connections.ts"
 import { createSkillsLoader } from "../runtime/skills.ts"
+import { readPdf } from "../runtime/tools/read-pdf.ts"
+import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
+import {
+  type ChatGPTConnections,
+  createChatGPTConnections,
+} from "./chatgpt-connections.ts"
+import {
+  ChatGPTModelCatalogError,
+  createChatGPTModelConnections,
+} from "./chatgpt-model-connections.ts"
 import { resolveYakitoriHome } from "./env-file.ts"
-import { createProviderService } from "./provider-service.ts"
-import type { StoredProviderConfiguration } from "./provider-configuration.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
   createThreadServerHandlers,
@@ -111,6 +105,7 @@ import {
 import { createYakitoriHttpServer } from "./http.ts"
 import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
+import { createModelSourceTool } from "./model-source-tools.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -123,6 +118,8 @@ import type {
   ApiReadSubscriptionResponse,
   ApiSubscriptionProvider,
 } from "./protocol.ts"
+import type { StoredProviderConfiguration } from "./provider-configuration.ts"
+import { createProviderService } from "./provider-service.ts"
 import type { RequestGate } from "./request-gate.ts"
 import { createSessionTitleGenerator } from "./session-title.ts"
 import {
@@ -135,6 +132,11 @@ import {
   type ProjectStore,
   type SqliteProjectStore,
 } from "./sqlite-project-store.ts"
+import { createSubscriptionAccountStore } from "./subscription-accounts.ts"
+import {
+  createSubscriptionConnections,
+  type SubscriptionConnections,
+} from "./subscription-connections.ts"
 import {
   type ConfigurationSnapshot,
   createUserConfigStore,
@@ -175,6 +177,8 @@ export type YakitoriApplicationOptions = {
     fetchFn?: typeof fetch
     openAuthorization?: (url: string, signal?: AbortSignal) => Promise<void>
   }>
+  // Explicitly reachable by the model backend; the local GUI origin is not public.
+  readonly assetBaseUrl?: string
   readonly activeMateId?: string
   readonly guiStaticDir?: string
   readonly mateDatabasePath?: string
@@ -224,6 +228,10 @@ export type YakitoriApplication = {
 export async function createYakitoriApplication(
   options: YakitoriApplicationOptions = {},
 ): Promise<YakitoriApplication> {
+  const assetBaseUrl =
+    options.assetBaseUrl === undefined
+      ? undefined
+      : requireAssetBaseUrl(options.assetBaseUrl)
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const rootDir = options.rootDir ?? ".yakitori"
@@ -1002,6 +1010,13 @@ export async function createYakitoriApplication(
                 ),
               }),
           rolloutAssets,
+          ...(assetBaseUrl === undefined
+            ? {}
+            : {
+                assetUrl: (
+                  source: import("../core/asset-types.ts").RolloutAssetReference,
+                ) => rolloutAssetUrl(source, assetBaseUrl),
+              }),
           approvalPolicy,
           onOperationalFailure: (failure) => {
             reportOperationalFailure(reporter, {
@@ -1776,8 +1791,13 @@ function createApiKeyProvider(
         wireApi: "openai_responses",
         capabilities: { remoteCompaction: false, nativePdf: true },
       },
-      createAttemptStream: () =>
-        createOpenAIProvider({ apiKey, model, baseURL: OPENAI_API_BASE_URL }),
+      createTurnTransport: () =>
+        createOpenAITurnTransport({
+          apiKey,
+          model,
+          baseURL: OPENAI_API_BASE_URL,
+          warmup: false,
+        }),
       continuationScope: createProviderContinuationScope(
         provider,
         OPENAI_API_BASE_URL,
@@ -1796,8 +1816,8 @@ function createApiKeyProvider(
         nativePdf: provider === "anthropic",
       },
     },
-    createAttemptStream: () =>
-      createAnthropicProvider({
+    createTurnTransport: () =>
+      createAnthropicTurnTransport({
         apiKey,
         model,
         baseURL,
@@ -1888,8 +1908,9 @@ async function registerCodexLogin(
         wireApi: "openai_responses",
         capabilities: { remoteCompaction: false, nativePdf: true },
       },
-      createAttemptStream: () =>
-        createOpenAIProvider({
+      createTurnTransport: () =>
+        createOpenAITurnTransport({
+          warmup: false,
           apiKey: login.apiKey,
           model: "selected-at-request-time",
           baseURL: OPENAI_API_BASE_URL,

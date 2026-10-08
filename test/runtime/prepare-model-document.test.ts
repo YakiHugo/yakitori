@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import {
   createNativePdfBudget,
   prepareModelDocuments,
@@ -65,7 +65,7 @@ describe("stored PDF model projection", () => {
       nativePdf: true,
       images: true,
     })
-    expect(native.documents[0]?.data).toBe(pdf.toString("base64"))
+    expect(native.documents).toEqual(documents)
     const vision = await prepareModelDocuments(documents, ctx.rolloutAssets, {
       nativePdf: false,
       images: true,
@@ -90,7 +90,7 @@ describe("stored PDF model projection", () => {
       { nativePdf: true, images: true },
     )
     expect(nativeAgain.documents[0]?.file).toEqual(documents[0]?.file)
-    expect(nativeAgain.documents[0]?.data).toBe(pdf.toString("base64"))
+    expect(nativeAgain.documents).toEqual(documents)
     expect(JSON.stringify(durable)).toBe(original)
   })
 
@@ -281,7 +281,7 @@ describe("native PDF request limits", () => {
         undefined,
         budget,
       )
-      expect(result.documents[0]?.data).toBe(pdf.toString("base64"))
+      expect(result.documents).toEqual([document])
     }
     const rejected = await prepareModelDocuments(
       [document],
@@ -298,7 +298,7 @@ describe("native PDF request limits", () => {
       ctx.rolloutAssets,
       capabilities,
     )
-    expect(retried.documents[0]?.data).toBe(pdf.toString("base64"))
+    expect(retried.documents).toEqual([document])
     expect(JSON.stringify(document)).toBe(original)
     expect(await ctx.rolloutAssets.read(saved.reference)).toEqual(pdf)
   })

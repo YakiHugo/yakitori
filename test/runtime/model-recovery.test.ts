@@ -11,6 +11,7 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const testUserHome = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -102,12 +103,9 @@ it("recovers a model request without replaying a completed tool or duplicating i
       mateRevisionId: "mate_revision_test",
     })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Record the effect and finish." },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Record the effect and finish." },
+      ]),
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     await manager.shutdown()

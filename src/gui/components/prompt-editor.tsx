@@ -1,20 +1,11 @@
-import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
-import type {
-  ImageAttachment,
-  UserAttachment,
-  PdfAttachment,
-  ImageDetail,
-  InputPart,
-} from "../../kernel/events.ts"
-import { sameInputParts } from "../input-parts.ts"
 import { baseKeymap, selectAll, splitBlock } from "prosemirror-commands"
 import { closeHistory, history, redo, undo } from "prosemirror-history"
 import { keymap } from "prosemirror-keymap"
 import { Slice } from "prosemirror-model"
 import {
   EditorState,
-  TextSelection,
   type SelectionBookmark,
+  TextSelection,
 } from "prosemirror-state"
 import { EditorView } from "prosemirror-view"
 import {
@@ -24,6 +15,16 @@ import {
   useLayoutEffect,
   useRef,
 } from "react"
+import { assetSourceKey } from "../../core/asset-types.ts"
+import type { InputDraft } from "../../core/user-input.ts"
+import type {
+  ImageAttachment,
+  ImageDetail,
+  PdfAttachment,
+  UserAttachment,
+} from "../../kernel/events.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
+import { sameInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
@@ -61,9 +62,9 @@ function attachmentInsertionBookmark(position: number): SelectionBookmark {
 
 type Props = Readonly<{
   ref?: Ref<PromptEditorHandle>
-  value: readonly InputPart[]
+  value: InputDraft
   // History recall temporarily parks the unsent draft outside this document.
-  parkedParts?: readonly InputPart[] | undefined
+  parkedParts?: InputDraft | undefined
   apiBase: string
   label: string
   placeholder?: string
@@ -72,7 +73,7 @@ type Props = Readonly<{
   activeSuggestion?: string | undefined
   menuOpen?: boolean
   suggestionsId?: string
-  onChange(parts: readonly InputPart[]): void
+  onChange(parts: InputDraft): void
   onPreviewImage?(image: ImageAttachment): void
   onOpenDocument?(document: PdfAttachment): void
   onDiscardAttachments?(images: readonly UserAttachment[]): void
@@ -91,35 +92,29 @@ export function PromptEditor(props: Props) {
   const latest = useRef(props)
   const insertions = useRef(new Set<{ bookmark: SelectionBookmark }>())
   const retainedAttachments = useRef(new Map<string, UserAttachment>())
-  const rememberAttachments = useCallback((parts: readonly InputPart[]) => {
-    for (const part of parts)
+  const rememberAttachments = useCallback((parts: InputDraft) => {
+    for (const part of parts.attachments)
       if (
-        part.type !== "text" &&
+        !("url" in part.file) &&
         part.file.path.startsWith("attachments/staging/")
       )
-        retainedAttachments.current.set(
-          `${part.file.rolloutId}\0${part.file.path}`,
-          {
-            name: part.name,
-            mediaType: part.mediaType,
-            sizeBytes: part.sizeBytes,
-            ...(part.type === "image" && part.detail !== undefined
-              ? { detail: part.detail }
-              : {}),
-            file: part.file,
-          },
-        )
+        retainedAttachments.current.set(assetSourceKey(part.file), {
+          name: part.name,
+          mediaType: part.mediaType,
+          sizeBytes: part.sizeBytes,
+          ...("detail" in part && part.detail !== undefined
+            ? { detail: part.detail }
+            : {}),
+          file: part.file,
+        })
   }, [])
   const releaseUnusedAttachments = useCallback(
-    (parts: readonly InputPart[]) => {
-      const owned = [...parts, ...(latest.current.parkedParts ?? [])]
-      const live = new Set(
-        owned.flatMap((part) =>
-          part.type !== "text"
-            ? [`${part.file.rolloutId}\0${part.file.path}`]
-            : [],
-        ),
-      )
+    (parts: InputDraft) => {
+      const owned = [
+        ...parts.attachments,
+        ...(latest.current.parkedParts?.attachments ?? []),
+      ]
+      const live = new Set(owned.flatMap((part) => [assetSourceKey(part.file)]))
       const unused = [...retainedAttachments.current].filter(
         ([key]) => !live.has(key),
       )
@@ -127,11 +122,8 @@ export function PromptEditor(props: Props) {
       if (unused.length)
         latest.current.onDiscardAttachments?.(unused.map(([, image]) => image))
       // The surface owns parked snapshots across keyed editor remounts.
-      for (const part of latest.current.parkedParts ?? [])
-        if (part.type !== "text")
-          retainedAttachments.current.delete(
-            `${part.file.rolloutId}\0${part.file.path}`,
-          )
+      for (const part of latest.current.parkedParts?.attachments ?? [])
+        retainedAttachments.current.delete(assetSourceKey(part.file))
       rememberAttachments(parts)
     },
     [rememberAttachments],
@@ -166,14 +158,12 @@ export function PromptEditor(props: Props) {
             if (editor.current !== view || !insertions.current.delete(pending))
               return false
             const selection = pending.bookmark.resolve(view.state.doc)
-            const content = parsePromptParts(
-              images.map(
-                (image): InputPart =>
-                  image.mediaType === "application/pdf"
-                    ? { ...image, type: "document" }
-                    : { ...image, type: "image" },
-              ),
-            ).firstChild?.content
+            const content = parsePromptParts({
+              kind: "input",
+              text: "",
+              elements: [],
+              attachments: images,
+            }).firstChild?.content
             if (!content) return false
             view.dispatch(
               closeHistory(view.state.tr).replaceWith(
@@ -473,7 +463,7 @@ export function PromptEditor(props: Props) {
     const view = editor.current
     if (!view) return
     if (
-      !sameInputParts(
+      !sameInputDraft(
         serializePromptParts(view.state.doc, (image) =>
           inputAttachmentOwnership.resolve(props.apiBase, image),
         ),

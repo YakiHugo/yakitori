@@ -1,15 +1,16 @@
-import { inputContentText } from "../../src/kernel/input-content.ts"
 import { describe, expect, it } from "vitest"
 import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
-  TurnTask,
   TurnProcessor,
   TurnRuntime,
+  TurnTask,
 } from "../../src/core/session.ts"
 import { SessionStatus, type TurnInput } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createUserInput, inputContentText } from "../../src/core/user-input.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
@@ -31,7 +32,7 @@ describe("live Session actor", () => {
       const thread = await manager.createThread()
       await thread.startIfIdle({
         submissionId: "turn_active",
-        content: { kind: "parts", parts: [{ type: "text", text: "start" }] },
+        content: createUserInput("start"),
       })
       const image = {
         type: "image" as const,
@@ -42,14 +43,11 @@ describe("live Session actor", () => {
       }
       const steer: TurnInput = {
         submissionId: "steer_ordered",
-        content: {
-          kind: "parts",
-          parts: [
-            { type: "text", text: "before" },
-            image,
-            { type: "text", text: "after" },
-          ],
-        },
+        content: inputFixture([
+          { type: "text", text: "before" },
+          image,
+          { type: "text", text: "after" },
+        ]),
       }
       expect(await thread.steer(steer, "turn_active")).toEqual({
         type: "steered",
@@ -63,10 +61,10 @@ describe("live Session actor", () => {
         await thread.steer(
           {
             ...steer,
-            content: {
-              kind: "parts",
-              parts: [image, { type: "text", text: "beforeafter" }],
-            },
+            content: inputFixture([
+              image,
+              { type: "text", text: "beforeafter" },
+            ]),
           },
           "turn_active",
         ),
@@ -161,10 +159,9 @@ describe("live Session actor", () => {
     try {
       const thread = await manager.createThread()
       await thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "original constraint" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "original constraint" },
+        ]),
       })
       await nextEventOfType(thread, "turn.completed")
       expect(
@@ -205,10 +202,7 @@ describe("live Session actor", () => {
       const thread = await manager.createThread()
       await thread.startIfIdle({
         submissionId: "turn_checkpoint",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "run" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "run" }]),
       })
       await entered.promise
       store.flushStarted = () => flushStarted.resolve()
@@ -273,10 +267,7 @@ describe("live Session actor", () => {
     try {
       const thread = await manager.createThread()
       await thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "run" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "run" }]),
       })
       await nextEventOfType(thread, "turn.failed")
       expect(proceeded).toBe(false)
@@ -351,10 +342,7 @@ describe("live Session actor", () => {
     const original = await manager.createThread()
     await original.startIfIdle({
       submissionId: "turn_original",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "original" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "original" }]),
     })
     await nextEventOfType(original, "turn.completed")
     const { thread: edited } = await manager.forkThread({
@@ -365,10 +353,7 @@ describe("live Session actor", () => {
     })
     await edited.startIfIdle({
       submissionId: "turn_edited",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "edited" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "edited" }]),
     })
     await nextEventOfType(edited, "turn.completed")
     const { thread: fork } = await manager.forkThread({
@@ -407,10 +392,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_before_close",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "persist me" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "persist me" }]),
     })
     await nextEventOfType(thread, "turn.completed")
 
@@ -441,10 +423,7 @@ describe("live Session actor", () => {
     const first = await manager.createThread(subagentInput(root.id, "first"))
     await first.startIfIdle({
       submissionId: "turn_first_child",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "finish" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "finish" }]),
     })
     await nextEventOfType(first, "turn.completed")
     const second = await manager.createThread(subagentInput(root.id, "second"))
@@ -468,10 +447,7 @@ describe("live Session actor", () => {
     const root = await manager.createThread()
     const firstFork = await manager.createThread({ parentThreadId: root.id })
     await firstFork.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "done" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "done" }]),
     })
     await nextEventOfType(firstFork, "turn.completed")
     const secondFork = await manager.createThread({ parentThreadId: root.id })
@@ -499,16 +475,10 @@ describe("live Session actor", () => {
     const first = await manager.createThread(subagentInput(root.id, "first"))
     const second = await manager.createThread(subagentInput(root.id, "second"))
     await first.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "first" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
     await second.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "second" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "second" }]),
     })
 
     release.resolve()
@@ -582,10 +552,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
 
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "run" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
     expect(manager.runningTurnCount).toBe(1)
 
@@ -616,10 +583,7 @@ describe("live Session actor", () => {
 
     const started = await thread.startIfIdle({
       submissionId: "turn_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "first" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
     expect(started).toEqual({
       type: "started",
@@ -629,19 +593,15 @@ describe("live Session actor", () => {
     expect(thread.agentStatus).toBe("running")
     expect(
       await thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "must not queue" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "must not queue" },
+        ]),
       }),
     ).toEqual({ type: "not_submitted", reason: "not_idle" })
     expect(
       await thread.steer(
         {
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "wrong" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "wrong" }]),
         },
         "turn_previous",
       ),
@@ -649,10 +609,9 @@ describe("live Session actor", () => {
     expect(
       await thread.steer(
         {
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "correction one" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "correction one" },
+          ]),
         },
         "turn_first",
       ),
@@ -660,10 +619,9 @@ describe("live Session actor", () => {
     expect(
       await thread.steer(
         {
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "correction two" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "correction two" },
+          ]),
         },
         "turn_first",
       ),
@@ -690,20 +648,14 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_closing",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "run" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
     await closed.promise
 
     await expect(
       thread.steer(
         {
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "too late" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "too late" }]),
         },
         "turn_closing",
       ),
@@ -728,10 +680,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     const input = {
       submissionId: "turn_idempotent",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "once" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "once" }]),
     }
     expect(await thread.startIfIdle(input)).toEqual({
       type: "started",
@@ -751,10 +700,7 @@ describe("live Session actor", () => {
     expect(
       await thread.startIfIdle({
         ...input,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "different" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "different" }]),
       }),
     ).toEqual({ type: "not_submitted", reason: "request_conflict" })
     expect(await thread.interruptTurn("turn_other")).toBe(false)
@@ -792,10 +738,9 @@ describe("live Session actor", () => {
 
     await expect(
       thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "must not persist" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "must not persist" },
+        ]),
       }),
     ).rejects.toThrow("configuration unavailable")
     expect(thread.status).toBe(SessionStatus.Idle)
@@ -837,10 +782,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
 
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "fail" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "fail" }]),
     })
     expect(await nextEventOfType(thread, "session.error")).toMatchObject({
       message: "sync failure",
@@ -850,10 +792,7 @@ describe("live Session actor", () => {
 
     await thread.startIfIdle({
       submissionId: "turn_abort",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "abort" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "abort" }]),
     })
     await thread.interrupt("user_cancelled")
     expect(await nextEventOfType(thread, "turn.interrupted")).toMatchObject({
@@ -905,10 +844,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_stuck",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "stuck" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "stuck" }]),
     })
     await running.promise
 
@@ -939,10 +875,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_abort_throws",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "stuck" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "stuck" }]),
     })
     await running.promise
 
@@ -980,10 +913,7 @@ describe("live Session actor", () => {
     expect(
       await thread.startIfIdle({
         submissionId: "turn_durable",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "durable" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "durable" }]),
       }),
     ).toEqual({
       type: "started",
@@ -1046,10 +976,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_input_retry",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "record once" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "record once" }]),
     })
     await nextEventOfType(thread, "turn.completed")
     expect(sampled).toBe(1)
@@ -1084,10 +1011,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_shutdown_fence",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "acknowledged" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "acknowledged" }]),
     })
     await flushStarted.promise
     const shutdown = manager.shutdown()
@@ -1132,10 +1056,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     const input = {
       submissionId: "turn_retry_fence",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "send once" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "send once" }]),
     }
     store.failNextFlush = true
 
@@ -1161,10 +1082,7 @@ describe("live Session actor", () => {
     expect(
       await thread.startIfIdle({
         submissionId: "turn_other",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "different" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "different" }]),
       }),
     ).toEqual({
       type: "started",
@@ -1206,10 +1124,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     const input = {
       submissionId: "turn_uncertain_append",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "only once" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "only once" }]),
     }
     store.failNextAppend = true
     // The recording drains, detects the uncertain append, and lands the batch
@@ -1237,20 +1152,17 @@ describe("live Session actor", () => {
 
     await thread.startIfIdle({
       submissionId: "turn_image",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "inspect" },
-          {
-            type: "image" as const,
-            name: "screen.png",
-            mediaType: "image/png",
-            sizeBytes: 123,
-            detail: "original",
-            file: { rolloutId: thread.id, path: "attachments/screen.png" },
-          },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect" },
+        {
+          type: "image" as const,
+          name: "screen.png",
+          mediaType: "image/png",
+          sizeBytes: 123,
+          detail: "original",
+          file: { rolloutId: thread.id, path: "attachments/screen.png" },
+        },
+      ]),
     })
     await nextEventOfType(thread, "turn.completed")
 
@@ -1264,7 +1176,6 @@ describe("live Session actor", () => {
         item: {
           role: "user",
           content: [
-            { type: "text", text: "inspect" },
             {
               type: "image",
               mediaType: "image/png",
@@ -1275,6 +1186,7 @@ describe("live Session actor", () => {
               },
               sizeBytes: 123,
             },
+            { type: "text", text: "inspect[Image 1]" },
           ],
         },
       },
@@ -1301,10 +1213,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_terminal_retry",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "finish" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "finish" }]),
     })
     await running.promise
 
@@ -1330,10 +1239,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_terminal_fence",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "finish" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "finish" }]),
     })
     store.flushStarted = () => terminalFlushStarted.resolve()
     store.flushBarrier = terminalMayFlush.promise
@@ -1343,10 +1249,7 @@ describe("live Session actor", () => {
     expect(thread.status).toBe(SessionStatus.Active)
     await expect(
       thread.startIfIdle({
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "too early" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "too early" }]),
       }),
     ).resolves.toEqual({ type: "not_submitted", reason: "not_idle" })
 
@@ -1381,18 +1284,12 @@ describe("live Session actor", () => {
     const source = await manager.createThread()
     await source.startIfIdle({
       submissionId: "item_before",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "before" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "before" }]),
     })
     await nextEventOfType(source, "turn.completed")
     await source.startIfIdle({
       submissionId: "item_cut",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "cut" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "cut" }]),
     })
 
     const forkPromise = manager.forkThread({
@@ -1402,10 +1299,7 @@ describe("live Session actor", () => {
     await forkStarted.promise
     const laterInput = source.startIfIdle({
       submissionId: "item_later",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "later" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "later" }]),
     })
     let laterSettled = false
     void laterInput.finally(() => {
@@ -1513,10 +1407,7 @@ describe("live Session actor", () => {
     const source = await manager.createThread()
     await source.startIfIdle({
       submissionId: "turn_source",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "source" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "source" }]),
     })
     await nextEventOfType(source, "turn.completed")
     store.failNextCreateFork = true
@@ -1548,10 +1439,7 @@ describe("live Session actor", () => {
     const source = await manager.createThread()
     await source.startIfIdle({
       submissionId: "turn_source",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "source" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "source" }]),
     })
     await nextEventOfType(source, "turn.completed")
 
@@ -1575,10 +1463,7 @@ describe("live Session actor", () => {
     })
 
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "run" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
     await nextEventOfType(thread, "turn.completed")
 
@@ -1608,20 +1493,14 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_with_answer",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "first" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
     await nextEventOfType(thread, "turn.completed")
     expect(thread.agentStatus).toEqual({ completed: "first answer" })
 
     await thread.startIfIdle({
       submissionId: "turn_without_answer",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "second" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "second" }]),
     })
     await nextEventOfType(thread, "turn.completed")
     expect(thread.agentStatus).toEqual({ completed: null })
@@ -1669,10 +1548,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_answer",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "answer" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "answer" }]),
     })
     expect(await nextEventOfType(thread, "turn.completed")).toMatchObject({
       completion,
@@ -1715,10 +1591,7 @@ describe("live Session actor", () => {
     )
     const thread = await manager.createThread()
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "run" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
     await nextEventOfType(thread, "turn.completed")
     expect(thread.agentStatus).toEqual({ completed: null })
@@ -1781,10 +1654,7 @@ describe("live Session actor", () => {
     const thread = await manager.createThread()
     await thread.startIfIdle({
       submissionId: "turn_compaction_race",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "compact" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "compact" }]),
     })
     await snapshotTaken.promise
     store.failNextFlush = true

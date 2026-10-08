@@ -146,7 +146,7 @@ function admissionIdentity(draft: AdmissionDraft): string {
       draft.sessionId,
       {
         ...draft.content,
-        contextAttachments: draft.content.contextAttachments ?? [],
+        references: draft.content.references ?? [],
       },
       draft.modelSelection ?? null,
       draft.supersedesRequestId ?? null,

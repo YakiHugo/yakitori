@@ -7,29 +7,30 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { isModelMessage, type ModelMessage } from "../../src/kernel/index.ts"
 import {
   createChatCompletionsProvider,
   toChatCompletionsMessages,
 } from "../../src/runtime/chat-completions-provider.ts"
+import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import {
   type ModelRequest,
-  type ModelStreamEvent,
   ModelStopReason,
+  type ModelStreamEvent,
 } from "../../src/runtime/model.ts"
-import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
-import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import {
   createToolRegistry,
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 describe("Chat Completions provider", () => {
   it.each([
@@ -1173,10 +1174,7 @@ describe("Chat Completions provider", () => {
           })
           threadId = thread.id
           await thread.startIfIdle({
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "Inspect" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "Inspect" }]),
           })
           await expect
             .poll(() => thread.agentStatus)
@@ -1377,10 +1375,7 @@ describe("Chat Completions provider", () => {
             mateRevisionId: "revision_test",
           })
           await thread.startIfIdle({
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "Inspect" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "Inspect" }]),
           })
           await expect
             .poll(() => thread.agentStatus)
@@ -1442,10 +1437,9 @@ describe("Chat Completions provider", () => {
           const resumed = await runtime.manager.resumeThread(thread.id)
           if (resumed === undefined) throw new Error("Missing resumed thread")
           await resumed.startIfIdle({
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "Continue" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Continue" },
+            ]),
           })
           await expect
             .poll(() => resumed.agentStatus)

@@ -1,17 +1,19 @@
-import OpenAI, { type ClientOptions } from "openai"
+import OpenAI, { type ClientOptions, toFile } from "openai"
 import type {
   Tool as OpenAITool,
   Response,
+  ResponseCreateParamsStreaming,
   ResponseInput,
   ResponseOutputMessage,
   ResponseOutputText,
-  ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
+import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
+import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import {
-  toChatGPTPlanRequest,
   requireChatGPTPlanNamespace,
+  toChatGPTPlanRequest,
 } from "./chatgpt-plan-request.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
@@ -23,8 +25,8 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
   type ModelStreamFailureEvent,
-  requireModelImageData,
   requireModelDocumentData,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 import { resolveModelWireEffort } from "./model-catalog.ts"
@@ -33,10 +35,11 @@ import {
   modelFailureFromUnknown,
 } from "./model-failure.ts"
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
-import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
+import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type OpenAIProviderOptions = {
+  readonly warmup?: boolean
   readonly requestProfile?: "chatgpt-plan"
   readonly apiKey: string
   readonly model: string
@@ -61,6 +64,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
       undefined,
       false,
       options.requestProfile,
+      undefined,
     )
 }
 
@@ -68,7 +72,27 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
 // expose no warmup capability; never probe subscription or compatible backends.
 export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
   const client = openAIClient(options)
+  const upload =
+    URL.parse(client.baseURL)?.origin === "https://api.openai.com" &&
+    options.requestProfile === undefined
+      ? createFileUploadCache(
+          async (document, bytes, signal) =>
+            (
+              await client.files.create(
+                {
+                  file: await toFile(bytes, document.name, {
+                    type: document.mediaType,
+                  }),
+                  purpose: "user_data",
+                },
+                signal === undefined ? undefined : { signal },
+              )
+            ).id,
+          (id) => client.files.delete(id),
+        )
+      : undefined
   const transport =
+    options.warmup !== false &&
     options.requestProfile === undefined &&
     supportsOpenAIRequestWarmup(options.baseURL ?? client.baseURL)
       ? createOpenAIResponsesTransport(client)
@@ -82,6 +106,7 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
       transport,
       false,
       options.requestProfile,
+      upload,
     )
   return {
     stream,
@@ -96,10 +121,13 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
               options.onResponseHeaders,
               transport,
               true,
+              options.requestProfile,
+              upload,
             )) as StreamFn,
         }),
-    close() {
+    async close() {
       transport?.close()
+      await upload?.close()
     },
   }
 }
@@ -126,6 +154,7 @@ async function* streamOpenAI(
   transport?: ReturnType<typeof createOpenAIResponsesTransport>,
   warmup = false,
   requestProfile?: "chatgpt-plan",
+  upload?: ReturnType<typeof createFileUploadCache>,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -145,16 +174,26 @@ async function* streamOpenAI(
       request,
       nativeDeferredLoading,
     )
+    const media = await prepareProviderMedia(
+      request,
+      upload === undefined
+        ? {}
+        : {
+            uploadDocument: (document, bytes) =>
+              upload(document, bytes, request.signal),
+          },
+    )
     const effort = resolveModelWireEffort(request.target)
     let body: ResponseCreateParamsStreaming = {
       model: request.target.model || defaultModel,
       instructions: flattenModelSystem(request.system),
       input: [
         ...toOpenAIInput(
-          request.messages,
+          media.messages,
           nativeDeferredLoading,
           request.target.provider,
           request.continuationScope,
+          media.uploadedFiles,
         ),
         ...(request.compaction === "remote_v2"
           ? [{ type: "compaction_trigger" as const }]
@@ -574,6 +613,19 @@ async function* streamOpenAI(
       yield abortedResponse(terminalUsage)
       return
     }
+    if (error instanceof AssetMediaError) {
+      yield {
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          stage: "request_build",
+          provider: request.target.provider,
+          wireApi: "openai_responses",
+          message: error.message,
+        },
+      }
+      return
+    }
     yield {
       ...terminalFailure(
         terminalEvent !== undefined && !(error instanceof OpenAIProtocolError)
@@ -625,6 +677,10 @@ export function toOpenAIInput(
   nativeDeferredLoading = true,
   provider = "openai",
   continuationScope?: string,
+  uploadedFiles: ReadonlyMap<
+    import("./model.ts").ModelDocumentBlock,
+    string
+  > = new Map(),
 ): ResponseInput {
   const input: ResponseInput = []
   const customCallIds = new Set<string>()
@@ -648,17 +704,22 @@ export function toOpenAIInput(
                 return {
                   type: "input_image" as const,
                   detail: block.detail ?? "high",
-                  image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                  image_url:
+                    block.file && "url" in block.file
+                      ? block.file.url
+                      : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                 }
-              if (provider !== "openai")
-                return {
-                  type: "input_text" as const,
-                  text: `[Document ${block.name} was not sent: native PDF input is not enabled for this provider.]`,
-                }
+              const fileId = uploadedFiles.get(block)
               return {
                 type: "input_file" as const,
                 filename: block.name,
-                file_data: `data:application/pdf;base64,${requireModelDocumentData(block)}`,
+                ...(fileId !== undefined
+                  ? { file_id: fileId }
+                  : "url" in block.file
+                    ? { file_url: block.file.url }
+                    : {
+                        file_data: `data:application/pdf;base64,${requireModelDocumentData(block)}`,
+                      }),
               }
             }),
       })
@@ -683,21 +744,27 @@ export function toOpenAIInput(
         if (block.type === "image")
           return {
             type: "input_image" as const,
-            image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+            image_url:
+              block.file && "url" in block.file
+                ? block.file.url
+                : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
             detail: block.detail ?? ("high" as const),
           }
-        // Responses supports files; compatible backends are separately gated.
-        if (provider !== "openai")
-          return {
-            type: "input_text" as const,
-            text: `[Document ${block.name} was not sent: native PDF input is not enabled for this provider.]`,
-          }
-        if (block.data === undefined)
+        const fileId = uploadedFiles.get(block)
+        if (
+          block.data === undefined &&
+          !("url" in block.file) &&
+          fileId === undefined
+        )
           throw new Error("Unresolved document asset.")
         return {
           type: "input_file" as const,
           filename: block.name,
-          file_data: `data:application/pdf;base64,${block.data}`,
+          ...(fileId !== undefined
+            ? { file_id: fileId }
+            : "url" in block.file
+              ? { file_url: block.file.url }
+              : { file_data: `data:application/pdf;base64,${block.data}` }),
         }
       })
       if (message.isError)

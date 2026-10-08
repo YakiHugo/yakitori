@@ -23,8 +23,8 @@ import {
   isModelSelection,
   isSessionConfigurationSnapshot,
   isTokenUsage,
-  isTurnMetrics,
   isTurnCompletion,
+  isTurnMetrics,
 } from "../kernel/events.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import { ContextManager } from "./context-manager.ts"
@@ -58,7 +58,6 @@ import {
   SqliteThreadSearchProjection,
   type ThreadSearchProjectionStamp,
 } from "./sqlite-thread-search-projection.ts"
-import { readUsageHistory } from "./usage-history.ts"
 import {
   SqliteThreadUsageProjection,
   type ThreadUsageSummary,
@@ -81,6 +80,8 @@ import {
   type ThreadStoreListResult,
   type ThreadStoreSearchInput,
 } from "./thread-store.ts"
+import { readUsageHistory } from "./usage-history.ts"
+import { isInputContent } from "./user-input.ts"
 
 type PendingWrite = {
   readonly entry: StoredRolloutItem
@@ -2454,12 +2455,14 @@ function isSubmissionMetadata(value: unknown): boolean {
   return (
     isRecord(value) &&
     hasOnlyKeys(value, [
+      "content",
       "modelSelection",
       "parentInputId",
       "metadata",
       "queuedDispatch",
       "requestFingerprint",
     ]) &&
+    (value.content === undefined || isInputContent(value.content)) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
     optionalString(value.parentInputId) &&

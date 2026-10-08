@@ -13,6 +13,7 @@ import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 it.each([
   "local",
@@ -102,10 +103,7 @@ it.each([
       mateRevisionId: "revision_test",
     })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: userRequest }],
-      },
+      content: inputFixture([{ type: "text" as const, text: userRequest }]),
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -160,10 +158,7 @@ it.each([
     if (resumed === undefined) throw new Error("Missing restored thread")
     expect(resumed.snapshot().context.history).toContainEqual(original)
     await resumed.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     await expect
       .poll(() => resumed.agentStatus)

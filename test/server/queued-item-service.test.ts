@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
@@ -13,6 +14,7 @@ import {
   QueuedItemService,
 } from "../../src/server/queued-item-service.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -21,7 +23,7 @@ afterEach(async () => {
 })
 
 describe("queued item service", () => {
-  it("counts all queued text parts against one character budget", async () => {
+  it("counts authored text and editor markers against one character budget", async () => {
     const queue = new InputQueue()
     const manager = new ThreadManager({
       store: new MemoryThreadStore(),
@@ -54,22 +56,21 @@ describe("queued item service", () => {
         image,
         {
           type: "text" as const,
-          text: "x".repeat(MAX_QUEUED_INPUT_TEXT_CHARS / 2),
+          text: "x".repeat(MAX_QUEUED_INPUT_TEXT_CHARS / 2 - 9),
         },
       ]
       expect(
-        service.enqueue("session_one", {
-          submissionId: "fits",
-          content: { kind: "parts", parts },
-        }).input.content.parts,
+        draftToEditorParts(
+          service.enqueue("session_one", {
+            submissionId: "fits",
+            content: inputFixture(parts),
+          }).input.content,
+        ),
       ).toEqual(parts)
       expect(() =>
         service.enqueue("session_one", {
           submissionId: "too_large",
-          content: {
-            kind: "parts",
-            parts: [...parts, { type: "text", text: "!" }],
-          },
+          content: inputFixture([...parts, { type: "text", text: "!" }]),
         }),
       ).toThrow(QueuedInputTooLargeError)
       expect(
@@ -136,10 +137,9 @@ describe("queued item service", () => {
     const version = queue.changeVersion()
     external.enqueue(thread.id, {
       submissionId: "request_external",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "external input" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "external input" },
+      ]),
     })
     expect(queue.changeVersion()).toBeGreaterThan(version)
     expect(queue.changesSince(0, [thread.id])).toEqual([

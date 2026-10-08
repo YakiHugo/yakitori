@@ -10,9 +10,10 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { DatabaseSync } from "node:sqlite"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type {
@@ -20,9 +21,9 @@ import type {
   RolloutItem,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
 const roots: string[] = []
@@ -398,8 +399,8 @@ describe("JsonlThreadStore", () => {
     const reopenedAssets = createStoreAssets(root, reopened)
     expect(await reopenedAssets.read(firstImage.file)).toEqual(firstBytes)
     expect(await reopenedAssets.read(secondImage.file)).toEqual(secondBytes)
-    expect(firstImage.file.rolloutId).toBe(id)
-    expect(secondImage.file.rolloutId).toBe(id)
+    expect(requireStoredAssetSource(firstImage.file).rolloutId).toBe(id)
+    expect(requireStoredAssetSource(secondImage.file).rolloutId).toBe(id)
     await reopened.shutdownThread(id)
   })
 

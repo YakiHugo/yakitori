@@ -12,6 +12,7 @@ import {
 } from "../../src/kernel/events.ts"
 import type { LiveRuntimeWarning } from "../../src/runtime/live-events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "../gui/input-fixtures.ts"
 
 const session: ApiSessionDetail = {
@@ -324,7 +325,7 @@ describe("model retry execution state", () => {
           requestId: "request_2",
           inputId: "input_2",
           role: "user",
-          content: { kind: "parts", parts: inputParts("Queued input") },
+          content: inputFixture(inputParts("Queued input")),
         },
       }),
     ]

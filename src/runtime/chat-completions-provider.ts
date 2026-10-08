@@ -2,12 +2,14 @@ import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
   ChatCompletionChunk,
-  ChatCompletionMessageParam,
   ChatCompletionContentPart,
+  ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
+import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
+import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -17,8 +19,8 @@ import {
   type ModelStreamEvent,
   type ModelToolCallBlock,
   type ModelUsage,
-  requireModelImageData,
   requireModelDocumentData,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -26,7 +28,6 @@ import {
   modelFailureFromUnknown,
 } from "./model-failure.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
-import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
@@ -95,8 +96,11 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
+    const media = await prepareProviderMedia(request, {
+      inlineDocumentUrls: true,
+    })
     const messages = toChatCompletionsMessages(
-      request.messages,
+      media.messages,
       request.target.provider,
       request.continuationScope,
       options.flavor ?? "generic",
@@ -411,6 +415,19 @@ async function* streamChatCompletions(
       yield { type: "cancelled", ...usageFields() }
       return
     }
+    if (error instanceof AssetMediaError) {
+      yield {
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          stage: "request_build",
+          provider: request.target.provider,
+          wireApi: "openai_chat_completions",
+          message: error.message,
+        },
+      }
+      return
+    }
     const apiError = error instanceof OpenAI.APIError ? error : undefined
     const requestId = apiError?.requestID ?? providerRequestId
     const retryAfterMs =
@@ -493,7 +510,10 @@ export function toChatCompletionsMessages(
               return {
                 type: "image_url" as const,
                 image_url: {
-                  url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                  url:
+                    block.file && "url" in block.file
+                      ? block.file.url
+                      : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                   detail: "high" as const,
                 },
               }
@@ -528,7 +548,10 @@ export function toChatCompletionsMessages(
             {
               type: "image_url",
               image_url: {
-                url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
+                url:
+                  block.file && "url" in block.file
+                    ? block.file.url
+                    : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                 detail: "high",
               },
             },

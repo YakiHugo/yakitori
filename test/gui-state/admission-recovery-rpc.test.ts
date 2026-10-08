@@ -1,5 +1,7 @@
+import { inputFixture } from "../fixtures/user-input.ts"
 import "./setup-store-environment.ts"
 import { afterEach, expect, it, vi } from "vitest"
+import type { ResponseAnnotation } from "../../src/core/input-context.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createExecutionViewState } from "../../src/gui/execution-view.ts"
 import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
@@ -8,18 +10,17 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import type { ResponseAnnotation } from "../../src/kernel/input-context.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { MessageProcessor } from "../../src/server/rpc/message-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { FakeRpcClient } from "../gui/fake-rpc-client.ts"
+import { inputParts } from "../gui/input-fixtures.ts"
 import {
   initializeConnection,
   openTestConnection,
 } from "../server/rpc/testkit.ts"
-import { FakeRpcClient } from "../gui/fake-rpc-client.ts"
-import { inputParts } from "../gui/input-fixtures.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -89,7 +90,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
     const started = await handlers.admitInput({
       sessionId,
       requestId: "request_active",
-      content: { kind: "parts", parts: inputParts("Keep working") },
+      content: inputFixture(inputParts("Keep working")),
     })
     if (!started.ok) throw new Error(started.body.error.message)
 
@@ -162,11 +163,10 @@ it("retries a committed queued input with the original snapshot when its RPC ack
         id: first.id,
         input: expect.objectContaining({
           submissionId: first.input.submissionId,
-          content: {
-            kind: "parts",
-            parts: inputParts("Follow up"),
-            contextAttachments: [annotation],
-          },
+          content: inputFixture(
+            inputParts("Follow up"),
+            { references: [annotation] }.references,
+          ),
         }),
       }),
     ])

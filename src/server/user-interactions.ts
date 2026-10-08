@@ -6,6 +6,7 @@ import type {
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation"
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
 import type { ThreadStore } from "../core/thread-store.ts"
+import { createUserInput } from "../core/user-input.ts"
 import { parseUserQuestions } from "../kernel/user-interaction.ts"
 import type { ServerHandlers } from "./handlers.ts"
 import type { ApiAdmitInputResponse, ApiHandlerResult } from "./protocol.ts"
@@ -140,20 +141,14 @@ export function createSessionInteractions(
         sessionId: request.sessionId,
         requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
         role: "user",
-        content: {
-          kind: "parts",
-          parts: [
-            {
-              type: "text",
-              text: questions.questions
-                .map(
-                  (question, index) =>
-                    `${question.title}\n${request.answers[index]}`,
-                )
-                .join("\n\n"),
-            },
-          ],
-        },
+        content: createUserInput(
+          questions.questions
+            .map(
+              (question, index) =>
+                `${question.title}\n${request.answers[index]}`,
+            )
+            .join("\n\n"),
+        ),
         metadata: {
           userQuestionId: request.toolCallId,
           userQuestionAnswers: request.answers,

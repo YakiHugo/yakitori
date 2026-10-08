@@ -1,10 +1,3 @@
-import {
-  inputContentText,
-  inputContentToModelMessage,
-} from "../kernel/input-content.ts"
-import { toolContentText } from "./model-tool-content.ts"
-import type { ModelToolContentBlock } from "../kernel/index.ts"
-import { consumeModelWarmup } from "./model-warmup.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
   TurnCompletion,
@@ -13,6 +6,11 @@ import type {
   TurnRuntime,
 } from "../core/session.ts"
 import { fingerprintTurnInput, type TurnInput } from "../core/session-io.ts"
+import {
+  inputContentText,
+  inputContentToModelMessage,
+} from "../core/user-input.ts"
+import type { ModelToolContentBlock } from "../kernel/index.ts"
 import {
   type CompletedExecutionItem,
   type ContextCompactionCompletedItem,
@@ -27,21 +25,22 @@ import {
   type SessionConfigurationSnapshot,
   type StartedExecutionItem,
   type TokenUsage,
-  type TurnLatency,
   type ToolExecutionItem,
+  type TurnLatency,
 } from "../kernel/index.ts"
 import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
+import { readAssetSource } from "./asset-media.ts"
+import {
+  type BackgroundCompaction,
+  canCompactPrefix,
+  createBackgroundCompaction,
+} from "./background-compaction.ts"
 import {
   buildCompactionRequest,
   canRetryCompactionWithCurrentModel,
   isContextOverflowError,
   trimRemoteCompactionToolTail,
 } from "./compaction.ts"
-import {
-  canCompactPrefix,
-  createBackgroundCompaction,
-  type BackgroundCompaction,
-} from "./background-compaction.ts"
 import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
@@ -75,6 +74,8 @@ import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
 } from "./model-request-budget.ts"
+import { toolContentText } from "./model-tool-content.ts"
+import { consumeModelWarmup } from "./model-warmup.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { prepareModelImage } from "./prepare-model-image.ts"
 import {
@@ -85,8 +86,8 @@ import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
-  resolveModelRequestPolicy,
   type ResolvedStepConfiguration,
+  resolveModelRequestPolicy,
   SessionConfiguration,
   toolHistoryOutputBudget,
 } from "./session-configuration.ts"
@@ -174,6 +175,9 @@ export type TurnProcessorOptions = {
   >
   readonly resolveShellName?: () => Promise<string>
   readonly now?: () => Date
+  readonly assetUrl?: (
+    source: import("../core/asset-types.ts").RolloutAssetReference,
+  ) => string | undefined
   readonly rolloutAssets?: RolloutAssets
   readonly onOperationalFailure?: TurnProcessorOperationalFailureReporter
   readonly agentControl?: AgentControl
@@ -903,6 +907,7 @@ async function executeTurnModelLoop(
           remoteCompaction,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
+          assetUrl: input.options.assetUrl,
           usages,
           onModelTiming: onCompactionModelTiming,
           rolloutBudget: budget,
@@ -1057,6 +1062,7 @@ async function executeTurnModelLoop(
                     : {}),
                   signal: input.signal,
                   rolloutAssets: input.options.rolloutAssets,
+                  assetUrl: input.options.assetUrl,
                   usages,
                   onModelTiming: onCompactionModelTiming,
                   rolloutBudget: budget,
@@ -1092,6 +1098,7 @@ async function executeTurnModelLoop(
           remoteCompaction,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
+          assetUrl: input.options.assetUrl,
           usages,
           onModelTiming: onCompactionModelTiming,
           rolloutBudget: budget,
@@ -1227,6 +1234,13 @@ async function executeTurnModelLoop(
         .snapshot()
         .context.history.at(-1)?.id
       const request: ModelRequest = {
+        assets: {
+          read: (source, signal) =>
+            readAssetSource(source, input.options.rolloutAssets, signal),
+          ...(input.options.assetUrl === undefined
+            ? {}
+            : { url: input.options.assetUrl }),
+        },
         streamOutputItems: true,
         async rebuildMessagesAfterOutput() {
           // Codex rebuilds retry input from history after draining in-flight
@@ -1741,6 +1755,17 @@ async function executeTurnModelLoop(
             requestStartedAt = Date.now()
             const result = await consumeModelStream({
               request: buildCompactionRequest({
+                assets: {
+                  read: (source, signal) =>
+                    readAssetSource(
+                      source,
+                      input.options.rolloutAssets,
+                      signal,
+                    ),
+                  ...(input.options.assetUrl === undefined
+                    ? {}
+                    : { url: input.options.assetUrl }),
+                },
                 source: [{ messages }],
                 target: step.target,
                 baseInstructions: configuration.baseInstructions,
@@ -2247,6 +2272,7 @@ async function compactLiveHistory(
     stream: StreamFn
     signal: AbortSignal
     rolloutAssets: RolloutAssets | undefined
+    assetUrl?: TurnProcessorOptions["assetUrl"]
     usages: ModelUsage[]
     onModelTiming: (
       durationMs: number,
@@ -2394,6 +2420,13 @@ async function compactLiveHistory(
           input.remoteCompaction
             ? {
                 compaction: "remote_v2",
+                assets: {
+                  read: (source, signal) =>
+                    readAssetSource(source, input.rolloutAssets, signal),
+                  ...(input.assetUrl === undefined
+                    ? {}
+                    : { url: input.assetUrl }),
+                },
                 target: compactionStep.target,
                 cacheKey: compactionStep.configuration.promptCacheKey,
                 system: [compactionStep.configuration.baseInstructions],
@@ -2403,6 +2436,13 @@ async function compactLiveHistory(
                 signal: input.signal,
               }
             : buildCompactionRequest({
+                assets: {
+                  read: (source, signal) =>
+                    readAssetSource(source, input.rolloutAssets, signal),
+                  ...(input.assetUrl === undefined
+                    ? {}
+                    : { url: input.assetUrl }),
+                },
                 source: [{ messages }],
                 target: compactionStep.target,
                 baseInstructions: compactionStep.configuration.baseInstructions,
@@ -3113,6 +3153,7 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
       inputContentToModelMessage(input.content, input.goalId),
     ),
     submissionMetadata: {
+      content: input.content,
       requestFingerprint: fingerprintTurnInput(input),
       ...(input.modelSelection === undefined
         ? {}
@@ -3180,13 +3221,7 @@ async function resolveRolloutAssetMedia(
           Buffer.from(image.data, "base64"),
           image.detail ?? "high",
         )
-      if (rolloutAssets === undefined)
-        throw new Error("Rollout image storage is unavailable.")
-      const bytes = await rolloutAssets.read(image.file)
-      if (bytes.byteLength !== image.sizeBytes) {
-        throw new Error("Rollout image size does not match its recorded size.")
-      }
-      return prepareModelImage(bytes, image.detail ?? "high")
+      return image
     }
     const content: ModelToolContentBlock[] = []
     // PDF raster/text fallback expands at its source slot, not after later text

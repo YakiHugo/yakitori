@@ -187,7 +187,10 @@ it("shows submitted sources once and expands their original content", async () =
     name: "reference.png",
     mediaType: "image/png" as const,
     sizeBytes: 42,
-    file: { rolloutId: "rollout-1", path: "images/reference.png" },
+    file: {
+      rolloutId: "rollout-1",
+      path: "attachments/staging/images/reference.png",
+    },
   }
   useAppStore.setState((state) => ({
     promptExcerpts: [
@@ -206,7 +209,7 @@ it("shows submitted sources once and expands their original content", async () =
         at: "2026-09-20T00:00:00Z",
 
         contextAttachments: [excerpt],
-        parts: inputParts("Use these sources", [attachment]),
+        content: inputParts("Use these sources", [attachment]),
       })),
     },
   }))
@@ -223,7 +226,9 @@ it("shows submitted sources once and expands their original content", async () =
   await user.click(screen.getByText("reference.png"))
   expect(
     screen.getByRole("img", { name: "reference.png" }).getAttribute("src"),
-  ).toBe("http://localhost/rollouts/rollout-1/assets/images/reference.png")
+  ).toBe(
+    "http://localhost/rollouts/rollout-1/assets/attachments/staging/images/reference.png",
+  )
 })
 
 it("shows the previous provider's cache policy and keeps minimum retention distinct from estimated expiry", async () => {

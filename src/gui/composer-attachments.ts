@@ -1,4 +1,5 @@
 import type { UserAttachment } from "../kernel/events.ts"
+import { rolloutAssetUrl } from "./rollout-asset-url.ts"
 
 export async function appendPickedAttachments(
   current: readonly UserAttachment[],
@@ -68,14 +69,9 @@ export function attachmentUrl(
   attachment: UserAttachment,
   apiBase = window.location.origin,
 ): string {
-  const base = apiBase.endsWith("/") ? apiBase : `${apiBase}/`
-  return new URL(
-    `rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${attachment.file.path
-      .split("/")
-      .map(encodeURIComponent)
-      .join("/")}`,
-    base,
-  ).toString()
+  const url = rolloutAssetUrl(attachment.file, apiBase)
+  if (url === undefined) throw new Error("Invalid attachment source.")
+  return url
 }
 
 export function requireDesktopBridge(): YakitoriDesktopBridge {

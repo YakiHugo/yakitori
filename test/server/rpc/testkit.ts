@@ -27,6 +27,7 @@ import type {
   JsonRpcNotification,
   JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
+import { inputFixture } from "../../fixtures/user-input.ts"
 
 // A malformed inbound frame can only be answered with a null id, which the
 // typed envelope does not admit.
@@ -202,14 +203,14 @@ export function createFakeHandlers(
         requestId: "request_1",
         turnId: "turn_1",
         inputId: "input_1",
-        content: { kind: "parts", parts: [] },
+        content: inputFixture([]),
       }),
     queueInput: async () =>
       okResult({
         requestId: "request_1",
         turnId: "turn_1",
         inputId: "input_1",
-        content: { kind: "parts", parts: [] },
+        content: inputFixture([]),
       }),
     listQueuedInputs: async () => okResult({ items: [] }),
     updateQueuedInput: async () =>
@@ -219,10 +220,7 @@ export function createFakeHandlers(
           sessionId: "session_1",
           input: {
             submissionId: "request_1",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "queued" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "queued" }]),
           },
           createdAt: "2026-01-01T00:00:00.000Z",
         },
@@ -233,13 +231,13 @@ export function createFakeHandlers(
         requestId: "request_1",
         turnId: "turn_1",
         inputId: "input_1",
-        content: { kind: "parts", parts: [] },
+        content: inputFixture([]),
       }),
     steerInput: async () =>
       okResult({
         requestId: "request_1",
         turnId: "turn_1",
-        content: { kind: "parts", parts: [] },
+        content: inputFixture([]),
       }),
     compactSession: async () =>
       okResult({

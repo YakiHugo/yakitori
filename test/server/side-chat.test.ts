@@ -1,26 +1,30 @@
-import type { StoredThread } from "../../src/core/rollout.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
-import { createModelProvider } from "../../src/runtime/model-provider.ts"
-import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
-import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
-import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import type { StoredThread } from "../../src/core/rollout.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
+import { createUserInput } from "../../src/core/user-input.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import {
   type ModelRequest,
   ModelStopReason,
   type StreamFn,
 } from "../../src/runtime/model.ts"
-import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createYakitoriApplication } from "../../src/server/application.ts"
 import {
   createSideChatService,
   type SideChatSnapshot,
 } from "../../src/server/side-chat.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { readRequestAsset } from "../support/faux-provider.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -128,10 +132,7 @@ describe("temporary side conversations", () => {
         {
           sideChatId: created.id,
           requestId: "first",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "hello" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "hello" }]),
         },
       )
       expect(first.expiresAt).toBe("2026-01-02T23:59:59.999Z")
@@ -143,10 +144,7 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: unused.id,
           requestId: "too-late",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "hello" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "hello" }]),
         }),
       ).toMatchObject({
         error: {
@@ -160,10 +158,7 @@ describe("temporary side conversations", () => {
         {
           sideChatId: created.id,
           requestId: "second",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "follow-up" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "follow-up" }]),
         },
       )
       expect(second.expiresAt).toBe("2026-01-03T23:59:59.998Z")
@@ -181,7 +176,7 @@ describe("temporary side conversations", () => {
         expired.messages.map((message) =>
           message.role === "assistant"
             ? message.text
-            : message.content.parts
+            : draftToEditorParts(message.content)
                 .flatMap((part) => (part.type === "text" ? [part.text] : []))
                 .join(""),
         ),
@@ -204,10 +199,7 @@ describe("temporary side conversations", () => {
         {
           sideChatId: created.id,
           requestId: "first",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "hello" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "hello" }]),
         },
       )
       expect(replay).toEqual(expired)
@@ -215,20 +207,16 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "first",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "changed" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "changed" }]),
         }),
       ).toMatchObject({ error: { data: { code: "conflict" } } })
       expect(
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "third",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "new message" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "new message" },
+          ]),
         }),
       ).toMatchObject({
         error: {
@@ -267,10 +255,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "active",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "question" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "question" }]),
       })
       await until(() => finish !== undefined)
       const deadline = context.service.read(created.id).expiresAt
@@ -279,10 +264,7 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "later",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "follow-up" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "follow-up" }]),
         }),
       ).toMatchObject({
         error: {
@@ -304,10 +286,7 @@ describe("temporary side conversations", () => {
         messages: [
           {
             role: "user",
-            content: {
-              kind: "parts",
-              parts: [{ type: "text", text: "question" }],
-            },
+            content: createUserInput("question"),
           },
           { role: "assistant", text: "finished", streaming: false },
         ],
@@ -338,10 +317,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "cancel-after-expiry",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "question" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "question" }]),
       })
       await until(() =>
         context.service
@@ -398,22 +374,17 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "context_only",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "" }],
-          contextAttachments: [attachment],
-        },
+        content: inputFixture(
+          [{ type: "text" as const, text: "" }],
+          { references: [attachment] }.references,
+        ),
       })
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
       expect(context.service.read(created.id).messages[0]).toMatchObject({
         role: "user",
-        content: {
-          kind: "parts",
-          parts: [{ type: "text", text: "" }],
-          contextAttachments: [attachment],
-        },
+        content: inputFixture([], [attachment]),
       })
       expect(JSON.stringify(requests[0]?.messages)).toContain(
         "quoted source text",
@@ -422,17 +393,18 @@ describe("temporary side conversations", () => {
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "bad_context",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "" }],
-            contextAttachments: [
-              {
-                ...attachment,
-                kind: "annotation",
-                anchor: { startOffset: 8, endOffset: 2 },
-              },
-            ],
-          },
+          content: inputFixture(
+            [{ type: "text" as const, text: "" }],
+            {
+              references: [
+                {
+                  ...attachment,
+                  kind: "annotation",
+                  anchor: { startOffset: 8, endOffset: 2 },
+                },
+              ],
+            }.references,
+          ),
         }),
       ).toMatchObject({ error: { code: -32602 } })
       expect(requests).toHaveLength(1)
@@ -467,15 +439,12 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
-        content: {
-          kind: "parts" as const,
-          parts: [
-            {
-              type: "text" as const,
-              text: "Selected excerpt: independent context",
-            },
-          ],
-        },
+        content: inputFixture([
+          {
+            type: "text" as const,
+            text: "Selected excerpt: independent context",
+          },
+        ]),
       })
       await until(
         () =>
@@ -493,7 +462,7 @@ describe("temporary side conversations", () => {
           text:
             message.role === "assistant"
               ? message.text
-              : message.content.parts
+              : draftToEditorParts(message.content)
                   .flatMap((part) => (part.type === "text" ? [part.text] : []))
                   .join(""),
         })),
@@ -522,10 +491,7 @@ describe("temporary side conversations", () => {
           model: "second-model",
           effort: "high",
         },
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Follow-up" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "Follow-up" }]),
       })
       await until(
         () =>
@@ -552,40 +518,31 @@ describe("temporary side conversations", () => {
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
-        content: {
-          kind: "parts" as const,
-          parts: [
-            {
-              type: "text" as const,
-              text: "Selected excerpt: independent context",
-            },
-          ],
-        },
+        content: inputFixture([
+          {
+            type: "text" as const,
+            text: "Selected excerpt: independent context",
+          },
+        ]),
       })
       expect(requests).toHaveLength(2)
       await rpc(context.connection, "sideChat/send", {
         sideChatId: created.id,
         requestId: "first-turn",
         modelSelection: { model: "first-model", provider: "faux" },
-        content: {
-          kind: "parts" as const,
-          parts: [
-            {
-              type: "text" as const,
-              text: "Selected excerpt: independent context",
-            },
-          ],
-        },
+        content: inputFixture([
+          {
+            type: "text" as const,
+            text: "Selected excerpt: independent context",
+          },
+        ]),
       })
       expect(requests).toHaveLength(2)
       expect(
         await context.connection.sendRequest("sideChat/send", {
           sideChatId: created.id,
           requestId: "first-turn",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "different" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "different" }]),
         }),
       ).toMatchObject({ error: { data: { code: "conflict" } } })
       const revisions = context.changes.map((change) => change.revision)
@@ -642,10 +599,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "retry",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "recover" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "recover" }]),
       })
       await until(() =>
         context.service
@@ -697,10 +651,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "cancel-me",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "first" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "first" }]),
       })
       await until(() =>
         context.service
@@ -721,10 +672,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "fail-me",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "second" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "second" }]),
       })
       await until(() => context.service.read(created.id).error !== undefined)
       expect(context.service.read(created.id)).toMatchObject({
@@ -737,10 +685,7 @@ describe("temporary side conversations", () => {
       await context.service.send({
         sideChatId: created.id,
         requestId: "close-me",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "third" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "third" }]),
       })
       await until(() =>
         context.service
@@ -839,6 +784,7 @@ describe("temporary side conversations", () => {
       ],
     }
     const requests: ModelRequest[] = []
+    const readDocuments: Buffer[][] = []
     const providers = createProviderRegistry({
       openai: createModelProvider({
         info: {
@@ -848,6 +794,19 @@ describe("temporary side conversations", () => {
         },
         stream: async function* (request) {
           requests.push(request)
+          readDocuments.push(
+            await Promise.all(
+              request.messages.flatMap((message) =>
+                message.role === "user"
+                  ? message.content
+                      .filter((block) => block.type === "document")
+                      .map((document) =>
+                        readRequestAsset(request, document.file),
+                      )
+                  : [],
+              ),
+            ),
+          )
           yield {
             type: "response",
             response: {
@@ -888,10 +847,7 @@ describe("temporary side conversations", () => {
       await service.send({
         sideChatId: side.id,
         requestId: "side_pdf",
-        content: {
-          kind: "parts",
-          parts: [{ type: "text", text: "Explain the PDF" }],
-        },
+        content: createUserInput("Explain the PDF"),
       })
       await until(() => service.read(side.id).activeTurnId === undefined)
       const nested = await service.create({ sourceSessionId: side.id })
@@ -906,14 +862,11 @@ describe("temporary side conversations", () => {
       await service.send({
         sideChatId: nested.id,
         requestId: "nested_pdf",
-        content: {
-          kind: "parts",
-          parts: [
-            { type: "text", text: "Explain the same PDF again" },
-            { type: "document", ...draft },
-            { type: "text", text: "Compare this copy" },
-          ],
-        },
+        content: inputFixture([
+          { type: "text", text: "Explain the same PDF again" },
+          { type: "document", ...draft },
+          { type: "text", text: "Compare this copy" },
+        ]),
       })
       await until(() => service.read(nested.id).activeTurnId === undefined)
       expect(requests).toHaveLength(2)
@@ -926,9 +879,11 @@ describe("temporary side conversations", () => {
         expect(documents).toHaveLength(index === 0 ? 1 : 2)
         expect(documents[0]).toMatchObject({
           name: "report.pdf",
-          data: bytes.toString("base64"),
           file: { rolloutId: index === 0 ? side.id : nested.id },
         })
+        expect(readDocuments[index]).toEqual(
+          Array.from({ length: index === 0 ? 1 : 2 }, () => bytes),
+        )
         expect(
           JSON.stringify(
             request.messages.filter((message) => message.role === "developer"),
@@ -944,13 +899,15 @@ describe("temporary side conversations", () => {
           )
           .at(-1)?.content,
       ).toMatchObject([
-        { type: "text", text: "Explain the same PDF again" },
         {
           type: "document",
           name: "follow-up.pdf",
-          data: bytes.toString("base64"),
+          file: { rolloutId: nested.id },
         },
-        { type: "text", text: "Compare this copy" },
+        {
+          type: "text",
+          text: "Explain the same PDF again[Document 1]Compare this copy",
+        },
       ])
       await expect(assets.read(draft.file)).rejects.toMatchObject({
         code: "ENOENT",
@@ -1000,10 +957,9 @@ describe("temporary side conversations", () => {
       await application.sideChats.send({
         sideChatId: created.id,
         requestId: "ephemeral-turn",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "temporary secret" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "temporary secret" },
+        ]),
       })
       await until(
         () =>

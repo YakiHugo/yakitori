@@ -14,6 +14,7 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
 
 const roots: string[] = []
@@ -426,10 +427,9 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_fork_source",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Original task" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "Original task" },
+        ]),
       }),
     )
     await first.entered.promise
@@ -683,10 +683,9 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_fork_active",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Original user task" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "Original user task" },
+        ]),
       }),
     )
     await first.entered.promise
@@ -713,10 +712,9 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId: forkId,
         requestId: "request_fork_continue",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Continue this branch" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "Continue this branch" },
+        ]),
       }),
     )
     await wrap.entered.promise
@@ -861,15 +859,12 @@ describe("goal runtime", () => {
       await application.handlers.admitInput({
         sessionId,
         requestId: "request_create_next_goal",
-        content: {
-          kind: "parts" as const,
-          parts: [
-            {
-              type: "text" as const,
-              text: "Create and complete the next goal",
-            },
-          ],
-        },
+        content: inputFixture([
+          {
+            type: "text" as const,
+            text: "Create and complete the next goal",
+          },
+        ]),
       }),
     )
     await secondWrap.entered.promise

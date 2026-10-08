@@ -3,8 +3,8 @@ import {
   mkdir,
   mkdtemp,
   open,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -12,10 +12,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 
 const roots: string[] = []
 
@@ -38,7 +39,9 @@ describe("rollout assets", () => {
       { name: "middle.pdf", data: pdf },
       { name: "last.png", data: pngBytes() },
     ])
-    expect(drafts.map((draft) => draft.file.path)).toEqual([
+    expect(
+      drafts.map((draft) => requireStoredAssetSource(draft.file).path),
+    ).toEqual([
       "attachments/staging/mixed/1.png",
       "attachments/staging/mixed/2.pdf",
       "attachments/staging/mixed/3.png",
@@ -243,7 +246,9 @@ describe("rollout assets", () => {
     const draft = await files.importAttachmentBytes(sessionId, "attachment_1", [
       { name: "screen.png", data },
     ])
-    expect(draft[0]?.file.path).toBe("attachments/staging/attachment_1/1.png")
+    expect(requireStoredAssetSource(draft[0]?.file).path).toBe(
+      "attachments/staging/attachment_1/1.png",
+    )
     const detailed = draft.map((attachment) => ({
       ...attachment,
       detail: "original" as const,
@@ -501,10 +506,10 @@ describe("rollout assets", () => {
       { name: "screen.png", data: pngBytes() },
     ])
     const attachment = stored[0]
-    expect(attachment?.file.path).toMatch(
+    expect(requireStoredAssetSource(attachment?.file).path).toMatch(
       /^attachments\/staging\/id-[a-f0-9]{64}\/1\.png$/,
     )
-    expect(attachment?.file.path).not.toContain(":")
+    expect(requireStoredAssetSource(attachment?.file).path).not.toContain(":")
 
     const prepared = await files.saveToolFile(
       sessionId,

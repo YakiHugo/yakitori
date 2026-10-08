@@ -1,5 +1,3 @@
-import { PdfAttachmentCard } from "./pdf-attachment.tsx"
-import { openUrlTarget } from "../lib/open-resource.ts"
 import { ArrowDown, ArrowLeft, ChevronRight } from "lucide-react"
 import {
   useCallback,
@@ -20,6 +18,8 @@ import {
   reduceExecutionView,
 } from "../execution-view.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
+import { inputDisplayParts } from "../input-draft.ts"
+import { openUrlTarget } from "../lib/open-resource.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
 import { LiveTextNotice } from "./cells/live-text-notice.tsx"
@@ -28,6 +28,7 @@ import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { MarkdownView } from "./markdown.tsx"
+import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   Collapsible,
   CollapsibleContent,
@@ -420,7 +421,7 @@ function TraceEntry({
       return (
         <article className="subagent-task">
           <h3>Task</h3>
-          {entry.parts.map((part, index) =>
+          {inputDisplayParts(entry.content).map((part, index) =>
             part.type === "text" ? (
               <p // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this input ID.
                 key={`${entry.inputId}:${index}`}

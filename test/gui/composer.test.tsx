@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { InputDraft } from "../../src/core/user-input.ts"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
 import {
@@ -16,6 +17,7 @@ import {
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
 import { ConversationScrollContext } from "../../src/gui/hooks/conversation-scroll-context.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -28,14 +30,14 @@ import {
 import {
   createEventEnvelope,
   EventType,
-  InputRole,
   type InputContent,
-  type InputPart,
+  InputRole,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
-import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 import { inputParts } from "./input-fixtures.ts"
+import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -182,9 +184,7 @@ describe("composer", () => {
 
   it("sends the trimmed draft on Enter", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -221,9 +221,7 @@ describe("composer", () => {
 
   it("does not send on Shift+Enter", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -244,7 +242,7 @@ describe("composer", () => {
     "Meta",
   ])("inserts Enter and Shift+Enter newlines, then sends with %s+Enter when configured", async (modifier) => {
     const user = userEvent.setup()
-    const admitInput = vi.fn(async (_parts: readonly InputPart[]) => {})
+    const admitInput = vi.fn(async (_parts: InputDraft) => {})
     usePreferencesStore.setState({ sendShortcut: "mod-enter" })
     useAppStore.setState({
       admitInput,
@@ -335,18 +333,18 @@ describe("composer", () => {
     await user.click(remove)
     expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts("", [draftImage("high")]))
+    ).toEqual(inputParts("", [draftImage("high")]).attachments)
 
     rejectCreate(new Error("creation failed"))
     await waitFor(() => expect(remove).toHaveProperty("disabled", false))
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts("", [draftImage("high")]))
+    ).toEqual(inputParts("", [draftImage("high")]).attachments)
   })
 
   it("keeps session prewarming quiet while the first input remains available", async () => {
@@ -401,9 +399,7 @@ describe("composer", () => {
 
   it("blocks send and slash execution while the session is busy", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -439,8 +435,8 @@ describe("composer", () => {
     await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
     await waitFor(() => {
       expect(
-        (useAppStore.getState().promptDraft ?? []).filter(
-          (part) => part.type === "image",
+        (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+          (attachment) => attachment.mediaType !== "application/pdf",
         ),
       ).toHaveLength(1)
     })
@@ -724,10 +720,10 @@ describe("composer", () => {
     )
 
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts(""))
+    ).toEqual(inputParts("").attachments)
     expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
     await user.click(screen.getByRole("textbox"))
     await user.keyboard("{Control>}z{/Control}")
@@ -755,16 +751,19 @@ describe("composer", () => {
           inputId: "input_1",
           content: {
             ...requestedInputContent(body.requestId),
-            parts: requestedInputContent(body.requestId).parts.map((part) =>
-              part.type === "image"
-                ? {
-                    ...part,
-                    file: {
-                      rolloutId: "session_1",
-                      path: "attachments/requests/detail_1/1.png",
-                    },
-                  }
-                : part,
+            ...inputFixture(
+              draftToEditorParts(requestedInputContent(body.requestId)).map(
+                (part) =>
+                  part.type === "image"
+                    ? {
+                        ...part,
+                        file: {
+                          rolloutId: "session_1",
+                          path: "attachments/requests/detail_1/1.png",
+                        },
+                      }
+                    : part,
+              ),
             ),
           },
         }
@@ -816,8 +815,7 @@ describe("composer", () => {
       fakeRef.current.requestsFor("session/input")[0]?.params,
     ).toMatchObject({
       content: {
-        kind: "parts",
-        parts: [expect.objectContaining({ type: "image", detail: "original" })],
+        attachments: [expect.objectContaining({ detail: "original" })],
       },
     })
     await waitFor(() => {
@@ -840,8 +838,8 @@ describe("composer", () => {
 
     await waitFor(() => {
       expect(
-        (useAppStore.getState().promptDraft ?? []).filter(
-          (part) => part.type === "image",
+        (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+          (attachment) => attachment.mediaType !== "application/pdf",
         ),
       ).toHaveLength(1)
     })
@@ -991,10 +989,10 @@ describe("composer", () => {
     await act(async () => resolveImport([draftImage("high")]))
     await waitFor(() =>
       expect(
-        (useAppStore.getState().promptDraft ?? []).filter(
-          (part) => part.type === "image",
+        (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+          (attachment) => attachment.mediaType !== "application/pdf",
         ),
-      ).toEqual(inputParts("", [draftImage("high")])),
+      ).toEqual(inputParts("", [draftImage("high")]).attachments),
     )
     expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
   })
@@ -1026,10 +1024,10 @@ describe("composer", () => {
       ]),
     )
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts(""))
+    ).toEqual(inputParts("").attachments)
   })
 
   it("stages dropped images without creating a session", async () => {
@@ -1045,8 +1043,8 @@ describe("composer", () => {
 
     await waitFor(() => {
       expect(
-        (useAppStore.getState().promptDraft ?? []).filter(
-          (part) => part.type === "image",
+        (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+          (attachment) => attachment.mediaType !== "application/pdf",
         ),
       ).toHaveLength(1)
     })
@@ -1079,8 +1077,8 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
     ).toHaveLength(0)
   })
@@ -1119,9 +1117,7 @@ describe("composer", () => {
 
   it("still dispatches a follow-up on Enter while a turn runs", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1216,7 +1212,7 @@ function executionWithHistory(...texts: readonly string[]) {
               requestId: `request_${index + 1}`,
               inputId: `input_${index + 1}`,
               role: InputRole.User,
-              content: { kind: "parts", parts: inputParts(text) },
+              content: inputFixture(inputParts(text)),
             },
           },
         }),
@@ -1244,13 +1240,13 @@ describe("history navigation", () => {
         path: `attachments/staging/history/1.${kind === "image" ? "png" : "pdf"}`,
       },
     }
-    const parts: readonly InputPart[] = [
+    const parts: InputDraft = inputFixture([
       { type: "text", text: "before " },
       image.mediaType === "application/pdf"
         ? { ...image, type: "document" }
         : { ...image, type: "image" },
       { type: "text", text: " after" },
-    ]
+    ])
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       execution: executionWithHistory("earlier question"),
@@ -1413,9 +1409,7 @@ describe("slash command menu", () => {
 
   it("executes the highlighted command on Enter and retains it until admission succeeds", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1438,9 +1432,7 @@ describe("slash command menu", () => {
 
   it("keeps the exact match selectable so Enter executes it", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1457,9 +1449,7 @@ describe("slash command menu", () => {
 
   it("executes a clicked command", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1476,9 +1466,7 @@ describe("slash command menu", () => {
 
   it("keeps the wrapped highlight selectable with arrow keys", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1495,9 +1483,7 @@ describe("slash command menu", () => {
 
   it("routes status and MCP commands to data panels without sending a message", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1547,9 +1533,7 @@ describe("slash command menu", () => {
 
   it("completes compact as text instead of executing while images are staged", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1572,9 +1556,7 @@ describe("slash command menu", () => {
 
   it("completes the command as text while the session model is restoring", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1609,9 +1591,7 @@ describe("slash command menu", () => {
 
   it("stays closed once the draft takes arguments", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1632,9 +1612,7 @@ describe("slash command menu", () => {
 
   it("lets Shift+Enter insert a newline while the menu is open", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1671,9 +1649,9 @@ describe("goal command", () => {
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Send" }))
     await waitFor(() =>
-      expect(useAppStore.getState().promptDraft).toEqual([
-        { ...image, type: "image" },
-      ]),
+      expect(useAppStore.getState().promptDraft).toEqual(
+        inputFixture([{ ...image, type: "image" }]),
+      ),
     )
     expect(
       window.yakitoriDesktop?.discardDraftAttachments,
@@ -1728,9 +1706,7 @@ describe("goal command", () => {
 
   it("completes /goal from the menu and sets the session goal on submit", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     const setGoal = vi.fn().mockResolvedValue(true)
     useAppStore.setState({
       admitInput,
@@ -1763,9 +1739,7 @@ describe("goal command", () => {
 
   it("opens the goal editor on a bare /goal submit", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
@@ -1786,9 +1760,7 @@ describe("goal command", () => {
 describe("file mention popup", () => {
   it("picks a file with Enter, replacing the @token with a chip", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     fakeRef.current.respond = (method, params) => {
       if (method === "workspace/findFiles") {
         // The picker caches a one-shot index fetch and filters client-side.
@@ -1856,9 +1828,7 @@ describe("skill mention popup", () => {
 
   it("picks a skill with Enter, replacing the $token with a chip", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({ ...skillsState(), admitInput })
     render(<Composer />)
 
@@ -1904,10 +1874,9 @@ describe("skill mention popup", () => {
                 requestId: body.requestId,
                 inputId: "input_1",
                 role: InputRole.User,
-                content: {
-                  kind: "parts",
-                  parts: inputParts(skillMentionText(templateCreator)),
-                },
+                content: inputFixture(
+                  inputParts(skillMentionText(templateCreator)),
+                ),
               },
             },
           }),
@@ -1940,10 +1909,7 @@ describe("skill mention popup", () => {
     expect(admissions).toHaveLength(1)
     expect(admissions[0]?.params).toMatchObject({
       sessionId: "session_1",
-      content: {
-        kind: "parts",
-        parts: inputParts(skillMentionText(templateCreator)),
-      },
+      content: inputFixture(inputParts(skillMentionText(templateCreator))),
     })
   })
 
@@ -1995,9 +1961,7 @@ describe("skill mention popup", () => {
 
   it("closes the mention popup when the cursor leaves the trailing token", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_parts: readonly InputPart[]) =>
-      Promise.resolve(),
-    )
+    const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({ ...skillsState(), admitInput })
     render(<Composer />)
 
@@ -2721,26 +2685,20 @@ describe("PDF attachment composer", () => {
   }
   it("sends a PDF-only draft and preserves its promoted document identity", async () => {
     const user = userEvent.setup()
-    const original: InputContent = {
-      kind: "parts",
-      parts: [{ ...pdf, type: "document" }],
-    }
-    const accepted: InputContent = {
-      kind: "parts",
-      parts: [
-        {
-          ...pdf,
-          type: "document",
-          file: {
-            rolloutId: "session_1",
-            path: "attachments/requests/pdf/manual.pdf",
-          },
+    const original: InputContent = inputFixture([{ ...pdf, type: "document" }])
+    const accepted: InputContent = inputFixture([
+      {
+        ...pdf,
+        type: "document",
+        file: {
+          rolloutId: "session_1",
+          path: "attachments/requests/pdf/manual.pdf",
         },
-      ],
-    }
+      },
+    ])
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: original.parts,
+      promptDraft: original,
     })
     fakeRef.current.respond = (method, params) => {
       if (method === "session/input")
@@ -2784,11 +2742,11 @@ describe("PDF attachment composer", () => {
       ...pdf,
       file: { ...pdf.file, path: "attachments/staging/undo_pdf/manual.pdf" },
     }
-    const parts: InputPart[] = [
+    const parts: InputDraft = inputFixture([
       { type: "text", text: "before" },
       { ...undoPdf, type: "document" },
       { type: "text", text: "after" },
-    ]
+    ])
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       promptDraft: parts,

@@ -3,7 +3,7 @@ import { citationSources } from "../../src/gui/citation-sources.ts"
 import type { JsonObject, ModelTextBlock } from "../../src/kernel/events.ts"
 
 describe("citation sources", () => {
-  it("normalizes all three providers and deduplicates URLs without losing block-local origins", () => {
+  it("lists sources from all three providers and deduplicates URLs without changing native annotations", () => {
     const citation = {
       type: "url_citation",
       title: "Shared source",
@@ -52,20 +52,6 @@ describe("citation sources", () => {
       {
         label: "Shared source",
         url: "https://example.com/source",
-        origins: [
-          { provider: "openai", blockIndex: 0, range: { start: 1, end: 4 } },
-          {
-            provider: "chatCompletions",
-            blockIndex: 1,
-            range: { start: 1, end: 4 },
-          },
-          {
-            provider: "chatCompletions",
-            blockIndex: 1,
-            range: { start: 0, end: 1 },
-          },
-          { provider: "anthropic", blockIndex: 2 },
-        ],
       },
     ])
     expect(blocks).toEqual(original)
@@ -85,63 +71,6 @@ describe("citation sources", () => {
       first.map((source) => source.id),
     )
     expect(JSON.stringify(first)).not.toContain("private-")
-  })
-
-  it.each([
-    { start_index: -1, end_index: 1 },
-    { start_index: 0, end_index: 5 },
-    { start_index: 1, end_index: 1 },
-    { start_index: 3, end_index: 1 },
-    { start_index: 0.5, end_index: 3 },
-    { start_index: 0, end_index: 3.5 },
-    { start_index: "0", end_index: 3 },
-    { start_index: 0, end_index: null },
-    { start_index: 2, end_index: 3 },
-    { start_index: 0, end_index: 2 },
-    {},
-  ])("leaves malformed or surrogate-splitting offsets unanchored: %j", (range) => {
-    expect(
-      sourceDetails([
-        openaiBlock("A😀B", [
-          {
-            type: "url_citation",
-            title: "Source",
-            url: "https://example.com/",
-            ...range,
-          },
-        ]),
-      ]),
-    ).toEqual([
-      {
-        label: "Source",
-        url: "https://example.com/",
-        origins: [{ provider: "openai", blockIndex: 0 }],
-      },
-    ])
-  })
-
-  it("retains ranges on valid UTF-16 boundaries including an entire surrogate pair", () => {
-    expect(
-      sourceDetails([
-        openaiBlock("A😀B", [
-          { type: "url_citation", start_index: 1, end_index: 3 },
-          { type: "url_citation", start_index: 0, end_index: 4 },
-        ]),
-      ]),
-    ).toEqual([
-      {
-        label: "Source",
-        origins: [
-          { provider: "openai", blockIndex: 0, range: { start: 1, end: 3 } },
-        ],
-      },
-      {
-        label: "Source",
-        origins: [
-          { provider: "openai", blockIndex: 0, range: { start: 0, end: 4 } },
-        ],
-      },
-    ])
   })
 
   it.each([
@@ -166,7 +95,6 @@ describe("citation sources", () => {
     ).toEqual([
       {
         label: "Named source",
-        origins: [{ provider: "openai", blockIndex: 0 }],
       },
     ])
   })
@@ -197,12 +125,10 @@ describe("citation sources", () => {
       {
         label: "example.com",
         url: "http://example.com/a",
-        origins: [{ provider: "openai", blockIndex: 0 }],
       },
       {
         label: "Result",
         url: "https://example.com/result",
-        origins: [{ provider: "anthropic", blockIndex: 1 }],
       },
     ])
   })
@@ -263,23 +189,16 @@ describe("citation sources", () => {
     const original = structuredClone(blocks)
 
     expect(sourceDetails(blocks)).toEqual([
-      { label: "report.pdf", origins: [{ provider: "openai", blockIndex: 0 }] },
-      { label: "notes.txt", origins: [{ provider: "openai", blockIndex: 0 }] },
-      { label: "output.csv", origins: [{ provider: "openai", blockIndex: 0 }] },
-      {
-        label: "File source",
-        origins: [{ provider: "openai", blockIndex: 0 }],
-      },
+      { label: "report.pdf" },
+      { label: "notes.txt" },
+      { label: "output.csv" },
+      { label: "File source" },
       {
         label: "Report",
         location: "from page 2",
-        origins: [{ provider: "anthropic", blockIndex: 1 }],
       },
-      { label: "Report", origins: [{ provider: "anthropic", blockIndex: 1 }] },
-      {
-        label: "Document source",
-        origins: [{ provider: "anthropic", blockIndex: 1 }],
-      },
+      { label: "Report" },
+      { label: "Document source" },
     ])
     expect(blocks).toEqual(original)
   })

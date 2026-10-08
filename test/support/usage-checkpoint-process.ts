@@ -5,6 +5,7 @@ import {
   plainToolName,
 } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const root = process.argv[2]
 if (root === undefined) throw new Error("Missing checkpoint fixture directory.")
@@ -61,10 +62,7 @@ const thread = await manager.createThread({
   mateRevisionId: "fixture",
 })
 await thread.startIfIdle({
-  content: {
-    kind: "parts" as const,
-    parts: [{ type: "text" as const, text: "Checkpoint test" }],
-  },
+  content: inputFixture([{ type: "text" as const, text: "Checkpoint test" }]),
 })
 await started
 // Exit without shutting down the manager or flushing the store: the completed

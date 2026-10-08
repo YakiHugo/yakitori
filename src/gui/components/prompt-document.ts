@@ -1,5 +1,8 @@
-import type { InputPart, UserAttachment } from "../../kernel/events.ts"
 import { type Node, Schema } from "prosemirror-model"
+import type { InputDraft } from "../../core/user-input.ts"
+import type { EditorPart } from "../../gui/input-draft.ts"
+import type { UserAttachment } from "../../kernel/events.ts"
+import { draftFromEditorParts, draftToEditorParts } from "../input-draft.ts"
 
 export type SkillMention = Readonly<{ name: string; path: string }>
 export type FileMention = Readonly<{ name: string; path: string }>
@@ -134,9 +137,10 @@ export function parsePrompt(text: string): Node {
   )
 }
 
-// Images are editor atoms, not textual placeholders in a submitted request.
-// Only cursor/suggestion offsets use the one-character object representation.
-export function parsePromptParts(parts: readonly InputPart[]): Node {
+// Attachments are editor atoms. Cursor and suggestion offsets use a one-character
+// object representation; submission keeps readable markers in the authored text.
+export function parsePromptParts(draft: InputDraft): Node {
+  const parts = draftToEditorParts(draft)
   const paragraphs: Node[] = []
   let content: Node[] = []
   for (const part of parts) {
@@ -163,8 +167,8 @@ export function serializePromptParts(
   resolveAttachment: (attachment: UserAttachment) => UserAttachment = (
     attachment,
   ) => attachment,
-): readonly InputPart[] {
-  const parts: InputPart[] = []
+): InputDraft {
+  const parts: EditorPart[] = []
   const appendText = (text: string) => {
     if (text === "") return
     const last = parts.at(-1)
@@ -187,11 +191,11 @@ export function serializePromptParts(
       } else appendText(node.isText ? (node.text ?? "") : mentionText(node))
     })
   })
-  return parts
+  return draftFromEditorParts(parts)
 }
 
-export function promptPartsText(parts: readonly InputPart[]): string {
-  return parts
+export function promptPartsText(draft: InputDraft): string {
+  return draftToEditorParts(draft)
     .map((part) => (part.type === "text" ? part.text : "\uFFFC"))
     .join("")
 }

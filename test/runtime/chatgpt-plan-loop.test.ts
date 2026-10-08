@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createUserInput } from "../../src/core/user-input.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
@@ -152,10 +153,7 @@ describe("ChatGPT plan registered Turn loop", () => {
       })
       // No model picker or other caller has primed the account catalog.
       await thread.startIfIdle({
-        content: {
-          kind: "parts",
-          parts: [{ type: "text", text: "Find the planning event" }],
-        },
+        content: createUserInput("Find the planning event"),
         modelSelection: { provider: providerId, model },
       })
       await expect

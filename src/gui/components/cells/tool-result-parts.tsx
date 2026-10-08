@@ -1,6 +1,6 @@
 import { useState } from "react"
-import { openUrlTarget } from "../../lib/open-resource.ts"
 import type { ModelToolContentBlock } from "../../../kernel/events.ts"
+import { openUrlTarget } from "../../lib/open-resource.ts"
 import { rolloutAssetUrl } from "../../rollout-asset-url.ts"
 
 export function ToolResultParts({
@@ -69,7 +69,9 @@ export function ToolResultParts({
             src={url}
             alt={
               ("name" in part ? part.name : undefined) ??
-              part.file?.path.split("/").at(-1) ??
+              (part.file && !("url" in part.file)
+                ? part.file.path.split("/").at(-1)
+                : undefined) ??
               "Tool image"
             }
             loading="lazy"

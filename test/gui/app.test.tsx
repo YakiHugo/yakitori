@@ -19,6 +19,7 @@ import {
   type StoredEventEnvelope,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "./input-fixtures.ts"
 
 const sessionId = "session_1"
@@ -205,7 +206,7 @@ describe("app shell", () => {
           sessionId,
           input: {
             submissionId: "request_2",
-            content: { kind: "parts", parts: inputParts("queued follow-up") },
+            content: inputFixture(inputParts("queued follow-up")),
           },
           createdAt: "2026-01-01T00:00:00.000Z",
         },

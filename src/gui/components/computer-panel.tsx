@@ -34,7 +34,12 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
     part?.type === "image" && part.file !== undefined
       ? {
           ...part,
-          name: part.name ?? part.file.path.split("/").at(-1) ?? "Screenshot",
+          name:
+            part.name ??
+            ("url" in part.file
+              ? undefined
+              : part.file.path.split("/").at(-1)) ??
+            "Screenshot",
         }
       : undefined
   const run = useCallback(

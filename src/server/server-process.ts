@@ -246,7 +246,9 @@ export async function handleServerControlRequest(
     }
     await application.rolloutAssets.discardDraftAttachments(request.attachments)
     application.releaseDraftRolloutAssets?.(
-      request.attachments.map((attachment) => attachment.file.rolloutId),
+      request.attachments.flatMap((attachment) =>
+        "url" in attachment.file ? [] : [attachment.file.rolloutId],
+      ),
     )
     return { requestId: request.requestId, ok: true }
   } catch (error) {

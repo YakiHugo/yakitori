@@ -1,3 +1,4 @@
+import type { AssetSource, RolloutAssetReference } from "../core/asset-types.ts"
 import type {
   JsonObject,
   ModelAssistantMessage,
@@ -10,12 +11,12 @@ import type {
   ModelReasoningBlock,
   ModelTextBlock,
   ModelToolCallBlock,
+  ModelToolContentBlock,
   ModelToolDefinition,
   ModelToolInputFormat,
   ModelToolResultMessage,
-  ModelToolContentBlock,
-  ModelUserMessage,
   ModelUserContentBlock,
+  ModelUserMessage,
 } from "../kernel/index.ts"
 
 export type {
@@ -29,12 +30,12 @@ export type {
   ModelReasoningBlock,
   ModelTextBlock,
   ModelToolCallBlock,
+  ModelToolContentBlock,
   ModelToolDefinition,
   ModelToolInputFormat,
   ModelToolResultMessage,
-  ModelToolContentBlock,
-  ModelUserMessage,
   ModelUserContentBlock,
+  ModelUserMessage,
 }
 
 export const ModelStopReason = {
@@ -76,6 +77,12 @@ export type ModelSystemSection = {
 }
 
 export type ModelRequest = Readonly<{
+  // Request-only access; neither HTTP deployment addresses nor provider file
+  // handles are written into the durable conversation.
+  assets?: Readonly<{
+    read(source: AssetSource, signal?: AbortSignal): Promise<Buffer>
+    url?(source: RolloutAssetReference): string | undefined
+  }>
   // Commit completed provider items while the response is still streaming.
   streamOutputItems?: boolean
   // After committed output, retry only from the consumer's updated history.

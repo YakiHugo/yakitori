@@ -88,6 +88,7 @@ file.
 | `YAKITORI_STORE_DIR` | Session store directory (default `YAKITORI_HOME`) |
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
 | `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when present) |
+| `YAKITORI_ASSET_BASE_URL` | Optional externally accessible asset route base, including any deployment path prefix |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
 | `YAKITORI_PROVIDER` | `faux` (default), `openai`, `codex`, `anthropic`, `grok`, or `kimi` |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, or `error` |

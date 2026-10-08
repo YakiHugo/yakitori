@@ -8,6 +8,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "./input-fixtures.ts"
 import { pastePrompt } from "./prompt-editor-helpers.ts"
 
@@ -79,7 +80,7 @@ describe("queued inputs", () => {
     const updateQueuedInput = vi.fn(async () => {})
     const queuedItems = seedQueuedInput().map((item) => ({
       ...item,
-      input: { ...item.input, content: { kind: "parts" as const, parts } },
+      input: { ...item.input, content: inputFixture(parts) },
     }))
     const originalQueuedItems = structuredClone(queuedItems)
     useAppStore.setState({ queuedItems, updateQueuedInput })
@@ -103,11 +104,14 @@ describe("queued inputs", () => {
     expect(editor.textContent).not.toContain("discarded")
     await pastePrompt(editor, " updated")
     await user.click(screen.getByRole("button", { name: "Save" }))
-    expect(updateQueuedInput).toHaveBeenCalledExactlyOnceWith("input_1", [
-      { type: "text", text: "before" },
-      image,
-      { type: "text", text: "after updated" },
-    ])
+    expect(updateQueuedInput).toHaveBeenCalledExactlyOnceWith(
+      "input_1",
+      inputFixture([
+        { type: "text", text: "before" },
+        image,
+        { type: "text", text: "after updated" },
+      ]),
+    )
     expect(useAppStore.getState().queuedItems).toEqual(originalQueuedItems)
   })
 
@@ -135,7 +139,7 @@ function seedQueuedInput() {
       sessionId: "session_1",
       input: {
         submissionId: "request_1",
-        content: { kind: "parts" as const, parts: inputParts("hello") },
+        content: inputFixture(inputParts("hello")),
       },
       createdAt: "2026-01-01T00:00:00.000Z",
     },

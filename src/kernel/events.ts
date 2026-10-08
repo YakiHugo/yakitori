@@ -1,6 +1,25 @@
+import {
+  type ImageAttachment,
+  type ImageDetail,
+  isAssetSource,
+  isImageAttachment,
+} from "../core/asset-types.ts"
+import {
+  type ContextExcerpt,
+  isContextExcerpts,
+} from "../core/input-context.ts"
 import { createEventId, isStorageKey } from "./ids.ts"
-import { type ContextExcerpt, isContextExcerpts } from "./input-context.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
+
+export type {
+  AssetSource,
+  ImageAttachment,
+  ImageDetail,
+  PdfAttachment,
+  RolloutAssetReference,
+  UserAttachment,
+} from "../core/asset-types.ts"
+export { isImageAttachment, isPdfAttachment } from "../core/asset-types.ts"
 
 export const EVENT_SCHEMA_VERSION = 7
 
@@ -62,17 +81,9 @@ export type JsonValue =
 export type JsonObject = { readonly [key: string]: JsonValue }
 export type EventMetadata = JsonObject
 
-// Editable user input retains authored text/attachment placement in one array.
-export type InputPart =
-  | Readonly<{ type: "text"; text: string }>
-  | (Readonly<{ type: "image" }> & ImageAttachment)
-  | (Readonly<{ type: "document" }> & PdfAttachment)
+import { type InputContent, isInputContent } from "../core/user-input.ts"
 
-export type InputContent = Readonly<{
-  kind: "parts"
-  parts: readonly InputPart[]
-  contextAttachments?: readonly ContextExcerpt[]
-}>
+export { type InputContent, isInputContent } from "../core/user-input.ts"
 
 export type TextContent = Readonly<{
   kind: "text"
@@ -80,33 +91,6 @@ export type TextContent = Readonly<{
   attachments?: readonly ImageAttachment[]
   contextAttachments?: readonly ContextExcerpt[]
 }>
-
-export type RolloutAssetReference = {
-  readonly rolloutId: string
-  readonly path: string
-}
-
-type ImageAttachmentMetadata = {
-  readonly name: string
-  readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
-  readonly sizeBytes: number
-  readonly detail?: ImageDetail
-}
-
-export type ImageDetail = "high" | "original"
-
-export type ImageAttachment = ImageAttachmentMetadata & {
-  readonly file: RolloutAssetReference
-}
-
-export type PdfAttachment = Readonly<{
-  name: string
-  mediaType: "application/pdf"
-  sizeBytes: number
-  file: RolloutAssetReference
-}>
-
-export type UserAttachment = ImageAttachment | PdfAttachment
 
 export type JsonContent = {
   readonly kind: "json"
@@ -120,171 +104,34 @@ export type ToolResultContent = Readonly<{
 
 export type ItemContent = TextContent | JsonContent | ToolResultContent
 
-// Provider-neutral, model-visible history IR. The kernel owns this contract so
-// durable checkpoints and forks do not depend on runtime request assembly.
-export type ModelTextBlock = Readonly<{
-  type: "text"
-  text: string
-  providerMetadata?: JsonObject
-}>
+import type {
+  FileObservation,
+  ModelDocumentBlock,
+  ModelMessage,
+  ModelTextBlock,
+  ModelToolContentBlock,
+} from "../core/conversation.ts"
 
-export type ModelImageBlock =
-  | {
-      readonly type: "image"
-      readonly mediaType: ImageAttachment["mediaType"]
-      readonly detail?: ImageDetail
-      readonly data: string
-      readonly file?: never
-      readonly sizeBytes?: never
-    }
-  | {
-      readonly type: "image"
-      readonly mediaType: ImageAttachment["mediaType"]
-      readonly detail?: ImageDetail
-      readonly file: RolloutAssetReference
-      readonly sizeBytes: number
-      readonly name?: string
-      readonly data?: never
-    }
-
-export type ModelDocumentBlock = Readonly<{
-  type: "document"
-  name: string
-  mediaType: "application/pdf"
-  sizeBytes: number
-  file: RolloutAssetReference
-  // Request-only; durable history retains the asset reference.
-  data?: string
-}>
-
-export type ModelReasoningBlock = {
-  readonly type: "reasoning"
-  readonly text: string
-  readonly providerMetadata?: JsonObject
-}
-
-// Opaque history owned by one provider/account. Convert it through that owner
-// before a cross-provider handoff; dropping it would silently lose context.
-export type ModelCompactionBlock = Readonly<{
-  type: "compaction"
-  provider: string
-  model: string
-  scope: string
-  encryptedContent: string
-  id?: string
-  metadata?: JsonObject
-}>
-
-export type ModelToolInputFormat = Readonly<{
-  type: "grammar"
-  syntax: "lark"
-  definition: string
-}>
-
-export type ModelToolDefinition = {
-  readonly name: string
-  readonly description: string
-  readonly inputSchema: JsonObject
-  readonly kind?: "function" | "custom" | "tool_search"
-  readonly inputFormat?: ModelToolInputFormat
-  readonly customInputFallbackKey?: string
-  readonly deferLoading?: boolean
-}
-
-export type ModelToolCallBlock = Readonly<{
-  type: "tool_call"
-  id: string
-  name: string
-  input: JsonValue
-  toolKind?: "function" | "custom" | "tool_search"
-  customInputFallbackKey?: string
-  providerMetadata?: JsonObject
-}>
-
-export type ModelContentBlock =
-  | ModelTextBlock
-  | ModelReasoningBlock
-  | ModelCompactionBlock
-  | ModelToolCallBlock
-
-export type ModelHistoryContext =
-  | Readonly<{ type: "skill_invocation"; inputId: string }>
-  | Readonly<{ type: "goal"; goalId: string }>
-  | Readonly<{
-      type: "world_state"
-      sectionId: string
-      revision: string
-    }>
-
-export type ModelUserContentBlock =
-  | ModelTextBlock
-  | ModelImageBlock
-  | ModelDocumentBlock
-
-export type ModelUserMessage = Readonly<{
-  role: "user"
-  content: readonly ModelUserContentBlock[]
-  context?: ModelHistoryContext
-  contextAttachments?: readonly ContextExcerpt[]
-}>
-
-export type ModelDeveloperMessage = {
-  readonly role: "developer"
-  readonly content: readonly ModelTextBlock[]
-  readonly context?: ModelHistoryContext
-}
-
-export type ModelAssistantMessage = {
-  readonly role: "assistant"
-  readonly content: readonly ModelContentBlock[]
-}
-
-export type FileObservation = {
-  readonly path: string
-  readonly kind:
-    | "delete"
-    | "edit"
-    | "invalidate"
-    | "ranged_read"
-    | "whole_file_read"
-    | "write"
-  readonly complete: boolean
-  readonly sha256?: string
-  readonly ranges?: readonly {
-    readonly startLine: number
-    readonly endLine: number
-  }[]
-  readonly created?: boolean
-  readonly optimisticRebase?: boolean
-}
-
-// Tool content is data, not an assistant continuation or a host/UI metadata channel.
-export type ModelToolContentBlock =
-  | Readonly<{ type: "text"; text: string }>
-  | ModelImageBlock
-  | ModelDocumentBlock
-
-export type ModelToolResultMessage = Readonly<{
-  role: "tool"
-  toolCallId: string
-  content: readonly ModelToolContentBlock[]
-  isError?: boolean
-  // A structural discovery result. Provider adapters encode this as an
-  // OpenAI tool_search_output or Anthropic tool_reference blocks instead of
-  // degrading it to ordinary tool-result text.
-  toolSearch?: Readonly<{
-    tools: readonly ModelToolDefinition[]
-  }>
-  // Execution-only metadata. Providers receive content; the actor retains this
-  // grant so later model-visible Turns can safely authorize file mutations.
-  fileObservations?: readonly FileObservation[]
-}>
-
-export type ModelMessage =
-  | ModelUserMessage
-  | ModelDeveloperMessage
-  | ModelAssistantMessage
-  | ModelToolResultMessage
+export type {
+  FileObservation,
+  ModelAssistantMessage,
+  ModelCompactionBlock,
+  ModelContentBlock,
+  ModelDeveloperMessage,
+  ModelDocumentBlock,
+  ModelHistoryContext,
+  ModelImageBlock,
+  ModelMessage,
+  ModelReasoningBlock,
+  ModelTextBlock,
+  ModelToolCallBlock,
+  ModelToolContentBlock,
+  ModelToolDefinition,
+  ModelToolInputFormat,
+  ModelToolResultMessage,
+  ModelUserContentBlock,
+  ModelUserMessage,
+} from "../core/conversation.ts"
 
 export type KernelError = {
   readonly message: string
@@ -1553,7 +1400,7 @@ function isModelImageBlock(value: unknown): boolean {
     ]) &&
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
-    isRolloutAssetReference(value.file) &&
+    isAssetSource(value.file) &&
     isNonNegativeInteger(value.sizeBytes) &&
     (value.name === undefined || isString(value.name))
   )
@@ -1841,26 +1688,6 @@ function isTurnLatency(value: unknown): value is TurnLatency {
   )
 }
 
-export function isInputContent(value: unknown): value is InputContent {
-  return (
-    isRecord(value) &&
-    value.kind === "parts" &&
-    onlyKeys(value, ["kind", "parts", "contextAttachments"]) &&
-    Array.isArray(value.parts) &&
-    value.parts.every((part) => {
-      if (!isRecord(part)) return false
-      if (part.type === "text")
-        return onlyKeys(part, ["type", "text"]) && isString(part.text)
-      const { type, ...attachment } = part
-      return type === "image"
-        ? isImageAttachment(attachment)
-        : type === "document" && isPdfAttachment(attachment)
-    }) &&
-    (value.contextAttachments === undefined ||
-      isContextExcerpts(value.contextAttachments))
-  )
-}
-
 function isTextContent(value: unknown): value is TextContent {
   return (
     isRecord(value) &&
@@ -1872,43 +1699,6 @@ function isTextContent(value: unknown): value is TextContent {
     (value.attachments === undefined ||
       (Array.isArray(value.attachments) &&
         value.attachments.every(isImageAttachment)))
-  )
-}
-
-export function isImageAttachment(value: unknown): value is ImageAttachment {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["name", "mediaType", "detail", "file", "sizeBytes"]) &&
-    isString(value.name) &&
-    isSupportedImageMediaType(value.mediaType) &&
-    (value.detail === undefined || isImageDetail(value.detail)) &&
-    isNonNegativeInteger(value.sizeBytes) &&
-    isRolloutAssetReference(value.file)
-  )
-}
-
-export function isPdfAttachment(value: unknown): value is PdfAttachment {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["name", "mediaType", "file", "sizeBytes"]) &&
-    isString(value.name) &&
-    value.name.length > 0 &&
-    value.mediaType === "application/pdf" &&
-    typeof value.sizeBytes === "number" &&
-    Number.isSafeInteger(value.sizeBytes) &&
-    value.sizeBytes > 0 &&
-    isRolloutAssetReference(value.file)
-  )
-}
-
-function isRolloutAssetReference(
-  value: unknown,
-): value is RolloutAssetReference {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["rolloutId", "path"]) &&
-    isStorageKey(value.rolloutId) &&
-    isString(value.path)
   )
 }
 
@@ -2059,8 +1849,8 @@ function isModelDocumentBlock(value: unknown): value is ModelDocumentBlock {
     value.mediaType === "application/pdf" &&
     typeof value.sizeBytes === "number" &&
     Number.isSafeInteger(value.sizeBytes) &&
-    value.sizeBytes > 0 &&
-    isRolloutAssetReference(value.file) &&
+    value.sizeBytes >= 0 &&
+    isAssetSource(value.file) &&
     (value.data === undefined || isString(value.data))
   )
 }
