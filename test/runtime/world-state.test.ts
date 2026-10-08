@@ -152,6 +152,44 @@ describe("world state", () => {
     expect(withTool?.fragments[0]?.text).toContain("spawn")
   })
 
+  it("updates delegation guidance when the exposed spawn tool changes", () => {
+    const context = {
+      rootSessionId: "session_1",
+      path: "/root",
+      taskName: "root",
+      agentType: "general" as const,
+      depth: 0,
+      maxDepth: 2,
+      maxConcurrentAgents: 4,
+    }
+    const initial = diffWorldState(
+      undefined,
+      worldState(undefined, "2026-08-21", ["spawn_agent"], context),
+    )
+    const disabled = diffWorldState(
+      initial?.snapshot,
+      worldState(undefined, "2026-08-21", [], context),
+    )
+    expect(disabled?.fragments).toContainEqual(
+      expect.objectContaining({
+        id: "multi_agent",
+        text: expect.stringContaining(
+          "No descendant-delegation tool is available",
+        ),
+      }),
+    )
+    const enabled = diffWorldState(
+      disabled?.snapshot,
+      worldState(undefined, "2026-08-21", ["spawn_agent"], context),
+    )
+    expect(enabled?.fragments).toContainEqual(
+      expect.objectContaining({
+        id: "multi_agent",
+        text: expect.stringContaining("You may spawn descendants"),
+      }),
+    )
+  })
+
   it("emits a session goal fragment, then a replacement, then a clearing", () => {
     const initial = diffWorldState(undefined, worldState())
     expect(initial?.fragments.map((fragment) => fragment.id)).not.toContain(

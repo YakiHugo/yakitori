@@ -396,6 +396,70 @@ describe("persisted models cache", () => {
     expect(discover).toHaveBeenCalledTimes(1)
   })
 
+  it("keeps concurrent stores' saves atomic and independently successful", async () => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    const directory = root
+    const entries = Array.from({ length: 8 }, (_, index) => ({
+      identity: `account_${index}`,
+      fetchedAt: index,
+      models: [
+        {
+          id: `model_${index}`,
+          instructions: "x".repeat(16_384 * (index + 1)),
+        },
+      ],
+    }))
+    const results = await Promise.allSettled(
+      entries.map((entry) =>
+        createFileModelsCacheStore({ provider: "codex", directory }).save(
+          entry,
+        ),
+      ),
+    )
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true)
+    const persisted = await createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    }).load()
+    expect(entries).toContainEqual(persisted)
+  })
+
+  it.each([
+    { efforts: null },
+    { efforts: [42] },
+    { instructions: {} },
+    { contextWindowTokens: -1 },
+    { effectiveContextWindowPercent: "100" },
+    { inputModalities: ["invalid"] },
+    { capabilities: { inputModalities: null } },
+    {
+      capabilities: {
+        inputModalities: ["text"],
+        imageDetailModes: [],
+        shellToolType: "unified_exec",
+        fileEditingToolType: ["none"],
+        supportsNativeToolSearch: false,
+        supportsCustomTools: false,
+      },
+    },
+    { toolOutputTruncation: { mode: "bytes", limit: -1 } },
+  ])("treats invalid discovered model fields as a cold cache: %j", async (fields) => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    await writeFile(
+      join(root, "codex.json"),
+      JSON.stringify({
+        identity: "account",
+        fetchedAt: Date.now(),
+        models: [{ id: "gpt-persisted", ...fields }],
+      }),
+    )
+    const store = createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    })
+    await expect(store.load()).resolves.toBeUndefined()
+  })
+
   it("treats a malformed cache file as absent", async () => {
     root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
     await writeFile(join(root, "codex.json"), "not json")

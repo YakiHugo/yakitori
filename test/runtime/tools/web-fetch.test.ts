@@ -236,6 +236,45 @@ describe("web_fetch contract", () => {
     })
   })
 
+  it.each([
+    [
+      "binary",
+      200,
+      { "content-type": "image/png" },
+      "unsupported_content_type",
+    ],
+    [
+      "oversized",
+      200,
+      { "content-type": "text/plain", "content-length": "10000" },
+      "response_too_large",
+    ],
+    [
+      "redirect",
+      302,
+      { location: "https://example.com/target" },
+      "cross_origin_redirect",
+    ],
+  ] as const)("closes an unread %s response body", async (_name, status, headers, code) => {
+    let closed = false
+    let responseToClose: ServerResponse | undefined
+    const base = await serve(({ response }) => {
+      responseToClose = response
+      response.once("close", () => {
+        closed = true
+      })
+      response.writeHead(status, headers)
+      response.write("partial")
+    })
+    try {
+      const result = await fetchUrl(base, { maxBodyBytes: 1024 })
+      expect(result).toMatchObject({ ok: false, code })
+      await expect.poll(() => closed, { timeout: 500 }).toBe(true)
+    } finally {
+      responseToClose?.destroy()
+    }
+  })
+
   it("truncates streaming bodies that lie about or omit content-length", async () => {
     const base = await serve(({ response }) => {
       response.writeHead(200, { "content-type": "text/plain" })

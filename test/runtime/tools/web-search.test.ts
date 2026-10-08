@@ -204,6 +204,28 @@ describe("web_search contract", () => {
     })
   })
 
+  it("closes an unread error response body", async () => {
+    let closed = false
+    let responseToClose: ServerResponse | undefined
+    const { endpoint } = await serveMcp(({ response }) => {
+      responseToClose = response
+      response.once("close", () => {
+        closed = true
+      })
+      response.writeHead(503, { "content-type": "text/plain" })
+      response.write("partial")
+    })
+    try {
+      expect(await search("example", { endpoint })).toMatchObject({
+        ok: false,
+        code: "search_error",
+      })
+      await expect.poll(() => closed, { timeout: 500 }).toBe(true)
+    } finally {
+      responseToClose?.destroy()
+    }
+  })
+
   it("appends the API key as the exaApiKey query parameter", async () => {
     const { endpoint, requests } = await serveMcp(({ response }) => {
       respondJson(response, {

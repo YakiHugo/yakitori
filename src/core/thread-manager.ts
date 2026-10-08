@@ -225,16 +225,19 @@ export class ThreadManager {
             })()
         }
       } catch (error) {
+        await this.#store.discardThread(threadId)
         await this.#store.deleteThread(threadId)
         throw error
       }
       if (this.#closing) {
+        await this.#store.discardThread(threadId)
         await this.#store.deleteThread(threadId)
         throw new Error("ThreadManager shut down while creating a Thread.")
       }
       try {
         return await this.#installStored(stored)
       } catch (error) {
+        await this.#store.discardThread(threadId)
         await this.#store.deleteThread(threadId)
         throw error
       }
@@ -326,6 +329,7 @@ export class ThreadManager {
         }
       })
       if (this.#closing) {
+        await this.#store.discardThread(target.id)
         await this.#store.deleteThread(target.id)
         throw new Error("ThreadManager shut down while forking a Thread.")
       }
