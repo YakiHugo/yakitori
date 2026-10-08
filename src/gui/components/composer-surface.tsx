@@ -1,11 +1,3 @@
-import { PdfAttachmentCard, openPdfAttachment } from "./pdf-attachment.tsx"
-import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
-import type { InputPart } from "../../kernel/events.ts"
-import {
-  inputContentAttachments,
-  inputContentText,
-} from "../../kernel/input-content.ts"
-import { textInputParts, trimInputParts } from "../input-parts.ts"
 import {
   Archive,
   ArrowUp,
@@ -37,32 +29,42 @@ import {
   useRef,
   useState,
 } from "react"
+import { assetSourceKey } from "../../core/asset-types.ts"
+import type { ContextExcerpt } from "../../core/input-context.ts"
+import type { InputDraft } from "../../core/user-input.ts"
+import {
+  inputContent,
+  inputContentAttachments,
+  inputContentText,
+} from "../../core/user-input.ts"
 import {
   COMPACT_DIRECTIVE,
   GOAL_DIRECTIVE,
   type UserAttachment,
 } from "../../kernel/events.ts"
-import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
   appendAttachmentFiles,
   appendPickedAttachments,
+  attachmentUrl,
   discardDraftAttachments,
   discardPickedAttachments,
-  attachmentUrl,
   pickAttachments as selectAttachments,
   validateAttachmentFiles,
 } from "../composer-attachments.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
+import { textInputDraft, trimInputDraft } from "../input-draft.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   type ComposerSuggestion,
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
+import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   fileMentionText,
-  skillMentionText,
   promptPartsText,
+  skillMentionText,
 } from "./prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
 import { ContextExcerptChips } from "./selection-actions.tsx"
@@ -177,7 +179,7 @@ export function ComposerSurface({
 }: Readonly<{
   sessionId?: string | undefined
   editorKey?: string | number | undefined
-  draft: readonly InputPart[]
+  draft: InputDraft
   excerpts: readonly ContextExcerpt[]
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError?: string | undefined
@@ -191,11 +193,11 @@ export function ComposerSurface({
   activeTurnId?: string | undefined
   supportsImages?: boolean
   supportsOriginal?: boolean
-  historyParts: readonly (readonly InputPart[])[]
-  setPromptDraft(parts: readonly InputPart[]): void
+  historyParts: readonly InputDraft[]
+  setPromptDraft(parts: InputDraft): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
-  onSubmit(parts: readonly InputPart[], mode?: "auto" | "queue"): void
+  onSubmit(parts: InputDraft, mode?: "auto" | "queue"): void
   onCancel(): void
   modelControls: ReactNode
   importAttachments: ComposerAttachmentImport
@@ -223,7 +225,7 @@ export function ComposerSurface({
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const draft = promptPartsText(parts)
-  const attachments = inputContentAttachments({ kind: "parts", parts })
+  const attachments = inputContentAttachments(inputContent(parts))
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const contextPanelRef = useRef<HTMLDivElement>(null)
   const addContextRef = useRef<HTMLButtonElement>(null)
@@ -236,40 +238,37 @@ export function ComposerSurface({
       Readonly<{
         sessionId: string | undefined
         stepsBack: number
-        savedDraft: readonly InputPart[]
+        savedDraft: InputDraft
       }>
     >()
   // A recalled input temporarily replaces the editor, but this surface still
   // owns the unsent snapshot, including across session-keyed editor remounts.
-  const parkedOwner = useRef<readonly InputPart[] | undefined>(undefined)
+  const parkedOwner = useRef<InputDraft | undefined>(undefined)
   const currentOwner = useRef({ parts, apiBase, onAttachmentError })
   useLayoutEffect(() => {
     currentOwner.current = { parts, apiBase, onAttachmentError }
   })
   const releaseParked = useCallback(
-    (previous: readonly InputPart[], next: readonly InputPart[] = []) => {
+    (previous: InputDraft, next: InputDraft = textInputDraft("")) => {
       const live = new Set(
-        inputAttachmentOwnership
-          .resolveParts(currentOwner.current.apiBase, [
-            ...currentOwner.current.parts,
-            ...next,
-          ])
-          .flatMap((part) =>
-            part.type !== "text"
-              ? [`${part.file.rolloutId}\0${part.file.path}`]
-              : [],
-          ),
-      )
-      const unused = inputContentAttachments({
-        kind: "parts",
-        parts: inputAttachmentOwnership.resolveParts(
-          currentOwner.current.apiBase,
-          previous,
+        [currentOwner.current.parts, next].flatMap((draft) =>
+          inputAttachmentOwnership
+            .resolveDraft(currentOwner.current.apiBase, draft)
+            .attachments.map((attachment) => assetSourceKey(attachment.file)),
         ),
-      }).filter(
+      )
+      const unused = inputContentAttachments(
+        inputContent(
+          inputAttachmentOwnership.resolveDraft(
+            currentOwner.current.apiBase,
+            previous,
+          ),
+        ),
+      ).filter(
         (image) =>
+          !("url" in image.file) &&
           image.file.path.startsWith("attachments/staging/") &&
-          !live.has(`${image.file.rolloutId}\0${image.file.path}`),
+          !live.has(assetSourceKey(image.file)),
       )
       if (unused.length)
         void discardDraftAttachments(unused).catch((error: unknown) =>
@@ -448,7 +447,7 @@ export function ComposerSurface({
     }
   }, [trigger, query, queryKey, menuOpen, searchFiles])
 
-  const text = inputContentText({ kind: "parts", parts }).trim()
+  const text = inputContentText(inputContent(parts)).trim()
   const previewAttachment =
     previewIndex === undefined ? undefined : attachments[previewIndex]
   const containsInput =
@@ -525,7 +524,7 @@ export function ComposerSurface({
     setHistoryNavigation(undefined)
     // Preserve authored detail in durable history and admission identity.
     // Runtime projects it to the selected model before preparing image bytes.
-    onSubmit(trimInputParts(parts), mode)
+    onSubmit(trimInputDraft(parts), mode)
   }
 
   // Selecting a command dispatches it right away, like codex: the draft
@@ -564,8 +563,8 @@ export function ComposerSurface({
     )
     // The caller clears the draft after the action succeeds. This preserves
     // the command when an asynchronous operation (notably /compact) fails.
-    setPromptDraft(textInputParts(command.name))
-    onSubmit(textInputParts(command.name))
+    setPromptDraft(textInputDraft(command.name))
+    onSubmit(textInputDraft(command.name))
   }
 
   const pickSuggestion = (item: ComposerSuggestion): void => {
@@ -804,7 +803,7 @@ export function ComposerSurface({
               {attachments.map((attachment, index) => (
                 <div
                   // biome-ignore lint/suspicious/noArrayIndexKey: Part slots distinguish repeated references to the same asset.
-                  key={`${index}:${attachment.file.rolloutId}:${attachment.file.path}`}
+                  key={`${index}:${assetSourceKey(attachment.file)}`}
                   className={
                     attachment.mediaType === "application/pdf"
                       ? "relative shrink-0 max-w-72"
@@ -934,8 +933,8 @@ export function ComposerSurface({
               setPreviewIndex(
                 attachments.findIndex(
                   (candidate) =>
-                    candidate.file.rolloutId === image.file.rolloutId &&
-                    candidate.file.path === image.file.path,
+                    assetSourceKey(candidate.file) ===
+                    assetSourceKey(image.file),
                 ),
               )
             }

@@ -5,12 +5,13 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { StoredRolloutItem } from "../../src/core/rollout.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import type {
   SessionEvent,
   SubmitTurnInput,
 } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { createUserInput } from "../../src/core/user-input.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import {
@@ -500,7 +501,7 @@ function tool(name: string): Omit<RuntimeTool, "execute"> {
 function input(text: string, submissionId: string): SubmitTurnInput {
   return {
     submissionId,
-    content: { kind: "parts", parts: [{ type: "text", text }] },
+    content: createUserInput(text),
   }
 }
 

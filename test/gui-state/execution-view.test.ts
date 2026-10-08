@@ -9,14 +9,15 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
-  isKernelEvent,
   type ItemContent,
+  isKernelEvent,
   type JsonValue,
   type KernelError,
   type KernelFact,
   type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "../gui/input-fixtures.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
@@ -269,18 +270,6 @@ describe("execution view", () => {
             id: "citation_0_openai_0",
             label: "Source",
             url: "https://example.com/source",
-            origins: [
-              {
-                provider: "openai",
-                blockIndex: 0,
-                range: { start: 0, end: 5 },
-              },
-              {
-                provider: "chatCompletions",
-                blockIndex: 1,
-                range: { start: 1, end: 6 },
-              },
-            ],
           },
         ],
       },
@@ -1010,7 +999,7 @@ describe("execution view", () => {
           requestId: "request:1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("run") },
+          content: inputFixture(inputParts("run")),
           modelSelection: { provider: "faux", model: "faux-1" },
         },
       },
@@ -1057,7 +1046,7 @@ describe("execution view", () => {
       expect.objectContaining({
         kind: "user_input",
         text: "run",
-        parts: inputParts("run"),
+        content: inputParts("run"),
       }),
       expect.objectContaining({
         kind: "tool",
@@ -1437,7 +1426,7 @@ describe("execution view", () => {
           requestId: "request:1",
           inputId: "input_1",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("run") },
+          content: inputFixture(inputParts("run")),
         },
       },
       {
@@ -1446,7 +1435,7 @@ describe("execution view", () => {
           requestId: "request:2",
           inputId: "input_2",
           role: InputRole.User,
-          content: { kind: "parts", parts: inputParts("queued") },
+          content: inputFixture(inputParts("queued")),
         },
       },
       {

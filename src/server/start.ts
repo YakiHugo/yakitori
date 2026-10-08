@@ -15,6 +15,9 @@ await runYakitoriServerProcess({
   port,
   application: {
     rootDir,
+    ...(process.env.YAKITORI_ASSET_BASE_URL === undefined
+      ? {}
+      : { assetBaseUrl: process.env.YAKITORI_ASSET_BASE_URL }),
     ...(guiStaticDir === undefined ? {} : { guiStaticDir }),
   },
   onListening(listeningUrl, application) {

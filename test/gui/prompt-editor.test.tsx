@@ -1,21 +1,22 @@
-import type {
-  ImageAttachment,
-  UserAttachment,
-  PdfAttachment,
-  InputPart,
-} from "../../src/kernel/events.ts"
-import { inputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
-import { textInputParts } from "../../src/gui/input-parts.ts"
-import { inputContentText } from "../../src/kernel/input-content.ts"
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { createRef, useState } from "react"
 import { afterEach, expect, it, vi } from "vitest"
+import type { InputDraft } from "../../src/core/user-input.ts"
+import { inputContentText } from "../../src/core/user-input.ts"
 import {
   PromptEditor,
   type PromptEditorHandle,
 } from "../../src/gui/components/prompt-editor.tsx"
+import { inputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
+import { textInputDraft } from "../../src/gui/input-draft.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import type {
+  ImageAttachment,
+  PdfAttachment,
+  UserAttachment,
+} from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 afterEach(cleanup)
 
@@ -26,10 +27,8 @@ function Fixture() {
       <PromptEditor
         apiBase="http://localhost"
         label="Prompt"
-        value={textInputParts(text)}
-        onChange={(parts) =>
-          setText(inputContentText({ kind: "parts", parts }))
-        }
+        value={textInputDraft(text)}
+        onChange={(parts) => setText(inputContentText(inputFixture(parts)))}
       />
       <output data-testid="serialized">{text}</output>
     </>
@@ -124,10 +123,8 @@ function ExternalFixture() {
       <PromptEditor
         apiBase="http://localhost"
         label="Prompt"
-        value={textInputParts(text)}
-        onChange={(parts) =>
-          setText(inputContentText({ kind: "parts", parts }))
-        }
+        value={textInputDraft(text)}
+        onChange={(parts) => setText(inputContentText(inputFixture(parts)))}
       />
       <output data-testid="serialized">{text}</output>
       <button type="button" onClick={() => setText("Restored draft")}>
@@ -163,7 +160,7 @@ it("does not delegate Enter to onKeyDown during IME composition", () => {
     <PromptEditor
       apiBase="http://localhost"
       label="Prompt"
-      value={textInputParts("Draft")}
+      value={textInputDraft("Draft")}
       onChange={() => {}}
       onKeyDown={onKeyDown}
     />,
@@ -186,7 +183,7 @@ it("blocks editing while disabled", () => {
     <PromptEditor
       apiBase="http://localhost"
       label="Prompt"
-      value={textInputParts("Locked draft")}
+      value={textInputDraft("Locked draft")}
       onChange={onChange}
       disabled
     />,
@@ -210,10 +207,8 @@ function SkillFixture() {
       <PromptEditor
         apiBase="http://localhost"
         label="Prompt"
-        value={textInputParts(text)}
-        onChange={(parts) =>
-          setText(inputContentText({ kind: "parts", parts }))
-        }
+        value={textInputDraft(text)}
+        onChange={(parts) => setText(inputContentText(inputFixture(parts)))}
       />
       <output data-testid="serialized">{text}</output>
     </>
@@ -267,7 +262,7 @@ function OrderedFixture({
   preview,
   apiBase = "http://ordered-editor.test/",
 }: {
-  initial: readonly InputPart[]
+  initial: InputDraft
   handle: React.RefObject<PromptEditorHandle | null>
   discard?: (images: readonly UserAttachment[]) => void
   preview?: (image: ImageAttachment) => void
@@ -286,7 +281,7 @@ function OrderedFixture({
         {...(preview ? { onPreviewImage: preview } : {})}
       />
       <output data-testid="parts">{JSON.stringify(parts)}</output>
-      <button type="button" onClick={() => setParts([])}>
+      <button type="button" onClick={() => setParts(inputFixture([]))}>
         clear ordered draft
       </button>
     </>
@@ -309,7 +304,7 @@ it("inserts images between authored text and preserves mapped placement during a
   render(
     <OrderedFixture
       handle={handle}
-      initial={[{ type: "text", text: "before" }]}
+      initial={inputFixture([{ type: "text", text: "before" }])}
     />,
   )
   const insertion = handle.current?.captureAttachmentInsertion()
@@ -317,11 +312,13 @@ it("inserts images between authored text and preserves mapped placement during a
   act(() => {
     expect(insertion?.insert([stagedImage])).toBe(true)
   })
-  expect(editedParts()).toEqual([
-    { type: "text", text: "before" },
-    { ...stagedImage, type: "image" },
-    { type: "text", text: " after" },
-  ])
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "before" },
+      { ...stagedImage, type: "image" },
+      { type: "text", text: " after" },
+    ]),
+  )
   expect(
     screen.getByRole("button", { name: "Preview attached image placed.png" }),
   ).toBeTruthy()
@@ -332,7 +329,7 @@ it("invalidates pending image insertion when the draft is externally replaced", 
   render(
     <OrderedFixture
       handle={handle}
-      initial={[{ type: "text", text: "old" }]}
+      initial={inputFixture([{ type: "text", text: "old" }])}
     />,
   )
   const insertion = handle.current?.captureAttachmentInsertion()
@@ -340,7 +337,7 @@ it("invalidates pending image insertion when the draft is externally replaced", 
   act(() => {
     expect(insertion?.insert([stagedImage])).toBe(false)
   })
-  expect(editedParts()).toEqual([])
+  expect(editedParts()).toEqual(inputFixture([]))
 })
 
 it("retains removed image bytes for Undo and releases only unused staging assets when history resets", () => {
@@ -350,27 +347,31 @@ it("retains removed image bytes for Undo and releases only unused staging assets
     <OrderedFixture
       handle={handle}
       discard={discard}
-      initial={[
+      initial={inputFixture([
         { type: "text", text: "before" },
         { ...stagedImage, type: "image" },
         { type: "text", text: "after" },
-      ]}
+      ])}
     />,
   )
   act(() => handle.current?.removeAttachment(0))
-  expect(editedParts()).toEqual([{ type: "text", text: "beforeafter" }])
+  expect(editedParts()).toEqual(
+    inputFixture([{ type: "text", text: "beforeafter" }]),
+  )
   expect(discard).not.toHaveBeenCalled()
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
-  expect(editedParts()).toEqual([
-    { type: "text", text: "before" },
-    { ...stagedImage, type: "image" },
-    { type: "text", text: "after" },
-  ])
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "before" },
+      { ...stagedImage, type: "image" },
+      { type: "text", text: "after" },
+    ]),
+  )
   act(() => handle.current?.removeAttachment(0))
   fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
   expect(discard).toHaveBeenCalledExactlyOnceWith([stagedImage])
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
-  expect(editedParts()).toEqual([])
+  expect(editedParts()).toEqual(inputFixture([]))
 })
 
 it("resolves image atoms restored by Undo after their staging bytes were promoted", () => {
@@ -392,18 +393,18 @@ it("resolves image atoms restored by Undo after their staging bytes were promote
     <OrderedFixture
       handle={handle}
       apiBase={apiBase}
-      initial={original}
+      initial={inputFixture(original)}
       preview={preview}
     />,
   )
   act(() => handle.current?.removeAttachment(0))
   inputAttachmentOwnership.promote(
     apiBase,
-    { kind: "parts", parts: original },
-    { kind: "parts", parts: accepted },
+    inputFixture(original),
+    inputFixture(accepted),
   )
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
-  expect(editedParts()).toEqual(accepted)
+  expect(editedParts()).toEqual(inputFixture(accepted))
   const image = screen.getByRole("button", {
     name: "Preview attached image placed.png",
   })
@@ -421,7 +422,7 @@ it("resolves image atoms restored by Undo after their staging bytes were promote
     ctrlKey: true,
     shiftKey: true,
   })
-  expect(editedParts()).toEqual([])
+  expect(editedParts()).toEqual(inputFixture([]))
 })
 
 const stagedPdf: PdfAttachment = {
@@ -440,7 +441,7 @@ it("preserves mixed PDF/image placement, image detail indexing and PDF Undo owne
     <OrderedFixture
       handle={handle}
       discard={discard}
-      initial={[{ type: "text", text: "before" }]}
+      initial={inputFixture([{ type: "text", text: "before" }])}
     />,
   )
   const insertion = handle.current?.captureAttachmentInsertion()
@@ -448,19 +449,23 @@ it("preserves mixed PDF/image placement, image detail indexing and PDF Undo owne
   act(() => {
     expect(insertion?.insert([stagedPdf, stagedImage])).toBe(true)
   })
-  expect(editedParts()).toEqual([
-    { type: "text", text: "before" },
-    { ...stagedPdf, type: "document" },
-    { ...stagedImage, type: "image" },
-    { type: "text", text: "after" },
-  ])
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "before" },
+      { ...stagedPdf, type: "document" },
+      { ...stagedImage, type: "image" },
+      { type: "text", text: "after" },
+    ]),
+  )
   act(() => handle.current?.setImageDetail(1, "high"))
-  expect(editedParts()).toEqual([
-    { type: "text", text: "before" },
-    { ...stagedPdf, type: "document" },
-    { ...stagedImage, type: "image", detail: "high" },
-    { type: "text", text: "after" },
-  ])
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "before" },
+      { ...stagedPdf, type: "document" },
+      { ...stagedImage, type: "image", detail: "high" },
+      { type: "text", text: "after" },
+    ]),
+  )
   act(() => handle.current?.removeAttachment(0))
   expect(
     screen.queryByRole("button", { name: "Open attached PDF manual.pdf" }),
@@ -486,13 +491,13 @@ it("resolves promoted PDF atoms for both mouse and keyboard activation", () => {
   }
   inputAttachmentOwnership.promote(
     apiBase,
-    { kind: "parts", parts: [{ ...stagedPdf, type: "document" }] },
-    { kind: "parts", parts: [{ ...accepted, type: "document" }] },
+    inputFixture([{ ...stagedPdf, type: "document" }]),
+    inputFixture([{ ...accepted, type: "document" }]),
   )
   render(
     <PromptEditor
       label="PDF prompt"
-      value={[{ ...stagedPdf, type: "document" }]}
+      value={inputFixture([{ ...stagedPdf, type: "document" }])}
       apiBase={apiBase}
       onChange={() => {}}
       onOpenDocument={open}
@@ -511,7 +516,7 @@ it("passes every dropped file in order so unsupported content is reported rather
   render(
     <PromptEditor
       label="PDF prompt"
-      value={[]}
+      value={inputFixture([])}
       apiBase="http://localhost"
       onChange={() => {}}
       onPasteAttachments={paste}

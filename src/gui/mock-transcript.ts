@@ -4,6 +4,7 @@
 import type { ApiSessionDetail } from "../server/protocol.ts"
 import type { ExecutionEntry, ExecutionViewState } from "./execution-view.ts"
 import { createExecutionViewState } from "./execution-view.ts"
+import { draftFromEditorParts, textInputDraft } from "./input-draft.ts"
 import { useAppStore } from "./store/app-store.ts"
 
 const SESSION_ID = "session_mock_typography"
@@ -110,12 +111,12 @@ function entries(): ExecutionEntry[] {
       kind: "user_input",
       inputId: "input_1",
       text: "帮我把 markdown 排版过一遍：标题、列表、代码块、引用、表格都要看效果，顺便对照一下 Codex 的风格。",
-      parts: [
+      content: draftFromEditorParts([
         {
           type: "text",
           text: "帮我把 markdown 排版过一遍：标题、列表、代码块、引用、表格都要看效果，顺便对照一下 Codex 的风格。",
         },
-      ],
+      ]),
       at: at("11:00:00"),
     },
     {
@@ -252,12 +253,12 @@ function entries(): ExecutionEntry[] {
       kind: "user_input",
       inputId: "input_2",
       text: "表格、引用块、任务列表也看看，再给一个编辑失败的样子。",
-      parts: [
+      content: draftFromEditorParts([
         {
           type: "text",
           text: "表格、引用块、任务列表也看看，再给一个编辑失败的样子。",
         },
-      ],
+      ]),
       at: at("11:04:00"),
     },
     {
@@ -344,7 +345,7 @@ function entries(): ExecutionEntry[] {
       kind: "user_input",
       inputId: "input_3",
       text: "最后看看被打断的 turn 长什么样。",
-      parts: [{ type: "text", text: "最后看看被打断的 turn 长什么样。" }],
+      content: textInputDraft("最后看看被打断的 turn 长什么样。"),
       at: at("11:06:00"),
     },
     {

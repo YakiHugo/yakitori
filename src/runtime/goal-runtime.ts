@@ -4,6 +4,7 @@ import type { ThreadMetadata } from "../core/rollout.ts"
 import type { TurnProcessor } from "../core/session.ts"
 import type { SessionIdleCause } from "../core/session-io.ts"
 import type { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
+import { createUserInput } from "../core/user-input.ts"
 import {
   createRequestId,
   type JsonObject,
@@ -152,15 +153,9 @@ export class GoalRuntime implements GoalToolService {
             {
               submissionId: createRequestId(),
               goalId: goal.id,
-              content: {
-                kind: "parts",
-                parts: [
-                  {
-                    type: "text",
-                    text: `The user updated the active goal objective: ${goal.objective}\nContinue toward this updated objective and verify its requirements before marking the goal complete.`,
-                  },
-                ],
-              },
+              content: createUserInput(
+                `The user updated the active goal objective: ${goal.objective}\nContinue toward this updated objective and verify its requirements before marking the goal complete.`,
+              ),
             },
             activeTurnId,
           )
@@ -576,15 +571,9 @@ export class GoalRuntime implements GoalToolService {
     await installed.thread.startIfIdle({
       submissionId: createRequestId(),
       goalId: goal.id,
-      content: {
-        kind: "parts",
-        parts: [
-          {
-            type: "text",
-            text: `Continue working toward the active goal: ${goal.objective}\nMake concrete progress until it is achieved or a real blocker requires user input. Use update_goal to record completion or the permitted stop state. Do not treat a final message as completing the goal.`,
-          },
-        ],
-      },
+      content: createUserInput(
+        `Continue working toward the active goal: ${goal.objective}\nMake concrete progress until it is achieved or a real blocker requires user input. Use update_goal to record completion or the permitted stop state. Do not treat a final message as completing the goal.`,
+      ),
     })
   }
 }

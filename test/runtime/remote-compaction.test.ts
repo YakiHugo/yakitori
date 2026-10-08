@@ -13,6 +13,7 @@ import {
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => {
@@ -145,19 +146,13 @@ describe("provider-native compaction history", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "start" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "start" }]),
     })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 1" })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -226,19 +221,13 @@ describe("provider-native compaction history", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Do not change the public API." },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Do not change the public API." },
+      ]),
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done 1" })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Continue." }]),
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done 2" })
     const stored = await harness.store.readThread(thread.id)
@@ -277,19 +266,17 @@ describe("provider-native compaction history", () => {
     const resumed = await resumedManager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("missing restored thread")
     await resumed.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue after restart." }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Continue after restart." },
+      ]),
     })
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "done 3" })
     await resumed.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue with Kimi." }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Continue with Kimi." },
+      ]),
       modelSelection: { provider: "kimi", model: "kimi-k2.5" },
     })
     await expect
@@ -355,19 +342,15 @@ describe("provider-native compaction history", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "original request" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "original request" },
+      ]),
     })
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "old assistant state" })
     await thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     await expect.poll(() => thread.agentStatus).toHaveProperty("errored")
     expect(JSON.stringify(thread.snapshot().context.history)).toContain(

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
-import type { ImageAttachment, InputContent } from "../../src/kernel/events.ts"
 import { createInputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
+import type { ImageAttachment, InputContent } from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const image: ImageAttachment = {
   name: "photo.png",
@@ -12,41 +13,35 @@ const image: ImageAttachment = {
     path: "attachments/staging/upload/photo.png",
   },
 }
-const source: InputContent = {
-  kind: "parts",
-  parts: [
-    { type: "text", text: "before" },
-    { ...image, type: "image" },
-    { type: "text", text: "after" },
-  ],
-}
+const source: InputContent = inputFixture([
+  { type: "text", text: "before" },
+  { ...image, type: "image" },
+  { type: "text", text: "after" },
+])
 const promoted = {
   rolloutId: "rollout_target",
   path: "attachments/requests/input/photo.png",
 }
-const accepted: InputContent = {
-  kind: "parts",
-  parts: [
-    { type: "text", text: "before" },
-    { ...image, type: "image", file: promoted },
-    { type: "text", text: "after" },
-  ],
-}
+const accepted: InputContent = inputFixture([
+  { type: "text", text: "before" },
+  { ...image, type: "image", file: promoted },
+  { type: "text", text: "after" },
+])
 
 describe("renderer input image ownership", () => {
   it("resolves staging references in place without changing text, detail or another API's ownership", () => {
     const ownership = createInputAttachmentOwnership()
     ownership.promote("http://localhost:1234/base/", source, accepted)
     expect(
-      ownership.resolveParts("http://localhost:1234/base", source.parts),
-    ).toEqual(accepted.parts)
+      ownership.resolveDraft("http://localhost:1234/base", source),
+    ).toEqual(accepted)
     expect(ownership.resolve("http://localhost:1234/other/", image)).toEqual(
       image,
     )
     expect(ownership.resolve("http://localhost:4321/base/", image)).toEqual(
       image,
     )
-    expect(source.parts[1]).toEqual({ ...image, type: "image" })
+    expect(source.attachments[0]).toEqual(image)
     expect(
       ownership.resolve("http://localhost:1234/base/", {
         ...image,
@@ -58,13 +53,11 @@ describe("renderer input image ownership", () => {
   it("never redirects existing durable history to another conversation's copy", () => {
     const ownership = createInputAttachmentOwnership()
     const durable = { ...image, file: promoted }
-    const original: InputContent = {
-      kind: "parts",
-      parts: [{ ...durable, type: "image" }],
-    }
-    ownership.promote("http://localhost/", original, {
-      kind: "parts",
-      parts: [
+    const original: InputContent = inputFixture([{ ...durable, type: "image" }])
+    ownership.promote(
+      "http://localhost/",
+      original,
+      inputFixture([
         {
           ...durable,
           type: "image",
@@ -73,8 +66,8 @@ describe("renderer input image ownership", () => {
             path: "attachments/requests/other/photo.png",
           },
         },
-      ],
-    })
+      ]),
+    )
     expect(ownership.resolve("http://localhost/", durable)).toEqual(durable)
   })
 
@@ -83,28 +76,30 @@ describe("renderer input image ownership", () => {
     expect(() =>
       ownership.promote("http://localhost/", source, {
         ...accepted,
-        parts: [...accepted.parts].reverse(),
+        text: "changed",
       }),
     ).toThrow("does not match")
     expect(() =>
-      ownership.promote("http://localhost/", source, {
-        kind: "parts",
-        parts: [
+      ownership.promote(
+        "http://localhost/",
+        source,
+        inputFixture([
           { type: "text", text: "changed" },
           { ...image, type: "image", file: promoted },
           { type: "text", text: "after" },
-        ],
-      }),
+        ]),
+      ),
     ).toThrow("does not match")
     expect(() =>
-      ownership.promote("http://localhost/", source, {
-        kind: "parts",
-        parts: [
+      ownership.promote(
+        "http://localhost/",
+        source,
+        inputFixture([
           { type: "text", text: "before" },
           { ...image, name: "unrelated.png", type: "image", file: promoted },
           { type: "text", text: "after" },
-        ],
-      }),
+        ]),
+      ),
     ).toThrow("does not match")
     expect(ownership.resolve("http://localhost/", image)).toEqual(image)
   })
@@ -121,20 +116,14 @@ describe("renderer input image ownership", () => {
     expect(() =>
       ownership.promote(
         "http://localhost/",
-        {
-          kind: "parts",
-          parts: [
-            { ...image, type: "image" },
-            { ...other, type: "image" },
-          ],
-        },
-        {
-          kind: "parts",
-          parts: [
-            { ...image, type: "image", file: promoted },
-            { ...other, type: "image" },
-          ],
-        },
+        inputFixture([
+          { ...image, type: "image" },
+          { ...other, type: "image" },
+        ]),
+        inputFixture([
+          { ...image, type: "image", file: promoted },
+          { ...other, type: "image" },
+        ]),
       ),
     ).toThrow("did not promote")
     expect(ownership.resolve("http://localhost/", image)).toEqual(image)
@@ -144,8 +133,8 @@ describe("renderer input image ownership", () => {
     }
     ownership.promote(
       "http://localhost/",
-      { kind: "parts", parts: [{ ...image, type: "image" }] },
-      { kind: "parts", parts: [{ ...image, type: "image", file: receipt }] },
+      inputFixture([{ ...image, type: "image" }]),
+      inputFixture([{ ...image, type: "image", file: receipt }]),
     )
     receipt.path = "changed-after-acceptance"
     const resolved = ownership.resolve("http://localhost/", image)

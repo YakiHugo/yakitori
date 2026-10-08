@@ -1,4 +1,4 @@
-import { inputContentToModelMessage } from "../kernel/input-content.ts"
+import { inputContentToModelMessage } from "../core/user-input.ts"
 import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import type {
   CompletedExecutionItem,
@@ -6,14 +6,12 @@ import type {
   KernelError,
   SessionConfigurationSnapshot,
   StartedExecutionItem,
-  ToolExecutionItem,
   TokenUsage,
-  TurnMetrics,
+  ToolExecutionItem,
   TurnCompletion,
+  TurnMetrics,
 } from "../kernel/events.ts"
-import { InputRole } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
-import { matchesStoredLegacyInputFingerprint } from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ModelContextSettings,
@@ -27,6 +25,7 @@ import {
   type AgentStatus,
   AsyncQueue,
   BoundedQueue,
+  fingerprintTurnInput,
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
   type SessionEvent,
@@ -36,14 +35,14 @@ import {
   type SessionPermissionEvent,
   SessionStatus,
   type TurnInput,
-  fingerprintTurnInput,
   type TurnInputSubmission,
 } from "./session-io.ts"
 import {
   PersistContext,
-  type SessionRolloutStore,
   type RolloutAppend,
+  type SessionRolloutStore,
 } from "./thread-store.ts"
+import { createUserInput } from "./user-input.ts"
 
 export type { TurnCompletion } from "../kernel/events.ts"
 
@@ -200,7 +199,6 @@ export class Session {
       fingerprint: string | undefined
       inputItemId: string
       turnId: string
-      restored?: boolean
     }>
   >()
   #pendingTurnStart: PendingTurnStart | undefined
@@ -255,7 +253,6 @@ export class Session {
       ) {
         this.#submittedInputs.set(record.item.turnId, {
           fingerprint: record.item.requestFingerprint,
-          restored: true,
           inputItemId: record.item.inputItemId,
           turnId: record.item.turnId,
         })
@@ -361,10 +358,7 @@ export class Session {
           await this.#routeTurnInput(
             {
               submissionId: operation.requestId,
-              content: {
-                kind: "parts",
-                parts: [{ type: "text", text: "/compact" }],
-              },
+              content: createUserInput("/compact"),
               manualCompact: true,
             },
             { type: "start_if_idle" },
@@ -444,25 +438,7 @@ export class Session {
     const fingerprint = fingerprintTurnInput(input)
     const submitted = this.#submittedInputs.get(input.submissionId)
     if (submitted !== undefined) {
-      if (
-        submitted.fingerprint !== fingerprint &&
-        !(
-          submitted.restored === true &&
-          submitted.fingerprint !== undefined &&
-          matchesStoredLegacyInputFingerprint(
-            submitted.fingerprint,
-            {
-              role:
-                input.goalId === undefined ? InputRole.User : InputRole.Runtime,
-              content: input.content,
-              modelSelection: input.modelSelection,
-              metadata: input.metadata,
-              parentInputId: input.parentInputId,
-            },
-            input,
-          )
-        )
-      ) {
+      if (submitted.fingerprint !== fingerprint) {
         return notSubmitted(Reason.RequestConflict)
       }
       return {
@@ -1516,16 +1492,10 @@ function buildInputItem(input: TurnInput): ResponseItemEnvelope {
 
 function turnInputSubmissionMetadata(
   input: TurnInput,
-): Pick<ResponseItemEnvelope, "submissionMetadata"> | undefined {
-  if (
-    input.modelSelection === undefined &&
-    input.parentInputId === undefined &&
-    input.metadata === undefined
-  ) {
-    return undefined
-  }
+): Pick<ResponseItemEnvelope, "submissionMetadata"> {
   return {
     submissionMetadata: {
+      content: input.content,
       ...(input.modelSelection === undefined
         ? {}
         : { modelSelection: input.modelSelection }),

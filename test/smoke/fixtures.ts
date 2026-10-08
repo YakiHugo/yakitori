@@ -1,11 +1,11 @@
-import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
-import type { PdfAttachment } from "../../src/kernel/events.ts"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { once } from "node:events"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, type Page, type TestInfo } from "@playwright/test"
+import type { PdfAttachment } from "../../src/kernel/events.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 
 export async function createSmokeEnvironment(): Promise<
   Readonly<{
@@ -545,7 +545,6 @@ export async function runProviderFlow(
         .filter((message) => message.role === "user")
         .at(-1)?.content,
     ).toEqual([
-      { type: "text", text: "Before attachment. " },
       {
         type: "image_url",
         image_url: {
@@ -553,7 +552,7 @@ export async function runProviderFlow(
           detail: "high",
         },
       },
-      { type: "text", text: "After attachment." },
+      { type: "text", text: "Before attachment. [Image 1]After attachment." },
     ])
 
     await runPdfInputFlow(page, testInfo, pdfOptions)
@@ -566,7 +565,6 @@ export async function runProviderFlow(
     // Unknown custom endpoints remain conservative: request projection expands
     // the PDF at its authored slot while durable history retains the original.
     expect(pdfContent).toEqual([
-      { type: "text", text: "Before PDF. " },
       { type: "text", text: expect.stringContaining("PDF ordered-smoke.pdf") },
       {
         type: "image_url",
@@ -575,7 +573,7 @@ export async function runProviderFlow(
           detail: "high",
         },
       },
-      { type: "text", text: "After PDF." },
+      { type: "text", text: "Before PDF. [Document 1]After PDF." },
     ])
 
     await openProviderSettings(page)
@@ -782,7 +780,7 @@ async function runOrderedInputFlow(
               node.querySelector("img") ? "image" : node.textContent,
             ),
           ),
-      ).toEqual(["Before attachment. ", "image", "After attachment."])
+      ).toEqual(["image", "Before attachment. [Image 1]After attachment."])
       const image = message.getByRole("img", {
         name: "ordered-smoke.png",
         exact: true,
@@ -821,12 +819,51 @@ async function runOrderedInputFlow(
     await expect.poll(size).toEqual({ width: 12, height: 12 })
     await preview.getByRole("button", { name: "Close preview" }).click()
     await expect(preview).toHaveCount(0)
+    const selectedPart = page
+      .getByRole("main")
+      .locator('.message-bubble[data-context-kind="message"]')
+      .filter({ hasText: "After attachment." })
+    await selectedPart.evaluate((node) => {
+      const range = document.createRange()
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+      let text = walker.nextNode()
+      while (text && !text.textContent?.includes("After attachment."))
+        text = walker.nextNode()
+      if (!text) throw new Error("Missing text after attachment")
+      const start = (text.textContent ?? "").indexOf("After attachment.")
+      range.setStart(text, start)
+      range.setEnd(text, start + "After attachment.".length)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
+    })
+    await page.getByRole("button", { name: "Add to conversation" }).click()
+    const marker = page.getByRole("button", { name: "Edit annotation 1" })
+    await expect(marker).toBeVisible()
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Array.from(
+            CSS.highlights.get("yakitori-response-annotations") ?? [],
+          ).map((range) => ({
+            text: range.toString(),
+          })),
+        ),
+      )
+      .toEqual([{ text: "After attachment." }])
+    await marker.click()
+    await page
+      .getByRole("textbox", { name: "Annotation comment (optional)" })
+      .fill("Explain the text after the attachment.")
     const screenshot = testInfo.outputPath("ordered-user-input.png")
     await page.screenshot({ path: screenshot, animations: "disabled" })
     await testInfo.attach("ordered-user-input", {
       path: screenshot,
       contentType: "image/png",
     })
+    await page.getByRole("button", { name: "Remove annotation" }).click()
+    await expect(marker).toHaveCount(0)
   } finally {
     if (!usesDesktop)
       await page.evaluate(() => {
@@ -936,7 +973,7 @@ async function runPdfInputFlow(
               node.tagName === "SECTION" ? "PDF" : node.textContent,
             ),
           ),
-      ).toEqual(["Before PDF. ", "PDF", "After PDF."])
+      ).toEqual(["PDF", "Before PDF. [Document 1]After PDF."])
       await expect(
         message.getByRole("link", { name: "Download PDF", exact: true }),
       ).toBeVisible()

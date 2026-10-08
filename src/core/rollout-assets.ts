@@ -5,15 +5,20 @@ import {
   link,
   mkdir,
   open,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, posix, resolve, sep } from "node:path"
-import type { UserAttachment, RolloutAssetReference } from "./events.ts"
-import { isStorageKey } from "./ids.ts"
-import { inspectImageBytes } from "./image-metadata.ts"
+import { isStorageKey } from "../kernel/ids.ts"
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
+import type {
+  AssetSource,
+  RolloutAssetReference,
+  StoredAttachment,
+  UserAttachment,
+} from "./asset-types.ts"
 
 // Bound disk snapshots, allocations and parser input independently of provider
 // quotas. A request may contain multiple attachments subject to runtime budgets.
@@ -51,12 +56,12 @@ export type RolloutAssets = {
     rolloutId: string,
     ownerId: string,
     paths: readonly string[],
-  ): Promise<readonly UserAttachment[]>
+  ): Promise<readonly StoredAttachment[]>
   importAttachmentBytes(
     rolloutId: string,
     ownerId: string,
     items: readonly AttachmentBytesInput[],
-  ): Promise<readonly UserAttachment[]>
+  ): Promise<readonly StoredAttachment[]>
   promoteAttachments(
     rolloutId: string,
     ownerId: string,
@@ -70,11 +75,11 @@ export type RolloutAssets = {
   discardRequestAttachments(rolloutId: string, ownerId: string): Promise<void>
   discardDraftAttachments(attachments: readonly UserAttachment[]): Promise<void>
   discardEphemeralRolloutFiles(rolloutId: string): Promise<void>
-  read(reference: RolloutAssetReference): Promise<Buffer>
+  read(reference: AssetSource): Promise<Buffer>
   openRead(
-    reference: RolloutAssetReference,
+    reference: AssetSource,
   ): Promise<{ readonly stream: ReadStream; readonly totalBytes: number }>
-  resolve(reference: RolloutAssetReference): string
+  resolve(reference: AssetSource): string
 }
 
 export function createRolloutAssets(
@@ -87,7 +92,9 @@ export function createRolloutAssets(
   const storageRootPath = resolve(storageRoot)
   const root = join(storageRootPath, "rollouts")
 
-  function resolveReference(reference: RolloutAssetReference): string {
+  function resolveReference(reference: AssetSource): string {
+    if ("url" in reference)
+      throw new Error("External URLs are not owned rollout files.")
     requireRolloutId(reference.rolloutId)
     requireRelativeFilePath(reference.path)
     const filesDir = join(root, reference.rolloutId, "files")
@@ -110,7 +117,7 @@ export function createRolloutAssets(
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const attachments: UserAttachment[] = []
+        const attachments: StoredAttachment[] = []
         const createdPaths: string[] = []
         try {
           for (const [index, sourcePath] of paths.entries()) {
@@ -173,7 +180,7 @@ export function createRolloutAssets(
       requirePathSegment(ownerId, "attachment owner")
       return options.withMutationLease(rolloutId, async () => {
         const ownerDirectory = fileNameForId(ownerId)
-        const attachments: UserAttachment[] = []
+        const attachments: StoredAttachment[] = []
         const createdPaths: string[] = []
         try {
           for (const [index, item] of items.entries()) {
@@ -228,6 +235,10 @@ export function createRolloutAssets(
           ).then(() => undefined)
         try {
           for (const [index, attachment] of attachments.entries()) {
+            if ("url" in attachment.file) {
+              promoted.push(attachment)
+              continue
+            }
             requireDraftAttachment(rolloutId, attachment)
             const file = attachmentReference(
               rolloutId,
@@ -303,6 +314,10 @@ export function createRolloutAssets(
           ).then(() => undefined)
         try {
           for (const [index, attachment] of attachments.entries()) {
+            if ("url" in attachment.file) {
+              copied.push(attachment)
+              continue
+            }
             const sourcePath = resolveReference(attachment.file)
             const file = attachmentReference(
               rolloutId,
@@ -375,6 +390,7 @@ export function createRolloutAssets(
     async discardDraftAttachments(attachments) {
       await Promise.all(
         attachments.map(async (attachment) => {
+          if ("url" in attachment.file) return
           requireDraftAttachment(attachment.file.rolloutId, attachment)
           await rm(resolveReference(attachment.file), { force: true })
         }),
@@ -580,6 +596,7 @@ function requireDraftAttachment(
   attachment: UserAttachment,
 ): void {
   if (
+    "url" in attachment.file ||
     attachment.file.rolloutId !== rolloutId ||
     !isStagingAttachmentPath(attachment.file.path)
   ) {

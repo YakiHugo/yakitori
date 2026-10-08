@@ -20,6 +20,7 @@ export type ResponseAnnotation = Readonly<{
   text: string
   comment?: string
   source: ContextSource
+  // UTF-16 offsets in the rendered source text, independent of provider citations.
   anchor: Readonly<{ startOffset: number; endOffset: number }>
 }>
 
@@ -42,6 +43,12 @@ export function isContextExcerpt(value: unknown): value is ContextExcerpt {
     !["message", "file", "browser"].includes(String(source.kind)) ||
     typeof source.label !== "string" ||
     !source.label.trim() ||
+    Object.keys(source).some(
+      (key) =>
+        !["kind", "label", "sessionId", "messageId", "path", "url"].includes(
+          key,
+        ),
+    ) ||
     !["sessionId", "messageId", "path", "url"].every(
       (key) => source[key] === undefined || typeof source[key] === "string",
     )

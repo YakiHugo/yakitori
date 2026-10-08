@@ -4,6 +4,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
+import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -13,8 +14,8 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
   type ModelUsage,
-  requireModelImageData,
   requireModelDocumentData,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -74,8 +75,12 @@ async function* streamGemini(
     const modelId = model.replace(/^models\//, "")
     if (!/^[a-zA-Z0-9._-]+$/.test(modelId))
       throw new GeminiProtocolError("Invalid Gemini model ID.")
+    const media = await prepareProviderMedia(request, {
+      inlineImageUrls: true,
+      inlineDocumentUrls: true,
+    })
     const contents = toGeminiContents(
-      request.messages,
+      media.messages,
       request.target.provider,
       request.continuationScope,
       model,
@@ -382,7 +387,10 @@ async function* streamGemini(
       yield { type: "cancelled", ...(usage === undefined ? {} : { usage }) }
       return
     }
-    if (error instanceof GeminiInlineRequestSizeError) {
+    if (
+      error instanceof GeminiInlineRequestSizeError ||
+      error instanceof AssetMediaError
+    ) {
       yield {
         type: "failure",
         failure: {

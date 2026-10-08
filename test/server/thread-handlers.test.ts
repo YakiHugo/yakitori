@@ -1,31 +1,35 @@
-import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
-import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { execFile } from "node:child_process"
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
+import { createUserInput } from "../../src/core/user-input.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import {
   createYakitoriError,
   YakitoriErrorCode,
 } from "../../src/kernel/errors.ts"
 import { isKernelEvent } from "../../src/kernel/events.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createSkillsLoader } from "../../src/runtime/skills.ts"
+import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
 
@@ -47,7 +51,7 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
-  it("rejects legacy live shapes and applies a single UTF-8 byte budget across all text parts", async () => {
+  it("rejects legacy live shapes and applies a single UTF-8 byte budget for authored text", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({
       store,
@@ -84,32 +88,26 @@ describe("thread server handlers", () => {
       expect(
         await method({
           ...request,
-          content: {
-            kind: "parts",
-            parts: [
-              { type: "text", text: "é" },
-              { type: "text", text: "é" },
-            ],
-          },
+          content: inputFixture([
+            { type: "text", text: "é" },
+            { type: "text", text: "é" },
+          ]),
         }),
       ).toMatchObject({
         ok: false,
         status: 400,
-        body: { error: { details: { field: "content.parts", maxBytes: 3 } } },
+        body: { error: { details: { field: "content.text", maxBytes: 3 } } },
       })
       expect(
         await method({
           ...request,
-          content: {
-            kind: "parts",
-            parts: [{ type: "audio", data: "unsupported" }],
-          },
+          content: inputFixture([{ type: "audio", data: "unsupported" }]),
         }),
       ).toMatchObject({ ok: false, status: 400 })
       expect(
         await method({
           ...request,
-          content: { kind: "parts", parts: [], text: "parallel" },
+          content: { ...createUserInput(""), unexpected: "parallel" },
         }),
       ).toMatchObject({ ok: false, status: 400 })
       const document = {
@@ -134,7 +132,7 @@ describe("thread server handlers", () => {
         expect(
           await method({
             ...request,
-            content: { kind: "parts", parts: [invalid] },
+            content: inputFixture([invalid]),
           }),
         ).toMatchObject({ ok: false, status: 400 })
     }
@@ -190,10 +188,9 @@ describe("thread server handlers", () => {
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_before_compact",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Remember the goal" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Remember the goal" },
+      ]),
     })
     if (!first.ok) throw new Error(first.body.error.message)
     const thread = manager.getThread(sessionId)
@@ -235,10 +232,7 @@ describe("thread server handlers", () => {
     const incompatibleReplay = await handlers.admitInput({
       sessionId,
       requestId: "request_manual_compact",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "/compact" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "/compact" }]),
     })
     expect(incompatibleReplay).toMatchObject({
       ok: false,
@@ -538,10 +532,9 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_idle_steer",
       expectedTurnId: "turn_missing",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "nothing to steer" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "nothing to steer" },
+      ]),
     })
     expect(idle.ok).toBe(false)
     if (!idle.ok) expect(idle.body.error.message).toContain("no_active_turn")
@@ -549,10 +542,9 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "start the work" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "start the work" },
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await waitForValue(() => (requests.length === 1 ? true : undefined))
@@ -561,10 +553,7 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_wrong_turn",
       expectedTurnId: "turn_other",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "wrong target" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "wrong target" }]),
     })
     expect(wrongTurn.ok).toBe(false)
     if (!wrongTurn.ok)
@@ -574,10 +563,9 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_steer",
       expectedTurnId: "request_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "also handle this" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "also handle this" },
+      ]),
     })
     if (!steered.ok) throw new Error(steered.body.error.message)
     expect(steered.body.turnId).toBe("request_first")
@@ -604,10 +592,9 @@ describe("thread server handlers", () => {
       type: "input.admitted",
       data: {
         steered: true,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "also handle this" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "also handle this" },
+        ]),
       },
     })
   })
@@ -682,10 +669,9 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "start the work" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "start the work" },
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await waitForValue(() => (requests.length === 1 ? true : undefined))
@@ -700,13 +686,10 @@ describe("thread server handlers", () => {
     const queued = await handlers.queueInput({
       sessionId,
       requestId: "request_queued",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "run after" },
-          ...attachments.map((image) => ({ type: attachmentType, ...image })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "run after" },
+        ...attachments.map((image) => ({ type: attachmentType, ...image })),
+      ]),
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     expect(queued.status).toBe(201)
@@ -722,10 +705,9 @@ describe("thread server handlers", () => {
         id: queued.body.inputId,
         input: expect.objectContaining({
           content: expect.objectContaining({
-            parts: [
-              { type: "text", text: "run after" },
+            text: `run after[${attachmentType === "image" ? "Image" : "Document"} 1]`,
+            attachments: [
               expect.objectContaining({
-                type: attachmentType,
                 name: `queued.${extension}`,
               }),
             ],
@@ -749,16 +731,13 @@ describe("thread server handlers", () => {
       sessionId,
       inputId: queued.body.inputId,
       requestId: "request_queued_edit",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "run after" },
-          ...editedAttachments.map((image) => ({
-            type: attachmentType,
-            ...image,
-          })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "run after" },
+        ...editedAttachments.map((image) => ({
+          type: attachmentType,
+          ...image,
+        })),
+      ]),
     })
     if (!edited.ok) throw new Error(edited.body.error.message)
     expect(edited.body.item.input.submissionId).toBe("request_queued")
@@ -812,16 +791,13 @@ describe("thread server handlers", () => {
     const next = await handlers.queueInput({
       sessionId,
       requestId: "request_dispatched",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "run second" },
-          ...nextAttachments.map((image) => ({
-            type: attachmentType,
-            ...image,
-          })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "run second" },
+        ...nextAttachments.map((image) => ({
+          type: attachmentType,
+          ...image,
+        })),
+      ]),
     })
     if (!next.ok) throw new Error(next.body.error.message)
     releaseFirst()
@@ -846,10 +822,9 @@ describe("thread server handlers", () => {
     expect(admittedNext[0]).toMatchObject({
       data: {
         content: {
-          parts: [
-            { type: "text", text: "run second" },
+          text: `run second[${attachmentType === "image" ? "Image" : "Document"} 1]`,
+          attachments: [
             expect.objectContaining({
-              type: attachmentType,
               name: `original-name.${extension}`,
             }),
           ],
@@ -909,20 +884,14 @@ describe("thread server handlers", () => {
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_interrupt_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "first" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
     if (!first.ok) throw new Error(first.body.error.message)
     await firstStarted.promise
     const queued = await handlers.queueInput({
       sessionId,
       requestId: "request_interrupt_queued",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "queued" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "queued" }]),
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     const interrupted = await handlers.cancelTurn({
@@ -952,10 +921,7 @@ describe("thread server handlers", () => {
     const manual = await handlers.admitInput({
       sessionId,
       requestId: "request_interrupt_manual",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "manual" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "manual" }]),
     })
     if (!manual.ok) throw new Error(manual.body.error.message)
     await waitForValue(() => (requests.length === 3 ? true : undefined))
@@ -985,7 +951,7 @@ describe("thread server handlers", () => {
                 message.role === "user" ? message.content : [],
               )
               .flatMap((block) => (block.type === "text" ? [block.text] : []))
-              .find((value) => value === "after resume")
+              .find((value) => value === "after resume[Image 1]")
             if (text !== undefined) seen.push(text)
             yield {
               type: "response",
@@ -1029,13 +995,10 @@ describe("thread server handlers", () => {
     const queued = await handlers.queueInput({
       sessionId,
       requestId: "request_after_resume",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "after resume" },
-          ...attachment.map((image) => ({ type: "image" as const, ...image })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "after resume" },
+        ...attachment.map((image) => ({ type: "image" as const, ...image })),
+      ]),
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     expect(manager.getThread(sessionId)).toBeUndefined()
@@ -1050,10 +1013,9 @@ describe("thread server handlers", () => {
     const longText = await handlers.queueInput({
       sessionId,
       requestId: "request_long_queue_text",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "x".repeat(300_000) }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "x".repeat(300_000) },
+      ]),
     })
     if (!longText.ok) throw new Error(longText.body.error.message)
     expect(queue.list(sessionId)).toHaveLength(2)
@@ -1061,10 +1023,9 @@ describe("thread server handlers", () => {
       await handlers.queueInput({
         sessionId,
         requestId: "request_queue_text_over_limit",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "x".repeat(1_048_577) }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "x".repeat(1_048_577) },
+        ]),
       }),
     ).toMatchObject({ ok: false, status: 400 })
     expect(
@@ -1077,7 +1038,7 @@ describe("thread server handlers", () => {
 
     expect(await manager.resumeThread(sessionId)).toBeDefined()
     await waitForValue(() => (seen.length === 1 ? true : undefined))
-    expect(seen).toEqual(["after resume"])
+    expect(seen).toEqual(["after resume[Image 1]"])
     const drained = await handlers.listQueuedInputs({ sessionId })
     if (!drained.ok) throw new Error(drained.body.error.message)
     expect(drained.body.items).toEqual([])
@@ -1138,20 +1099,16 @@ describe("thread server handlers", () => {
     const started = await handlers.admitInput({
       sessionId,
       requestId: "request_running_before_block",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "running input" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "running input" }]),
     })
     if (!started.ok) throw new Error(started.body.error.message)
     await waitForValue(() => (modelCalls === 1 ? true : undefined))
     const queued = await handlers.queueInput({
       sessionId,
       requestId: "request_blocked_queued",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "blocked queued input" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "blocked queued input" },
+      ]),
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     const beforeDispatch = await handlers.readSessionEvents({ sessionId })
@@ -1245,38 +1202,28 @@ describe("thread server handlers", () => {
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_running",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "running" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "running" }]),
     })
     if (!first.ok) throw new Error(first.body.error.message)
     await waitForValue(() => (seen.length === 1 ? true : undefined))
     const a = await handlers.queueInput({
       sessionId,
       requestId: "request_a",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "a" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "a" }]),
     })
     const b = await handlers.queueInput({
       sessionId,
       requestId: "request_b",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "b" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "b" }]),
     })
     if (!a.ok || !b.ok) throw new Error("Queue admission failed")
     const editedInPlace = await handlers.updateQueuedInput({
       sessionId,
       inputId: a.body.inputId,
       requestId: "request_a",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "changed in place" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "changed in place" },
+      ]),
     })
     if (!editedInPlace.ok) throw new Error(editedInPlace.body.error.message)
     expect(editedInPlace.body.item.input.submissionId).toBe("request_a")
@@ -1284,10 +1231,7 @@ describe("thread server handlers", () => {
       sessionId,
       inputId: a.body.inputId,
       requestId: "request_b",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "changed again" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "changed again" }]),
     })
     if (!editedWithAnotherRequestId.ok)
       throw new Error(editedWithAnotherRequestId.body.error.message)
@@ -1304,10 +1248,7 @@ describe("thread server handlers", () => {
       sessionId,
       inputId: a.body.inputId,
       requestId: "request_a_edited",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "a edited" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "a edited" }]),
     })
     if (!updated.ok) throw new Error(updated.body.error.message)
     expect(updated.body.item.id).toBe(a.body.inputId)
@@ -1428,10 +1369,9 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_search",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "A needle in user text" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "A needle in user text" },
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await waitForValue(() =>
@@ -1523,10 +1463,7 @@ describe("thread server handlers", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: `request_${text}`,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: text }],
-        },
+        content: inputFixture([{ type: "text" as const, text: text }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await waitForValue(() =>
@@ -1586,10 +1523,7 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_tokens",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "answer" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "answer" }]),
       modelSelection: { provider: "openai", model: "gpt-6-sol" },
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
@@ -1683,10 +1617,7 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_completion",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "answer" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "answer" }]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await waitForValue(() => outcomes[0])
@@ -1791,10 +1722,7 @@ describe("thread server handlers", () => {
     const admitted = handlers.admitInput({
       sessionId,
       requestId: "request_fenced_delivery",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "answer" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "answer" }]),
     })
     const result = await admitted
     if (!result.ok) throw new Error(result.body.error.message)
@@ -1933,10 +1861,7 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_retry_warning",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "recover" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "recover" }]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await waitForValue(() => (warning === undefined ? undefined : true))
@@ -2014,22 +1939,19 @@ describe("thread server handlers", () => {
     const invalid = await handlers.admitInput({
       sessionId: threadId,
       requestId: "request_invalid_rollout_asset",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "inspect" },
-          {
-            type: "image" as const,
-            name: "screen.png",
-            mediaType: "image/png",
-            sizeBytes: 24,
-            file: {
-              rolloutId: "../escape",
-              path: "attachments/staging/draft/1.png",
-            },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect" },
+        {
+          type: "image" as const,
+          name: "screen.png",
+          mediaType: "image/png",
+          sizeBytes: 24,
+          file: {
+            rolloutId: "../escape",
+            path: "attachments/staging/draft/1.png",
           },
-        ],
-      },
+        },
+      ]),
     })
     expect(invalid).toMatchObject({
       ok: false,
@@ -2040,13 +1962,10 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId: threadId,
       requestId: "request_physical_assets",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "inspect" },
-          ...attachments.map((image) => ({ type: "image" as const, ...image })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect" },
+        ...attachments.map((image) => ({ type: "image" as const, ...image })),
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await vi.waitFor(async () => {
@@ -2121,13 +2040,10 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_rejected_image",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "blocked" },
-          { type: "image" as const, ...draft },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "blocked" },
+        { type: "image" as const, ...draft },
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await expect
@@ -2143,13 +2059,10 @@ describe("thread server handlers", () => {
     const replayed = await handlers.admitInput({
       sessionId,
       requestId: "request_rejected_image",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "blocked" },
-          { type: "image" as const, ...draft },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "blocked" },
+        { type: "image" as const, ...draft },
+      ]),
     })
     expect(replayed).toMatchObject({ ok: true, status: 200 })
     await expect(rolloutAssets.read(draft.file)).resolves.toEqual(pngBytes())
@@ -2236,10 +2149,7 @@ describe("thread server handlers", () => {
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_active",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "first" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
     if (!first.ok) throw new Error(first.body.error.message)
     await started.promise
@@ -2248,23 +2158,25 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_image_steer",
       expectedTurnId: "request_active",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "inspect image" },
-          ...draft.map((image) => ({ type: "image" as const, ...image })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect image" },
+        ...draft.map((image) => ({ type: "image" as const, ...image })),
+      ]),
     })
     if (!steered.ok) throw new Error(steered.body.error.message)
     expect(
-      steered.body.content.parts.find((part) => part.type === "image")?.name,
+      draftToEditorParts(steered.body.content).find(
+        (part) => part.type === "image",
+      )?.name,
     ).toBe("original.png")
     expect(
-      steered.body.content.parts.find((part) => part.type === "image")?.file
-        .path,
+      requireStoredAssetSource(
+        draftToEditorParts(steered.body.content).find(
+          (part) => part.type === "image",
+        )?.file,
+      ).path,
     ).toContain("attachments/requests/")
-    const promoted = steered.body.content.parts.find(
+    const promoted = draftToEditorParts(steered.body.content).find(
       (part) => part.type === "image",
     )
     if (promoted === undefined) throw new Error("Image was not promoted.")
@@ -2283,10 +2195,10 @@ describe("thread server handlers", () => {
     const retried = await handlers.queueInput({
       sessionId,
       requestId: "request_recovered_image",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "inspect image" }, promoted],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect image" },
+        promoted,
+      ]),
     })
     if (!retried.ok) throw new Error(retried.body.error.message)
     expect(retried.body.inputId).toMatch(/^input_/)
@@ -2334,22 +2246,19 @@ describe("thread server handlers", () => {
     const admitted = await handlers.admitInput({
       sessionId: rolloutId,
       requestId: "request_deleted_during_promotion",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "inspect" },
-          {
-            type: "image" as const,
-            name: "screen.png",
-            mediaType: "image/png",
-            sizeBytes: 24,
-            file: {
-              rolloutId,
-              path: "attachments/staging/draft_deleted/1.png",
-            },
+      content: inputFixture([
+        { type: "text" as const, text: "inspect" },
+        {
+          type: "image" as const,
+          name: "screen.png",
+          mediaType: "image/png",
+          sizeBytes: 24,
+          file: {
+            rolloutId,
+            path: "attachments/staging/draft_deleted/1.png",
           },
-        ],
-      },
+        },
+      ]),
     })
 
     expect(admitted).toMatchObject({

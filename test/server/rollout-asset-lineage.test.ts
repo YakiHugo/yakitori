@@ -11,15 +11,20 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import {
+  createFauxProvider,
+  readRequestAsset,
+} from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -99,33 +104,30 @@ describe("rollout asset lineage", () => {
       const admitted = await application.handlers.admitInput({
         sessionId: threadId,
         requestId: "request_physical_integration",
-        content: {
-          kind: "parts" as const,
-          parts: [
-            { type: "text" as const, text: "inspect" },
-            ...attachments.map((image) => ({
-              type: "image" as const,
-              ...image,
-            })),
-          ],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "inspect" },
+          ...attachments.map((image) => ({
+            type: "image" as const,
+            ...image,
+          })),
+        ]),
       })
       expectOk(admitted)
       await waitForThreadIdle(application, threadId)
       const storedImage = await durableImageFile(application, threadId)
-      expect(storedImage.rolloutId).toBe(rolloutId)
+      expect(requireStoredAssetSource(storedImage).rolloutId).toBe(rolloutId)
 
       const server = application.createHttpServer()
       const baseUrl = await listen(server)
       try {
         const physical = await fetch(
-          `${baseUrl}/rollouts/${rolloutId}/assets/${storedImage.path}`,
+          `${baseUrl}/rollouts/${rolloutId}/assets/${requireStoredAssetSource(storedImage).path}`,
         )
         expect(physical.status).toBe(200)
         expect(Buffer.from(await physical.arrayBuffer())).toEqual(imageBytes)
         expect(
           await fetch(
-            `${baseUrl}/rollouts/${threadId}/assets/${storedImage.path}`,
+            `${baseUrl}/rollouts/${threadId}/assets/${requireStoredAssetSource(storedImage).path}`,
           ),
         ).toMatchObject({ status: 404 })
         const log = await fetch(
@@ -162,25 +164,20 @@ describe("rollout asset lineage", () => {
       await rm(workspace, { recursive: true, force: true })
     })
     const imageBytes = pngBuffer(128)
+    let inspected: Buffer | undefined
     const provider = createFauxProvider([
       { content: [{ type: "text", text: "source image" }] },
       { content: [{ type: "text", text: "source text" }] },
       { content: [{ type: "text", text: "child" }] },
       { content: [{ type: "text", text: "grandchild" }] },
       {
-        assertRequest(request) {
-          expect(request.messages).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                role: "user",
-                content: expect.arrayContaining([
-                  expect.objectContaining({
-                    data: imageBytes.toString("base64"),
-                  }),
-                ]),
-              }),
-            ]),
-          )
+        async assertRequest(request) {
+          const image = request.messages
+            .flatMap((message) =>
+              message.role === "user" ? message.content : [],
+            )
+            .find((block) => block.type === "image")
+          inspected = await readRequestAsset(request, image?.file)
         },
         content: [{ type: "text", text: "image survived" }],
       },
@@ -208,13 +205,10 @@ describe("rollout asset lineage", () => {
     const first = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_lineage_image",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "remember" },
-          ...attachments.map((image) => ({ type: "image" as const, ...image })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "remember" },
+        ...attachments.map((image) => ({ type: "image" as const, ...image })),
+      ]),
     })
     expectOk(first)
     await waitForThreadIdle(application, sourceId)
@@ -222,10 +216,7 @@ describe("rollout asset lineage", () => {
     const second = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_lineage_second",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "fork here" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "fork here" }]),
     })
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
@@ -234,10 +225,7 @@ describe("rollout asset lineage", () => {
       sessionId: sourceId,
       atInputId: second.body.inputId,
       reason: "edit",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "child input" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "child input" }]),
     })
     expectOk(child)
     const childId = child.body.session.id
@@ -248,10 +236,9 @@ describe("rollout asset lineage", () => {
       sessionId: childId,
       atInputId: childInputId,
       reason: "edit",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "grandchild input" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "grandchild input" },
+      ]),
     })
     expectOk(grandchild)
     const grandchildId = grandchild.body.session.id
@@ -266,14 +253,14 @@ describe("rollout asset lineage", () => {
     const continued = await application.handlers.admitInput({
       sessionId: grandchildId,
       requestId: "request_lineage_continue",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "use inherited image" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "use inherited image" },
+      ]),
     })
     expectOk(continued)
     await waitForThreadIdle(application, grandchildId)
     expect(provider.callCount).toBe(5)
+    expect(inspected).toEqual(imageBytes)
 
     expectOk(
       await application.handlers.deleteSession({ sessionId: grandchildId }),
@@ -323,10 +310,7 @@ describe("rollout asset lineage", () => {
       await application.handlers.admitInput({
         sessionId: sourceId,
         requestId: "request_command_first",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "first" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "first" }]),
       }),
     )
     await waitForThreadIdle(application, sourceId)
@@ -340,10 +324,7 @@ describe("rollout asset lineage", () => {
     const second = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_command_second",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "fork here" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "fork here" }]),
     })
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
@@ -351,10 +332,7 @@ describe("rollout asset lineage", () => {
       sessionId: sourceId,
       atInputId: second.body.inputId,
       reason: "edit",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "child" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "child" }]),
     })
     expectOk(child)
     const childId = child.body.session.id

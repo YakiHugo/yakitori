@@ -1,16 +1,16 @@
 import {
-  createAnthropicProvider,
+  createAnthropicTurnTransport,
   createChatCompletionsProvider,
   createConfiguredModelsManager,
   createGeminiProvider,
   createModelProvider,
-  createOpenAIProvider,
   createOpenAITurnTransport,
   createProviderContinuationScope,
-  providerPresets,
   type ModelProvider,
+  providerPresets,
   type StreamFn,
 } from "../runtime/index.ts"
+import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
@@ -83,25 +83,27 @@ export function createConfiguredProvider(
         model: configuration.models.at(0)?.id ?? "",
         baseURL: configuration.baseURL,
       }
-      const transport =
-        configuration.requestWarmup === true &&
+      const transport:
+        | Pick<ModelClientSession, "stream" | "warmup" | "close">
+        | undefined =
         configuration.wireApi === "openai_responses"
-          ? createOpenAITurnTransport(options)
-          : undefined
+          ? createOpenAITurnTransport({
+              ...options,
+              warmup: configuration.requestWarmup === true,
+            })
+          : configuration.wireApi === "anthropic_messages"
+            ? createAnthropicTurnTransport(options)
+            : undefined
       const stream =
         transport?.stream ??
-        (configuration.wireApi === "openai_responses"
-          ? createOpenAIProvider(options)
-          : configuration.wireApi === "anthropic_messages"
-            ? createAnthropicProvider(options)
-            : configuration.wireApi === "gemini_generate_content"
-              ? createGeminiProvider(options)
-              : createChatCompletionsProvider({
-                  ...options,
-                  ...(preset?.flavor === undefined
-                    ? {}
-                    : { flavor: preset.flavor }),
-                }))
+        (configuration.wireApi === "gemini_generate_content"
+          ? createGeminiProvider(options)
+          : createChatCompletionsProvider({
+              ...options,
+              ...(preset?.flavor === undefined
+                ? {}
+                : { flavor: preset.flavor }),
+            }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
           const model = (await models.listModels()).find(
@@ -138,7 +140,7 @@ export function createConfiguredProvider(
           ? {}
           : { warmup: configureStream(transport.warmup) }),
         close() {
-          transport?.close()
+          return transport?.close()
         },
       }
     },

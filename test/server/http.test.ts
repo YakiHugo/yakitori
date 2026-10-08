@@ -1,9 +1,9 @@
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import {
   createYakitoriHttpServer,
   type YakitoriHttpServerOptions,

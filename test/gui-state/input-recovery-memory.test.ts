@@ -1,15 +1,14 @@
 import { describe, expect, it } from "vitest"
-import type { InputContent } from "../../src/kernel/events.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import { createInputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
+import type { InputContent } from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "../gui/input-fixtures.ts"
 
 const draft = {
   apiBase: "http://localhost:4141/",
   sessionId: "session_one",
-  content: {
-    kind: "parts",
-    parts: inputParts("Continue the task"),
-  } satisfies InputContent,
+  content: inputFixture(inputParts("Continue the task")) satisfies InputContent,
 }
 const attachment = {
   name: "screen.png",
@@ -36,11 +35,10 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(requestIds("request_first"))
     const submission = {
       ...draft,
-      content: {
-        kind: "parts",
-        parts: inputParts("Continue the task", [attachment]),
-        contextAttachments: [annotation],
-      } satisfies InputContent,
+      content: inputFixture(
+        inputParts("Continue the task", [attachment]),
+        { references: [annotation] }.references,
+      ) satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5", effort: "high" },
     }
     const first = memory.reserveAdmission(submission)
@@ -97,11 +95,10 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(() => `request_${++sequence}`)
     const submission = {
       ...draft,
-      content: {
-        kind: "parts",
-        parts: inputParts("Continue the task", [attachment]),
-        contextAttachments: [annotation],
-      } satisfies InputContent,
+      content: inputFixture(
+        inputParts("Continue the task", [attachment]),
+        { references: [annotation] }.references,
+      ) satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5", effort: "high" },
     }
     const submissions = [
@@ -110,14 +107,14 @@ describe("input recovery memory", () => {
         ...submission,
         content: {
           ...submission.content,
-          parts: inputParts("Edited task", [attachment]),
+          ...inputParts("Edited task", [attachment]),
         },
       },
       {
         ...submission,
         content: {
           ...submission.content,
-          parts: inputParts("Continue the task", [
+          ...inputParts("Continue the task", [
             { ...attachment, detail: "original" as const },
           ]),
         },
@@ -126,9 +123,7 @@ describe("input recovery memory", () => {
         ...submission,
         content: {
           ...submission.content,
-          contextAttachments: [
-            { ...annotation, comment: "Check this instead" },
-          ],
+          references: [{ ...annotation, comment: "Check this instead" }],
         },
       },
       {
@@ -144,10 +139,10 @@ describe("input recovery memory", () => {
         ...submission,
         content: {
           ...submission.content,
-          parts: [
-            { ...attachment, type: "image" as const },
-            { type: "text" as const, text: "Continue the task" },
-          ],
+          ...inputFixture([
+            { ...attachment, type: "image" },
+            { type: "text", text: "Continue the task" },
+          ]),
         },
       },
     ]
@@ -169,19 +164,23 @@ describe("input recovery memory", () => {
     const memory = createInputRecoveryMemory(requestIds("request_first"))
     const submission = structuredClone({
       ...draft,
-      content: {
-        kind: "parts" as const,
-        parts: [
+      content: inputFixture(
+        [
           { type: "text" as const, text: "Continue the task" },
           { ...attachment, type: "image" as const },
         ] as const,
-        contextAttachments: [annotation] as const,
-      },
+        { references: [annotation] as const }.references,
+      ),
       modelSelection: { provider: "codex", model: "gpt-5" },
     })
     memory.reserveAdmission(submission)
-    submission.content.parts[1].file.path = "edited.png"
-    submission.content.contextAttachments[0].anchor.endOffset = 20
+    Object.assign(submission.content.attachments[0]?.file ?? {}, {
+      path: "edited.png",
+    })
+    Object.assign(
+      (submission.content.references?.[0] as typeof annotation).anchor,
+      { endOffset: 20 },
+    )
     submission.modelSelection.model = "another-model"
     const recovered = memory.readAdmissionByRequestId(
       draft.apiBase,
@@ -190,23 +189,23 @@ describe("input recovery memory", () => {
     )
     expect(recovered).toEqual({
       ...draft,
-      content: {
-        kind: "parts",
-        parts: inputParts("Continue the task", [attachment]),
-        contextAttachments: [annotation],
-      } satisfies InputContent,
+      content: inputFixture(
+        inputParts("Continue the task", [attachment]),
+        { references: [annotation] }.references,
+      ) satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5" },
       requestId: "request_first",
     })
-    const recoveredImage = recovered?.content.parts[1]
+    if (!recovered) throw new Error("Missing recovered input")
+    const recoveredImage = draftToEditorParts(recovered.content)[1]
     if (recoveredImage?.type !== "image")
       throw new Error("Missing recovered image")
     // Mutating a caller's own copy must not affect the recovery record.
     Object.assign(recoveredImage.file, { path: "caller-edit.png" })
     expect(
       memory.listAdmissionsForSession(draft.apiBase, draft.sessionId)[0]
-        ?.content.parts,
-    ).toEqual(inputParts("Continue the task", [attachment]))
+        ?.content,
+    ).toMatchObject(inputParts("Continue the task", [attachment]))
   })
 
   it("removes only the matching admission and ignores old acknowledgements", () => {
@@ -229,14 +228,13 @@ describe("input recovery memory", () => {
     const first = {
       requestId: "request_first",
       turnId: "turn_one",
-      content: {
-        kind: "parts" as const,
-        parts: [
+      content: inputFixture(
+        [
           { type: "text" as const, text: "First steer" },
           { ...structuredClone(attachment), type: "image" as const },
         ] as const,
-        contextAttachments: [structuredClone(annotation)] as const,
-      },
+        { references: [structuredClone(annotation)] as const }.references,
+      ),
       restored: false,
     }
     const second = {
@@ -244,7 +242,7 @@ describe("input recovery memory", () => {
       requestId: "request_second",
       content: {
         ...first.content,
-        parts: inputParts("Second steer", [attachment]),
+        ...inputParts("Second steer", [attachment]),
       },
     }
     memory.reserveSteer(draft.apiBase, draft.sessionId, first)
@@ -253,34 +251,36 @@ describe("input recovery memory", () => {
       ...first,
       content: {
         ...first.content,
-        parts: inputParts("Other API", [attachment]),
+        ...inputParts("Other API", [attachment]),
       },
     })
     memory.reserveSteer(draft.apiBase, "session_two", {
       ...first,
       content: {
         ...first.content,
-        parts: inputParts("Other session", [attachment]),
+        ...inputParts("Other session", [attachment]),
       },
     })
-    first.content.parts[1].file.path = "edited.png"
-    first.content.contextAttachments[0].comment = "Edited comment"
+    Object.assign(first.content.attachments[0]?.file ?? {}, {
+      path: "edited.png",
+    })
+    Object.assign(first.content.references?.[0] ?? {}, {
+      comment: "Edited comment",
+    })
     expect(memory.readSteers(draft.apiBase, draft.sessionId)).toEqual([
       {
         ...first,
-        content: {
-          kind: "parts",
-          parts: inputParts("First steer", [attachment]),
-          contextAttachments: [annotation],
-        },
+        content: inputFixture(
+          inputParts("First steer", [attachment]),
+          { references: [annotation] }.references,
+        ),
       },
       {
         ...second,
-        content: {
-          kind: "parts",
-          parts: inputParts("Second steer", [attachment]),
-          contextAttachments: [annotation],
-        },
+        content: inputFixture(
+          inputParts("Second steer", [attachment]),
+          { references: [annotation] }.references,
+        ),
       },
     ])
     memory.updateSteers(draft.apiBase, draft.sessionId, (steers) =>
@@ -300,18 +300,18 @@ describe("input recovery memory", () => {
     expect(
       memory
         .readSteers(draft.apiBase, draft.sessionId)
-        .map((steer) => steer.content.parts),
-    ).toEqual([inputParts("Second steer", [attachment])])
+        .map((steer) => steer.content),
+    ).toMatchObject([inputParts("Second steer", [attachment])])
     expect(
       memory
         .readSteers("http://other.test", draft.sessionId)
-        .map((steer) => steer.content.parts),
-    ).toEqual([inputParts("Other API", [attachment])])
+        .map((steer) => steer.content),
+    ).toMatchObject([inputParts("Other API", [attachment])])
     expect(
       memory
         .readSteers(draft.apiBase, "session_two")
-        .map((steer) => steer.content.parts),
-    ).toEqual([inputParts("Other session", [attachment])])
+        .map((steer) => steer.content),
+    ).toMatchObject([inputParts("Other session", [attachment])])
   })
 })
 

@@ -1,3 +1,4 @@
+import type { AssetSource } from "../../src/core/asset-types.ts"
 import type {
   ModelContentBlock,
   ModelFailure,
@@ -9,7 +10,9 @@ import type {
 } from "../../src/runtime/model.ts"
 import { ModelStopReason as StopReason } from "../../src/runtime/model.ts"
 
-export type FauxRequestAssertion = (request: ModelRequest) => void
+export type FauxRequestAssertion = (
+  request: ModelRequest,
+) => void | Promise<void>
 
 export type FauxScriptedResponse = {
   readonly snapshots?: readonly string[]
@@ -66,7 +69,7 @@ async function* streamScriptedResponse(
   step: FauxScriptedResponse,
   request: ModelRequest,
 ): AsyncGenerator<ModelStreamEvent> {
-  step.assertRequest?.(request)
+  await step.assertRequest?.(request)
 
   if (step.throwBefore !== undefined) throw step.throwBefore
 
@@ -149,6 +152,7 @@ function waitForAbort(signal: AbortSignal | undefined): Promise<void> {
 function cloneRequest(request: ModelRequest): ModelRequest {
   return {
     target: structuredClone(request.target),
+    ...(request.assets === undefined ? {} : { assets: request.assets }),
     ...(request.cacheKey === undefined ? {} : { cacheKey: request.cacheKey }),
     system: structuredClone(request.system),
     messages: structuredClone(request.messages),
@@ -159,4 +163,15 @@ function cloneRequest(request: ModelRequest): ModelRequest {
       : { maxOutputTokens: request.maxOutputTokens }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   }
+}
+
+// Harness requests carry access to portable media. Consume it while the Session
+// lease is live; request snapshots do not retain bytes after their owner closes.
+export function readRequestAsset(
+  request: ModelRequest | undefined,
+  source: AssetSource | undefined,
+): Promise<Buffer> {
+  if (!request?.assets || source === undefined)
+    throw new Error("Missing request asset access.")
+  return request.assets.read(source)
 }

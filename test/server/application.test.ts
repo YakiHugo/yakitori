@@ -1,4 +1,3 @@
-import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
   mkdir,
   mkdtemp,
@@ -13,11 +12,13 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
   createYakitoriApplication,
   resolveWorkspaceDirectory,
@@ -31,11 +32,15 @@ import {
   type ApiListSessionsResponse,
 } from "../../src/server/protocol.ts"
 import type { ProviderConfigurationResponse } from "../../src/server/provider-service.ts"
-import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
-import { deferred } from "./rpc/testkit.ts"
-import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
+import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import {
+  createFauxProvider,
+  readRequestAsset,
+} from "../support/faux-provider.ts"
+import { deferred } from "./rpc/testkit.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -280,10 +285,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId,
             requestId: "request_endpoint",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "Verify the endpoint" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Verify the endpoint" },
+            ]),
             modelSelection: {
               provider: connection.provider,
               model: connection.model,
@@ -349,10 +353,9 @@ describe("application composition", () => {
         const input = {
           sessionId,
           requestId: "request_completion",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "Finish the task" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "Finish the task" },
+          ]),
         }
         expectOk(await application.handlers.admitInput(input))
         await vi.waitFor(() => {
@@ -467,10 +470,9 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: committedId,
           requestId: "request_first_commit",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "persist this prompt" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "persist this prompt" },
+          ]),
         })
         expectOk(admitted)
         // The admission is acknowledged at routing; the staged Session
@@ -576,10 +578,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_agent_listing",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "delegate" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "delegate" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, rootThreadId)
@@ -767,10 +766,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_live_spawn",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "delegate" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "delegate" },
+            ]),
           }),
         )
         await waitForThreadIdle(application, rootSessionId)
@@ -823,10 +821,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_root_still_subscribed",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "continue" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "continue" },
+            ]),
           }),
         )
         await vi.waitFor(() =>
@@ -902,10 +899,9 @@ describe("application composition", () => {
           await first.handlers.admitInput({
             sessionId: rootSessionId,
             requestId: "request_spawn_observer",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "delegate" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "delegate" },
+            ]),
           }),
         )
         await waitForThreadIdle(first, rootSessionId)
@@ -1021,10 +1017,9 @@ describe("application composition", () => {
             await restarted.handlers.admitInput({
               sessionId: rootSessionId,
               requestId: `request_resume_child_${turn}`,
-              content: {
-                kind: "parts" as const,
-                parts: [{ type: "text" as const, text: "resume observer" }],
-              },
+              content: inputFixture([
+                { type: "text" as const, text: "resume observer" },
+              ]),
             }),
           )
           await expect
@@ -1170,10 +1165,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_spawn_child",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "delegate" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "delegate" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, rootThreadId)
@@ -1217,10 +1209,9 @@ describe("application composition", () => {
         const followup = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_use_child_result",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "use child result" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "use child result" },
+          ]),
         })
         expectOk(followup)
         await waitForThreadIdle(application, rootThreadId)
@@ -1310,10 +1301,9 @@ describe("application composition", () => {
       const admitted = await first.handlers.admitInput({
         sessionId: rootThreadId,
         requestId: "request_spawn_persisted",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "spawn persistent child" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "spawn persistent child" },
+        ]),
       })
       expectOk(admitted)
       await waitForThreadIdle(first, rootThreadId)
@@ -1366,10 +1356,9 @@ describe("application composition", () => {
         const afterRestart = await resumed.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_list_restored",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "list children" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "list children" },
+          ]),
         })
         expectOk(afterRestart)
         await waitForThreadIdle(resumed, rootThreadId)
@@ -1502,16 +1491,13 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "request_image",
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "inspect" },
-              ...attachments.map((image) => ({
-                type: "image" as const,
-                ...image,
-              })),
-            ],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "inspect" },
+            ...attachments.map((image) => ({
+              type: "image" as const,
+              ...image,
+            })),
+          ]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, sessionId)
@@ -1526,8 +1512,8 @@ describe("application composition", () => {
         expect(admittedEvent).toMatchObject({
           data: {
             content: {
-              parts: [
-                { type: "text", text: "inspect" },
+              text: "inspect[Image 1]",
+              attachments: [
                 {
                   detail: "high",
                   file: {
@@ -1563,23 +1549,34 @@ describe("application composition", () => {
               "rollouts",
               draftRolloutId,
               "files",
-              attachments[0]?.file.path ?? "",
+              requireStoredAssetSource(attachments[0]?.file).path ?? "",
             ),
           ),
         ).rejects.toMatchObject({ code: "ENOENT" })
         expect(captured?.messages).toContainEqual({
           role: "user",
           content: [
-            { type: "text", text: "inspect" },
             {
               type: "image",
+              name: "screen.png",
               mediaType: "image/png",
               detail: "high",
-              data: imageBytes.toString("base64"),
+              sizeBytes: imageBytes.length,
+              file: {
+                rolloutId: sessionId,
+                path: "attachments/requests/request_image/1.png",
+              },
             },
+            { type: "text", text: "inspect[Image 1]" },
           ],
         })
 
+        expect(
+          await readRequestAsset(captured, {
+            rolloutId: sessionId,
+            path: "attachments/requests/request_image/1.png",
+          }),
+        ).toEqual(imageBytes)
         const image = await fetch(
           `${baseUrl}/rollouts/${sessionId}/assets/attachments/requests/request_image/1.png`,
         )
@@ -1602,16 +1599,13 @@ describe("application composition", () => {
         const conflictingImage = await application.handlers.admitInput({
           sessionId,
           requestId: "request_image",
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "inspect" },
-              ...replacementDraft.map((image) => ({
-                type: "image" as const,
-                ...image,
-              })),
-            ],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "inspect" },
+            ...replacementDraft.map((image) => ({
+              type: "image" as const,
+              ...image,
+            })),
+          ]),
         })
         expectError(conflictingImage, 409, ApiErrorCode.Conflict)
         expect(conflictingImage.body.error.details).toMatchObject({
@@ -1636,19 +1630,16 @@ describe("application composition", () => {
           sessionId,
           atInputId: admitted.body.inputId,
           reason: "edit",
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "changed" },
-              {
-                type: "image" as const,
-                name: "screen.png",
-                mediaType: "image/png",
-                data: Buffer.from("image-bytes").toString("base64"),
-                sizeBytes: 11,
-              },
-            ],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "changed" },
+            {
+              type: "image" as const,
+              name: "screen.png",
+              mediaType: "image/png",
+              data: Buffer.from("image-bytes").toString("base64"),
+              sizeBytes: 11,
+            },
+          ]),
         })
         expect(rejectedFork).toMatchObject({
           status: 400,
@@ -1659,23 +1650,20 @@ describe("application composition", () => {
           sessionId,
           atInputId: admitted.body.inputId,
           reason: "edit",
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "inspect more closely" },
-              {
-                type: "image",
-                name: "screen.png",
-                mediaType: "image/png",
-                sizeBytes: imageBytes.byteLength,
-                detail: "high",
-                file: {
-                  rolloutId: sessionId,
-                  path: "attachments/requests/request_image/1.png",
-                },
+          content: inputFixture([
+            { type: "text" as const, text: "inspect more closely" },
+            {
+              type: "image",
+              name: "screen.png",
+              mediaType: "image/png",
+              sizeBytes: imageBytes.byteLength,
+              detail: "high",
+              file: {
+                rolloutId: sessionId,
+                path: "attachments/requests/request_image/1.png",
               },
-            ],
-          },
+            },
+          ]),
         })
         expectOk(forked)
         expect(forked.body.historyEndSeqExclusive).toBe(2)
@@ -1697,7 +1685,6 @@ describe("application composition", () => {
           item: {
             item: {
               content: [
-                { type: "text", text: "inspect more closely" },
                 {
                   file: {
                     rolloutId: forked.body.session.id,
@@ -1706,6 +1693,7 @@ describe("application composition", () => {
                     ),
                   },
                 },
+                { type: "text", text: "inspect more closely[Image 1]" },
               ],
             },
           },
@@ -1713,9 +1701,11 @@ describe("application composition", () => {
         const childImagePath =
           childInput?.type === "response_item" &&
           childInput.item.item.role === "user"
-            ? childInput.item.item.content.filter(
-                (block) => block.type === "image",
-              )[0]?.file?.path
+            ? requireStoredAssetSource(
+                childInput.item.item.content.filter(
+                  (block) => block.type === "image",
+                )[0]?.file,
+              )?.path
             : undefined
         if (childImagePath === undefined) {
           throw new Error("Expected the forked input to retain its image.")
@@ -1754,30 +1744,24 @@ describe("application composition", () => {
           application.handlers.admitInput({
             sessionId: concurrentSession.body.session.id,
             requestId: "request_concurrent_image",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "A" },
-                ...draftA.map((image) => ({
-                  type: "image" as const,
-                  ...image,
-                })),
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "A" },
+              ...draftA.map((image) => ({
+                type: "image" as const,
+                ...image,
+              })),
+            ]),
           }),
           application.handlers.admitInput({
             sessionId: concurrentSession.body.session.id,
             requestId: "request_concurrent_image",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "B" },
-                ...draftB.map((image) => ({
-                  type: "image" as const,
-                  ...image,
-                })),
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "B" },
+              ...draftB.map((image) => ({
+                type: "image" as const,
+                ...image,
+              })),
+            ]),
           }),
         ])
         expect(concurrent.map((result) => result.status).sort()).toEqual([
@@ -1816,10 +1800,7 @@ describe("application composition", () => {
           await first.handlers.admitInput({
             sessionId: existingSessionId,
             requestId: "request_restart_seed",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "seed" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "seed" }]),
           }),
         )
         await waitForThreadIdle(first, existingSessionId)
@@ -1871,10 +1852,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_close_active",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "wait" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "wait" }]),
         })
         expectOk(admitted)
         expect(
@@ -1927,16 +1905,13 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "text_only_request",
-          content: {
-            kind: "parts" as const,
-            parts: [
-              { type: "text" as const, text: "inspect" },
-              ...attachments.map((image) => ({
-                type: "image" as const,
-                ...image,
-              })),
-            ],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "inspect" },
+            ...attachments.map((image) => ({
+              type: "image" as const,
+              ...image,
+            })),
+          ]),
         })
         expectOk(admitted)
 
@@ -1946,11 +1921,11 @@ describe("application composition", () => {
         expect(captured?.messages).toContainEqual({
           role: "user",
           content: [
-            { type: "text", text: "inspect" },
             {
               type: "text",
               text: expect.stringContaining("does not support image input"),
             },
+            { type: "text", text: "inspect[Image 1]" },
           ],
         })
       } finally {
@@ -1985,7 +1960,7 @@ describe("application composition", () => {
         if (attachment === undefined) throw new Error("missing imported image")
 
         const response = await fetch(
-          `${baseUrl}/rollouts/${attachment.file.rolloutId}/assets/${attachment.file.path}`,
+          `${baseUrl}/rollouts/${requireStoredAssetSource(attachment.file).rolloutId}/assets/${requireStoredAssetSource(attachment.file).path}`,
         )
 
         expect(response.status).toBe(200)
@@ -2302,10 +2277,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_project_config",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "run" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2367,10 +2339,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_outside_project_config",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "run" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2477,10 +2446,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_mcp_reload",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "run" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2513,10 +2479,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_provider_config",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "hello" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "hello" }]),
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -2598,12 +2561,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "configure-source",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "Add my local coding source." },
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Add my local coding source." },
+            ]),
           }),
         )
         await waitForThreadIdle(application, created.body.session.id)
@@ -2701,12 +2661,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "missing-configured-key",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "Use the configured endpoint" },
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Use the configured endpoint" },
+            ]),
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
           400,
@@ -2748,12 +2705,9 @@ describe("application composition", () => {
           await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId: "missing-reloaded-key",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "Use the configured endpoint" },
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Use the configured endpoint" },
+            ]),
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
           400,
@@ -2853,10 +2807,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_switch_provider",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "switch" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "switch" }]),
           modelSelection: { provider: "openai", model: "gpt-6-astra" },
         })
         expectOk(admitted)
@@ -2893,10 +2844,7 @@ describe("application composition", () => {
         const admitted = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_switch_grok_oidc",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "use grok" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "use grok" }]),
           modelSelection: { provider: "grok", model: "grok-4.5" },
         })
         expectError(admitted, 400, ApiErrorCode.InvalidInput)
@@ -2929,10 +2877,7 @@ describe("application composition", () => {
           const admitted = await application.handlers.admitInput({
             sessionId: created.body.session.id,
             requestId,
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: text }],
-            },
+            content: inputFixture([{ type: "text" as const, text: text }]),
           })
           expectOk(admitted)
           await waitForThreadIdle(application, created.body.session.id)
@@ -2975,10 +2920,7 @@ describe("application composition", () => {
         const input = {
           sessionId: created.body.session.id,
           requestId: "request_idempotent_host",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "only once" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "only once" }]),
           modelSelection: { provider: "faux", model: "scripted" },
           parentInputId: "input_parent",
           metadata: { source: "test" },
@@ -2993,10 +2935,7 @@ describe("application composition", () => {
 
         const conflicting = await application.handlers.admitInput({
           ...input,
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "different" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "different" }]),
         })
         expectError(conflicting, 409, ApiErrorCode.Conflict)
         const read = await application.handlers.readSession({
@@ -3051,20 +2990,16 @@ describe("application composition", () => {
         const first = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_fork_first",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "first" }],
-          },
+          content: inputFixture([{ type: "text" as const, text: "first" }]),
         })
         expectOk(first)
         await waitForThreadIdle(application, created.body.session.id)
         const second = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_fork_second",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "replace this" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "replace this" },
+          ]),
         })
         expectOk(second)
         await waitForThreadIdle(application, created.body.session.id)
@@ -3073,10 +3008,9 @@ describe("application composition", () => {
           sessionId: created.body.session.id,
           atInputId: second.body.inputId,
           reason: "edit",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "replacement" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "replacement" },
+          ]),
           modelSelection: forkModelSelection,
         })
         expectOk(forked)
@@ -3397,10 +3331,9 @@ describe("application composition", () => {
       const admitted = await first.handlers.admitInput({
         sessionId: created.body.session.id,
         requestId: "request_before_restart",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "resume after restart" }],
-        },
+        content: inputFixture([
+          { type: "text" as const, text: "resume after restart" },
+        ]),
       })
       expectOk(admitted)
       await waitForThreadIdle(first, created.body.session.id)
@@ -3564,12 +3497,9 @@ describe("provider login registration", () => {
             const admitted = await application.handlers.admitInput({
               sessionId: created.body.session.id,
               requestId: `import-turn-${restarted}`,
-              content: {
-                kind: "parts" as const,
-                parts: [
-                  { type: "text" as const, text: "Use the imported account." },
-                ],
-              },
+              content: inputFixture([
+                { type: "text" as const, text: "Use the imported account." },
+              ]),
               modelSelection: { provider: "codex", model: "gpt-6-astra" },
             })
             expectOk(admitted)
@@ -3916,12 +3846,9 @@ describe("provider login registration", () => {
           await application.handlers.admitInput({
             sessionId,
             requestId: "request_key",
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "Verify the selected key" },
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Verify the selected key" },
+            ]),
             modelSelection: { provider: "openai", model: "gpt-6-sol" },
           }),
         )

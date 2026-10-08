@@ -1,6 +1,7 @@
-import type { InputPart } from "../../kernel/events.ts"
 import { create } from "zustand"
+import type { InputDraft } from "../../core/user-input.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
+import { textInputDraft } from "../input-draft.ts"
 
 export type WorkspaceView =
   | "changes"
@@ -29,7 +30,7 @@ export type WorkspaceTab = (
   | {
       id: string
       kind: "chat"
-      draft: readonly InputPart[]
+      draft: InputDraft
       composerFocusRevision?: number
       excerpts: readonly ContextExcerpt[]
       sourceSessionId?: string
@@ -85,7 +86,7 @@ type WorkspaceStore = {
   setBrowserTitle(id: string, title: string): void
   updateChatDraft(
     id: string,
-    draft: readonly InputPart[],
+    draft: InputDraft,
     excerpts: readonly ContextExcerpt[],
   ): void
 }
@@ -187,7 +188,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
             ...(get().sessionId === undefined
               ? {}
               : { workspaceSessionId: get().sessionId }),
-            draft: [],
+            draft: textInputDraft(""),
             excerpts: [],
             title: count === 0 ? "Side chat" : `Side chat ${count + 1}`,
             ...(sourceSessionId === undefined ? {} : { sourceSessionId }),

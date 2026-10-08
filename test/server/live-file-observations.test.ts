@@ -2,13 +2,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createFauxProvider } from "../support/faux-provider.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 
 describe("live file observations", () => {
   it("restores a durable read after application restart before editing", async () => {
@@ -49,10 +50,9 @@ describe("live file observations", () => {
         await first.handlers.admitInput({
           sessionId,
           requestId: "request_read_before_restart",
-          content: {
-            kind: "parts" as const,
-            parts: [{ type: "text" as const, text: "read the file" }],
-          },
+          content: inputFixture([
+            { type: "text" as const, text: "read the file" },
+          ]),
         }),
       )
       await waitForThreadIdle(first, sessionId)
@@ -87,10 +87,9 @@ describe("live file observations", () => {
           await second.handlers.admitInput({
             sessionId,
             requestId: "request_edit_after_restart",
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "edit the file" }],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "edit the file" },
+            ]),
           }),
         )
         await waitForThreadIdle(second, sessionId)

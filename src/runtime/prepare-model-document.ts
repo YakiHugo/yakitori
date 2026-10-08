@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
+import type { RolloutAssets } from "../core/rollout-assets.ts"
 import type { ModelDocumentBlock, ModelImageBlock } from "../kernel/events.ts"
-import type { RolloutAssets } from "../kernel/rollout-assets.ts"
+import { readAssetSource } from "./asset-media.ts"
 import { prepareModelImage } from "./prepare-model-image.ts"
 import { readPdf } from "./tools/read-pdf.ts"
 import type { PdfReadResult } from "./tools/read-pdf-worker.ts"
@@ -96,12 +97,13 @@ export async function prepareModelDocuments(
   }
   for (const document of documents) {
     signal?.throwIfAborted()
-    if (assets === undefined)
-      throw new Error("Document asset storage unavailable.")
-    const bytes = await assets.read(document.file)
-    if (bytes.length !== document.sizeBytes)
+    const bytes = await readAssetSource(document.file, assets, signal)
+    if (document.sizeBytes > 0 && bytes.length !== document.sizeBytes)
       throw new Error("Document asset size mismatch.")
-    const source = assets.resolve(document.file)
+    const source =
+      "url" in document.file
+        ? document.file.url
+        : assets?.resolve(document.file)
     const format = capabilities.images ? "image" : "text"
     if (capabilities.nativePdf) {
       if (capabilities.nativePdfLimits !== undefined) {
@@ -117,7 +119,7 @@ export async function prepareModelDocuments(
           continue
         }
       }
-      projected.documents.push({ ...document, data: bytes.toString("base64") })
+      projected.documents.push(document)
       continue
     }
     const result = await readCachedPdf(bytes, format, signal)

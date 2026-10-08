@@ -5,14 +5,16 @@ import { describe, expect, it } from "vitest"
 // Value imports from these paths pull node builtins (node:crypto and friends)
 // into the browser bundle and blank the GUI at runtime. Type-only imports are
 // erased at build time and stay legal. The allowed kernel surfaces are
-// dependency-free contracts, including excerpt validation and ordered input
-// normalization/projection in input-content.ts; ids.ts uses
+// dependency-free event types. Pure core modules own input, excerpt and asset
+// validation/projection. The server asset-url module
+// is a pure access-address contract shared with the renderer; ids.ts uses
 // browser-safe globalThis.crypto.
 const forbiddenValueImportFrom = [
   /kernel\/index\.ts/,
   /kernel\/(?!(events|ids|input-context|input-content|user-interaction)\.ts)[^"']+/,
+  /core\/(?!(asset-types|conversation|input-context|user-input|thread-search|goal)\.ts)[^"']+/,
   /runtime\//,
-  /server\//,
+  /server\/(?!(asset-url)\.ts)[^"']+/,
 ]
 
 const importStatement = /import\s+(?!type\b)([\s\S]*?)\sfrom\s["']([^"']+)["']/g

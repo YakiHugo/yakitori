@@ -1,11 +1,6 @@
-import { fingerprintInputAdmission } from "../kernel/operation.ts"
-import {
-  inputContentText,
-  inputContentAttachments,
-  replaceInputAttachments,
-} from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
+import { assetSourceKey, isAssetSource } from "../core/asset-types.ts"
 import { isGoalStatus, type ThreadGoal } from "../core/goal.ts"
 import type {
   RolloutItem,
@@ -22,30 +17,34 @@ import {
 import type { ThreadManager } from "../core/thread-manager.ts"
 import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
 import {
+  createUserInput,
+  inputContentAttachments,
+  inputContentText,
+  isInputContent,
+  replaceInputAttachments,
+} from "../core/user-input.ts"
+import {
+  AttachmentConflictError,
   createEventEnvelope,
   createRequestId,
   EVENT_SCHEMA_VERSION,
   type EventMetadata,
   ForkReason,
   IdPrefix,
-  type ImageAttachment,
-  type PdfAttachment,
-  AttachmentConflictError,
+  type InputContent,
   InputRole,
   isIdWithPrefix,
   isJsonValue,
   isKernelEvent,
   isRequestId,
-  isStorageKey,
   isYakitoriError,
   type ModelSelection,
   type RolloutAssets,
   type StoredEventEnvelope,
-  type InputContent,
   type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
-import { isContextExcerpts } from "../kernel/input-context.ts"
+import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
@@ -727,7 +726,10 @@ export function createThreadServerHandlers(
     content: InputContent,
   ): Promise<PromotedContent> => {
     const attachments = inputContentAttachments(content)
-    if (attachments.length === 0) {
+    if (
+      attachments.length === 0 ||
+      attachments.every((attachment) => "url" in attachment.file)
+    ) {
       return { content, rollback: undefined }
     }
     if (options.rolloutAssets === undefined) {
@@ -736,8 +738,9 @@ export function createThreadServerHandlers(
     try {
       const allStagedInSession = attachments.every(
         (attachment) =>
-          attachment.file.rolloutId === rolloutId &&
-          attachment.file.path.startsWith("attachments/staging/"),
+          "url" in attachment.file ||
+          (attachment.file.rolloutId === rolloutId &&
+            attachment.file.path.startsWith("attachments/staging/")),
       )
       const promotion = allStagedInSession
         ? await options.rolloutAssets.promoteAttachments(
@@ -769,14 +772,19 @@ export function createThreadServerHandlers(
     requestId: string,
     content: InputContent,
   ) => {
-    const drafts = inputContentAttachments(content).filter((attachment) =>
-      attachment.file.path.startsWith("attachments/staging/"),
+    const drafts = inputContentAttachments(content).filter(
+      (attachment) =>
+        !("url" in attachment.file) &&
+        ("url" in attachment.file ||
+          attachment.file.path.startsWith("attachments/staging/")),
     )
     if (drafts.length === 0) return
     try {
       await options.rolloutAssets?.discardDraftAttachments(drafts)
       options.releaseDraftRolloutAssets?.(
-        drafts.map((attachment) => attachment.file.rolloutId),
+        drafts.flatMap((attachment) =>
+          "url" in attachment.file ? [] : [attachment.file.rolloutId],
+        ),
       )
     } catch (error) {
       reportOperationalFailure(reporter, {
@@ -1421,17 +1429,17 @@ export function createThreadServerHandlers(
           const sourceAttachments = inputContentAttachments(sourceContent)
           forkContent = {
             ...request.content,
-            ...(request.content.contextAttachments === undefined &&
-            sourceContent.contextAttachments !== undefined
-              ? { contextAttachments: sourceContent.contextAttachments }
+            ...(request.content.references === undefined &&
+            sourceContent.references !== undefined
+              ? { references: sourceContent.references }
               : {}),
           }
           for (const attachment of inputContentAttachments(forkContent)) {
             if (
               !sourceAttachments.some(
                 (original) =>
-                  original.file.rolloutId === attachment.file.rolloutId &&
-                  original.file.path === attachment.file.path &&
+                  assetSourceKey(original.file) ===
+                    assetSourceKey(attachment.file) &&
                   original.name === attachment.name &&
                   original.mediaType === attachment.mediaType &&
                   original.sizeBytes === attachment.sizeBytes,
@@ -2289,7 +2297,9 @@ function mapRolloutEvent(
           inputId: item.item.id,
           role: InputRole.User,
           ...(steered ? { steered: true } : {}),
-          content: modelUserInputContent(item.item.item),
+          content:
+            item.item.submissionMetadata?.content ??
+            modelUserInputContent(item.item.item),
           ...(item.item.submissionMetadata?.modelSelection === undefined
             ? {}
             : {
@@ -2430,6 +2440,7 @@ function requestAttachmentOwners(content: InputContent): readonly string[] {
   return [
     ...new Set(
       inputContentAttachments(content).flatMap((attachment) => {
+        if ("url" in attachment.file) return []
         const match = /^attachments\/requests\/([^/]+)\//.exec(
           attachment.file.path,
         )
@@ -2455,35 +2466,34 @@ function turnIdForInput(stored: StoredThread, inputId: string): string {
 function modelUserInputContent(
   message: import("../kernel/events.ts").ModelUserMessage,
 ): InputContent {
-  return {
-    kind: "parts",
-    parts: message.content.map((part) => {
-      if (part.type === "text") return { type: "text", text: part.text }
-      if (part.file === undefined || part.sizeBytes === undefined)
-        throw invalidInput(
-          "Input attachments require stored rollout asset references.",
-        )
-      if (part.type === "document")
-        return {
-          type: "document",
-          name: part.name,
-          mediaType: part.mediaType,
-          sizeBytes: part.sizeBytes,
-          file: part.file,
-        }
-      return {
-        type: "image",
-        name: part.name ?? part.file.path.split("/").at(-1) ?? "image",
-        mediaType: part.mediaType,
-        detail: part.detail ?? "high",
-        sizeBytes: part.sizeBytes,
-        file: part.file,
-      }
-    }),
-    ...(message.contextAttachments === undefined
-      ? {}
-      : { contextAttachments: message.contextAttachments }),
-  }
+  return createUserInput(
+    message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join(""),
+    message.content.flatMap(
+      (block): import("../core/asset-types.ts").UserAttachment[] => {
+        if (block.type === "text") return []
+        if (block.file === undefined || block.sizeBytes === undefined)
+          throw invalidInput(
+            "Input attachments require portable asset sources.",
+          )
+        return [
+          {
+            name: block.name ?? "image",
+            mediaType: block.mediaType,
+            sizeBytes: block.sizeBytes,
+            file: block.file,
+            ...(block.type === "image"
+              ? { detail: block.detail ?? "high" }
+              : {}),
+          },
+        ]
+      },
+    ),
+    [],
+    message.contextAttachments,
+  )
 }
 
 function requireRolloutAssets(
@@ -3005,162 +3015,32 @@ function requireAdmissionInputContent(
   maxInputBytes: number,
   maxContextBytes = maxInputBytes,
 ): InputContent {
-  if (
-    !isRecord(value) ||
-    value.kind !== "parts" ||
-    !Array.isArray(value.parts) ||
-    Object.keys(value).some(
-      (key) => !["kind", "parts", "contextAttachments"].includes(key),
-    )
-  )
+  if (!isInputContent(value))
     throw invalidInput(
-      "content must include kind parts and an ordered parts array.",
+      "content must contain input text, elements, attachments and valid references.",
     )
-  let textBytes = 0
-  const parts = value.parts.map((part: unknown, index: number) => {
-    if (!isRecord(part))
-      throw invalidInput(
-        `content.parts[${index}] must be a text, image or document object.`,
-      )
-    if (
-      part.type === "text" &&
-      typeof part.text === "string" &&
-      Object.keys(part).every((key) => key === "type" || key === "text")
-    ) {
-      textBytes += Buffer.byteLength(part.text, "utf8")
-      if (textBytes > maxInputBytes)
-        throw invalidInput(
-          `content.parts text must not exceed ${maxInputBytes} bytes.`,
-          { field: "content.parts", maxBytes: maxInputBytes },
-        )
-      return { type: "text" as const, text: part.text }
-    }
-    if (
-      part.type === "image" &&
-      Object.keys(part).every((key) =>
-        ["type", "name", "mediaType", "sizeBytes", "detail", "file"].includes(
-          key,
-        ),
-      )
-    )
-      return { type: "image" as const, ...requireImageAttachment(part, index) }
-    if (
-      part.type === "document" &&
-      Object.keys(part).every((key) =>
-        ["type", "name", "mediaType", "sizeBytes", "file"].includes(key),
-      )
-    )
-      return { type: "document" as const, ...requirePdfAttachment(part, index) }
-    throw invalidInput(
-      `content.parts[${index}] must be a text, image or document object.`,
-    )
-  })
+  if (Buffer.byteLength(value.text, "utf8") > maxInputBytes)
+    throw invalidInput(`content.text must not exceed ${maxInputBytes} bytes.`, {
+      field: "content.text",
+      maxBytes: maxInputBytes,
+    })
   if (
-    value.contextAttachments !== undefined &&
-    !isContextExcerpts(value.contextAttachments)
-  )
-    throw invalidInput(
-      "content.contextAttachments must contain valid context excerpts.",
-    )
-  if (
-    value.contextAttachments !== undefined &&
-    Buffer.byteLength(JSON.stringify(value.contextAttachments), "utf8") >
+    value.references !== undefined &&
+    Buffer.byteLength(JSON.stringify(value.references), "utf8") >
       maxContextBytes
   )
     throw invalidInput(
-      `content.contextAttachments must not exceed ${maxContextBytes} bytes.`,
+      `content.references must not exceed ${maxContextBytes} bytes.`,
     )
-  return {
-    kind: "parts",
-    parts,
-    ...(value.contextAttachments === undefined
-      ? {}
-      : { contextAttachments: value.contextAttachments }),
+  for (const attachment of value.attachments) {
+    if (Buffer.byteLength(attachment.name, "utf8") > 255)
+      throw invalidInput("Attachment name is too long.")
+    if (!isAssetSource(attachment.file))
+      throw invalidInput("Invalid attachment source.")
+    if (!("url" in attachment.file) && attachment.sizeBytes <= 0)
+      throw invalidInput("Stored attachment sizeBytes must be positive.")
   }
-}
-
-function requireImageAttachment(
-  value: unknown,
-  index: number,
-): ImageAttachment {
-  if (!isRecord(value)) {
-    throw invalidInput(`content.parts[${index}] must be an image object.`)
-  }
-  const name = requireString(value.name, `content.parts[${index}].name`)
-  if (Buffer.byteLength(name, "utf8") > 255) {
-    throw invalidInput(`content.parts[${index}].name is too long.`)
-  }
-  const mediaType = value.mediaType
-  if (
-    mediaType !== "image/gif" &&
-    mediaType !== "image/jpeg" &&
-    mediaType !== "image/png" &&
-    mediaType !== "image/webp"
-  ) {
-    throw invalidInput(
-      `content.parts[${index}].mediaType is not a supported image type.`,
-    )
-  }
-  if (
-    !Number.isSafeInteger(value.sizeBytes) ||
-    (value.sizeBytes as number) <= 0
-  ) {
-    throw invalidInput(`content.parts[${index}].sizeBytes must be positive.`)
-  }
-  const detail = value.detail ?? "high"
-  if (detail !== "high" && detail !== "original") {
-    throw invalidInput(
-      `content.parts[${index}].detail must be high or original.`,
-    )
-  }
-  return {
-    name,
-    mediaType,
-    detail,
-    sizeBytes: value.sizeBytes as number,
-    file: requireRolloutAssetReference(value.file, index),
-  }
-}
-
-function requirePdfAttachment(
-  value: Record<string, unknown>,
-  index: number,
-): PdfAttachment {
-  const name = requireString(value.name, `content.parts[${index}].name`)
-  if (Buffer.byteLength(name, "utf8") > 255)
-    throw invalidInput(`content.parts[${index}].name is too long.`)
-  if (value.mediaType !== "application/pdf")
-    throw invalidInput(
-      `content.parts[${index}].mediaType must be application/pdf.`,
-    )
-  if (
-    !Number.isSafeInteger(value.sizeBytes) ||
-    (value.sizeBytes as number) <= 0
-  )
-    throw invalidInput(`content.parts[${index}].sizeBytes must be positive.`)
-  return {
-    name,
-    mediaType: "application/pdf",
-    sizeBytes: value.sizeBytes as number,
-    file: requireRolloutAssetReference(value.file, index),
-  }
-}
-
-function requireRolloutAssetReference(
-  value: unknown,
-  index: number,
-): ImageAttachment["file"] {
-  if (
-    !isRecord(value) ||
-    !isStorageKey(value.rolloutId) ||
-    typeof value.path !== "string" ||
-    Object.keys(value).some((key) => key !== "rolloutId" && key !== "path")
-  ) {
-    throw invalidInput(
-      `content.parts[${index}].file must be a rollout asset reference.`,
-    )
-  }
-  return { rolloutId: value.rolloutId, path: value.path }
+  return value
 }
 
 function optionalStringField(

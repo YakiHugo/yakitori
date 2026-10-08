@@ -12,9 +12,10 @@ import {
 import {
   createEventEnvelope,
   EventType,
-  InputRole,
   type InputContent,
+  InputRole,
 } from "../../src/kernel/events.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -113,11 +114,10 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
   expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
     {
       sessionId: "session_1",
-      content: {
-        kind: "parts",
-        parts: inputParts("Please review"),
-        contextAttachments: [excerpt],
-      },
+      content: inputFixture(
+        inputParts("Please review"),
+        { references: [excerpt] }.references,
+      ),
     },
   )
   expect(useAppStore.getState().promptDraft).toEqual(
@@ -264,7 +264,7 @@ it("keeps new-conversation excerpts separate and carries them through the first 
   expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
     {
       sessionId: "session_created",
-      content: { kind: "parts", parts: [], contextAttachments: [newExcerpt] },
+      content: inputFixture([], { references: [newExcerpt] }.references),
     },
   )
   expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])

@@ -186,9 +186,8 @@ describe("ordered user PDF wire content", () => {
     expect(JSON.stringify(content)).not.toContain("JVBERi0")
   })
 
-  it("preserves the Responses-compatible backend gate for user PDF bytes", () => {
+  it("adapts prepared PDFs for configured provider IDs", () => {
     const content = toOpenAIInput([message], true, "custom")
-    expect(JSON.stringify(content)).not.toContain("JVBERi0")
-    expect(JSON.stringify(content)).toContain("native PDF input is not enabled")
+    expect(content).toEqual(toOpenAIInput([message], true, "openai"))
   })
 })

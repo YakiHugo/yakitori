@@ -1,14 +1,15 @@
-import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
+import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 function body<T>(response: ApiHandlerResult<T>): T {
   if (!response.ok) throw new Error(JSON.stringify(response.body))
@@ -180,10 +181,7 @@ async function input(
     await application.handlers.admitInput({
       sessionId,
       requestId: label,
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: label }],
-      },
+      content: inputFixture([{ type: "text" as const, text: label }]),
     }),
   )
 }

@@ -2,11 +2,12 @@ import { expect, it } from "vitest"
 import {
   parsePrompt,
   parsePromptParts,
-  serializePromptParts,
   promptOffset,
   promptPosition,
   serializePrompt,
+  serializePromptParts,
 } from "../../src/gui/components/prompt-document.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 it("roundtrips multiline text and inline path-qualified skills without moving them", () => {
   const text = "请用 [$review](/skills/review/SKILL.md) 检查\n\n然后测试 🐣"
@@ -69,8 +70,8 @@ it("roundtrips text/PDF/image/text without textual placeholders in the submitted
     },
     { type: "text" as const, text: "b" },
   ]
-  const doc = parsePromptParts(parts)
-  expect(serializePromptParts(doc)).toEqual(parts)
+  const doc = parsePromptParts(inputFixture(parts))
+  expect(serializePromptParts(doc)).toEqual(inputFixture(parts))
   expect(serializePrompt(doc)).toBe("a\uFFFC\uFFFCb")
   expect(promptPosition(doc, 3)).toBe(4)
   expect(promptOffset(doc, 4)).toBe(3)

@@ -1,33 +1,30 @@
-import type { ApiAdmitInputResponse } from "../../server/protocol.ts"
-import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
-import {
-  inputContentAttachments,
-  inputContentText,
-} from "../../kernel/input-content.ts"
-import type { InputContent, InputPart } from "../../kernel/events.ts"
-import {
-  joinInputDrafts,
-  sameInputParts,
-  trimInputParts,
-} from "../input-parts.ts"
 import { useMemo } from "react"
 import { create } from "zustand"
+import { assetSourceKey } from "../../core/asset-types.ts"
 import type { ThreadGoal } from "../../core/goal.ts"
 import type {
   SessionSidebar,
   SidebarChange,
 } from "../../core/session-sidebar.ts"
+import type { InputDraft } from "../../core/user-input.ts"
+import {
+  inputContent,
+  inputContentAttachments,
+  inputContentText,
+} from "../../core/user-input.ts"
+import type { InputContent } from "../../kernel/events.ts"
 import {
   COMPACT_DIRECTIVE,
-  type UserAttachment,
   isKernelEvent,
   type ModelSelection,
   type StoredEventEnvelope,
+  type UserAttachment,
 } from "../../kernel/events.ts"
 import { createRequestId } from "../../kernel/ids.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { QueuedInput } from "../../server/input-queue.ts"
 import type {
+  ApiAdmitInputResponse,
   ApiProject,
   ApiProviderSummary,
   ApiReadUsageResponse,
@@ -47,6 +44,14 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
+import {
+  hasInputDraft,
+  joinInputDrafts,
+  sameInputDraft,
+  textInputDraft,
+  trimInputDraft,
+} from "../input-draft.ts"
 import {
   inputRecoveryMemory,
   type PendingAdmission,
@@ -68,7 +73,7 @@ type SessionSelection = {
 const firstInputDraftSessionId = "draft_first_input"
 
 export type SessionDraft = Readonly<{
-  parts: readonly InputPart[] | undefined
+  content: InputDraft | undefined
   excerpts: readonly ContextExcerpt[]
 }>
 
@@ -136,9 +141,9 @@ export type AppStoreData = {
   // park in sessionDrafts and are restored on selection; neither is a
   // persistence or attachment-lifecycle authority.
   draftModelSelection: ModelSelection | undefined
-  newSessionPrompt: readonly InputPart[] | undefined
+  newSessionPrompt: InputDraft | undefined
   newSessionExcerpts: readonly ContextExcerpt[]
-  promptDraft: readonly InputPart[] | undefined
+  promptDraft: InputDraft | undefined
   promptExcerpts: readonly ContextExcerpt[]
   queuedItems: readonly QueuedInput[]
   recoveredAdmission: PendingAdmission | undefined
@@ -227,7 +232,7 @@ export type AppStoreActions = {
   ): Promise<boolean>
   selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
-    parts: readonly InputPart[],
+    parts: InputDraft,
     // "queue" skips steering: the input joins the durable pending queue and
     // dispatches as the next Turn when the Session goes idle.
     mode?: "auto" | "queue",
@@ -235,7 +240,7 @@ export type AppStoreActions = {
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   refreshQueuedInputs(): Promise<void>
-  updateQueuedInput(inputId: string, parts: readonly InputPart[]): Promise<void>
+  updateQueuedInput(inputId: string, parts: InputDraft): Promise<void>
   reorderQueuedInputs(inputIds: readonly string[]): Promise<void>
   startQueuedInput(inputId: string): Promise<void>
   resolvePermission(
@@ -243,7 +248,7 @@ export type AppStoreActions = {
     permissionRequestId: string,
     behavior: "allow" | "deny",
   ): Promise<void>
-  setPromptDraft(parts: readonly InputPart[]): void
+  setPromptDraft(parts: InputDraft): void
   addPromptExcerpt(excerpt: ContextExcerpt): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
@@ -590,32 +595,29 @@ export const useAppStore = create<AppStore>()((set, get) => {
     get().sessionSelectionIntentRevision === selection.revision &&
     get().selection.sessionId === selection.sessionId
 
-  const sameDraftParts = (
-    left: readonly InputPart[],
-    right: readonly InputPart[],
-  ) =>
-    sameInputParts(
-      inputAttachmentOwnership.resolveParts(get().apiBase, left),
-      inputAttachmentOwnership.resolveParts(get().apiBase, right),
+  const sameResolvedDraft = (left: InputDraft, right: InputDraft) =>
+    sameInputDraft(
+      inputAttachmentOwnership.resolveDraft(get().apiBase, left),
+      inputAttachmentOwnership.resolveDraft(get().apiBase, right),
     )
   const recordPromotedContent = (
     original: InputContent,
     accepted: InputContent,
   ) => {
-    if (!original.parts.some((part) => part.type !== "text")) return
+    if (!original.attachments.length) return
     inputAttachmentOwnership.promote(get().apiBase, original, accepted)
     set((state) => ({
       promptDraft:
         state.promptDraft === undefined
           ? undefined
-          : inputAttachmentOwnership.resolveParts(
+          : inputAttachmentOwnership.resolveDraft(
               state.apiBase,
               state.promptDraft,
             ),
       newSessionPrompt:
         state.newSessionPrompt === undefined
           ? undefined
-          : inputAttachmentOwnership.resolveParts(
+          : inputAttachmentOwnership.resolveDraft(
               state.apiBase,
               state.newSessionPrompt,
             ),
@@ -625,11 +627,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           {
             ...draft,
             parts:
-              draft.parts === undefined
+              draft.content === undefined
                 ? undefined
-                : inputAttachmentOwnership.resolveParts(
+                : inputAttachmentOwnership.resolveDraft(
                     state.apiBase,
-                    draft.parts,
+                    draft.content,
                   ),
           },
         ]),
@@ -667,11 +669,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
         ? {
-            parts: state.promptDraft,
+            content: state.promptDraft,
             excerpts: state.promptExcerpts,
           }
         : (state.sessionDrafts[sessionId] ?? {
-            parts: undefined,
+            content: undefined,
             excerpts: [],
           })
       // A reply can arrive after replay has already restored its pending
@@ -679,19 +681,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const last = restoring.at(-1)
       const alreadyInDraft =
         last !== undefined &&
-        sameDraftParts(trimInputParts(draft.parts ?? []), last.content.parts)
+        sameResolvedDraft(
+          trimInputDraft(draft.content ?? textInputDraft("")),
+          last.content,
+        )
       const toPrepend = alreadyInDraft ? restoring.slice(0, -1) : restoring
       const restored: SessionDraft = {
-        parts: inputAttachmentOwnership.resolveParts(
+        content: inputAttachmentOwnership.resolveDraft(
           state.apiBase,
           joinInputDrafts([
-            ...toPrepend.map((steer) => steer.content.parts),
-            draft.parts,
+            ...toPrepend.map((steer) => steer.content),
+            draft.content,
           ]),
         ),
         excerpts: [
           ...restoring.flatMap((steer) =>
-            (steer.content.contextAttachments ?? []).filter(
+            (steer.content.references ?? []).filter(
               (excerpt) =>
                 !draft.excerpts.some((current) => current.id === excerpt.id),
             ),
@@ -703,7 +708,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ? {
             pendingSteers,
             restoredSteerRequestIds,
-            promptDraft: restored.parts,
+            promptDraft: restored.content,
             promptExcerpts: restored.excerpts,
           }
         : {
@@ -731,26 +736,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
         ? {
-            parts: state.promptDraft,
+            content: state.promptDraft,
             excerpts: state.promptExcerpts,
           }
         : (state.sessionDrafts[sessionId] ?? {
-            parts: undefined,
+            content: undefined,
             excerpts: [],
           })
-      const alreadyInDraft = sameDraftParts(
-        trimInputParts(draft.parts ?? []),
-        admission.content.parts,
+      const alreadyInDraft = sameResolvedDraft(
+        trimInputDraft(draft.content ?? textInputDraft("")),
+        admission.content,
       )
       const restored: SessionDraft = {
-        parts: alreadyInDraft
-          ? draft.parts
-          : inputAttachmentOwnership.resolveParts(
+        content: alreadyInDraft
+          ? draft.content
+          : inputAttachmentOwnership.resolveDraft(
               state.apiBase,
-              joinInputDrafts([admission.content.parts, draft.parts]),
+              joinInputDrafts([admission.content, draft.content]),
             ),
         excerpts: [
-          ...(admission.content.contextAttachments ?? []).filter(
+          ...(admission.content.references ?? []).filter(
             (excerpt) =>
               !draft.excerpts.some((current) => current.id === excerpt.id),
           ),
@@ -759,7 +764,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
       return selected
         ? {
-            promptDraft: restored.parts,
+            promptDraft: restored.content,
             promptExcerpts: restored.excerpts,
           }
         : {
@@ -1286,11 +1291,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
             selection: {},
             selectedSession: undefined,
             execution: createExecutionViewState(),
-            promptDraft: inputAttachmentOwnership.resolveParts(
+            promptDraft: inputAttachmentOwnership.resolveDraft(
               get().apiBase,
-              pending.content.parts,
+              pending.content,
             ),
-            promptExcerpts: pending.content.contextAttachments ?? [],
+            promptExcerpts: pending.content.references ?? [],
             recoveredAdmission: pending,
           })
           return
@@ -2135,11 +2140,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     admitInput: async (parts, mode = "auto") => {
       const excerpts = get().promptExcerpts
-      const content: InputContent = {
-        kind: "parts",
+      const content: InputContent = inputContent(
         parts,
-        ...(excerpts.length ? { contextAttachments: excerpts } : {}),
-      }
+        { ...(excerpts.length ? { references: excerpts } : {}) }.references,
+      )
       const text = inputContentText(content)
       const attachments = inputContentAttachments(content)
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
@@ -2337,35 +2341,33 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (alreadyRestored && acceptedContent !== undefined) {
               const acceptedAttachments =
                 inputContentAttachments(acceptedContent)
-              const replaceParts = (
-                current: readonly InputPart[],
-              ): readonly InputPart[] =>
-                current.map((part) => {
-                  if (part.type === "text") return part
+              const replaceParts = (current: InputDraft): InputDraft => ({
+                ...current,
+                attachments: current.attachments.map((attachment) => {
                   const index = attachments.findIndex((original) =>
-                    sameAttachments([original], [part]),
+                    sameAttachments([original], [attachment]),
                   )
-                  const replacement = acceptedAttachments[index]
-                  return replacement === undefined
-                    ? part
-                    : replacement.mediaType === "application/pdf"
-                      ? { type: "document", ...replacement }
-                      : { type: "image", ...replacement }
-                })
+                  return acceptedAttachments[index] ?? attachment
+                }),
+              })
               set((state) =>
                 state.selection.sessionId === selection.sessionId
-                  ? { promptDraft: replaceParts(state.promptDraft ?? []) }
+                  ? {
+                      promptDraft: replaceParts(
+                        state.promptDraft ?? textInputDraft(""),
+                      ),
+                    }
                   : {
                       sessionDrafts: {
                         ...state.sessionDrafts,
                         [selection.sessionId]: {
                           ...(state.sessionDrafts[selection.sessionId] ?? {
-                            parts: undefined,
+                            content: undefined,
                             excerpts: [],
                           }),
-                          parts: replaceParts(
-                            state.sessionDrafts[selection.sessionId]?.parts ??
-                              [],
+                          content: replaceParts(
+                            state.sessionDrafts[selection.sessionId]?.content ??
+                              textInputDraft(""),
                           ),
                         },
                       },
@@ -2378,8 +2380,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
               if (alreadyRestored) return
               set((state) => {
                 if (state.selection.sessionId === selection.sessionId) {
-                  const clear = sameDraftParts(
-                    trimInputParts(state.promptDraft ?? []),
+                  const clear = sameResolvedDraft(
+                    trimInputDraft(state.promptDraft ?? textInputDraft("")),
                     parts,
                   )
                   return {
@@ -2391,8 +2393,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 }
                 const draft = state.sessionDrafts[selection.sessionId]
                 if (draft === undefined) return state
-                const clear = sameDraftParts(
-                  trimInputParts(draft.parts ?? []),
+                const clear = sameResolvedDraft(
+                  trimInputDraft(draft.content ?? textInputDraft("")),
                   parts,
                 )
                 return {
@@ -2400,7 +2402,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                     ...state.sessionDrafts,
                     [selection.sessionId]: {
                       ...draft,
-                      parts: clear ? undefined : draft.parts,
+                      content: clear ? undefined : draft.content,
                       excerpts: draft.excerpts.filter(
                         (excerpt) => !excerpts.includes(excerpt),
                       ),
@@ -2422,7 +2424,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }))
             if (
               !alreadyRestored &&
-              sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)
+              sameResolvedDraft(
+                trimInputDraft(get().promptDraft ?? textInputDraft("")),
+                parts,
+              )
             ) {
               set({ promptDraft: undefined })
             }
@@ -2467,7 +2472,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             if (!isCurrentSelection(selection)) return
             if (
-              sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)
+              sameResolvedDraft(
+                trimInputDraft(get().promptDraft ?? textInputDraft("")),
+                parts,
+              )
             ) {
               set({ promptDraft: undefined })
             }
@@ -2551,7 +2559,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
               (excerpt) => !excerpts.includes(excerpt),
             ),
           }))
-          if (sameDraftParts(trimInputParts(get().promptDraft ?? []), parts)) {
+          if (
+            sameResolvedDraft(
+              trimInputDraft(get().promptDraft ?? textInputDraft("")),
+              parts,
+            )
+          ) {
             set({
               promptDraft: undefined,
             })
@@ -2666,7 +2679,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             sessionId: selection.sessionId,
             inputId,
             requestId,
-            content: { ...item.input.content, parts },
+            content: inputContent(parts, item.input.content.references),
             ...(item.input.modelSelection === undefined
               ? {}
               : { modelSelection: item.input.modelSelection }),
@@ -3398,12 +3411,12 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
   const sessionId = state.selection.sessionId
   if (sessionId === undefined) return state.sessionDrafts
   const hasContent =
-    trimInputParts(state.promptDraft ?? []).length > 0 ||
+    hasInputDraft(trimInputDraft(state.promptDraft ?? textInputDraft(""))) ||
     state.promptExcerpts.length > 0
   const sessionDrafts = { ...state.sessionDrafts }
   if (hasContent) {
     sessionDrafts[sessionId] = {
-      parts: state.promptDraft,
+      content: state.promptDraft,
       excerpts: state.promptExcerpts,
     }
   } else {
@@ -3421,7 +3434,7 @@ function takeSessionDraft(
   delete next[sessionId]
   return {
     sessionDrafts: next,
-    promptDraft: draft?.parts,
+    promptDraft: draft?.content,
     promptExcerpts: draft?.excerpts ?? [],
   }
 }
@@ -3432,18 +3445,21 @@ function sameAttachments(
 ): boolean {
   return (
     left.length === right.length &&
-    left.every(
-      (attachment, index) =>
-        attachment.name === right[index]?.name &&
+    left.every((attachment, index) => {
+      const other = right[index]
+      return (
+        other !== undefined &&
+        attachment.name === other.name &&
         attachment.mediaType === right[index]?.mediaType &&
         attachment.sizeBytes === right[index]?.sizeBytes &&
         ("detail" in attachment ? attachment.detail : undefined) ===
           ("detail" in (right[index] ?? {})
             ? (right[index] as { detail?: string }).detail
             : undefined) &&
-        attachment.file.rolloutId === right[index]?.file.rolloutId &&
-        attachment.file.path === right[index]?.file.path,
-    )
+        right[index] !== undefined &&
+        assetSourceKey(attachment.file) === assetSourceKey(other.file)
+      )
+    })
   )
 }
 

@@ -1,16 +1,17 @@
 import type {
   CompletedExecutionItem,
-  StartedExecutionItem,
   EventMetadata,
   JsonObject,
   KernelError,
   ModelMessage,
   ModelSelection,
   SessionConfigurationSnapshot,
+  StartedExecutionItem,
   TokenUsage,
-  TurnMetrics,
   TurnCompletion,
+  TurnMetrics,
 } from "../kernel/events.ts"
+import type { InputContent } from "./user-input.ts"
 
 export type HistoryPosition = {
   readonly rolloutId: string
@@ -62,6 +63,8 @@ export type ResponseItemEnvelope = Readonly<{
   toolContentBlockCount?: number
   providerMetadata?: JsonObject
   submissionMetadata?: Readonly<{
+    // Preserve editor ranges and references; model blocks cannot reconstruct them.
+    content?: InputContent
     modelSelection?: ModelSelection
     parentInputId?: string
     metadata?: EventMetadata

@@ -1,13 +1,11 @@
-import type {
-  UserAttachment,
-  InputContent,
-  InputPart,
-} from "../kernel/events.ts"
-import { inputContentAttachments } from "../kernel/input-content.ts"
+import { assetSourceKey } from "../core/asset-types.ts"
+import type { InputDraft } from "../core/user-input.ts"
+import { inputContentAttachments } from "../core/user-input.ts"
+import type { InputContent, UserAttachment } from "../kernel/events.ts"
 
 // Editor Undo steps can outlive staging files. This renderer-local ownership
 // map resolves those references to the server's promoted assets; it never
-// changes authored parts or crosses API origins.
+// changes authored text or markers or crosses API origins.
 export function createInputAttachmentOwnership() {
   const promoted = new Map<string, UserAttachment["file"]>()
   const key = (apiBase: string, image: UserAttachment) => {
@@ -15,7 +13,7 @@ export function createInputAttachmentOwnership() {
     base.hash = ""
     base.search = ""
     if (!base.pathname.endsWith("/")) base.pathname += "/"
-    return `${base.toString()}\0${image.file.rolloutId}\0${image.file.path}`
+    return `${base.toString()}\0${assetSourceKey(image.file)}`
   }
   const resolve = (apiBase: string, image: UserAttachment): UserAttachment => {
     const file = promoted.get(key(apiBase, image))
@@ -24,17 +22,13 @@ export function createInputAttachmentOwnership() {
 
   return {
     resolve,
-    resolveParts(
-      apiBase: string,
-      parts: readonly InputPart[],
-    ): readonly InputPart[] {
-      return parts.map((part) => {
-        if (part.type === "text") return part
-        const attachment = resolve(apiBase, part)
-        return attachment.mediaType === "application/pdf"
-          ? { ...attachment, type: "document" }
-          : { ...attachment, type: "image" }
-      })
+    resolveDraft(apiBase: string, draft: InputDraft): InputDraft {
+      return {
+        ...draft,
+        attachments: draft.attachments.map((attachment) =>
+          resolve(apiBase, attachment),
+        ),
+      }
     },
     promote(
       apiBase: string,
@@ -42,15 +36,17 @@ export function createInputAttachmentOwnership() {
       accepted: InputContent,
     ): void {
       if (
-        original.parts.length !== accepted.parts.length ||
-        original.parts.some((part, index) => {
-          const other = accepted.parts[index]
-          return part.type === "text"
-            ? other?.type !== "text" || part.text !== other.text
-            : other?.type !== part.type ||
-                part.name !== other.name ||
-                part.mediaType !== other.mediaType ||
-                part.sizeBytes !== other.sizeBytes
+        original.text !== accepted.text ||
+        JSON.stringify(original.elements) !==
+          JSON.stringify(accepted.elements) ||
+        original.attachments.length !== accepted.attachments.length ||
+        original.attachments.some((attachment, index) => {
+          const other = accepted.attachments[index]
+          return (
+            other?.name !== attachment.name ||
+            other.mediaType !== attachment.mediaType ||
+            other.sizeBytes !== attachment.sizeBytes
+          )
         })
       )
         throw new Error("Promoted input does not match submitted content.")
@@ -60,10 +56,17 @@ export function createInputAttachmentOwnership() {
       for (const [index, image] of originals.entries()) {
         // Durable history references keep their original owner. Only staging
         // paths disappear after admission and need an editor-history alias.
-        if (!image.file.path.startsWith("attachments/staging/")) continue
+        if (
+          "url" in image.file ||
+          !image.file.path.startsWith("attachments/staging/")
+        )
+          continue
         const target = acceptedImages[index]
         if (target === undefined) throw new Error("Missing promoted image.")
-        if (target.file.path.startsWith("attachments/staging/"))
+        if (
+          "url" in target.file ||
+          target.file.path.startsWith("attachments/staging/")
+        )
           throw new Error("Admission did not promote the staged image.")
         const sourceKey = key(apiBase, image)
         if (sourceKey !== key(apiBase, target))

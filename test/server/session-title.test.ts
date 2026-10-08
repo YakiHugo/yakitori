@@ -3,19 +3,20 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import {
   createSessionTitleGenerator,
   KIMI_TITLE_MODEL,
   normalizeSessionTitle,
   resolveTitleTarget,
 } from "../../src/server/session-title.ts"
-import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
-import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
-import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -277,10 +278,7 @@ describe("admitInput title trigger", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: `request_${text.split(" ")[0]}`,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: text }],
-        },
+        content: inputFixture([{ type: "text" as const, text: text }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       if (text === "first request") {

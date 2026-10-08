@@ -1,22 +1,27 @@
-import { isKernelEvent, type InputContent } from "../../src/kernel/events.ts"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import type { ContextExcerpt } from "../../src/core/input-context.ts"
 import type { StoredRolloutItem } from "../../src/core/rollout.ts"
-import type { ContextExcerpt } from "../../src/kernel/input-context.ts"
+import { createUserInput } from "../../src/core/user-input.ts"
+import { draftToEditorParts } from "../../src/gui/input-draft.ts"
+import { type InputContent, isKernelEvent } from "../../src/kernel/events.ts"
 import {
-  ModelStopReason,
   type ModelRequest,
+  ModelStopReason,
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { readRequestAsset } from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -71,16 +76,15 @@ async function admit(
   sessionId: string,
   requestId: string,
   text: string,
-  contextAttachments?: readonly ContextExcerpt[],
+  references?: readonly ContextExcerpt[],
 ) {
   const result = await app.handlers.admitInput({
     sessionId,
     requestId,
-    content: {
-      kind: "parts" as const,
-      parts: text === "" ? [] : [{ type: "text" as const, text }],
-      ...(contextAttachments === undefined ? {} : { contextAttachments }),
-    },
+    content: inputFixture(
+      text === "" ? [] : [{ type: "text" as const, text }],
+      { ...(references === undefined ? {} : { references }) }.references,
+    ),
   })
   if (!result.ok) throw new Error(result.body.error.message)
   await until(() => app.threadManager.getThread(sessionId)?.status === "idle")
@@ -110,6 +114,88 @@ const excerpts: readonly ContextExcerpt[] = [
 ]
 
 describe("structured context and ephemeral forks", () => {
+  it("retains external URLs through admission, restart, edit forks and side chats", async () => {
+    const requests: ModelRequest[] = []
+    const context = await fixture(async function* (request) {
+      requests.push(request)
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "done" }],
+        },
+      }
+    })
+    const source = { url: "https://cdn.example/photo.png?version=1" }
+    const content = createUserInput(
+      "Inspect [Image 1] please",
+      [
+        {
+          name: "photo.png",
+          mediaType: "image/png",
+          sizeBytes: 0,
+          file: source,
+        },
+      ],
+      [{ startOffset: 8, endOffset: 17, attachmentIndex: 0 }],
+    )
+    const id = await createMain(context.app)
+    const admitted = await context.app.handlers.admitInput({
+      sessionId: id,
+      requestId: "external_first",
+      modelSelection: { provider: "openai", model: "gpt-5" },
+      content,
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await until(
+      () => context.app.threadManager.getThread(id)?.status === "idle",
+    )
+    await context.restart()
+    const events = await context.app.handlers.readSessionEvents({
+      sessionId: id,
+    })
+    if (!events.ok) throw new Error(events.body.error.message)
+    expect(
+      events.body.events.find((event) => event.type === "input.admitted"),
+    ).toMatchObject({ data: { content } })
+    const fork = await context.app.handlers.forkSession({
+      sessionId: id,
+      atInputId: admitted.body.inputId,
+      reason: "edit",
+      modelSelection: { provider: "openai", model: "gpt-5" },
+      content: { ...content, text: `${content.text} again` },
+    })
+    if (!fork.ok) throw new Error(fork.body.error.message)
+    await until(
+      () =>
+        context.app.threadManager.getThread(fork.body.session.id)?.status ===
+        "idle",
+    )
+    const side = await context.app.sideChats.create({
+      sourceSessionId: fork.body.session.id,
+    })
+    await context.app.sideChats.send({
+      sideChatId: side.id,
+      requestId: "external_side",
+      content: createUserInput("Explain that image"),
+    })
+    await until(
+      () => context.app.sideChats.read(side.id).activeTurnId === undefined,
+    )
+    for (const request of requests) {
+      const images = request.messages.flatMap((message) =>
+        message.role === "user"
+          ? message.content.filter((block) => block.type === "image")
+          : [],
+      )
+      expect(images).toHaveLength(1)
+      expect(images[0]).toMatchObject({ file: source, sizeBytes: 0 })
+    }
+    expect(
+      await context.app.handlers.deleteSession({ sessionId: id }),
+    ).toMatchObject({ ok: true })
+    await context.app.sideChats.remove(side.id)
+  })
   it.each([
     "steer",
     "queue",
@@ -144,7 +230,7 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
       requestId: "ordered_active",
       modelSelection: { provider: "openai", model: "gpt-5" },
-      content: { kind: "parts", parts: [{ type: "text", text: "start" }] },
+      content: createUserInput("start"),
     })
     if (!initial.ok) throw new Error(initial.body.error.message)
     await until(() => requests.length === 1)
@@ -166,14 +252,11 @@ describe("structured context and ephemeral forks", () => {
     )
     if (!image || image.mediaType === "application/pdf")
       throw new Error("Missing draft")
-    const content: InputContent = {
-      kind: "parts",
-      parts: [
-        { type: "text", text: "before image" },
-        { type: "image", ...image },
-        { type: "text", text: "after image" },
-      ],
-    }
+    const content: InputContent = inputFixture([
+      { type: "text", text: "before image" },
+      { type: "image", ...image },
+      { type: "text", text: "after image" },
+    ])
     const submit = (content: InputContent) =>
       route === "steer"
         ? context.app.handlers.steerInput({
@@ -194,13 +277,12 @@ describe("structured context and ephemeral forks", () => {
       body: accepted.body,
     })
     expect(
-      await submit({
-        kind: "parts",
-        parts: [
+      await submit(
+        inputFixture([
           { type: "image", ...image },
           { type: "text", text: "before imageafter image" },
-        ],
-      }),
+        ]),
+      ),
     ).toMatchObject({ ok: false, status: 409 })
     const [changed] = await context.app.rolloutAssets.importAttachmentBytes(
       id,
@@ -210,14 +292,13 @@ describe("structured context and ephemeral forks", () => {
     if (!changed || changed.mediaType === "application/pdf")
       throw new Error("Missing changed draft")
     expect(
-      await submit({
-        kind: "parts",
-        parts: [
+      await submit(
+        inputFixture([
           { type: "text", text: "before image" },
           { type: "image", ...changed },
           { type: "text", text: "after image" },
-        ],
-      }),
+        ]),
+      ),
     ).toMatchObject({ ok: false, status: 409 })
     expect(await context.app.rolloutAssets.read(changed.file)).toEqual(
       changedBytes,
@@ -234,14 +315,13 @@ describe("structured context and ephemeral forks", () => {
       if (!retryImage || retryImage.mediaType === "application/pdf")
         throw new Error("Missing retry image")
       expect(
-        await submit({
-          kind: "parts",
-          parts: [
+        await submit(
+          inputFixture([
             { type: "text", text: "before image" },
             { type: "image", ...retryImage },
             { type: "text", text: "after image" },
-          ],
-        }),
+          ]),
+        ),
       ).toMatchObject({ ok: true })
       await expect(
         context.app.rolloutAssets.read(retryImage.file),
@@ -258,24 +338,35 @@ describe("structured context and ephemeral forks", () => {
         (message) =>
           message.role === "user" &&
           message.content.some(
-            (part) => part.type === "text" && part.text === "before image",
+            (part) =>
+              part.type === "text" && part.text.startsWith("before image"),
           ),
       ),
     ).toEqual([
       {
         role: "user",
         content: [
-          { type: "text", text: "before image" },
           {
             type: "image",
+            name: "placed.png",
             mediaType: "image/png",
+            sizeBytes: bytes.length,
             detail: "high",
-            data: bytes.toString("base64"),
+            file: {
+              rolloutId: id,
+              path: "attachments/requests/ordered_followup/1.png",
+            },
           },
-          { type: "text", text: "after image" },
+          { type: "text", text: "before image[Image 1]after image" },
         ],
       },
     ])
+    expect(
+      await readRequestAsset(requests[1], {
+        rolloutId: id,
+        path: "attachments/requests/ordered_followup/1.png",
+      }),
+    ).toEqual(bytes)
     await expect
       .poll(() =>
         context.app.rolloutAssets.read(image.file).then(
@@ -297,21 +388,18 @@ describe("structured context and ephemeral forks", () => {
     expect(admissions).toHaveLength(1)
     expect(admissions[0]).toMatchObject({
       data: {
-        content: {
-          kind: "parts",
-          parts: [
-            { type: "text", text: "before image" },
-            {
-              type: "image",
-              name: "placed.png",
-              file: {
-                rolloutId: id,
-                path: "attachments/requests/ordered_followup/1.png",
-              },
+        content: inputFixture([
+          { type: "text", text: "before image" },
+          {
+            type: "image",
+            name: "placed.png",
+            file: {
+              rolloutId: id,
+              path: "attachments/requests/ordered_followup/1.png",
             },
-            { type: "text", text: "after image" },
-          ],
-        },
+          },
+          { type: "text", text: "after image" },
+        ]),
       },
     })
     expect(JSON.stringify(requests[1]?.messages)).not.toContain(
@@ -337,7 +425,9 @@ describe("structured context and ephemeral forks", () => {
         requestId: "ordered_followup",
         content: {
           ...accepted.body.content,
-          parts: [...accepted.body.content.parts].reverse(),
+          ...inputFixture(
+            [...draftToEditorParts(accepted.body.content)].reverse(),
+          ),
         },
       }),
     ).toMatchObject({ ok: false, status: 409 })
@@ -417,7 +507,7 @@ describe("structured context and ephemeral forks", () => {
         sessionId: id,
         requestId: "mixed_active",
         modelSelection: { provider: "openai", model: "gpt-6-astra" },
-        content: { kind: "parts", parts: [{ type: "text", text: "wait" }] },
+        content: createUserInput("wait"),
       })
       if (!initial.ok) throw new Error(initial.body.error.message)
       await until(() => requests.length === 1)
@@ -442,16 +532,13 @@ describe("structured context and ephemeral forks", () => {
       image.mediaType === "application/pdf"
     )
       throw new Error("Missing mixed fixture attachments")
-    const content: InputContent = {
-      kind: "parts",
-      parts: [
-        { type: "text", text: "before PDF" },
-        { type: "document", ...pdf },
-        { type: "text", text: "between media" },
-        { type: "image", ...image },
-        { type: "text", text: "after image" },
-      ],
-    }
+    const content: InputContent = inputFixture([
+      { type: "text", text: "before PDF" },
+      { type: "document", ...pdf },
+      { type: "text", text: "between media" },
+      { type: "image", ...image },
+      { type: "text", text: "after image" },
+    ])
     const submit = (value: InputContent) => {
       const request = {
         sessionId: id,
@@ -475,15 +562,15 @@ describe("structured context and ephemeral forks", () => {
       body: accepted.body,
     })
     expect(
-      await submit({ ...content, parts: [...content.parts].reverse() }),
+      await submit({ ...content, text: `${content.text} changed input` }),
     ).toMatchObject({ ok: false, status: 409 })
     expect(
       await submit({
         ...content,
-        parts: content.parts.map((part) =>
-          part.type === "document"
-            ? { ...part, sizeBytes: part.sizeBytes + 1 }
-            : part,
+        attachments: content.attachments.map((attachment) =>
+          attachment.mediaType === "application/pdf"
+            ? { ...attachment, sizeBytes: attachment.sizeBytes + 1 }
+            : attachment,
         ),
       }),
     ).toMatchObject({ ok: false, status: 409 })
@@ -501,19 +588,18 @@ describe("structured context and ephemeral forks", () => {
       .at(-1)
     expect(user?.content.map((block) => block.type)).toEqual([
       "text",
-      "text",
       "image",
-      "text",
       "image",
       "text",
     ])
-    expect(user?.content[0]).toEqual({ type: "text", text: "before PDF" })
-    expect(user?.content[1]).toMatchObject({
+    expect(user?.content[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("report.pdf"),
     })
-    expect(user?.content[3]).toEqual({ type: "text", text: "between media" })
-    expect(user?.content[5]).toEqual({ type: "text", text: "after image" })
+    expect(user?.content.at(-1)).toEqual({
+      type: "text",
+      text: "before PDF[Document 1]between media[Image 2]after image",
+    })
     await context.restart()
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
@@ -527,14 +613,10 @@ describe("structured context and ephemeral forks", () => {
     )
     if (!isKernelEvent(admission) || admission.type !== "input.admitted")
       throw new Error("Missing PDF admission")
-    expect(admission.data.content.parts.map((part) => part.type)).toEqual([
-      "text",
-      "document",
-      "text",
-      "image",
-      "text",
-    ])
-    const storedPdf = admission.data.content.parts.find(
+    expect(
+      draftToEditorParts(admission.data.content).map((part) => part.type),
+    ).toEqual(["text", "document", "text", "image", "text"])
+    const storedPdf = draftToEditorParts(admission.data.content).find(
       (part) => part.type === "document",
     )
     if (!storedPdf) throw new Error("Missing persisted PDF")
@@ -554,28 +636,22 @@ describe("structured context and ephemeral forks", () => {
         sessionId: id,
         atInputId: admission.data.inputId,
         reason: "edit",
-        content: {
-          kind: "parts",
-          parts: [
-            {
-              ...storedPdf,
-              file: {
-                ...storedPdf.file,
-                path: "attachments/requests/foreign/1.pdf",
-              },
+        content: inputFixture([
+          {
+            ...storedPdf,
+            file: {
+              ...storedPdf.file,
+              path: "attachments/requests/foreign/1.pdf",
             },
-          ],
-        },
+          },
+        ]),
       })
       expect(foreign).toMatchObject({ ok: false, status: 400 })
       const forked = await context.app.handlers.forkSession({
         sessionId: id,
         atInputId: admission.data.inputId,
         reason: "edit",
-        content: {
-          kind: "parts",
-          parts: [storedPdf, { type: "text", text: "PDF first" }],
-        },
+        content: inputFixture([storedPdf, { type: "text", text: "PDF first" }]),
       })
       if (!forked.ok) throw new Error(forked.body.error.message)
       await until(
@@ -595,7 +671,9 @@ describe("structured context and ephemeral forks", () => {
           : [],
       )[0]
       if (!document) throw new Error("Missing fork PDF")
-      expect(document.file.rolloutId).toBe(forked.body.session.id)
+      expect(requireStoredAssetSource(document.file).rolloutId).toBe(
+        forked.body.session.id,
+      )
       expect(await context.app.rolloutAssets.read(document.file)).toEqual(
         pdfBytes,
       )
@@ -634,16 +712,13 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
       requestId: "fork_source",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
-      content: {
-        kind: "parts",
-        parts: [
-          { type: "text", text: "before" },
-          { type: "image", ...first },
-          { type: "text", text: "between" },
-          { type: "image", ...second },
-          { type: "text", text: "after" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text", text: "before" },
+        { type: "image", ...first },
+        { type: "text", text: "between" },
+        { type: "image", ...second },
+        { type: "text", text: "after" },
+      ]),
     })
     if (!initial.ok) throw new Error(initial.body.error.message)
     await until(
@@ -661,9 +736,9 @@ describe("structured context and ephemeral forks", () => {
     )
     if (!isKernelEvent(source) || source.type !== "input.admitted")
       throw new Error("Missing source input")
-    const [firstImage, secondImage] = source.data.content.parts.filter(
-      (part) => part.type === "image",
-    )
+    const [firstImage, secondImage] = draftToEditorParts(
+      source.data.content,
+    ).filter((part) => part.type === "image")
     if (!firstImage || !secondImage)
       throw new Error("Missing durable source images")
     const beforeInvalid = await context.app.threadStore.listThreadIds()
@@ -672,18 +747,15 @@ describe("structured context and ephemeral forks", () => {
       atInputId: initial.body.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
-      content: {
-        kind: "parts",
-        parts: [
-          {
-            ...firstImage,
-            file: {
-              ...firstImage.file,
-              path: "attachments/requests/other/1.png",
-            },
+      content: inputFixture([
+        {
+          ...firstImage,
+          file: {
+            ...firstImage.file,
+            path: "attachments/requests/other/1.png",
           },
-        ],
-      },
+        },
+      ]),
     })
     expect(invalid).toMatchObject({
       ok: false,
@@ -737,16 +809,13 @@ describe("structured context and ephemeral forks", () => {
       atInputId: initial.body.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
-      content: {
-        kind: "parts",
-        parts: [
-          { type: "text", text: "changed before" },
-          { ...secondImage, detail: "original" },
-          { type: "text", text: "changed middle" },
-          firstImage,
-          { type: "text", text: "changed after" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text", text: "changed before" },
+        { ...secondImage, detail: "original" },
+        { type: "text", text: "changed middle" },
+        firstImage,
+        { type: "text", text: "changed after" },
+      ]),
     })
     if (!edited.ok) throw new Error(edited.body.error.message)
     await until(() => heldReceipt)
@@ -766,11 +835,12 @@ describe("structured context and ephemeral forks", () => {
     expect(user).toMatchObject({
       role: "user",
       content: [
-        { type: "text", text: "changed before" },
         { type: "image", detail: "original" },
-        { type: "text", text: "changed middle" },
         { type: "image" },
-        { type: "text", text: "changed after" },
+        {
+          type: "text",
+          text: "changed before[Image 1]changed middle[Image 2]changed after",
+        },
       ],
     })
     const stored = await context.app.threadStore.readThread(childId)
@@ -789,19 +859,15 @@ describe("structured context and ephemeral forks", () => {
     expect(
       copied.map((part) => (part.file === undefined ? undefined : part.name)),
     ).toEqual(["second.png", "first.png"])
-    expect(copied.map((part) => part.file?.rolloutId)).toEqual([
-      childId,
-      childId,
-    ])
+    expect(
+      copied.map((part) => requireStoredAssetSource(part.file)?.rolloutId),
+    ).toEqual([childId, childId])
     const removed = await context.app.handlers.forkSession({
       sessionId: childId,
       atInputId: childInput.item.id,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
-      content: {
-        kind: "parts",
-        parts: [{ type: "text", text: "remove the images" }],
-      },
+      content: createUserInput("remove the images"),
     })
     if (!removed.ok) throw new Error(removed.body.error.message)
     await until(
@@ -836,87 +902,23 @@ describe("structured context and ephemeral forks", () => {
           (message) =>
             message.role === "user" &&
             message.content.some(
-              (part) => part.type === "text" && part.text === "changed before",
+              (part) =>
+                part.type === "text" && part.text.startsWith("changed before"),
             ),
         ),
     ).toMatchObject({
       content: [
-        { type: "text", text: "changed before" },
         { type: "image" },
-        { type: "text", text: "changed middle" },
         { type: "image" },
-        { type: "text", text: "changed after" },
+        {
+          type: "text",
+          text: "changed before[Image 1]changed middle[Image 2]changed after",
+        },
       ],
     })
   })
 
-  it("replays persisted legacy admission hashes without resampling or rewriting saved input", async () => {
-    let calls = 0
-    const context = await fixture(async function* () {
-      calls++
-      yield {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.EndTurn,
-          content: [{ type: "text", text: "done" }],
-        },
-      }
-    })
-    const id = await createMain(context.app)
-    await admit(context.app, id, "saved_request", "saved prompt")
-    let legacyBytes = ""
-    const path = join(
-      context.app.sessionStoreRoot,
-      "rollouts",
-      id,
-      "rollout.jsonl",
-    )
-    await context.restart(async () => {
-      const lines = (await readFile(path, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line): StoredRolloutItem => JSON.parse(line))
-      legacyBytes = `${lines
-        .map((line) =>
-          JSON.stringify(
-            line.item.type === "turn_started"
-              ? {
-                  ...line,
-                  item: {
-                    ...line.item,
-                    requestFingerprint:
-                      "f085c0727a70d11aba2b12534bf68f0cfc5dfb5d6fd07af216cdb6a84022ef49",
-                  },
-                }
-              : line,
-          ),
-        )
-        .join("\n")}\n`
-      await writeFile(path, legacyBytes)
-    })
-    await admit(context.app, id, "saved_request", "saved prompt")
-    expect(calls).toBe(1)
-    expect(await readFile(path, "utf8")).toBe(legacyBytes)
-    expect(
-      await context.app.handlers.admitInput({
-        sessionId: id,
-        requestId: "saved_request",
-        content: {
-          kind: "parts",
-          parts: [
-            { type: "text", text: "saved" },
-            { type: "text", text: " prompt" },
-          ],
-        },
-      }),
-    ).toMatchObject({ ok: false, status: 409 })
-    expect(calls).toBe(1)
-  })
-
-  it.each([
-    "saved-separate-images",
-    "ordered",
-  ] as const)("resumes %s user media into the same request order and attachment projection", async (shape) => {
+  it("resumes authored text and portable media after restart", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
@@ -951,74 +953,26 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
       requestId: "ordered_first",
       modelSelection: { provider: "openai", model: "gpt-5" },
-      content: {
-        kind: "parts" as const,
-        parts: [
-          ...(shape === "ordered"
-            ? attachments
-                .slice(0, 1)
-                .map((image) => ({ type: "image" as const, ...image }))
-            : []),
-          { type: "text" as const, text: "between images" },
-          ...(shape === "ordered" ? attachments.slice(1) : attachments).map(
-            (image) => ({ type: "image" as const, ...image }),
-          ),
-        ],
-      },
+      content: inputFixture([
+        ...attachments
+          .slice(0, 1)
+          .map((image) => ({ type: "image" as const, ...image })),
+        { type: "text" as const, text: "between images" },
+        ...attachments
+          .slice(1)
+          .map((image) => ({ type: "image" as const, ...image })),
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
-    await context.restart(async () => {
-      if (shape === "ordered") return
-      const path = join(
-        context.app.sessionStoreRoot,
-        "rollouts",
-        id,
-        "rollout.jsonl",
-      )
-      const entries = (await readFile(path, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line): StoredRolloutItem => JSON.parse(line))
-      const rewritten = entries.map((entry) => {
-        if (
-          entry.item.type !== "response_item" ||
-          entry.item.item.id !== admitted.body.inputId ||
-          entry.item.item.item.role !== "user"
-        )
-          return entry
-        const message = entry.item.item.item
-        const images = message.content.filter((block) => block.type === "image")
-        const [firstImage, secondImage] = images
-        if (firstImage === undefined || secondImage === undefined)
-          throw new Error("Missing saved images")
-        const text = { type: "text", text: "between images" }
-        return {
-          ...entry,
-          item: {
-            ...entry.item,
-            item: {
-              ...entry.item.item,
-              item: { role: "user", content: [text], images },
-            },
-          },
-        }
-      })
-      await writeFile(
-        path,
-        `${rewritten.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-      )
-    })
+    await context.restart()
     const continued = await context.app.handlers.admitInput({
       sessionId: id,
       requestId: "ordered_continue",
       modelSelection: { provider: "openai", model: "gpt-5" },
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "continue" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
     if (!continued.ok) throw new Error(continued.body.error.message)
     await until(
@@ -1030,27 +984,26 @@ describe("structured context and ephemeral forks", () => {
         (message) =>
           message.role === "user" &&
           message.content.some(
-            (block) => block.type === "text" && block.text === "between images",
+            (block) =>
+              block.type === "text" && block.text.includes("between images"),
           ),
       )
     if (original?.role !== "user")
       throw new Error("Missing resumed user content")
-    expect(original.content.map((block) => block.type)).toEqual(
-      shape === "ordered"
-        ? ["image", "text", "image"]
-        : ["text", "image", "image"],
-    )
+    expect(original.content.map((block) => block.type)).toEqual([
+      "image",
+      "image",
+      "text",
+    ])
     const imageBlocks = original.content.filter(
       (block) => block.type === "image",
     )
     const pixels = await Promise.all(
       imageBlocks.map(async (block) => {
-        if (block.data === undefined)
-          throw new Error("Unresolved resumed image")
-        const bytes = await sharp(Buffer.from(block.data, "base64"))
-          .removeAlpha()
-          .raw()
-          .toBuffer()
+        if (block.file === undefined)
+          throw new Error("Missing portable resumed image")
+        const source = await readRequestAsset(requests.at(-1), block.file)
+        const bytes = await sharp(source).removeAlpha().raw().toBuffer()
         return [...bytes.subarray(0, 3)]
       }),
     )
@@ -1071,47 +1024,23 @@ describe("structured context and ephemeral forks", () => {
     ).toMatchObject({
       data: {
         content: {
-          kind: "parts",
-          parts:
-            shape === "ordered"
-              ? [
-                  {
-                    type: "image",
-                    name: "first.png",
-                    file: {
-                      rolloutId: id,
-                      path: expect.stringContaining("attachments/requests/"),
-                    },
-                  },
-                  { type: "text", text: "between images" },
-                  {
-                    type: "image",
-                    name: "second.png",
-                    file: {
-                      rolloutId: id,
-                      path: expect.stringContaining("attachments/requests/"),
-                    },
-                  },
-                ]
-              : [
-                  { type: "text", text: "between images" },
-                  {
-                    type: "image",
-                    name: "first.png",
-                    file: {
-                      rolloutId: id,
-                      path: expect.stringContaining("attachments/requests/"),
-                    },
-                  },
-                  {
-                    type: "image",
-                    name: "second.png",
-                    file: {
-                      rolloutId: id,
-                      path: expect.stringContaining("attachments/requests/"),
-                    },
-                  },
-                ],
+          text: "[Image 1]between images[Image 2]",
+          attachments: [
+            {
+              name: "first.png",
+              file: {
+                rolloutId: id,
+                path: expect.stringContaining("attachments/requests/"),
+              },
+            },
+            {
+              name: "second.png",
+              file: {
+                rolloutId: id,
+                path: expect.stringContaining("attachments/requests/"),
+              },
+            },
+          ],
         },
       },
     })
@@ -1152,6 +1081,35 @@ describe("structured context and ephemeral forks", () => {
       ],
     })
     expect(requestUser).not.toHaveProperty("contextAttachments")
+    const hydrated = requestUser?.content.at(-1)
+    if (hydrated?.type !== "text") throw new Error("Missing input context")
+    const sections = hydrated.text.split("\n\n")
+    expect(sections[0]).toContain("User feedback")
+    const references = sections
+      .filter((section) => section.startsWith("Reference material:\n"))
+      .map((section) => JSON.parse(section.slice(section.indexOf("\n") + 1)))
+    expect(references).toEqual([
+      {
+        id: "selection_1",
+        text: "frozen quoted passage",
+        source: {
+          kind: "message",
+          label: "Earlier answer",
+          sessionId: "source_session",
+          messageId: "answer_1",
+        },
+      },
+      {
+        id: "annotation_1",
+        text: "other passage",
+        source: { kind: "file", label: "index.ts", path: "/project/index.ts" },
+      },
+    ])
+    expect(
+      sections
+        .filter((section) => section.startsWith("User feedback:\n"))
+        .map((section) => JSON.parse(section.slice(section.indexOf("\n") + 1))),
+    ).toEqual([{ referenceId: "annotation_1", comment: "explain this" }])
     const stored = await context.app.threadStore.readThread(id)
     expect(
       stored?.rollout.find(
@@ -1170,7 +1128,7 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
     })
     if (!events.ok) throw new Error(events.body.error.message)
-    expect(JSON.stringify(events.body)).toContain('"contextAttachments"')
+    expect(JSON.stringify(events.body)).toContain('"references"')
     expect(JSON.stringify(events.body)).toContain('"text":"Explain this"')
     await admit(context.app, id, "context_turn", "Explain this", excerpts)
     expect(requests).toHaveLength(1)
@@ -1194,10 +1152,9 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
       atInputId: inputId,
       reason: "edit",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Fresh question" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Fresh question" },
+      ]),
     })
     if (!forked.ok) throw new Error(forked.body.error.message)
     await until(
@@ -1260,10 +1217,9 @@ describe("structured context and ephemeral forks", () => {
     const active = await context.app.handlers.admitInput({
       sessionId: id,
       requestId: "parent_active",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "unfinished parent task" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "unfinished parent task" },
+      ]),
     })
     if (!active.ok) throw new Error(active.body.error.message)
     await until(() => requests.length === 2)
@@ -1290,11 +1246,10 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "side_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain the decision only" }],
-        contextAttachments: excerpts,
-      },
+      content: inputFixture(
+        [{ type: "text" as const, text: "Explain the decision only" }],
+        { references: excerpts }.references,
+      ),
     })
     await until(
       () => context.app.sideChats.read(side.id).activeTurnId === undefined,
@@ -1330,11 +1285,12 @@ describe("structured context and ephemeral forks", () => {
     })
     expect(context.app.sideChats.read(side.id).messages[0]).toMatchObject({
       role: "user",
-      content: {
-        kind: "parts",
-        parts: [{ type: "text", text: "Explain the decision only" }],
-        contextAttachments: excerpts,
-      },
+      content: createUserInput(
+        "Explain the decision only",
+        [],
+        [],
+        { references: excerpts }.references,
+      ),
     })
     const nested = await context.app.sideChats.create({
       sourceSessionId: side.id,
@@ -1342,10 +1298,9 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: nested.id,
       requestId: "nested_first",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain the side answer" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Explain the side answer" },
+      ]),
     })
     await until(
       () => context.app.sideChats.read(nested.id).activeTurnId === undefined,
@@ -1361,8 +1316,26 @@ describe("structured context and ephemeral forks", () => {
     "tool",
   ] as const)("keeps inherited %s images model-visible after closing an intermediate side chat", async (origin) => {
     const requests: ModelRequest[] = []
+    const readImages: Buffer[][] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
+      readImages.push(
+        await Promise.all(
+          request.messages.flatMap((message) =>
+            message.role === "user" || message.role === "tool"
+              ? message.content
+                  .filter((block) => block.type === "image")
+                  .map((image) =>
+                    image.type !== "image"
+                      ? Promise.reject(new Error("Expected image"))
+                      : image.file === undefined
+                        ? Promise.resolve(Buffer.from(image.data, "base64"))
+                        : readRequestAsset(request, image.file),
+                  )
+              : [],
+          ),
+        ),
+      )
       if (origin === "tool" && requests.length === 1) {
         yield {
           type: "response",
@@ -1407,16 +1380,13 @@ describe("structured context and ephemeral forks", () => {
       sessionId: parentId,
       requestId: "parent_image_turn",
       modelSelection: { provider: "openai", model: "gpt-5" },
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Describe the parent image" },
-          ...(attachments ?? []).map((image) => ({
-            type: "image" as const,
-            ...image,
-          })),
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Describe the parent image" },
+        ...(attachments ?? []).map((image) => ({
+          type: "image" as const,
+          ...image,
+        })),
+      ]),
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
     await until(
@@ -1437,12 +1407,9 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "side_image_question",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Explain the image color only" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Explain the image color only" },
+      ]),
     })
     await until(
       () => context.app.sideChats.read(side.id).activeTurnId === undefined,
@@ -1454,17 +1421,15 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: nested.id,
       requestId: "nested_image_question",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Explain the same image again" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Explain the same image again" },
+      ]),
     })
     await until(
       () => context.app.sideChats.read(nested.id).activeTurnId === undefined,
     )
-    for (const request of requests.slice(origin === "tool" ? 2 : 1)) {
+    const start = origin === "tool" ? 2 : 1
+    for (const [index, request] of requests.slice(start).entries()) {
       const images = request.messages.flatMap((message) =>
         message.role === "user"
           ? message.content.filter((block) => block.type === "image")
@@ -1472,9 +1437,11 @@ describe("structured context and ephemeral forks", () => {
       )
       expect(images).toHaveLength(1)
       const image = images[0]
-      if (!image?.data)
-        throw new Error("Inherited image was not materialized for the model")
-      const pixels = await sharp(Buffer.from(image.data, "base64"))
+      if (image?.file === undefined)
+        throw new Error("Missing inherited image source")
+      const pixels = await sharp(
+        readImages[start + index]?.[0] ?? Buffer.alloc(0),
+      )
         .removeAlpha()
         .raw()
         .toBuffer()
@@ -1541,10 +1508,7 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: nested.id,
       requestId: "nested_active",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Keep working" }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Keep working" }]),
     })
     await until(() =>
       context.app.sideChats
@@ -1626,18 +1590,15 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "side_image",
-      content: {
-        kind: "parts" as const,
-        parts: [
-          { type: "text" as const, text: "Inspect the file" },
-          ...imported.attachments.map((attachment) =>
-            attachment.mediaType === "application/pdf"
-              ? { type: "document" as const, ...attachment }
-              : { type: "image" as const, ...attachment },
-          ),
-          { type: "text", text: " and image" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Inspect the file" },
+        ...imported.attachments.map((attachment) =>
+          attachment.mediaType === "application/pdf"
+            ? { type: "document" as const, ...attachment }
+            : { type: "image" as const, ...attachment },
+        ),
+        { type: "text", text: " and image" },
+      ]),
     })
     await until(
       () => context.app.sideChats.read(side.id).activeTurnId === undefined,
@@ -1646,7 +1607,13 @@ describe("structured context and ephemeral forks", () => {
     expect(JSON.stringify(requests)).toContain(
       "Project instruction: use the local fixture",
     )
-    expect(JSON.stringify(requests[0]?.messages)).toContain('"data":')
+    const image = requests[0]?.messages
+      .flatMap((message) => (message.role === "user" ? message.content : []))
+      .find((block) => block.type === "image")
+    if (image?.file === undefined) throw new Error("Missing side image source")
+    expect(await readRequestAsset(requests[0], image.file)).toEqual(
+      await readFile(imagePath),
+    )
     expect(
       requests[0]?.tools.some((tool) => tool.name.endsWith("read_file")),
     ).toBe(true)
@@ -1660,32 +1627,31 @@ describe("structured context and ephemeral forks", () => {
         (message) =>
           message.role === "user" &&
           message.content.some(
-            (part) => part.type === "text" && part.text === "Inspect the file",
+            (part) =>
+              part.type === "text" && part.text.startsWith("Inspect the file"),
           ),
       ),
     ).toMatchObject({
       content: [
-        { type: "text", text: "Inspect the file" },
         { type: "image" },
-        { type: "text", text: " and image" },
+        { type: "text", text: "Inspect the file[Image 1] and image" },
       ],
     })
     const firstMessage = context.app.sideChats.read(side.id).messages[0]
     const attachment =
       firstMessage?.role === "user"
-        ? firstMessage.content.parts.find((part) => part.type === "image")
+        ? draftToEditorParts(firstMessage.content).find(
+            (part) => part.type === "image",
+          )
         : undefined
     if (!attachment) throw new Error("Missing promoted attachment")
     expect(firstMessage).toMatchObject({
       role: "user",
-      content: {
-        kind: "parts",
-        parts: [
-          { type: "text", text: "Inspect the file" },
-          { type: "image" },
-          { type: "text", text: " and image" },
-        ],
-      },
+      content: inputFixture([
+        { type: "text", text: "Inspect the file" },
+        { type: "image" },
+        { type: "text", text: " and image" },
+      ]),
     })
     expect(await context.app.rolloutAssets.read(attachment.file)).toEqual(
       await readFile(imagePath),
@@ -1727,10 +1693,9 @@ describe("structured context and ephemeral forks", () => {
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "permission_turn",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Run the command" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Run the command" },
+      ]),
     })
     await until(
       () =>

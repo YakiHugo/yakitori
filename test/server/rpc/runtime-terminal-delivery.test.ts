@@ -8,6 +8,7 @@ import { createSessionEventHub } from "../../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../../src/server/handlers.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
+import { inputFixture } from "../../fixtures/user-input.ts"
 import {
   deferred,
   initializeConnection,
@@ -78,10 +79,7 @@ describe("runtime terminal delivery", () => {
           const admitted = await handlers.admitInput({
             sessionId,
             requestId: turnId,
-            content: {
-              kind: "parts" as const,
-              parts: [{ type: "text" as const, text: "finish" }],
-            },
+            content: inputFixture([{ type: "text" as const, text: "finish" }]),
           })
           if (!admitted.ok) throw new Error(admitted.body.error.message)
           store.failNextAppend = failure !== "flush"
@@ -228,10 +226,7 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "child_request",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "Child task" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "Child task" }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -287,10 +282,7 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: turnId,
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "finish" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "finish" }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -423,10 +415,7 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "request_retry",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "retry" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "retry" }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -549,10 +538,7 @@ describe("runtime terminal delivery", () => {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: "request_active",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "start" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "start" }]),
       })
       if (!admitted.ok) throw new Error(admitted.body.error.message)
       await client.waitForFrame(
@@ -564,10 +550,7 @@ describe("runtime terminal delivery", () => {
       const queued = await handlers.queueInput({
         sessionId,
         requestId: "request_queued",
-        content: {
-          kind: "parts" as const,
-          parts: [{ type: "text" as const, text: "later" }],
-        },
+        content: inputFixture([{ type: "text" as const, text: "later" }]),
       })
       if (!queued.ok) throw new Error(queued.body.error.message)
       continueOutput.resolve()

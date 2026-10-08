@@ -18,11 +18,12 @@ import {
 } from "../../src/gui/store/app-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import type {
-  SideChatSnapshot,
   SideChatSend,
+  SideChatSnapshot,
 } from "../../src/server/side-chat.ts"
-import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "./input-fixtures.ts"
+import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 
 const client = vi.hoisted(() => ({
   request:
@@ -375,7 +376,7 @@ describe("side chat panel", () => {
                 id: "input",
                 turnId: "turn",
                 role: "user",
-                content: { kind: "parts", parts: inputParts("First question") },
+                content: inputFixture(inputParts("First question")),
                 streaming: false,
               },
               {
@@ -389,7 +390,7 @@ describe("side chat panel", () => {
                 id: "followup",
                 turnId: "next-turn",
                 role: "user",
-                content: { kind: "parts", parts: inputParts("Follow up") },
+                content: inputFixture(inputParts("Follow up")),
                 streaming: false,
               },
             ],
@@ -446,7 +447,7 @@ describe("side chat panel", () => {
     expect(requests("sideChat/send")).toHaveLength(1)
     expect(requests("sideChat/send")[0]).toMatchObject({
       sideChatId: "side-chat",
-      content: { kind: "parts", parts: inputParts("Explain") },
+      content: inputFixture(inputParts("Explain")),
     })
   })
 
@@ -570,7 +571,7 @@ describe("side chat panel", () => {
     const changed = requests("sideChat/send")[2]
     expect(changed?.requestId).not.toBe(first?.requestId)
     expect(changed).toMatchObject({
-      content: { kind: "parts", parts: inputParts("Explain") },
+      content: inputFixture(inputParts("Explain")),
       modelSelection: modelB,
     })
     await act(async () =>
@@ -648,11 +649,10 @@ describe("side chat panel", () => {
       screen.getByRole("button", { name: "Send side chat message" }),
     )
     expect(requests("sideChat/send")[0]).toMatchObject({
-      content: {
-        kind: "parts",
-        parts: inputParts("Explain"),
-        contextAttachments: [original],
-      },
+      content: inputFixture(
+        inputParts("Explain"),
+        { references: [original] }.references,
+      ),
     })
     await act(async () =>
       useWorkspaceStore.getState().askInSideChat(
@@ -693,7 +693,10 @@ describe("side chat panel", () => {
       width: 4,
       height: 5,
       detail: "high" as const,
-      file: { rolloutId: "side-chat", path: "images/diagram.png" },
+      file: {
+        rolloutId: "side-chat",
+        path: "attachments/staging/images/diagram.png",
+      },
     }
     const importAttachmentFiles = vi.fn(async () => [image])
     const discardDraftAttachments = vi.fn(async () => {})
@@ -727,7 +730,7 @@ describe("side chat panel", () => {
     )
     await screen.findByRole("alert")
     expect(requests("sideChat/send")[0]).toMatchObject({
-      content: { kind: "parts", parts: inputParts("Explain", [image]) },
+      content: inputFixture(inputParts("Explain", [image])),
     })
     expect(
       screen.getByRole("button", { name: "Preview diagram.png" }),
@@ -737,10 +740,10 @@ describe("side chat panel", () => {
     )
     expect(requests("sideChat/send")[1]).toEqual(requests("sideChat/send")[0])
     expect(
-      (useAppStore.getState().promptDraft ?? []).filter(
-        (part) => part.type === "image",
+      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
+        (attachment) => attachment.mediaType !== "application/pdf",
       ),
-    ).toEqual(inputParts(""))
+    ).toEqual(inputParts("").attachments)
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("Main conversation draft"),
     )
@@ -785,8 +788,7 @@ describe("side chat panel", () => {
     const side = useWorkspaceStore
       .getState()
       .tabs.find((tab) => tab.id === "chat-tab")
-    expect(side?.kind === "chat" && side.draft).toContainEqual({
-      type: "text",
+    expect(side?.kind === "chat" && side.draft).toMatchObject({
       text: expect.stringContaining("/repo/review/SKILL.md"),
     })
     expect(useAppStore.getState().promptDraft).toEqual(
@@ -877,11 +879,10 @@ describe("side chat panel", () => {
       screen.getByRole("button", { name: "Send side chat message" }),
     )
     expect(requests("sideChat/send")[1]).toMatchObject({
-      content: {
-        kind: "parts",
-        parts: inputParts("Explain"),
-        contextAttachments: [context],
-      },
+      content: inputFixture(
+        inputParts("Explain"),
+        { references: [context] }.references,
+      ),
     })
     expect(requests("sideChat/send")[1]?.requestId).not.toBe(
       original?.requestId,

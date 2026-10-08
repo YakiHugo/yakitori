@@ -12,9 +12,11 @@ import { userEvent } from "@testing-library/user-event"
 import { useState } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
+  findContextSource,
   resolveAnnotationRange,
   selectionOffsets,
 } from "../../src/gui/components/annotation-layer.tsx"
+import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
 import {
   AnnotationLayer,
   ContextExcerptChips,
@@ -25,6 +27,8 @@ import {
   contextSourceAttributes,
   type ResponseAnnotation,
 } from "../../src/gui/conversation-context.ts"
+import { useAppStore } from "../../src/gui/store/app-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const source = {
   kind: "message",
@@ -134,6 +138,80 @@ it("carries a file selection to side chat without adding an annotation", async (
     }),
   )
   expect(props.onAddToConversation).not.toHaveBeenCalled()
+})
+
+it.each([
+  "Different first passage",
+  "Selected 😀 passage",
+])("anchors a selection to its user text part when the first part is %j", async (firstText) => {
+  useAppStore.setState({ selection: { sessionId: "session_1" } })
+  const onAddToConversation = vi.fn<(annotation: ResponseAnnotation) => void>()
+  const { container } = render(
+    <>
+      <UserMessageCell
+        queued={false}
+        entry={{
+          kind: "user_input",
+          inputId: "input_1",
+          at: "2026-10-08T00:00:00.000Z",
+          text: `${firstText}Selected 😀 passage`,
+          content: inputFixture([
+            { type: "text", text: firstText },
+            {
+              type: "image",
+              name: "image.png",
+              mediaType: "image/png",
+              sizeBytes: 9,
+              file: {
+                rolloutId: "session_1",
+                path: "attachments/requests/image/0.png",
+              },
+            },
+            { type: "text", text: "Selected 😀 passage" },
+          ]),
+        }}
+      />
+      <SelectionActions
+        {...defaultProps()}
+        onAddToConversation={onAddToConversation}
+      />
+    </>,
+  )
+  const selectedSource = container.querySelectorAll<HTMLElement>(
+    '[data-context-kind="message"]',
+  )[0]
+  if (!selectedSource) throw new Error("Missing user text")
+  const textNode = selectedSource.querySelector("p")?.firstChild
+  if (!textNode) throw new Error("Missing user text node")
+  const start = firstText.length + 9
+  const range = document.createRange()
+  range.setStart(textNode, start)
+  range.setEnd(textNode, start + 19)
+  window.getSelection()?.removeAllRanges()
+  window.getSelection()?.addRange(range)
+  fireEvent.pointerUp(selectedSource)
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Add to conversation" }))
+  const captured = onAddToConversation.mock.calls[0]?.[0]
+  if (!captured) throw new Error("Missing captured annotation")
+  expect(captured).toMatchObject({
+    text: "Selected 😀 passage",
+    source: {
+      kind: "message",
+      label: "User message",
+      sessionId: "session_1",
+      messageId: "input_1",
+    },
+    anchor: {
+      startOffset: firstText.length + 9,
+      endOffset: firstText.length + 28,
+    },
+  })
+  expect(findContextSource(captured.source)).toBe(selectedSource)
+  const resolved = resolveAnnotationRange(selectedSource, captured)
+  expect(resolved?.toString()).toBe("Selected 😀 passage")
+  expect(selectedSource.contains(resolved?.startContainer ?? null)).toBe(true)
 })
 
 it("ignores editable text and selections spanning sources; Escape dismisses the toolbar", () => {

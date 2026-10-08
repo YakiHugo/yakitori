@@ -1,11 +1,11 @@
-import type { ContextSource } from "../kernel/input-context.ts"
+import type { ContextSource } from "../core/input-context.ts"
 
 export type {
   ContextExcerpt,
   ContextSource,
   ResponseAnnotation,
   SelectedTextAttachment,
-} from "../kernel/input-context.ts"
+} from "../core/input-context.ts"
 
 export function contextSourceAttributes(source: ContextSource) {
   return {

@@ -1,23 +1,27 @@
-import { PdfAttachmentCard, openPdfAttachment } from "./pdf-attachment.tsx"
-import { PromptEditor } from "./prompt-editor.tsx"
-import { inputContentAttachments } from "../../kernel/input-content.ts"
-import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
-import { sameInputParts, trimInputParts } from "../input-parts.ts"
 import { LoaderCircle, MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
+import type { InputDraft } from "../../core/user-input.ts"
+import { inputContent, inputContentAttachments } from "../../core/user-input.ts"
 import type {
   ImageAttachment,
-  ModelSelection,
   InputContent,
-  InputPart,
+  ModelSelection,
 } from "../../kernel/events.ts"
 import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import {
-  discardDraftAttachments,
   attachmentUrl,
+  discardDraftAttachments,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
+import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
+import {
+  hasInputDraft,
+  inputDisplayParts,
+  sameInputDraft,
+  textInputDraft,
+  trimInputDraft,
+} from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
   normalizeKimiModelSelection,
@@ -36,6 +40,8 @@ import {
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { ModelSelector } from "./model-selector.tsx"
+import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
+import { PromptEditor } from "./prompt-editor.tsx"
 import { ContextExcerptChips } from "./selection-actions.tsx"
 
 export function SideChatPanel({
@@ -134,7 +140,7 @@ export function SideChatPanel({
         if (current?.kind === "chat")
           updateDraft(
             tab.id,
-            inputAttachmentOwnership.resolveParts(apiBase, current.draft),
+            inputAttachmentOwnership.resolveDraft(apiBase, current.draft),
             current.excerpts,
           )
       }
@@ -311,28 +317,24 @@ export function SideChatPanel({
     }
   }
 
-  const send = async (
-    parts: readonly InputPart[] = trimInputParts(tab.draft),
-  ) => {
+  const send = async (parts: InputDraft = trimInputDraft(tab.draft)) => {
     if (
       sending.current ||
       chatRef.current?.activeTurnId ||
       expiredByServer ||
       (chatRef.current !== undefined && isExpired(chatRef.current)) ||
-      (parts.length === 0 && tab.excerpts.length === 0)
+      (!hasInputDraft(parts) && tab.excerpts.length === 0)
     )
       return
     const originalDraft = tab.draft
     const originalExcerpts = tab.excerpts
     const modelSelection = selection ?? chatRef.current?.modelSelection
     const payload = {
-      content: {
-        kind: "parts" as const,
+      content: inputContent(
         parts,
-        ...(originalExcerpts.length
-          ? { contextAttachments: originalExcerpts }
-          : {}),
-      },
+        { ...(originalExcerpts.length ? { references: originalExcerpts } : {}) }
+          .references,
+      ),
       modelSelection,
     }
     const request =
@@ -382,17 +384,17 @@ export function SideChatPanel({
       // actions and uploads may have staged new input while it was in flight.
       if (
         latest !== undefined &&
-        sameInputParts(
-          inputAttachmentOwnership.resolveParts(apiBase, latest.draft),
-          inputAttachmentOwnership.resolveParts(apiBase, originalDraft),
+        sameInputDraft(
+          inputAttachmentOwnership.resolveDraft(apiBase, latest.draft),
+          inputAttachmentOwnership.resolveDraft(apiBase, originalDraft),
         ) &&
         latest.excerpts === originalExcerpts
       )
-        updateDraft(tab.id, [], [])
+        updateDraft(tab.id, textInputDraft(""), [])
       else if (latest)
         updateDraft(
           tab.id,
-          inputAttachmentOwnership.resolveParts(apiBase, latest.draft),
+          inputAttachmentOwnership.resolveDraft(apiBase, latest.draft),
           latest.excerpts,
         )
       attempt.current = undefined
@@ -499,12 +501,12 @@ export function SideChatPanel({
             >
               {message.role === "user" ? (
                 <>
-                  {message.content.contextAttachments?.length ? (
+                  {message.content.references?.length ? (
                     <ContextExcerptChips
-                      excerpts={message.content.contextAttachments}
+                      excerpts={message.content.references}
                     />
                   ) : null}
-                  {message.content.parts.map((part, index) =>
+                  {inputDisplayParts(message.content).map((part, index) =>
                     part.type === "text" ? (
                       <MarkdownView
                         // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
@@ -581,7 +583,7 @@ export function SideChatPanel({
       {expired ? (
         <div className="side-chat-expired" role="status">
           <p>Side chat expired. Start a new side chat to continue.</p>
-          {tab.draft.length > 0 ? (
+          {hasInputDraft(tab.draft) ? (
             <PromptEditor
               label="Unsent side chat draft"
               apiBase={apiBase}
@@ -602,18 +604,13 @@ export function SideChatPanel({
             />
           ) : null}
           {tab.excerpts.length > 0 ||
-          inputContentAttachments({ kind: "parts", parts: tab.draft }).length >
-            0 ? (
+          inputContentAttachments(inputContent(tab.draft)).length > 0 ? (
             <p>
               {tab.excerpts.length} context excerpt
               {tab.excerpts.length === 1 ? "" : "s"} and{" "}
-              {
-                inputContentAttachments({ kind: "parts", parts: tab.draft })
-                  .length
-              }{" "}
+              {inputContentAttachments(inputContent(tab.draft)).length}{" "}
               attachment
-              {inputContentAttachments({ kind: "parts", parts: tab.draft })
-                .length === 1
+              {inputContentAttachments(inputContent(tab.draft)).length === 1
                 ? ""
                 : "s"}{" "}
               remain in this side chat.
@@ -664,7 +661,7 @@ export function SideChatPanel({
           }
           historyParts={
             chat?.messages.flatMap((message) =>
-              message.role === "user" ? [message.content.parts] : [],
+              message.role === "user" ? [message.content] : [],
             ) ?? []
           }
           setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}

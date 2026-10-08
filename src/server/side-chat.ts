@@ -1,30 +1,30 @@
-import {
-  inputContentText,
-  inputContentAttachments,
-  replaceInputAttachments,
-} from "../kernel/input-content.ts"
 import { realpath, stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
 import { AgentThread } from "../core/agent-thread.ts"
 import { ContextManager } from "../core/context-manager.ts"
 import type { StoredRolloutItem, StoredThread } from "../core/rollout.ts"
+import type {
+  AttachmentBytesInput,
+  RolloutAssets,
+} from "../core/rollout-assets.ts"
 import { Session, type TurnProcessor } from "../core/session.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
-  type UserAttachment,
-  type ModelDocumentBlock,
-  isInputContent,
-  type ModelMessage,
-  type ModelImageBlock,
-  type ModelSelection,
+  inputContentAttachments,
+  inputContentText,
+  replaceInputAttachments,
+} from "../core/user-input.ts"
+import {
   type InputContent,
+  isInputContent,
+  type ModelDocumentBlock,
+  type ModelImageBlock,
+  type ModelMessage,
+  type ModelSelection,
+  type UserAttachment,
 } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import type {
-  AttachmentBytesInput,
-  RolloutAssets,
-} from "../kernel/rollout-assets.ts"
 import type {
   PermissionGate,
   RuntimePermissionRequest,
@@ -213,48 +213,9 @@ export function createSideChatService(options: {
                 )
                 .map((entry) => entry.item)),
         ]
-        // Freeze image bytes now; PDFs receive independent asset references
-        // once the side conversation owns its ephemeral rollout below.
-        let inheritedHistory: readonly ModelMessage[] = await Promise.all(
-          inherited.map(async (message) => {
-            if (message.role !== "user" && message.role !== "tool")
-              return message
-            const resolveImage = async (image: ModelImageBlock) => {
-              if (image.data !== undefined) return image
-              if (options.rolloutAssets === undefined)
-                throw new SideChatError("Attachment storage is unavailable.")
-              const bytes = await options.rolloutAssets.read(image.file)
-              if (bytes.byteLength !== image.sizeBytes)
-                throw new Error(
-                  "Inherited image size does not match its recorded size.",
-                )
-              return {
-                type: "image" as const,
-                mediaType: image.mediaType,
-                ...(image.detail === undefined ? {} : { detail: image.detail }),
-                data: bytes.toString("base64"),
-              }
-            }
-            if (message.role === "user") {
-              return {
-                ...message,
-                content: await Promise.all(
-                  message.content.map((block) =>
-                    block.type === "image" ? resolveImage(block) : block,
-                  ),
-                ),
-              }
-            }
-            return {
-              ...message,
-              content: await Promise.all(
-                message.content.map((block) =>
-                  block.type === "image" ? resolveImage(block) : block,
-                ),
-              ),
-            }
-          }),
-        )
+        // Preserve portable sources until the side conversation owns independent
+        // copies below. External URLs need no local ownership transfer.
+        let inheritedHistory: readonly ModelMessage[] = inherited
         let attachmentNumber = 0
         const quoteAttachment = (
           block: ModelImageBlock | ModelDocumentBlock,
@@ -401,46 +362,69 @@ export function createSideChatService(options: {
           },
           async shutdownThread() {},
         }
-        // Creating the processor establishes the ephemeral asset lease. PDFs
-        // must be copied afterwards: request projection rereads their files,
-        // so retaining inline bytes alone cannot freeze inherited documents.
+        // Creating the processor establishes the ephemeral asset lease. Copy owned
+        // media afterwards so deleting the parent cannot remove these sources.
         const processor = await options.createProcessor(stored)
         let thread: AgentThread
-        let rollbackDocuments: (() => Promise<void>) | undefined
+        let rollbackMedia: (() => Promise<void>) | undefined
         try {
-          const documents = referenceAttachments.filter(
-            (block): block is ModelDocumentBlock => block.type === "document",
-          )
-          if (documents.length > 0) {
+          const media = referenceAttachments.flatMap((block) => {
+            if (block.file === undefined || "url" in block.file) return []
+            if (block.sizeBytes === undefined)
+              throw new Error("Inherited media has no recorded size.")
+            return [
+              {
+                block,
+                attachment: {
+                  name:
+                    block.type === "document"
+                      ? block.name
+                      : (("name" in block ? block.name : undefined) ?? "image"),
+                  mediaType: block.mediaType,
+                  sizeBytes: block.sizeBytes,
+                  file: block.file,
+                  ...(block.type === "image"
+                    ? { detail: block.detail ?? "high" }
+                    : {}),
+                },
+              },
+            ]
+          })
+          if (media.length > 0) {
             if (options.rolloutAssets === undefined)
               throw new SideChatError("Attachment storage is unavailable.")
             const copied = await options.rolloutAssets.copyAttachments(
               id,
               `side_context_${id}`,
-              documents,
+              media.map(({ attachment }) => attachment),
             )
-            rollbackDocuments = copied.rollback
+            rollbackMedia = copied.rollback
             const replacements = new Map(
-              documents.map((document, index) => {
+              media.map(({ block }, index) => {
                 const attachment = copied.attachments[index]
-                if (attachment?.mediaType !== "application/pdf")
-                  throw new Error("Missing inherited PDF attachment copy.")
-                return [document, { type: "document" as const, ...attachment }]
+                if (attachment === undefined)
+                  throw new Error("Missing inherited media copy.")
+                return [
+                  block,
+                  attachment.mediaType === "application/pdf"
+                    ? { type: "document" as const, ...attachment }
+                    : { type: "image" as const, ...attachment },
+                ]
               }),
             )
-            const replaceDocuments = (message: ModelMessage): ModelMessage => {
+            const replaceMedia = (message: ModelMessage): ModelMessage => {
               if (message.role !== "user" && message.role !== "tool")
                 return message
               return {
                 ...message,
                 content: message.content.map((block) =>
-                  block.type === "document"
-                    ? (replacements.get(block) ?? block)
-                    : block,
+                  block.type === "text" || block.file === undefined
+                    ? block
+                    : (replacements.get(block) ?? block),
                 ),
               }
             }
-            inheritedHistory = inheritedHistory.map(replaceDocuments)
+            inheritedHistory = inheritedHistory.map(replaceMedia)
             for (const [index, record] of rollout.entries()) {
               const item = record.item
               if (
@@ -453,7 +437,7 @@ export function createSideChatService(options: {
                     ...item,
                     item: {
                       ...item.item,
-                      item: replaceDocuments(item.item.item),
+                      item: replaceMedia(item.item.item),
                     },
                   },
                 }
@@ -478,7 +462,7 @@ export function createSideChatService(options: {
             await processor.dispose?.()
           } finally {
             try {
-              await rollbackDocuments?.()
+              await rollbackMedia?.()
             } finally {
               await options.releaseAssets?.(id)
             }
@@ -534,12 +518,12 @@ export function createSideChatService(options: {
       const chat = requireChat(input.sideChatId)
       if (!isInputContent(input.content))
         throw new SideChatError(
-          "content must contain valid ordered input parts.",
+          "content must contain valid text, editor elements and attachments.",
         )
       const attachments = inputContentAttachments(input.content)
       if (
         (!inputContentText(input.content).trim() &&
-          !input.content.contextAttachments?.length &&
+          !input.content.references?.length &&
           attachments.length === 0) ||
         !input.requestId.trim()
       )
@@ -572,15 +556,17 @@ export function createSideChatService(options: {
           "conflict",
         )
       const operation = (async () => {
-        const promotion =
-          attachments.length === 0
-            ? undefined
-            : await options.rolloutAssets?.promoteAttachments(
-                chat.snapshot.id,
-                input.requestId,
-                attachments,
-              )
-        if (attachments.length !== 0 && promotion === undefined)
+        const ownsFiles = attachments.some(
+          (attachment) => !("url" in attachment.file),
+        )
+        const promotion = !ownsFiles
+          ? undefined
+          : await options.rolloutAssets?.promoteAttachments(
+              chat.snapshot.id,
+              input.requestId,
+              attachments,
+            )
+        if (ownsFiles && promotion === undefined)
           throw new SideChatError("Attachment storage is unavailable.")
         const content =
           promotion === undefined

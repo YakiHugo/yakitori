@@ -20,6 +20,7 @@ import {
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 
 const workspace = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -106,10 +107,9 @@ describe("bounded length recovery", () => {
       },
     )
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Original request." }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Original request." },
+      ]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -117,10 +117,7 @@ describe("bounded length recovery", () => {
         completed: "Old assistant state",
       })
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Continue." }]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -183,10 +180,9 @@ describe("bounded length recovery", () => {
       },
     )
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Original request." }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Original request." },
+      ]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -194,10 +190,7 @@ describe("bounded length recovery", () => {
         completed: "Old assistant state",
       })
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Continue." }]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -250,10 +243,7 @@ describe("bounded length recovery", () => {
       }
     })
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Explain." }]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -296,10 +286,7 @@ describe("bounded length recovery", () => {
       { modelContextWindowTokens: 1_000 },
     )
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Explain." }]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -349,10 +336,7 @@ describe("bounded length recovery", () => {
       { modelContextWindowTokens: 1_000 },
     )
     const started = await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Explain." }]),
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
     await terminalYielded.promise
@@ -360,12 +344,9 @@ describe("bounded length recovery", () => {
       await expect(
         runtime.thread.steer(
           {
-            content: {
-              kind: "parts" as const,
-              parts: [
-                { type: "text" as const, text: "Answer my new question." },
-              ],
-            },
+            content: inputFixture([
+              { type: "text" as const, text: "Answer my new question." },
+            ]),
           },
           started.turnId,
         ),
@@ -444,10 +425,9 @@ describe("bounded length recovery", () => {
       { toolRegistry },
     )
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Read and explain." }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Read and explain." },
+      ]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)
@@ -491,10 +471,7 @@ describe("bounded length recovery", () => {
       }
     })
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Explain." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Explain." }]),
     })
     await continuationEntered.promise
     await runtime.thread.interrupt("Cancel continuation")
@@ -509,10 +486,7 @@ describe("bounded length recovery", () => {
       "Saved partial text",
     )
     await runtime.thread.startIfIdle({
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Continue." }],
-      },
+      content: inputFixture([{ type: "text" as const, text: "Continue." }]),
     })
     await expect
       .poll(() => runtime.thread.agentStatus)

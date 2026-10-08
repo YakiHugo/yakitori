@@ -16,6 +16,7 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
 
 const roots: string[] = []
@@ -152,10 +153,9 @@ describe("goal handlers", () => {
     const submitted = await reopened.handlers.admitInput({
       sessionId,
       requestId: "request_user_resume",
-      content: {
-        kind: "parts" as const,
-        parts: [{ type: "text" as const, text: "Actually do this first" }],
-      },
+      content: inputFixture([
+        { type: "text" as const, text: "Actually do this first" },
+      ]),
     })
     expect(submitted).toMatchObject({ ok: true })
     const request = await next.entered.promise

@@ -1,11 +1,11 @@
 import { ModelFailureError } from "./errors.ts"
-import { estimateHistoryTokens } from "./model-request-budget.ts"
 import type {
   ModelMessage,
   ModelRequest,
   ModelSystemSection,
   ModelTarget,
 } from "./model.ts"
+import { estimateHistoryTokens } from "./model-request-budget.ts"
 
 // Local compaction keeps the base instructions and appends a user request,
 // following Codex. User-message retention is enforced separately by code.
@@ -98,6 +98,7 @@ export function trimRemoteCompactionToolTail(
 }
 
 export function buildCompactionRequest(input: {
+  readonly assets?: ModelRequest["assets"]
   readonly source: readonly { readonly messages: readonly ModelMessage[] }[]
   readonly target: ModelTarget
   readonly baseInstructions: ModelSystemSection
@@ -108,6 +109,7 @@ export function buildCompactionRequest(input: {
 }): ModelRequest {
   return {
     target: input.target,
+    ...(input.assets === undefined ? {} : { assets: input.assets }),
     ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
     ...(input.maxOutputTokens === undefined
       ? {}

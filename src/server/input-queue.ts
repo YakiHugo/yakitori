@@ -1,8 +1,8 @@
-import { readStoredInputContent } from "../kernel/input-content.ts"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { TurnInput } from "../core/session-io.ts"
+import { readStoredInputContent } from "../core/user-input.ts"
 import { createInputId } from "../kernel/ids.ts"
 
 export const MAX_QUEUED_ITEMS = 100

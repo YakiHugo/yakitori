@@ -89,7 +89,7 @@ describe("session goal", () => {
           inputId: "input_1",
           text: goal.objective,
           at: goal.createdAt,
-          parts: inputParts(goal.objective),
+          content: inputParts(goal.objective),
         }}
         queued={false}
       />,

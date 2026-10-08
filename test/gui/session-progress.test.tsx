@@ -71,7 +71,7 @@ it("renders a restored answered question without offering another submission", (
           questionId: "ask_1",
           text: "Workspace",
           at: "2026-09-22T00:00:00Z",
-          parts: inputParts("Workspace"),
+          content: inputParts("Workspace"),
         },
       ],
     },

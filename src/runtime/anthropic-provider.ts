@@ -1,17 +1,21 @@
-import Anthropic from "@anthropic-ai/sdk"
+import Anthropic, { toFile } from "@anthropic-ai/sdk"
 import type {
-  ContentBlockParam,
+  BetaContentBlockParam,
+  BetaMessageParam,
+  BetaRawMessageStreamEvent,
+  BetaToolResultBlockParam,
+} from "@anthropic-ai/sdk/resources/beta/messages/messages"
+import type {
   MessageCreateParamsStreaming,
-  MessageParam,
   OutputConfig,
   RawMessageStreamEvent,
   RedactedThinkingBlockParam,
   TextBlockParam,
   ThinkingBlockParam,
   Tool,
-  ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
+import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
   DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
@@ -24,8 +28,8 @@ import {
   type ModelStreamEvent,
   type ModelStreamFailureEvent,
   type ModelUsage,
-  requireModelImageData,
   requireModelDocumentData,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -33,6 +37,7 @@ import {
   modelFailureFromUnknown,
 } from "./model-failure.ts"
 import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
+import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type AnthropicProviderOptions = {
@@ -48,6 +53,19 @@ export type AnthropicProviderOptions = {
 export function createAnthropicProvider(
   options: AnthropicProviderOptions,
 ): StreamFn {
+  return anthropicTransport(options, false).stream
+}
+
+export function createAnthropicTurnTransport(
+  options: AnthropicProviderOptions,
+) {
+  return anthropicTransport(options, true)
+}
+
+function anthropicTransport(
+  options: AnthropicProviderOptions,
+  ownsFiles: boolean,
+) {
   // SDK-internal retries stay disabled: the model request runtime owns policy.
   const client =
     options.client ??
@@ -58,13 +76,38 @@ export function createAnthropicProvider(
       maxRetries: 0,
     })
 
-  return (request) =>
+  const upload =
+    ownsFiles &&
+    URL.parse(client.baseURL)?.origin === "https://api.anthropic.com"
+      ? createFileUploadCache(
+          async (document, bytes, signal) =>
+            (
+              await client.beta.files.upload(
+                {
+                  file: await toFile(bytes, document.name, {
+                    type: document.mediaType,
+                  }),
+                },
+                signal === undefined ? undefined : { signal },
+              )
+            ).id,
+          (id) => client.beta.files.delete(id),
+        )
+      : undefined
+  const stream: StreamFn = (request) =>
     streamAnthropic(
       client,
       options.model,
       request,
       options.baseURL ?? "https://api.anthropic.com",
+      upload,
     )
+  return {
+    stream,
+    async close() {
+      await upload?.close()
+    },
+  }
 }
 
 async function* streamAnthropic(
@@ -72,13 +115,14 @@ async function* streamAnthropic(
   defaultModel: string,
   request: ModelRequest,
   fallbackBaseURL: string,
+  upload?: ReturnType<typeof createFileUploadCache>,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield { type: "cancelled" }
     return
   }
 
-  let stream: AsyncIterable<RawMessageStreamEvent>
+  let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let failureStage: "connect" | "response_body" = "connect"
   const customFallbackKeys = new Map(
     request.tools.flatMap((tool) =>
@@ -118,32 +162,44 @@ async function* streamAnthropic(
             supportsAdaptiveThinking(request.target.model || defaultModel)
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
-    const body: MessageCreateParamsStreaming = {
-      stream: true,
-      model: request.target.model || defaultModel,
-      max_tokens: request.maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
-      system: toAnthropicSystem(request.system, explicitPromptCaching),
-      messages: toAnthropicRequestMessages(
-        request.messages,
-        request.tools,
-        explicitPromptCaching,
-        nativeDeferredLoading,
-        request.target.provider,
-        request.continuationScope,
-      ),
-      ...(tools === undefined ? {} : { tools }),
-      ...(request.cacheKey === undefined
-        ? {}
-        : { metadata: { user_id: request.cacheKey } }),
-      ...(thinking === undefined ? {} : { thinking }),
-      ...(effortLevel === undefined
+    const media = await prepareProviderMedia(
+      request,
+      upload === undefined
         ? {}
         : {
-            output_config: {
-              effort: effortLevel as NonNullable<OutputConfig["effort"]>,
-            },
-          }),
-    }
+            uploadDocument: (document, bytes) =>
+              upload(document, bytes, request.signal),
+          },
+    )
+    const body: import("@anthropic-ai/sdk/resources/beta/messages/messages").MessageCreateParamsStreaming =
+      {
+        stream: true,
+        model: request.target.model || defaultModel,
+        max_tokens:
+          request.maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
+        system: toAnthropicSystem(request.system, explicitPromptCaching),
+        messages: toAnthropicRequestMessages(
+          media.messages,
+          request.tools,
+          explicitPromptCaching,
+          nativeDeferredLoading,
+          request.target.provider,
+          request.continuationScope,
+          media.uploadedFiles,
+        ),
+        ...(tools === undefined ? {} : { tools }),
+        ...(request.cacheKey === undefined
+          ? {}
+          : { metadata: { user_id: request.cacheKey } }),
+        ...(thinking === undefined ? {} : { thinking }),
+        ...(effortLevel === undefined
+          ? {}
+          : {
+              output_config: {
+                effort: effortLevel as NonNullable<OutputConfig["effort"]>,
+              },
+            }),
+      }
     // Only PDFs sent to the direct API use Anthropic's documented whole-body
     // limit. Compatible endpoints own their limits, regardless of provider ID.
     if (
@@ -176,24 +232,51 @@ async function* streamAnthropic(
         return
       }
     }
-    stream = await client.messages.create(
-      body,
-      request.signal === undefined && effortLevel === undefined
-        ? undefined
-        : {
-            ...(request.signal === undefined ? {} : { signal: request.signal }),
-            ...(effortLevel === undefined
-              ? {}
-              : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
-          },
-    )
+    stream =
+      media.uploadedFiles.size > 0
+        ? await client.beta.messages.create(
+            {
+              ...body,
+              betas: [
+                "files-api-2025-04-14",
+                ...(effortLevel === undefined ? [] : ["effort-2025-11-24"]),
+              ],
+            },
+            request.signal === undefined
+              ? undefined
+              : { signal: request.signal },
+          )
+        : await client.messages.create(
+            body as MessageCreateParamsStreaming,
+            request.signal === undefined && effortLevel === undefined
+              ? undefined
+              : {
+                  ...(request.signal === undefined
+                    ? {}
+                    : { signal: request.signal }),
+                  ...(effortLevel === undefined
+                    ? {}
+                    : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
+                },
+          )
     failureStage = "response_body"
   } catch (error) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
     }
-    yield terminalFailure(error, request.target.provider, "connect")
+    if (error instanceof AssetMediaError) {
+      yield {
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          stage: "request_build",
+          provider: request.target.provider,
+          wireApi: "anthropic_messages",
+          message: error.message,
+        },
+      }
+    } else yield terminalFailure(error, request.target.provider, "connect")
     return
   }
 
@@ -456,8 +539,12 @@ export function toAnthropicMessages(
   availableTools?: ReadonlyMap<string, ModelRequest["tools"][number]>,
   provider = "anthropic",
   continuationScope?: string,
-): MessageParam[] {
-  const converted: MessageParam[] = []
+  uploadedFiles: ReadonlyMap<
+    import("./model.ts").ModelDocumentBlock,
+    string
+  > = new Map(),
+): BetaMessageParam[] {
+  const converted: BetaMessageParam[] = []
   for (const message of messages) {
     if (message.role === "developer") {
       const content = message.content.map((block) => ({
@@ -476,20 +563,29 @@ export function toAnthropicMessages(
           if (block.type === "image")
             return {
               type: "image" as const,
-              source: {
-                type: "base64" as const,
-                media_type: block.mediaType,
-                data: requireModelImageData(block),
-              },
+              source:
+                block.file && "url" in block.file
+                  ? { type: "url" as const, url: block.file.url }
+                  : {
+                      type: "base64" as const,
+                      media_type: block.mediaType,
+                      data: requireModelImageData(block),
+                    },
             }
+          const fileId = uploadedFiles.get(block)
           return {
             type: "document" as const,
             title: block.name,
-            source: {
-              type: "base64" as const,
-              media_type: "application/pdf" as const,
-              data: requireModelDocumentData(block),
-            },
+            source:
+              fileId !== undefined
+                ? { type: "file" as const, file_id: fileId }
+                : "url" in block.file
+                  ? { type: "url" as const, url: block.file.url }
+                  : {
+                      type: "base64" as const,
+                      media_type: "application/pdf" as const,
+                      data: requireModelDocumentData(block),
+                    },
           }
         }),
       )
@@ -512,7 +608,7 @@ export function toAnthropicMessages(
       continue
     }
 
-    const toolResult: ToolResultBlockParam = {
+    const toolResult: BetaToolResultBlockParam = {
       type: "tool_result",
       tool_use_id: message.toolCallId,
       content:
@@ -539,22 +635,38 @@ export function toAnthropicMessages(
                 if (block.type === "image")
                   return {
                     type: "image" as const,
-                    source: {
-                      type: "base64" as const,
-                      media_type: block.mediaType,
-                      data: requireModelImageData(block),
-                    },
+                    source:
+                      block.file && "url" in block.file
+                        ? { type: "url" as const, url: block.file.url }
+                        : {
+                            type: "base64" as const,
+                            media_type: block.mediaType,
+                            data: requireModelImageData(block),
+                          },
                   }
-                if (block.data === undefined)
+                const fileId = uploadedFiles.get(block)
+                if (
+                  block.data === undefined &&
+                  !("url" in block.file) &&
+                  fileId === undefined
+                )
                   throw new Error("Unresolved document asset.")
                 return {
                   type: "document" as const,
                   title: block.name,
-                  source: {
-                    type: "base64" as const,
-                    media_type: "application/pdf" as const,
-                    data: block.data,
-                  },
+                  source:
+                    fileId !== undefined
+                      ? {
+                          type: "file" as const,
+                          file_id: fileId,
+                        }
+                      : "url" in block.file
+                        ? { type: "url" as const, url: block.file.url }
+                        : {
+                            type: "base64" as const,
+                            media_type: "application/pdf" as const,
+                            data: requireModelDocumentData(block),
+                          },
                 }
               }),
       ...(message.isError ? { is_error: true } : {}),
@@ -565,8 +677,8 @@ export function toAnthropicMessages(
 }
 
 function appendAnthropicUserContent(
-  messages: MessageParam[],
-  content: ContentBlockParam[],
+  messages: BetaMessageParam[],
+  content: BetaContentBlockParam[],
 ): void {
   const last = messages.at(-1)
   if (last?.role === "user" && Array.isArray(last.content)) {
@@ -630,19 +742,26 @@ function toAnthropicRequestMessages(
   nativeDeferredLoading: boolean,
   provider: string,
   continuationScope?: string,
-): MessageParam[] {
+  uploadedFiles: ReadonlyMap<
+    import("./model.ts").ModelDocumentBlock,
+    string
+  > = new Map(),
+): BetaMessageParam[] {
   const dynamic = toAnthropicMessages(
     messages,
     nativeDeferredLoading,
     new Map(tools.map((tool) => [tool.name, tool])),
     provider,
     continuationScope,
+    uploadedFiles,
   )
   if (cacheBreakpoint) markLastModelContentBlockCacheable(dynamic)
   return dynamic
 }
 
-function markLastModelContentBlockCacheable(messages: MessageParam[]): boolean {
+function markLastModelContentBlockCacheable(
+  messages: BetaMessageParam[],
+): boolean {
   for (
     let messageIndex = messages.length - 1;
     messageIndex >= 0;
@@ -864,7 +983,7 @@ function toAnthropicAssistantBlock(
   block: ModelContentBlock,
   provider: string,
   continuationScope?: string,
-): ContentBlockParam | undefined {
+): BetaContentBlockParam | undefined {
   if (block.type === "compaction") {
     throw new Error(
       "Native compaction must be converted by its owning provider before using Anthropic Messages.",
