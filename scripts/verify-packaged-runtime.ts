@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process"
-import { access } from "node:fs/promises"
+import { execFileSync, spawn } from "node:child_process"
+import { access, readFile } from "node:fs/promises"
 import { arch, platform } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -24,6 +24,28 @@ const runtimeDirectory = join(
 await access(executable)
 await access(runtimeDirectory)
 await access(join(runtimeDirectory, "read-pdf-worker.js"))
+
+// Check the icon selected by the actual bundle, not just builder configuration.
+const iconName = execFileSync(
+  "/usr/bin/plutil",
+  [
+    "-extract",
+    "CFBundleIconFile",
+    "raw",
+    "-o",
+    "-",
+    join(applicationDirectory, "Contents", "Info.plist"),
+  ],
+  { encoding: "utf8" },
+).trim()
+const packagedIcon = await readFile(
+  join(applicationDirectory, "Contents", "Resources", iconName),
+)
+if (!packagedIcon.equals(await readFile("assets/app-icon/icon.icns"))) {
+  throw new Error(
+    "The packaged app does not contain the approved Yakitori icon.",
+  )
+}
 
 await new Promise<void>((resolve, reject) => {
   const probe = [

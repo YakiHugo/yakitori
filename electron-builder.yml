@@ -34,6 +34,7 @@ extraResources:
   - from: dist/gui
     to: gui
 mac:
+  icon: assets/app-icon/icon.icns
   category: public.app-category.developer-tools
   target:
     - dir

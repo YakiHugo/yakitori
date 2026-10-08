@@ -207,3 +207,32 @@ it("ignores pointer down while a sidebar update is in flight", async () => {
     beforeSessionId: "session_a",
   })
 })
+
+it("scrolls the real sidebar near its edges during an item drag", async () => {
+  render(<App />)
+  const source = screen.getByRole("button", { name: "Task b" })
+  const viewport = document.querySelector<HTMLElement>(".sidebar-scroll")
+  if (!viewport) throw new Error("Sidebar scroll viewport is missing.")
+  Object.defineProperties(viewport, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 200, configurable: true },
+  })
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(0, 0, 250, 200),
+  )
+  vi.spyOn(document, "elementFromPoint").mockReturnValue(source)
+  fireEvent.pointerDown(source, {
+    button: 0,
+    pointerId: 1,
+    pointerType: "mouse",
+    clientX: 40,
+    clientY: 80,
+  })
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 195 })
+  await waitFor(() => expect(viewport.scrollTop).toBeGreaterThan(0))
+  const scrolled = viewport.scrollTop
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 5 })
+  await waitFor(() => expect(viewport.scrollTop).toBeLessThan(scrolled))
+  fireEvent.keyDown(window, { key: "Escape" })
+  expect(move).not.toHaveBeenCalled()
+})

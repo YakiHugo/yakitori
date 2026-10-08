@@ -118,7 +118,12 @@ export type ThreadStore = {
   readThread(threadId: string): Promise<StoredThread | undefined>
   listThreadIds(): Promise<readonly string[]>
   readSessionSidebar(): Promise<SessionSidebar>
-  updateSessionSidebar(change: SidebarChange): Promise<SessionSidebar>
+  // Generated titles must test absence inside the same storage mutation lock
+  // as a manual rename, matching Grok's generated_title_if_absent contract.
+  updateSessionSidebar(
+    change: SidebarChange,
+    options?: { onlyIfUntitled?: boolean },
+  ): Promise<SessionSidebar>
   sessionPresentation(
     threadId: string,
   ): Promise<

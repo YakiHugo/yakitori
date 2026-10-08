@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { SubscriptionConnection } from "../../server/subscription-connections.ts"
+import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
@@ -241,7 +242,25 @@ export function ProviderSubscription({
             </p>
           )}
           {running && connection.login?.url ? (
-            <a href={connection.login.url} target="_blank" rel="noreferrer">
+            <a
+              href={connection.login.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(event) => {
+                event.preventDefault()
+                setError(undefined)
+                void openUrlTarget({
+                  kind: "url",
+                  url: event.currentTarget.href,
+                }).catch((cause: unknown) =>
+                  setError(
+                    cause instanceof Error
+                      ? cause.message
+                      : "Could not open sign-in page.",
+                  ),
+                )
+              }}
+            >
               Open sign-in page ↗
             </a>
           ) : null}

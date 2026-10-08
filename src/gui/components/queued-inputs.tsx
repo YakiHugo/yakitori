@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import type { InputDraft } from "../../core/user-input.ts"
 import {
   inputContentAttachments,
@@ -31,6 +31,31 @@ export function QueuedInputs() {
     textInputDraft(""),
   )
 
+  const editRevision = useRef(0)
+  const pendingSave = useRef<number | undefined>(undefined)
+  const [saving, setSaving] = useState(false)
+  const closeEditor = () => {
+    editRevision.current += 1
+    pendingSave.current = undefined
+    setSaving(false)
+    setEditingId(undefined)
+  }
+  const saveEdit = (inputId: string) => {
+    const revision = editRevision.current
+    if (pendingSave.current === revision) return
+    pendingSave.current = revision
+    setSaving(true)
+    void updateQueuedInput(inputId, trimInputDraft(editingParts)).then(
+      (saved) => {
+        // Cancel/reopen owns a new draft; an old reply must not close that editor.
+        if (editRevision.current !== revision) return
+        pendingSave.current = undefined
+        setSaving(false)
+        if (saved) closeEditor()
+      },
+    )
+  }
+
   if (queued.length === 0) return null
 
   return (
@@ -54,8 +79,7 @@ export function QueuedInputs() {
               className="flex min-w-0 flex-1 gap-1"
               onSubmit={(event) => {
                 event.preventDefault()
-                void updateQueuedInput(item.id, trimInputDraft(editingParts))
-                setEditingId(undefined)
+                saveEdit(item.id)
               }}
             >
               <PromptEditor
@@ -63,6 +87,7 @@ export function QueuedInputs() {
                 apiBase={apiBase}
                 className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-foreground"
                 value={editingParts}
+                disabled={saving}
                 onChange={setEditingParts}
                 onPreviewImage={setPreview}
                 onOpenDocument={(document) => {
@@ -77,29 +102,25 @@ export function QueuedInputs() {
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
-                    setEditingId(undefined)
+                    closeEditor()
                     return true
                   }
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault()
-                    void updateQueuedInput(
-                      item.id,
-                      trimInputDraft(editingParts),
-                    )
-                    setEditingId(undefined)
+                    saveEdit(item.id)
                     return true
                   }
                   return false
                 }}
               />
-              <Button type="submit" size="sm">
+              <Button type="submit" size="sm" disabled={saving}>
                 Save
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                onClick={() => setEditingId(undefined)}
+                onClick={closeEditor}
               >
                 Cancel
               </Button>
@@ -115,6 +136,9 @@ export function QueuedInputs() {
               <QueueButton
                 label="Edit queued input"
                 onClick={() => {
+                  editRevision.current += 1
+                  pendingSave.current = undefined
+                  setSaving(false)
                   setEditingId(item.id)
                   setEditingParts(item.input.content)
                 }}

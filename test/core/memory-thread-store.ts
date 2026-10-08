@@ -54,15 +54,24 @@ export class MemoryThreadStore implements ThreadStore {
   async readSessionSidebar() {
     return structuredClone(this.#sidebar)
   }
-  async updateSessionSidebar(change: SidebarChange) {
-    this.#sidebar = changeSessionSidebar(
-      this.#sidebar,
-      change,
-      sessionEntries(
-        [...this.#threads.values()].map((thread) => thread.metadata),
-        this.#sessionHeads,
-      ),
+  async updateSessionSidebar(
+    change: SidebarChange,
+    options: { onlyIfUntitled?: boolean } = {},
+  ) {
+    const sessions = sessionEntries(
+      [...this.#threads.values()].map((thread) => thread.metadata),
+      this.#sessionHeads,
     )
+    if (options.onlyIfUntitled && change.type === "session") {
+      const session = sessions.find((entry) => entry.id === change.sessionId)
+      if (
+        session !== undefined &&
+        (session.title !== undefined ||
+          this.#sidebar.entries[session.navigationId]?.title !== undefined)
+      )
+        return this.readSessionSidebar()
+    }
+    this.#sidebar = changeSessionSidebar(this.#sidebar, change, sessions)
     return this.readSessionSidebar()
   }
   async sessionPresentation(threadId: string) {

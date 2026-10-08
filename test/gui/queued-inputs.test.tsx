@@ -77,7 +77,7 @@ describe("queued inputs", () => {
       image,
       { type: "text" as const, text: "after" },
     ]
-    const updateQueuedInput = vi.fn(async () => {})
+    const updateQueuedInput = vi.fn(async () => true)
     const queuedItems = seedQueuedInput().map((item) => ({
       ...item,
       input: { ...item.input, content: inputFixture(parts) },

@@ -895,7 +895,10 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async updateSessionSidebar(change: SidebarChange): Promise<SessionSidebar> {
+  async updateSessionSidebar(
+    change: SidebarChange,
+    options: { onlyIfUntitled?: boolean } = {},
+  ): Promise<SessionSidebar> {
     await this.#ready
     if ("sessionId" in change) {
       await this.#staged.get(change.sessionId)?.materializing
@@ -921,11 +924,17 @@ export class JsonlThreadStore implements ThreadStore {
         await this.#readSessionHeads(),
       )
       const durable = await this.#readDurableSessionSidebar()
-      const state = changeSessionSidebar(
-        await this.readSessionSidebar(),
-        change,
-        sessions,
-      )
+      const current = await this.readSessionSidebar()
+      if (options.onlyIfUntitled && change.type === "session") {
+        const session = sessions.find((entry) => entry.id === change.sessionId)
+        if (
+          session !== undefined &&
+          (session.title !== undefined ||
+            current.entries[session.navigationId]?.title !== undefined)
+        )
+          return current
+      }
+      const state = changeSessionSidebar(current, change, sessions)
       const stagedIds = new Set(this.#staged.keys())
       const persisted: SessionSidebar = {
         sections: state.sections,

@@ -6,9 +6,9 @@
 // leaving the current checkout untouched.
 // YAKITORI_INSTALL_TARGET overrides the install destination.
 import { spawn } from "node:child_process"
-import { access, mkdtemp, rm } from "node:fs/promises"
+import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 const artifactName = "yakitori-macos-arm64"
 const installTarget =
@@ -92,8 +92,47 @@ async function buildAndInstallFromMain(staging: string): Promise<void> {
 
 async function install(app: string): Promise<void> {
   await access(join(app, "Contents", "MacOS", "Yakitori"))
-  await rm(installTarget, { recursive: true, force: true })
-  await run("ditto", [app, installTarget])
+  // Copy beside the destination before touching the usable installation. The
+  // final renames stay on one filesystem, including custom install targets.
+  await mkdir(dirname(installTarget), { recursive: true })
+  const replacement = await mkdtemp(
+    join(dirname(installTarget), `.${basename(installTarget)}-install-`),
+  )
+  const prepared = join(replacement, "prepared.app")
+  const backup = join(replacement, "previous.app")
+  let keepBackup = false
+  try {
+    await run("ditto", [app, prepared])
+    await access(join(prepared, "Contents", "MacOS", "Yakitori"))
+    let hadPrevious = false
+    try {
+      await rename(installTarget, backup)
+      hadPrevious = true
+    } catch (error) {
+      if (
+        !(error instanceof Error && "code" in error && error.code === "ENOENT")
+      )
+        throw error
+    }
+    try {
+      await rename(prepared, installTarget)
+    } catch (error) {
+      if (hadPrevious) {
+        try {
+          await rename(backup, installTarget)
+        } catch (restoreError) {
+          keepBackup = true
+          throw new AggregateError(
+            [error, restoreError],
+            `Installation failed and the previous app could not be restored. It remains at ${backup}.`,
+          )
+        }
+      }
+      throw error
+    }
+  } finally {
+    if (!keepBackup) await rm(replacement, { recursive: true, force: true })
+  }
   // gh downloads carry no quarantine attribute; clear one copied from an
   // older browser-downloaded install so Gatekeeper does not re-prompt.
   await run("xattr", ["-dr", "com.apple.quarantine", installTarget]).catch(
