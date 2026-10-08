@@ -48,6 +48,7 @@ type Entry = {
   rawProvider: OAuthClientProvider
   pending?: PendingLogin
   refreshing?: Promise<void>
+  loggingOut?: Promise<void>
   starting?: boolean
   loginEpoch: number
 }
@@ -214,6 +215,7 @@ export function createMcpOAuth(
       },
       async tokens() {
         const current = await credentials
+        while (entry.loggingOut) await entry.loggingOut
         if (
           current.tokens &&
           current.expiresAt !== undefined &&
@@ -280,6 +282,7 @@ export function createMcpOAuth(
       entry.starting = true
       const epoch = ++entry.loginEpoch
       try {
+        await entry.loggingOut
         await entry.refreshing
       } catch (error) {
         delete entry.starting
@@ -419,13 +422,20 @@ export function createMcpOAuth(
     async logout(name, config) {
       const entry = get(name, config)
       entry.loginEpoch++
-      const operation = entry.pending?.operation
-      finish(entry, new Error("MCP login cancelled."))
-      if (operation) await Promise.allSettled([operation])
-      if (entry.refreshing) await Promise.allSettled([entry.refreshing])
-      await entry.writes
-      await entry.rawProvider.invalidateCredentials?.("all")
-      await rm(entry.path, { force: true })
+      // Publish the deletion barrier before yielding, so refresh and new login
+      // cannot start after logout has sampled the operations it must drain.
+      entry.loggingOut ??= (async () => {
+        const operation = entry.pending?.operation
+        finish(entry, new Error("MCP login cancelled."))
+        if (operation) await Promise.allSettled([operation])
+        if (entry.refreshing) await Promise.allSettled([entry.refreshing])
+        await entry.writes
+        await entry.rawProvider.invalidateCredentials?.("all")
+        await rm(entry.path, { force: true })
+      })().finally(() => {
+        delete entry.loggingOut
+      })
+      return entry.loggingOut
     },
     async hasCredentials(name, config) {
       if (!("url" in config)) return false
@@ -441,6 +451,7 @@ export function createMcpOAuth(
       await Promise.allSettled(operations)
       await Promise.all(
         [...entries.values()].map(async (entry) => {
+          await entry.loggingOut
           await entry.refreshing
           await entry.writes
         }),

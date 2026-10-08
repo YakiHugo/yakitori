@@ -571,7 +571,10 @@ function availableProviderId(name: string, ids: readonly string[]) {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "custom"
   let base = /^[a-z]/.test(slug) ? slug : `provider-${slug}`
-  if (["faux", "codex", "kimi", "constructor", "prototype"].includes(base))
+  if (
+    base.startsWith("chatgpt-") ||
+    ["faux", "codex", "kimi", "constructor", "prototype"].includes(base)
+  )
     base = `provider-${base}`
   let id = base
   let suffix = 2
