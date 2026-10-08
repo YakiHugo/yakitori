@@ -154,6 +154,31 @@ afterEach(() => {
 })
 
 describe("side chat panel", () => {
+  it("keeps a streaming Mermaid response readable without attempting a diagram", async () => {
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create"
+        ? snapshot(1, {
+            activeTurnId: "turn",
+            messages: [
+              {
+                id: "answer",
+                turnId: "turn",
+                role: "assistant",
+                text: "```mermaid\nflowchart LR\nA[",
+                streaming: true,
+              },
+            ],
+          })
+        : {},
+    )
+    const { container } = render(<Panel />)
+    await screen.findByRole("button", { name: "Copy Mermaid source" })
+    expect(container.querySelector("pre")?.textContent).toContain("A[")
+    expect(screen.queryByText(/Rendering Mermaid diagram/)).toBeNull()
+    expect(screen.queryByText(/Could not render Mermaid diagram/)).toBeNull()
+    expect(screen.queryByRole("img", { name: "Mermaid diagram" })).toBeNull()
+  })
+
   it("keeps expired history readable and opens a new chat in the original parent session", async () => {
     const history = snapshot(1, {
       expiresAt: "2020-01-01T00:00:00.000Z",

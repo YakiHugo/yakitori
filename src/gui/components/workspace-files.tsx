@@ -442,6 +442,7 @@ function FilePreview({
             <div {...source}>
               {rendered && markdown ? (
                 <MarkdownView
+                  apiBase={apiBase}
                   text={preview.content}
                   workspaceRoot={cwd}
                   documentPath={absolutePath}

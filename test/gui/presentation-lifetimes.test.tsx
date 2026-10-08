@@ -52,10 +52,10 @@ it("fits a loaded image, bounds zoom, and releases its Escape listener on unmoun
   })
   const parent = image.parentElement
   if (!parent) throw new Error("Expected image viewport")
-  vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
-    width: 800,
-    height: 300,
-  } as DOMRect)
+  Object.defineProperties(parent, {
+    clientWidth: { value: 800 },
+    clientHeight: { value: 300 },
+  })
   fireEvent.load(image)
   expect(image.style.width).toBe("600px")
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }))
@@ -74,4 +74,61 @@ it("fits a loaded image, bounds zoom, and releases its Escape listener on unmoun
   unmount()
   fireEvent.keyDown(document, { key: "Escape" })
   expect(onClose).toHaveBeenCalledTimes(1)
+})
+
+it("refits after viewport changes while preserving actual-size pixels", () => {
+  const addListener = vi.spyOn(window, "addEventListener")
+  const removeListener = vi.spyOn(window, "removeEventListener")
+  const { unmount } = render(
+    <ImageLightbox
+      src="diagram.svg"
+      name="resizable diagram"
+      onClose={() => {}}
+    />,
+  )
+  const image = screen.getByRole("img", { name: "resizable diagram" })
+  Object.defineProperties(image, {
+    naturalWidth: { value: 1200 },
+    naturalHeight: { value: 600 },
+  })
+  const viewport = image.parentElement
+  if (!viewport) throw new Error("Expected image viewport")
+  let width = 800
+  let height = 600
+  Object.defineProperties(viewport, {
+    clientWidth: { get: () => width },
+    clientHeight: { get: () => height },
+  })
+  viewport.style.padding = "0px 40px 16px"
+  fireEvent.load(image)
+  expect(image.style.width).toBe("720px")
+
+  width = 400
+  fireEvent(window, new Event("resize"))
+  fireEvent.click(screen.getByRole("button", { name: "Reset zoom" }))
+  expect(image.style.width).toBe("320px")
+
+  fireEvent.click(screen.getByRole("button", { name: "Actual size" }))
+  expect(image.style.width).toBe("1200px")
+  height = 116
+  fireEvent(window, new Event("resize"))
+  expect(image.style.width).toBe("1200px")
+  fireEvent.click(screen.getByRole("button", { name: "Reset zoom" }))
+  expect(image.style.width).toBe("200px")
+
+  width = 1000
+  height = 816
+  fireEvent(window, new Event("resize"))
+  expect(image.style.width).toBe("920px")
+
+  // Reset takes a fresh measurement even if a resize notification is pending.
+  width = 300
+  fireEvent.click(screen.getByRole("button", { name: "Reset zoom" }))
+  expect(image.style.width).toBe("220px")
+  const resizeListener = addListener.mock.calls.find(
+    ([event]) => event === "resize",
+  )?.[1]
+  expect(resizeListener).toBeTypeOf("function")
+  unmount()
+  expect(removeListener).toHaveBeenCalledWith("resize", resizeListener)
 })

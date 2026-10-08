@@ -11,9 +11,11 @@ import { LiveTextNotice } from "./live-text-notice.tsx"
 export function ReasoningCell({
   entry,
   workspaceRoot,
+  apiBase,
 }: {
   readonly entry: Extract<ExecutionEntry, { kind: "reasoning" }>
   readonly workspaceRoot?: string | undefined
+  readonly apiBase?: string | undefined
 }) {
   return (
     <Collapsible
@@ -32,6 +34,7 @@ export function ReasoningCell({
       <CollapsibleContent className="pt-1 pb-2">
         <LiveTextNotice entry={entry} />
         <MarkdownView
+          apiBase={apiBase}
           text={entry.text}
           streaming={entry.status === "streaming"}
           className="markdown max-w-2xl text-sm text-muted-foreground"

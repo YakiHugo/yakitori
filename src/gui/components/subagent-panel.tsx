@@ -503,14 +503,22 @@ function TraceEntry({
         >
           <LiveTextNotice entry={entry} />
           <MarkdownView
+            apiBase={apiBase}
             text={entry.text}
+            streaming={entry.status === "streaming"}
             workspaceRoot={workspaceRoot}
             className="markdown text-sm"
           />
         </div>
       )
     case "reasoning":
-      return <ReasoningCell entry={entry} workspaceRoot={workspaceRoot} />
+      return (
+        <ReasoningCell
+          entry={entry}
+          workspaceRoot={workspaceRoot}
+          apiBase={apiBase}
+        />
+      )
     case "tool":
       return (
         <ToolCell

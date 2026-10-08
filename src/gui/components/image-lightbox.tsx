@@ -1,5 +1,5 @@
 import { Minus, Plus, X } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 const ZOOM_STEP = 0.25
 const ZOOM_MIN = 0.25
@@ -17,8 +17,45 @@ export function ImageLightbox({
   name: string
   onClose(): void
 }>) {
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useState<number | "actual">(1)
   const [fittedWidth, setFittedWidth] = useState<number>()
+  const [naturalWidth, setNaturalWidth] = useState<number>()
+  const imageRef = useRef<HTMLImageElement>(null)
+  const measure = useCallback(() => {
+    const image = imageRef.current
+    const viewport = image?.parentElement
+    if (
+      !image ||
+      !viewport ||
+      image.naturalWidth === 0 ||
+      image.naturalHeight === 0
+    )
+      return
+    const style = getComputedStyle(viewport)
+    // client dimensions exclude borders/scrollbars but include padding.
+    // Fit to the content box so the first view and reset show every edge.
+    const width =
+      viewport.clientWidth -
+      (Number.parseFloat(style.paddingLeft) || 0) -
+      (Number.parseFloat(style.paddingRight) || 0)
+    const height =
+      viewport.clientHeight -
+      (Number.parseFloat(style.paddingTop) || 0) -
+      (Number.parseFloat(style.paddingBottom) || 0)
+    if (width <= 0 || height <= 0) return
+    setNaturalWidth(image.naturalWidth)
+    setFittedWidth(
+      Math.min(
+        image.naturalWidth,
+        (image.naturalWidth / image.naturalHeight) * height,
+        width,
+      ),
+    )
+  }, [])
+  useEffect(() => {
+    window.addEventListener("resize", measure)
+    return () => window.removeEventListener("resize", measure)
+  }, [measure])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -29,6 +66,12 @@ export function ImageLightbox({
     document.addEventListener("keydown", onKeyDown, true)
     return () => document.removeEventListener("keydown", onKeyDown, true)
   }, [onClose])
+  const zoomFactor =
+    zoom === "actual"
+      ? naturalWidth === undefined || fittedWidth === undefined
+        ? 1
+        : naturalWidth / fittedWidth
+      : zoom
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: Backdrop dismissal has no keyboard equivalent; Escape and the close button cover it.
     <div
@@ -56,28 +99,22 @@ export function ImageLightbox({
       </div>
       <div
         data-backdrop
-        className="grid min-h-0 flex-1 place-items-center overflow-auto px-10 pb-4"
+        className="grid min-h-0 flex-1 overflow-auto px-10 pb-4"
+        style={{ placeItems: "safe center" }}
       >
         <img
+          ref={imageRef}
           src={src}
           alt={name}
-          onLoad={(event) => {
-            const image = event.currentTarget
-            const box = image.parentElement?.getBoundingClientRect()
-            if (!box || image.naturalWidth === 0) return
-            setFittedWidth(
-              Math.min(
-                image.naturalWidth,
-                (image.naturalWidth / image.naturalHeight) * box.height,
-                box.width,
-              ),
-            )
-          }}
+          onLoad={measure}
           className="rounded-lg"
           style={
             fittedWidth === undefined
               ? { maxWidth: "100%", maxHeight: "100%" }
-              : { width: fittedWidth * zoom }
+              : {
+                  width: zoom === "actual" ? naturalWidth : fittedWidth * zoom,
+                  maxWidth: "none",
+                }
           }
         />
       </div>
@@ -86,10 +123,8 @@ export function ImageLightbox({
           <button
             type="button"
             aria-label="Zoom out"
-            disabled={zoom <= ZOOM_MIN}
-            onClick={() =>
-              setZoom((current) => Math.max(ZOOM_MIN, current - ZOOM_STEP))
-            }
+            disabled={zoomFactor <= ZOOM_MIN}
+            onClick={() => setZoom(Math.max(ZOOM_MIN, zoomFactor - ZOOM_STEP))}
             className="grid size-8 place-items-center rounded-full transition-colors hover:bg-black/10 disabled:opacity-40"
           >
             <Minus className="size-4" />
@@ -98,18 +133,29 @@ export function ImageLightbox({
             type="button"
             aria-label="Reset zoom"
             title="Reset zoom"
-            onClick={() => setZoom(1)}
+            onClick={() => {
+              measure()
+              setZoom(1)
+            }}
             className="min-w-12 rounded-full px-1 py-1 text-center text-[13px] font-medium tabular-nums transition-colors hover:bg-black/10"
           >
-            {Math.round(zoom * 100)}%
+            {Math.round(zoomFactor * 100)}%
+          </button>
+          <button
+            type="button"
+            aria-label="Actual size"
+            title="Actual size"
+            disabled={naturalWidth === undefined || fittedWidth === undefined}
+            onClick={() => setZoom("actual")}
+            className="rounded-full px-2 py-1 text-[13px] font-medium transition-colors hover:bg-black/10 disabled:opacity-40"
+          >
+            1:1
           </button>
           <button
             type="button"
             aria-label="Zoom in"
-            disabled={zoom >= ZOOM_MAX}
-            onClick={() =>
-              setZoom((current) => Math.min(ZOOM_MAX, current + ZOOM_STEP))
-            }
+            disabled={zoomFactor >= ZOOM_MAX}
+            onClick={() => setZoom(Math.min(ZOOM_MAX, zoomFactor + ZOOM_STEP))}
             className="grid size-8 place-items-center rounded-full transition-colors hover:bg-black/10 disabled:opacity-40"
           >
             <Plus className="size-4" />

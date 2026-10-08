@@ -1,5 +1,13 @@
 import type { MouseEvent, ReactNode } from "react"
-import { isValidElement, memo, useEffect, useMemo, useState } from "react"
+import {
+  createContext,
+  isValidElement,
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react"
 import type { Components } from "react-markdown"
 import Markdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -11,12 +19,16 @@ import {
   normalizeLanguage,
   useHighlighter,
 } from "../lib/syntax-highlighter.ts"
+import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { MarkdownImage } from "./markdown-image.tsx"
+import { MermaidDiagram } from "./mermaid-diagram.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
 
 // Model streams commonly deliver several deltas within one animation window;
 // this brief quiet period coalesces them while keeping completed blocks prompt.
 const highlightSettleMs = 120
+const MarkdownStreamingContext = createContext(false)
 
 function highlight(
   highlighter: HighlighterCore,
@@ -82,6 +94,7 @@ function FencedCode({
 }
 
 function MarkdownPre({ children }: { readonly children?: ReactNode }) {
+  const streaming = useContext(MarkdownStreamingContext)
   const codeProps = isValidElement(children)
     ? (children.props as { className?: unknown; children?: unknown })
     : undefined
@@ -92,7 +105,11 @@ function MarkdownPre({ children }: { readonly children?: ReactNode }) {
     typeof codeProps?.className === "string"
       ? /language-([\w#+-]+)/.exec(codeProps.className)?.[1]
       : undefined
-  return <FencedCode code={code} language={language} />
+  return language?.toLowerCase() === "mermaid" ? (
+    <MermaidDiagram source={code} streaming={streaming} />
+  ) : (
+    <FencedCode code={code} language={language} />
+  )
 }
 
 function parseFileHref(href: string): { path: string; line?: number } {
@@ -115,6 +132,9 @@ function isLocalFileHref(href: string): boolean {
 }
 
 function markdownUrlTransform(url: string, key: string): string {
+  // The image renderer classifies sources before loading them; retain local
+  // file and image data URLs here rather than losing them to link sanitization.
+  if (key === "src") return url
   // Preserve the file targets this renderer handles itself; react-markdown
   // otherwise treats a root filename followed by a line as an unknown scheme.
   return key === "href" && isLocalFileHref(url) ? url : defaultUrlTransform(url)
@@ -221,6 +241,7 @@ function MarkdownLink({
 function createMarkdownComponents(
   workspaceRoot: string | undefined,
   documentPath: string | undefined,
+  apiBase: string,
 ): Components {
   return {
     a: (props) => (
@@ -228,6 +249,16 @@ function createMarkdownComponents(
         {...props}
         workspaceRoot={workspaceRoot}
         documentPath={documentPath}
+      />
+    ),
+    img: ({ src, alt, title }) => (
+      <MarkdownImage
+        src={typeof src === "string" ? src : undefined}
+        alt={alt}
+        title={title}
+        workspaceRoot={workspaceRoot}
+        documentPath={documentPath}
+        apiBase={apiBase}
       />
     ),
     pre: MarkdownPre,
@@ -239,17 +270,21 @@ export const MarkdownView = memo(function MarkdownView({
   className,
   workspaceRoot,
   documentPath,
+  apiBase: apiBaseOverride,
   streaming = false,
 }: Readonly<{
   text: string
   className?: string
   workspaceRoot?: string | undefined
   documentPath?: string | undefined
+  apiBase?: string | undefined
   streaming?: boolean
 }>) {
+  const defaultApiBase = useAppStore((state) => state.apiBase)
+  const apiBase = apiBaseOverride ?? defaultApiBase
   const components = useMemo(
-    () => createMarkdownComponents(workspaceRoot, documentPath),
-    [workspaceRoot, documentPath],
+    () => createMarkdownComponents(workspaceRoot, documentPath, apiBase),
+    [workspaceRoot, documentPath, apiBase],
   )
   const useIncrementalParser =
     streaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text)
@@ -262,13 +297,15 @@ export const MarkdownView = memo(function MarkdownView({
   )
   return (
     <div className={className}>
-      <Markdown
-        remarkPlugins={remarkPlugins}
-        components={components}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </Markdown>
+      <MarkdownStreamingContext value={streaming}>
+        <Markdown
+          remarkPlugins={remarkPlugins}
+          components={components}
+          urlTransform={markdownUrlTransform}
+        >
+          {text}
+        </Markdown>
+      </MarkdownStreamingContext>
     </div>
   )
 })
