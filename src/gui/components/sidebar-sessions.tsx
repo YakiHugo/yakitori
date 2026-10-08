@@ -133,6 +133,7 @@ export function SessionItems({
                   { id: "pinned", name: "Pinned" },
                   ...sections,
                 ].map((section) => ({
+                  id: section.id,
                   label: section.name,
                   checked: (session.sectionId ?? "") === section.id,
                   action: () =>
