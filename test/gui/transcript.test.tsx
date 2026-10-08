@@ -822,6 +822,68 @@ it.each([
   expect(writeText).toHaveBeenCalledWith("**Continuation**")
 })
 
+it("preserves citation sources from every final-answer fragment", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: ["first", "last"].map((itemId) => ({
+        kind: "assistant" as const,
+        itemId,
+        turnId: "turn_1",
+        text: `${itemId} `,
+        status: "completed" as const,
+        at,
+        sources: [
+          {
+            id: "citation_0_openai_0",
+            label: `${itemId} source`,
+            url: `https://example.com/${itemId}`,
+          },
+        ],
+      })),
+      turnTimings: {
+        turn_1: {
+          completedAt: at,
+          outcome: { status: "completed", answerItemIds: ["first", "last"] },
+        },
+      },
+    },
+  })
+  render(<Transcript />)
+  expect(
+    screen.getByRole("link", { name: "first source" }).getAttribute("href"),
+  ).toBe("https://example.com/first")
+  expect(
+    screen.getByRole("link", { name: "last source" }).getAttribute("href"),
+  ).toBe("https://example.com/last")
+  act(() => {
+    const execution = useAppStore.getState().execution
+    useAppStore.setState({
+      execution: {
+        ...execution,
+        entries: execution.entries.map((entry) =>
+          entry.kind === "assistant" && entry.itemId === "first"
+            ? {
+                ...entry,
+                sources: [
+                  {
+                    id: "citation_0_openai_0",
+                    label: "updated source",
+                    url: "https://example.com/updated",
+                  },
+                ],
+              }
+            : entry,
+        ),
+      },
+    })
+  })
+  expect(screen.queryByRole("link", { name: "first source" })).toBeNull()
+  expect(
+    screen.getByRole("link", { name: "updated source" }).getAttribute("href"),
+  ).toBe("https://example.com/updated")
+})
+
 it("does not promote progress when the completed Turn has an explicit empty answer", () => {
   useAppStore.setState({
     execution: {

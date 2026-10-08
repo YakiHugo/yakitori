@@ -244,6 +244,29 @@ describe("computer ownership through application turn lifecycle", () => {
     }
   })
 
+  it("keeps computer ownership separate for equal request IDs in different sessions", async () => {
+    const context = await fixture(true)
+    try {
+      const first = body(await context.application.handlers.createSession())
+      await input(context.application, first.session.id, "first")
+      await until(async () => context.waitingForAbort)
+      const second = body(await context.application.handlers.createSession())
+      body(
+        await context.application.handlers.admitInput({
+          sessionId: second.session.id,
+          requestId: "first",
+          content: inputFixture([{ type: "text", text: "other-session" }]),
+        }),
+      )
+      await until(async () => context.toolResults.length === 2)
+      expect(context.toolResults[1]).toContain("busy")
+      expect(await readFile(context.calls, "utf8")).toBe("js:first\n")
+      expect(await context.cleanupInputs()).toEqual([])
+    } finally {
+      await context.close()
+    }
+  })
+
   it("holds ownership after the cancellation grace period until the old turn releases the computer", async () => {
     const context = await fixture(true)
     try {

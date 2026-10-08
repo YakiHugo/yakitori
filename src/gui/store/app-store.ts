@@ -626,7 +626,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           id,
           {
             ...draft,
-            parts:
+            content:
               draft.content === undefined
                 ? undefined
                 : inputAttachmentOwnership.resolveDraft(

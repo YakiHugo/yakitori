@@ -109,7 +109,14 @@ function ChildTrace({
           if (replaySnapshot)
             dispatch({ type: "replay_completed", session: replaySnapshot })
           replaySnapshot = undefined
+          setError(undefined)
           setLoading(false)
+        },
+        onDisconnected: (cause) => {
+          if (disposed) return
+          dispatch({ type: "stream_unavailable" })
+          setLoading(false)
+          setError(cause instanceof Error ? cause.message : String(cause))
         },
         onError: (cause) => {
           if (disposed) return

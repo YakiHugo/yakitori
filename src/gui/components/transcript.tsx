@@ -171,18 +171,20 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
       if (last === undefined || pieces.length !== itemIds.length) continue
       const text = pieces.map((entry) => entry.text).join("")
       const incomplete = pieces.some((entry) => entry.incomplete)
+      const sources = pieces.flatMap((piece) =>
+        (piece.sources ?? []).map((source) => ({
+          ...source,
+          // Citation IDs are local to each recorded assistant item.
+          id: JSON.stringify([piece.itemId, source.id]),
+        })),
+      )
       const previous = previousAnswers.current.get(turnId)
       answers.set(
         turnId,
-        previous?.entry.itemId === last.itemId &&
-          previous.entry.text === text &&
-          previous.entry.at === last.at &&
-          previous.entry.status === last.status &&
-          previous.entry.incomplete === incomplete &&
-          previous.itemIds.length === itemIds.length &&
-          previous.itemIds.every((id, index) => id === itemIds[index])
+        previous?.pieces.length === pieces.length &&
+          previous.pieces.every((entry, index) => entry === pieces[index])
           ? previous
-          : { itemIds, entry: { ...last, text, incomplete } },
+          : { itemIds, pieces, entry: { ...last, text, incomplete, sources } },
       )
     }
     previousAnswers.current = answers
@@ -365,6 +367,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
 }
 
 type FinalAnswer = Readonly<{
+  pieces: readonly Extract<ExecutionEntry, { kind: "assistant" }>[]
   itemIds: readonly string[]
   entry: Extract<ExecutionEntry, { kind: "assistant" }>
 }>
