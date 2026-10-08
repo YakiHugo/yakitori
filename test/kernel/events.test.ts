@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, expectTypeOf, it } from "vitest"
 import {
   createEventEnvelope,
   EventType,
@@ -164,6 +164,34 @@ describe("kernel facts", () => {
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
+  })
+
+  it("assigns fresh envelope identity when wrapping an already enveloped fact", () => {
+    const previous = createEventEnvelope({
+      sessionId: "session_previous",
+      seq: 4,
+      id: "event_previous",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      event: { type: EventType.SessionCreated, data: { title: "Witness" } },
+    })
+    const envelope = createEventEnvelope({
+      sessionId: "session_current",
+      seq: 1,
+      id: "event_current",
+      createdAt: "2026-02-01T00:00:00.000Z",
+      event: { ...previous, version: 1 },
+    })
+    expect(envelope).toEqual({
+      sessionId: "session_current",
+      seq: 1,
+      id: "event_current",
+      createdAt: "2026-02-01T00:00:00.000Z",
+      version: 7,
+      type: EventType.SessionCreated,
+      data: { title: "Witness" },
+    })
+    expectTypeOf(envelope.version).toEqualTypeOf<number>()
+    expect(isKernelEvent(previous)).toBe(true)
   })
 
   it("strictly rejects malformed known facts at write time", () => {

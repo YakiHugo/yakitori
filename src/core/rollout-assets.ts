@@ -716,11 +716,17 @@ async function linkOnce(
 ): Promise<boolean> {
   const directory = dirname(path)
   await ensureDirectoryChain(root, directory)
+  let linked = false
   try {
     await link(sourcePath, path)
+    linked = true
     await syncDirectory(directory)
     return true
   } catch (error) {
+    if (linked) {
+      await rm(path, { force: true })
+      throw error
+    }
     if (!isAlreadyExists(error)) throw error
     const existing = await stat(path)
     if (!existing.isFile() || existing.size !== sourceBytes) {
@@ -758,11 +764,17 @@ async function writeOnce(
       handle = undefined
     }
 
+    let linked = false
     try {
       await link(temporaryPath, path)
+      linked = true
       await syncDirectory(directory)
       return true
     } catch (error) {
+      if (linked) {
+        await rm(path, { force: true })
+        throw error
+      }
       if (!isAlreadyExists(error)) throw error
       const existing = await readFile(path)
       if (!existing.equals(bytes)) {

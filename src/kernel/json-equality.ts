@@ -29,21 +29,23 @@ export function createJsonMergePatch(
   previous: JsonObject,
   current: JsonObject,
 ): JsonObject | undefined {
-  const patch: Record<string, JsonValue> = {}
+  const patch: Array<[string, JsonValue]> = []
   for (const key of Object.keys(previous)) {
-    if (!Object.hasOwn(current, key)) patch[key] = null
+    if (!Object.hasOwn(current, key)) patch.push([key, null])
   }
   for (const [key, currentValue] of Object.entries(current)) {
-    const previousValue = previous[key]
+    const previousValue = Object.hasOwn(previous, key)
+      ? previous[key]
+      : undefined
     if (jsonValuesEqual(previousValue, currentValue)) continue
     if (isJsonObject(previousValue) && isJsonObject(currentValue)) {
       const child = createJsonMergePatch(previousValue, currentValue)
-      if (child !== undefined) patch[key] = child
+      if (child !== undefined) patch.push([key, child])
     } else {
-      patch[key] = currentValue
+      patch.push([key, currentValue])
     }
   }
-  return Object.keys(patch).length === 0 ? undefined : patch
+  return patch.length === 0 ? undefined : Object.fromEntries(patch)
 }
 
 export function applyJsonMergePatch(
@@ -63,7 +65,16 @@ function applyMergePatchValue(target: JsonValue, patch: JsonValue): JsonValue {
       delete merged[key]
       continue
     }
-    merged[key] = applyMergePatchValue(merged[key] ?? null, value)
+    // Every JSON key is an own data property, including "__proto__".
+    Object.defineProperty(merged, key, {
+      value: applyMergePatchValue(
+        Object.hasOwn(merged, key) ? (merged[key] ?? null) : null,
+        value,
+      ),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    })
   }
   return merged
 }

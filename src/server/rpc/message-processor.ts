@@ -15,6 +15,7 @@ import {
   type ApiSubscriptionProvider,
 } from "../protocol.ts"
 import type { ProviderService } from "../provider-service.ts"
+import { createRequestGate, type RequestGate } from "../request-gate.ts"
 import type { SideChatService } from "../side-chat.ts"
 import type { ProjectStore } from "../sqlite-project-store.ts"
 import {
@@ -79,6 +80,7 @@ export type MessageProcessorOptions = Readonly<{
   reportOperationalFailure?: OperationalFailureReporter
   userAgent?: string
   drainTimeoutMs?: number
+  requestGate?: RequestGate
   diagnostics?: () => Readonly<Record<string, number>>
 }>
 
@@ -128,6 +130,7 @@ export class MessageProcessor {
   private readonly reporter: OperationalFailureReporter
   private readonly userAgent: string
   private readonly drainTimeoutMs: number
+  private readonly requestGate: RequestGate
   private readonly diagnosticsSource: () => Readonly<Record<string, number>>
   private readonly serializationQueues = new RequestSerializationQueues()
   private readonly subscriptions: SessionSubscriptions
@@ -152,6 +155,7 @@ export class MessageProcessor {
       options.reportOperationalFailure ?? consoleOperationalFailureReporter
     this.userAgent = options.userAgent ?? "yakitori"
     this.drainTimeoutMs = options.drainTimeoutMs ?? defaultDrainTimeoutMs
+    this.requestGate = options.requestGate ?? createRequestGate()
     this.diagnosticsSource = options.diagnostics ?? (() => ({}))
     const eventHub =
       options.eventHub ??
@@ -334,7 +338,24 @@ export class MessageProcessor {
     }
     const runUnderGate = async (): Promise<void> => {
       try {
-        await this.invoke(entry, request, context, connection)
+        if (entry.shutdownContinuation && !this.requestGate.accepting) {
+          // Still owned and drained by the connection gate below. Closing new
+          // work must not prevent an admitted Turn from receiving its replies.
+          await this.invoke(entry, request, context, connection)
+          return
+        }
+        const admitted = await this.requestGate.run(() =>
+          this.invoke(entry, request, context, connection),
+        )
+        if (!admitted.accepted)
+          this.emitMessage(
+            connection,
+            errorResponse(
+              request.id,
+              INTERNAL_ERROR,
+              "Server is shutting down.",
+            ),
+          )
       } finally {
         settle()
       }

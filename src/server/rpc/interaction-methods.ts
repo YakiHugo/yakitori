@@ -33,6 +33,9 @@ export const interactionMethods: readonly RpcMethodDefinition[] = [
   "session/elicitation/answer",
 ].map((method) => ({
   method,
+  // Async question answers admit another Turn; elicitation replies unblock one
+  // that already owns a running invocation.
+  shutdownContinuation: method !== "session/question/answer",
   scope: () => undefined,
   async invoke(params, context) {
     if (

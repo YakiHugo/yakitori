@@ -140,6 +140,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
         : { sideChats: options.sideChats }),
       handlers,
       eventHub,
+      requestGate,
       reportOperationalFailure: reporter,
       ...(projectStore === undefined ? {} : { projectStore }),
       ...(providers === undefined ? {} : { providers }),

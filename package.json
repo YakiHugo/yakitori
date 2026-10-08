@@ -54,7 +54,6 @@
     "electron-builder": "^26.15.3",
     "happy-dom": "^20.11.1",
     "typescript": "^6.0.3",
-    "unified": "^11.0.5",
     "vite": "^8.1.0",
     "vitest": "^4.1.9",
     "yazl": "^3.3.1"
@@ -94,6 +93,7 @@
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
     "saxes": "^6.0.0",
     "sharp": "^0.35.4",
     "shiki": "^4.4.3",
@@ -103,6 +103,7 @@
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
     "undici": "^8.10.2",
+    "unified": "^11.0.5",
     "ws": "^8.21.3",
     "yaml": "^2.9.0",
     "yauzl": "^3.4.0",

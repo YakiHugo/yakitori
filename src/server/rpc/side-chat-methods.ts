@@ -61,6 +61,10 @@ function entry(
 ): RpcMethodDefinition {
   return {
     method,
+    shutdownContinuation:
+      method === "sideChat/cancel" ||
+      method === "sideChat/resolvePermission" ||
+      method === "sideChat/close",
     scope: (params) =>
       method === "sideChat/create"
         ? undefined

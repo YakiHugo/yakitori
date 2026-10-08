@@ -6,12 +6,17 @@ export type ImageMetadata = Readonly<{
   height: number
 }>
 
+// A deterministic rejection of already-read bytes, separate from file/network IO.
+export class InvalidImageDataError extends Error {}
+
 export function inspectImageBytes(bytes: Uint8Array): ImageMetadata {
   const buffer = asBuffer(bytes)
   const mediaType = detectImageMediaType(buffer)
   const dimensions = readImageDimensions(buffer, mediaType)
   if (dimensions === undefined) {
-    throw new Error("Image data is truncated or has invalid dimensions.")
+    throw new InvalidImageDataError(
+      "Image data is truncated or has invalid dimensions.",
+    )
   }
   return { mediaType, ...dimensions }
 }
@@ -73,7 +78,9 @@ function detectImageMediaType(bytes: Buffer): ImageAttachment["mediaType"] {
   ) {
     return "image/webp"
   }
-  throw new Error("Only PNG, JPEG, GIF, and WebP images can be attached.")
+  throw new InvalidImageDataError(
+    "Only PNG, JPEG, GIF, and WebP images can be attached.",
+  )
 }
 
 function readJpegDimensions(

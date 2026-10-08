@@ -65,7 +65,8 @@ type OccurrenceCursor = Readonly<{
   occurrenceIndex: number
 }>
 
-const schemaVersion = 2
+// Rebuild disposable text projections after switching to CommonMark/GFM parsing.
+const schemaVersion = 3
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
