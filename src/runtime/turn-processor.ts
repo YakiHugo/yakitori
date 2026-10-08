@@ -1969,39 +1969,45 @@ async function executeTurnModelLoop(
       }
       continuingAnswer = false
 
+      // Stop hooks may await or request another step. Keep admission open
+      // until their decision and context writes are complete, then atomically
+      // consume any steering that arrived during the hook or finish the Turn.
+      pendingSteering.push(...input.control.takeSteering())
+      if (pendingSteering.length > 0) continue
+      if (reason === undefined) {
+        const stopHook = await input.options.hookRunner?.run({
+          event:
+            input.options.sessionHookContext?.isSubagent === true
+              ? HookEvent.SubagentStop
+              : HookEvent.Stop,
+          payload: {
+            session_id: metadata.id,
+            turn_id: input.input.submissionId,
+          },
+          cwd: workspaceRoot,
+          signal: input.signal,
+        })
+        if (stopHook?.continue === false) {
+          await recordHookContext(input.runtime, input.input.submissionId, [
+            ...(stopHook.additionalContext ?? []),
+            stopHook.reason ?? "Stop hook requested another model step.",
+          ])
+          answerItemIds.length = 0
+          continuationReminderNeeded = true
+          continue
+        }
+        await recordHookContext(
+          input.runtime,
+          input.input.submissionId,
+          stopHook?.additionalContext ?? [],
+        )
+      }
       const completion = input.control.takeSteeringOrComplete()
       if (completion.type === "steering") {
         pendingSteering.push(...completion.inputs)
         continue
       }
-      if (reason !== undefined) return finish(reason)
-      const stopHook = await input.options.hookRunner?.run({
-        event:
-          input.options.sessionHookContext?.isSubagent === true
-            ? HookEvent.SubagentStop
-            : HookEvent.Stop,
-        payload: {
-          session_id: metadata.id,
-          turn_id: input.input.submissionId,
-        },
-        cwd: workspaceRoot,
-        signal: input.signal,
-      })
-      if (stopHook?.continue === false) {
-        await recordHookContext(input.runtime, input.input.submissionId, [
-          ...(stopHook.additionalContext ?? []),
-          stopHook.reason ?? "Stop hook requested another model step.",
-        ])
-        answerItemIds.length = 0
-        continuationReminderNeeded = true
-        continue
-      }
-      await recordHookContext(
-        input.runtime,
-        input.input.submissionId,
-        stopHook?.additionalContext ?? [],
-      )
-      return finish()
+      return finish(reason)
     } catch (error) {
       if (
         modelCalls === 0 &&

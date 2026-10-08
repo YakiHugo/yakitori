@@ -248,6 +248,91 @@ describe("live Session actor", () => {
     }
   })
 
+  it("drains an admitted tool result queued behind usage before interruption completes", async () => {
+    const store = new MemoryThreadStore()
+    const entered = deferred<TurnRuntime>()
+    const flushStarted = deferred<void>()
+    const releaseFlush = deferred<void>()
+    const hardAborted = deferred<void>()
+    const manager = createManager(
+      {
+        async run(runtime) {
+          entered.resolve(runtime)
+          await new Promise(() => {})
+        },
+        abort() {
+          hardAborted.resolve()
+        },
+      },
+      store,
+    )
+    try {
+      const thread = await manager.createThread()
+      await thread.startIfIdle({
+        submissionId: "turn_drain",
+        content: createUserInput("run"),
+      })
+      const runtime = await entered.promise
+      store.flushStarted = () => flushStarted.resolve()
+      store.flushBarrier = releaseFlush.promise
+      const usage = runtime.recordUsage({ inputTokens: 5, outputTokens: 2 })
+      await flushStarted.promise
+      const response = {
+        id: "result_drained",
+        turnId: "turn_drain",
+        createdAt: "2026-10-08T00:00:00.000Z",
+        item: {
+          role: "tool" as const,
+          toolCallId: "call_drained",
+          content: [{ type: "text" as const, text: "file changed" }],
+        },
+      }
+      const completion = {
+        type: "dynamic_tool_call" as const,
+        itemId: "tool_drained",
+        toolCallId: "call_drained",
+        name: "write_file",
+        input: {},
+        requiresPermission: false,
+        resultItemId: response.id,
+        content: { kind: "text" as const, text: "file changed" },
+      }
+      const committed = runtime.recordToolResult(response, completion).then(
+        () => "committed",
+        (error: unknown) => error,
+      )
+      await thread.interrupt("stop")
+      await hardAborted.promise
+      // Let finalization begin while both accepted mutations remain queued.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(thread.status).toBe(SessionStatus.Active)
+      releaseFlush.resolve()
+      await usage
+      expect(await committed).toBe("committed")
+      await nextEventOfType(thread, "turn.interrupted")
+      const items =
+        (await store.readThread(thread.id))?.rollout.map(({ item }) => item) ??
+        []
+      expect(items.slice(-3)).toEqual([
+        { type: "response_item", item: response },
+        { type: "item_completed", turnId: "turn_drain", item: completion },
+        {
+          type: "turn_completed",
+          turnId: "turn_drain",
+          outcome: "interrupted",
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+      ])
+      expect(thread.snapshot().context.history.at(-1)).toEqual(response)
+      await expect(
+        runtime.recordToolResult(response, completion),
+      ).rejects.toThrow("no longer active")
+    } finally {
+      releaseFlush.resolve()
+      await manager.shutdown()
+    }
+  })
+
   it("rejects a failed usage flush before the processor can start its next request", async () => {
     const store = new MemoryThreadStore()
     const errors: unknown[] = []

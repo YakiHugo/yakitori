@@ -87,6 +87,7 @@ type PendingWrite = {
   readonly entry: StoredRolloutItem
   readonly bytes: Buffer
   offset: number
+  needsRecovery: boolean
 }
 
 type LiveWriter = {
@@ -401,6 +402,7 @@ export class JsonlThreadStore implements ThreadStore {
         entry,
         bytes: Buffer.from(`${JSON.stringify(entry)}\n`),
         offset: 0,
+        needsRecovery: false,
       })
     }
     const endSeqExclusive = writer.nextSeq
@@ -1353,28 +1355,32 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async #writePending(writer: LiveWriter, pending: PendingWrite) {
-    try {
-      return await writer.file.write(
-        pending.bytes,
-        pending.offset,
-        pending.bytes.length - pending.offset,
-      )
-    } catch {
-      const committed = await this.#recoverWriterAfterWriteError(
-        writer,
-        pending,
-      )
-      if (committed) {
-        return {
-          bytesWritten: pending.bytes.length - pending.offset,
-          buffer: pending.bytes,
+    for (let attempt = 0; ; attempt += 1) {
+      // A failed retry can also have written bytes. Retain that uncertainty
+      // across append/flush calls until reconciliation and reopening succeed.
+      if (pending.needsRecovery) {
+        const committed = await this.#recoverWriterAfterWriteError(
+          writer,
+          pending,
+        )
+        pending.needsRecovery = false
+        if (committed) {
+          return {
+            bytesWritten: pending.bytes.length - pending.offset,
+            buffer: pending.bytes,
+          }
         }
       }
-      return writer.file.write(
-        pending.bytes,
-        pending.offset,
-        pending.bytes.length - pending.offset,
-      )
+      try {
+        return await writer.file.write(
+          pending.bytes,
+          pending.offset,
+          pending.bytes.length - pending.offset,
+        )
+      } catch (error) {
+        pending.needsRecovery = true
+        if (attempt === 1) throw error
+      }
     }
   }
 

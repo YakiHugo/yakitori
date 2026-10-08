@@ -3506,6 +3506,81 @@ describe("Turn processor", () => {
     ).toBe(true)
   })
 
+  it.each(["waiting", "continuing"] as const)(
+    "accepts steering while a Stop hook is %s",
+    async (phase) => {
+      const entered = deferred<void>()
+      const release = deferred<void>()
+      const requests: ModelRequest[] = []
+      let stops = 0
+      const runtime = await createRuntime(
+        async function* (request) {
+          requests.push(request)
+          if (phase === "continuing" && requests.length === 2) {
+            entered.resolve()
+            await release.promise
+          }
+          yield responseEvent(`answer ${requests.length}`)
+        },
+        createToolRegistry([]),
+        {
+          hookRunner: {
+            async dispose() {},
+            async run(request) {
+              if (request.event !== HookEvent.Stop)
+                return { continue: true, additionalContext: [] }
+              stops += 1
+              if (stops === 1) {
+                if (phase === "waiting") {
+                  entered.resolve()
+                  await release.promise
+                }
+                return {
+                  continue: phase === "waiting",
+                  reason: "Verify the result before stopping.",
+                  additionalContext: [],
+                }
+              }
+              return { continue: true, additionalContext: [] }
+            },
+          },
+        },
+      )
+      const thread = await runtime.createThread()
+      const started = await thread.startIfIdle({
+        content: inputFixture([{ type: "text", text: "start" }]),
+      })
+      if (started.type !== "started") throw new Error("Turn did not start.")
+      try {
+        await entered.promise
+        await expect(
+          thread.steer(
+            {
+              content: inputFixture([
+                { type: "text", text: "Check the additional requirement" },
+              ]),
+            },
+            started.turnId,
+          ),
+        ).resolves.toMatchObject({ type: "steered" })
+      } finally {
+        release.resolve()
+      }
+      const expectedCalls = phase === "waiting" ? 2 : 3
+      await expect.poll(() => thread.agentStatus).toEqual({
+        completed: `answer ${expectedCalls}`,
+      })
+      expect(requests).toHaveLength(expectedCalls)
+      expect(JSON.stringify(requests.at(-1)?.messages)).toContain(
+        "Check the additional requirement",
+      )
+      const stored = await runtime.store.readThread(thread.id)
+      expect(
+        stored?.rollout.filter(({ item }) => item.type === "turn_started"),
+      ).toHaveLength(1)
+    },
+  )
+
   it("does not record steering rejected by its prompt hook", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
