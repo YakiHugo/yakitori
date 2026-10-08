@@ -20,7 +20,7 @@ async function fixture() {
   const requests: { key: string | undefined; path: string | undefined }[] = []
   const endpoint = createServer((request, response) => {
     requests.push({ key: request.headers.authorization, path: request.url })
-    if (request.url === "/v1/models") {
+    if (request.url?.split("?")[0] === "/v1/models") {
       response.writeHead(status, { "content-type": "application/json" })
       response.end(JSON.stringify({ data: models }))
       return
@@ -321,4 +321,58 @@ it("does not carry a connection's successful status to a changed endpoint from t
   })
   await f.service.reload()
   expect((await f.service.read()).providers[0]?.connection).toBeUndefined()
+})
+
+it("refreshes with current discovery semantics after a preset-only change", async () => {
+  const f = await fixture()
+  await f.service.write({
+    id: "personal",
+    configuration: f.configuration,
+    apiKey: "same-key",
+  })
+  await f.service.write({
+    id: "personal",
+    configuration: {
+      ...f.configuration,
+      preset: "siliconflow",
+      models: [{ id: "coder" }],
+    },
+  })
+  await f.service.refreshModels("personal")
+  expect(f.requests.at(-1)).toEqual({
+    key: "Bearer same-key",
+    path: "/v1/models?sub_type=chat",
+  })
+  const restarted = f.create()
+  await restarted.service.reload()
+  await restarted.service.write({
+    id: "personal",
+    configuration: { ...f.configuration, models: [{ id: "coder" }] },
+  })
+  await restarted.service.refreshModels("personal")
+  expect(f.requests.at(-1)?.path).toBe("/v1/models")
+})
+
+it("refreshes auth headers when no-key mode changes without changing the stored key", async () => {
+  const f = await fixture()
+  // API keys are opaque: this value is also the no-key mode placeholder.
+  await f.service.write({
+    id: "personal",
+    configuration: { ...f.configuration, noKey: true },
+    apiKey: "local-no-key",
+  })
+  expect(f.requests.at(-1)?.key).toBeUndefined()
+  await f.service.write({
+    id: "personal",
+    configuration: {
+      ...f.configuration,
+      noKey: false,
+      models: [{ id: "coder" }],
+    },
+  })
+  await f.service.refreshModels("personal")
+  expect(f.requests.at(-1)).toEqual({
+    key: "Bearer local-no-key",
+    path: "/v1/models",
+  })
 })

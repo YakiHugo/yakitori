@@ -757,15 +757,13 @@ export class Session {
     active: ActiveTurn,
     error: unknown,
   ): Promise<void> {
+    active.finishing = true
+    active.acceptingSteering = false
     if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
     try {
       await this.#store.flushThread(this.id)
     } catch (recoveryError) {
       this.#reportPersistenceError(recoveryError)
-    }
-    if (this.#activeTurn === active) {
-      this.#activeTurn = undefined
-      if (!this.#closing) this.#setStatus(SessionStatus.Idle, "failed")
     }
     try {
       await this.#recordAgentFailure(
@@ -773,6 +771,10 @@ export class Session {
       )
     } catch (failureError) {
       this.#reportPersistenceError(failureError)
+    } finally {
+      // Keep ownership until the failure status is settled, as for a started
+      // Turn; otherwise it can overwrite a newly admitted Turn's status.
+      this.#releaseTurn(active, "failed")
     }
   }
 

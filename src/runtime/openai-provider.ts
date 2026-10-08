@@ -283,7 +283,7 @@ async function* streamOpenAI(
           event.type === "response.incomplete" ||
           event.type === "response.failed"
         )
-          event.response.output.forEach(requireChatGPTPlanNamespace)
+          event.response.output?.forEach(requireChatGPTPlanNamespace)
       }
       // Cancellation suppresses content, not accounting already delivered by
       // the provider. Tool completion may abort a queued warmup terminal event.
@@ -446,7 +446,10 @@ async function* streamOpenAI(
         event.type === "response.incomplete" ||
         event.type === "response.failed"
       ) {
-        if (warmup && event.response.output.length !== 0)
+        // Failed Responses envelopes may omit output and carry null usage.
+        // Codex also sends completed items separately from terminal metadata.
+        const terminalOutput = event.response.output ?? []
+        if (warmup && terminalOutput.length !== 0)
           throw new OpenAIProtocolError(
             "Non-generating warmup unexpectedly produced output.",
           )
@@ -468,11 +471,11 @@ async function* streamOpenAI(
             }),
         )
         const authoritativeIds = new Set(
-          [...completedItems.values(), ...event.response.output].map(
+          [...completedItems.values(), ...terminalOutput].map(
             (item) => item.id,
           ),
         )
-        for (const [index, item] of event.response.output.entries()) {
+        for (const [index, item] of terminalOutput.entries()) {
           if (completedIds.has(outputItemId(item) ?? "")) continue
           const knownIndex = [...outputByIndex].find(
             ([, known]) => outputItemId(known) === outputItemId(item),
@@ -1297,7 +1300,7 @@ function responseResult(
   return {
     stopReason,
     content,
-    ...(response.usage === undefined
+    ...(response.usage == null
       ? {}
       : {
           usage: {
@@ -1358,7 +1361,7 @@ function responseFailure(
       providerRequestId: response.id,
       fallbackMessage: "OpenAI request failed.",
     }),
-    ...(response.usage === undefined
+    ...(response.usage == null
       ? {}
       : {
           usage: responseResult(response, ModelStopReason.EndTurn, [], provider)

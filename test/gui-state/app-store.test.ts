@@ -4984,3 +4984,62 @@ function requestedInputContent(requestId: string): InputContent {
   if (!request) throw new Error("Missing test input request")
   return structuredClone((request.params as { content: InputContent }).content)
 }
+
+it.each([
+  "success",
+  "failure",
+] as const)("keeps the latest usage read when an older %s completes after settings are reopened", async (outcome) => {
+  const older = deferredResponse()
+  const newer = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method !== "usage/read") return notFound()
+    return fakeRef.current.requestsFor("usage/read").length === 1
+      ? older.promise
+      : newer.promise
+  }
+  const oldRead = useAppStore.getState().loadUsage()
+  const newRead = useAppStore.getState().loadUsage()
+  const usage = {
+    generatedAt: "2026-10-08T15:00:00Z",
+    totals: {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      turns: 1,
+    },
+    days: [],
+    models: [],
+    modelDays: [],
+    threads: [],
+  }
+  newer.resolve({ usage })
+  await newRead
+  if (outcome === "failure") older.reject(new Error("Old usage failed"))
+  else
+    older.resolve({
+      usage: { ...usage, generatedAt: "2026-10-08T14:00:00Z" },
+    })
+  await oldRead
+  expect(useAppStore.getState().usage).toEqual({
+    summary: usage,
+    loading: false,
+  })
+})
+
+it("ignores a superseded queue read failure after the latest queue refresh succeeds", async () => {
+  const older = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method !== "session/queue/list") return notFound()
+    return fakeRef.current.requestsFor(method).length === 1
+      ? older.promise
+      : { items: [] }
+  }
+  useAppStore.setState({ selection: { sessionId: "session_1" } })
+  const oldRead = useAppStore.getState().refreshQueuedInputs()
+  await useAppStore.getState().refreshQueuedInputs()
+  older.reject(new Error("Superseded queue read failed"))
+  await oldRead
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(useAppStore.getState().queuedItems).toEqual([])
+})

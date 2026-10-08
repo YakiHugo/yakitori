@@ -399,6 +399,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
   }
   let projectChangesSubscribedClient: AppRpcClient | undefined
   let providersReadRevision = 0
+  let usageReadRevision = 0
   let queueReadRevision = 0
   const runTask = async (
     task: () => Promise<void>,
@@ -2660,7 +2661,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           inputRecoveryMemory.acknowledgeAdmission(admission)
         }
       } catch (error) {
-        if (isCurrentSelection(selection))
+        if (isCurrentSelection(selection) && revision === queueReadRevision)
           set({ message: errorMessage(error, "Could not load queued inputs.") })
       }
     },
@@ -2983,6 +2984,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
     loadUsage: async () => {
       const apiBase = get().apiBase
+      const revision = ++usageReadRevision
       set((state) => ({
         usage: {
           ...(state.usage.summary === undefined
@@ -2996,10 +2998,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
           "usage/read",
           {},
         )
-        if (apiBase !== get().apiBase) return
+        if (apiBase !== get().apiBase || revision !== usageReadRevision) return
         set({ usage: { summary: response.usage, loading: false } })
       } catch (error) {
-        if (apiBase !== get().apiBase) return
+        if (apiBase !== get().apiBase || revision !== usageReadRevision) return
         set((state) => ({
           usage: {
             ...(state.usage.summary === undefined

@@ -104,7 +104,14 @@ export function createProviderService(
     configuration: ProviderConfiguration,
     key: string,
   ) => {
-    const identity = `${createProviderContinuationScope(id, configuration.baseURL, key)}:${configuration.wireApi}`
+    // Discovery semantics also depend on preset filtering/metadata and whether
+    // the no-key placeholder is omitted from request headers.
+    const identity = JSON.stringify([
+      createProviderContinuationScope(id, configuration.baseURL, key),
+      configuration.wireApi,
+      configuration.preset ?? null,
+      configuration.noKey === true,
+    ])
     let catalog = catalogs.get(identity)
     if (!catalog) {
       catalog = createProviderModelCatalog({

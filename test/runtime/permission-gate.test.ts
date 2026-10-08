@@ -111,3 +111,49 @@ describe("permission gate", () => {
     expect(gate.list("session_abort")).toEqual([])
   })
 })
+
+it("cleans up a request when publishing its admission fails", async () => {
+  const failure = new Error("permission observer failed")
+  const gate = createPermissionGate({
+    publish: () => {
+      throw failure
+    },
+  })
+  await expect(
+    gate.request({
+      sessionId: "session_publish",
+      turnId: "turn_publish",
+      toolCallId: "tool_publish",
+      action: "file_change",
+      timeoutMs: 10_000,
+    }),
+  ).rejects.toBe(failure)
+  expect(gate.list("session_publish")).toEqual([])
+})
+
+it("rejects the permission wait when publishing its decision fails", async () => {
+  const failure = new Error("decision observer failed")
+  const gate = createPermissionGate({
+    publish: (event) => {
+      if (event.type === "permission.resolved") throw failure
+    },
+  })
+  const outcome = gate.request({
+    sessionId: "session_decision",
+    turnId: "turn_decision",
+    toolCallId: "tool_decision",
+    action: "file_change",
+    timeoutMs: 10_000,
+  })
+  const result = expect(outcome).rejects.toBe(failure)
+  const request = gate.list("session_decision")[0]
+  if (!request) throw new Error("Missing permission")
+  gate.resolve({
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    permissionRequestId: request.permissionRequestId,
+    behavior: "allow",
+  })
+  await result
+  expect(gate.list("session_decision")).toEqual([])
+})

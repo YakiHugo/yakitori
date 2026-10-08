@@ -73,7 +73,7 @@ export function createPermissionGate(
         createdAt: new Date().toISOString(),
       }
 
-      return new Promise<RuntimePermissionOutcome>((resolve) => {
+      return new Promise<RuntimePermissionOutcome>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined
         const onAbort = () => {
           settle({
@@ -97,9 +97,13 @@ export function createPermissionGate(
             ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
             createdAt: new Date().toISOString(),
           }
-          options.publish?.(event)
-          input.publish?.(event)
-          resolve(outcome)
+          try {
+            options.publish?.(event)
+            input.publish?.(event)
+            resolve(outcome)
+          } catch (error) {
+            reject(error)
+          }
         }
 
         pending.set(permissionRequestId, { ...request, settle })
@@ -107,8 +111,14 @@ export function createPermissionGate(
           type: "permission.requested",
           ...request,
         }
-        options.publish?.(event)
-        input.publish?.(event)
+        try {
+          options.publish?.(event)
+          input.publish?.(event)
+        } catch (error) {
+          pending.delete(permissionRequestId)
+          reject(error)
+          return
+        }
         // A synchronous observer may decide immediately while handling the
         // requested notification. Do not install an orphaned timer afterward.
         if (!pending.has(permissionRequestId)) return
