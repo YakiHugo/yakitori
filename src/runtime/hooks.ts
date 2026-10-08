@@ -129,16 +129,14 @@ async function runCommandHook(
   handler: HookHandler,
   request: HookRequest,
 ): Promise<HookOutcome> {
-  if (request.signal?.aborted)
+  if (request.signal?.aborted === true)
     throw new DOMException("The operation was aborted.", "AbortError")
   const child = spawn(process.env.SHELL ?? "/bin/sh", ["-c", handler.command], {
     cwd: request.cwd,
+    detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
   })
-  child.stdin.end(
-    `${JSON.stringify({ hook_event_name: request.event, ...request.payload })}\n`,
-  )
   let stdout = ""
   let stderr = ""
   child.stdout.setEncoding("utf8")
@@ -154,38 +152,70 @@ async function runCommandHook(
     (resolve, reject) => {
       let terminationError: Error | undefined
       let forceKill: ReturnType<typeof setTimeout> | undefined
-      const timeout = setTimeout(() => {
-        terminationError = new Error(
+      let closed = false
+      let exitCode: number | null = null
+      const signalProcess = (signal: NodeJS.Signals) => {
+        try {
+          if (process.platform !== "win32" && child.pid !== undefined) {
+            process.kill(-child.pid, signal)
+          } else {
+            child.kill(signal)
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+      const finish = () => {
+        if (!closed || forceKill !== undefined) return
+        cancelTimeout()
+        request.signal?.removeEventListener("abort", onAbort)
+        if (terminationError !== undefined) reject(terminationError)
+        else resolve({ code: exitCode })
+      }
+      const cancelTimeout = scheduleHookTimeout(timeoutMs, () => {
+        terminationError ??= new Error(
           `${request.event} hook timed out after ${timeoutMs}ms.`,
         )
-        child.kill("SIGKILL")
-      }, timeoutMs)
-      timeout.unref()
+        if (forceKill !== undefined) clearTimeout(forceKill)
+        forceKill = undefined
+        signalProcess("SIGKILL")
+        finish()
+      })
       const onAbort = () => {
+        if (terminationError !== undefined) return
         terminationError = new DOMException(
           "The operation was aborted.",
           "AbortError",
         )
-        child.kill("SIGTERM")
+        signalProcess("SIGTERM")
+        // A descendant may ignore SIGTERM after the shell exits and closes its
+        // pipes. Keep ownership through escalation, not just the leader's exit.
         forceKill = setTimeout(() => {
-          if (child.exitCode === null) child.kill("SIGKILL")
+          forceKill = undefined
+          signalProcess("SIGKILL")
+          finish()
         }, 1_000)
-        forceKill.unref()
       }
       request.signal?.addEventListener("abort", onAbort, { once: true })
       child.once("error", (error) => {
-        clearTimeout(timeout)
-        if (forceKill !== undefined) clearTimeout(forceKill)
-        request.signal?.removeEventListener("abort", onAbort)
-        reject(error)
+        terminationError ??= error
       })
-      child.once("exit", (code) => {
-        clearTimeout(timeout)
-        if (forceKill !== undefined) clearTimeout(forceKill)
-        request.signal?.removeEventListener("abort", onAbort)
-        if (terminationError !== undefined) reject(terminationError)
-        else resolve({ code })
+      child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        // Hooks are allowed to finish without consuming their input.
+        if (error.code === "EPIPE") return
+        terminationError ??= error
+        signalProcess("SIGKILL")
       })
+      // Like wait_with_output in the reference runners, completion includes
+      // draining inherited pipes. A shell's exit alone does not end ownership.
+      child.once("close", (code) => {
+        closed = true
+        exitCode = code
+        finish()
+      })
+      child.stdin.end(
+        `${JSON.stringify({ hook_event_name: request.event, ...request.payload })}\n`,
+      )
       if (request.signal?.aborted === true) onAbort()
     },
   )
@@ -238,6 +268,29 @@ async function runCommandHook(
       ? {}
       : { updatedInput: asJsonValue(hookSpecific.updatedInput) }),
   }
+}
+
+// Node truncates larger delays to 1ms. Preserve the configured deadline by
+// scheduling bounded chunks against a monotonic clock, without capping it.
+function scheduleHookTimeout(
+  timeoutMs: number,
+  expire: () => void,
+): () => void {
+  const deadline = performance.now() + timeoutMs
+  let timer: ReturnType<typeof setTimeout>
+  const schedule = () => {
+    const remaining = deadline - performance.now()
+    timer = setTimeout(
+      () => {
+        if (performance.now() < deadline) schedule()
+        else expire()
+      },
+      Math.min(remaining, 2_147_483_647),
+    )
+    timer.unref()
+  }
+  schedule()
+  return () => clearTimeout(timer)
 }
 
 function hasTrustedHash(handler: HookHandler): boolean {
