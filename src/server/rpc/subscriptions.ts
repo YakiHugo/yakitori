@@ -84,7 +84,10 @@ export function createSessionSubscriptions(
   // One pending answer channel per permission request, shared by every
   // subscribed connection: the permission.requested publication fans out per
   // connection, so registration dedupes on sessionId:permissionRequestId.
-  const pendingPermissionRequests = new Map<string, PendingServerRequest>()
+  const pendingPermissionRequests = new Map<
+    string,
+    PendingServerRequest & { params: SessionPermissionRequestParams }
+  >()
 
   function ensurePermissionRequest(
     sessionId: string,
@@ -99,7 +102,7 @@ export function createSessionSubscriptions(
       method: sessionPermissionRequestMethod,
       params,
     })
-    const request: PendingServerRequest = {
+    const request = {
       id: registered.id,
       method: sessionPermissionRequestMethod,
       params,
@@ -203,6 +206,22 @@ export function createSessionSubscriptions(
     }
   }
 
+  function retirePermissionsForTurn(sessionId: string, turnId: string): void {
+    for (const [key, request] of pendingPermissionRequests) {
+      if (
+        request.params.sessionId !== sessionId ||
+        request.params.turnId !== turnId
+      )
+        continue
+      pendingPermissionRequests.delete(key)
+      options.pendingRequests.reject(request.id, {
+        code: INTERNAL_ERROR,
+        message: "client request resolved because the turn state was changed",
+        data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
+      })
+    }
+  }
+
   function remove(connectionId: number, sessionId: string): void {
     const set = bySession.get(sessionId)
     const entry = set?.get(connectionId)
@@ -228,6 +247,8 @@ export function createSessionSubscriptions(
       if (closed) return
       if (delivery.kind === "durable") {
         for (const event of delivery.events) {
+          if (isKernelEvent(event) && event.type === "turn.completed")
+            retirePermissionsForTurn(input.sessionId, event.data.turnId)
           // Events published between the snapshot read and the replay can
           // arrive through the buffer as well; the cursor dedupes them.
           if (event.seq <= lastSeq) continue
@@ -240,6 +261,9 @@ export function createSessionSubscriptions(
         }
         return
       }
+      // Runtime termination also retires requests when persistence failed.
+      if (delivery.event.type === "turn.finished")
+        retirePermissionsForTurn(input.sessionId, delivery.event.turnId)
       // Transient events never carry a durable cursor.
       if (delivery.event.type === "permission.requested") {
         // The same publication fans out to every subscribed connection; the

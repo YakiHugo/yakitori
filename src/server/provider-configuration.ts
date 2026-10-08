@@ -314,6 +314,7 @@ export function providersFromConfig(
         models: record.models,
         noKey: record.no_key,
         enabled: record.enabled,
+        requestWarmup: record.request_warmup,
         modelSelection: record.model_selection,
       })
       const credentialRef =
@@ -364,6 +365,9 @@ export function providerConfigValue(
     ...(configuration.enabled === undefined
       ? {}
       : { enabled: configuration.enabled }),
+    ...(configuration.requestWarmup === undefined
+      ? {}
+      : { request_warmup: configuration.requestWarmup }),
     ...(configuration.preset === undefined
       ? {}
       : { preset: configuration.preset }),

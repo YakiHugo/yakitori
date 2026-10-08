@@ -863,10 +863,12 @@ export async function createYakitoriApplication(
                     context.signal?.throwIfAborted()
                     if (context.turnId === undefined)
                       throw new Error("Computer use requires an active turn.")
-                    if (
-                      computerOwner !== undefined &&
-                      computerOwner !== context.turnId
-                    )
+                    // Request IDs are scoped to a session, not the process.
+                    const owner = JSON.stringify([
+                      stored.metadata.id,
+                      context.turnId,
+                    ])
+                    if (computerOwner !== undefined && computerOwner !== owner)
                       return {
                         ok: false,
                         code: "computer_busy",
@@ -875,7 +877,7 @@ export async function createYakitoriApplication(
                         content:
                           "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
                       }
-                    computerOwner = context.turnId
+                    computerOwner = owner
                     return tool.execute(input, context)
                   },
                 })),
@@ -1046,12 +1048,15 @@ export async function createYakitoriApplication(
           return {
             ...running,
             completion: running.completion.finally(async () => {
-              if (computerOwner !== input.submissionId) return
+              const owner = JSON.stringify([
+                stored.metadata.id,
+                input.submissionId,
+              ])
+              if (computerOwner !== owner) return
               try {
                 await mcpManager.finishTurn()
               } finally {
-                if (computerOwner === input.submissionId)
-                  computerOwner = undefined
+                if (computerOwner === owner) computerOwner = undefined
               }
             }),
           }

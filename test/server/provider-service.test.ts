@@ -51,6 +51,47 @@ const configuration = {
 } as const
 
 describe("provider configuration", () => {
+  it("preserves explicit request warmup through saved configuration and reload", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              data: [{ id: "gpt-test" }],
+            }),
+          ),
+      ),
+    )
+    const { service, userConfig, configPath } = await fixture()
+    const saved = await service.write({
+      id: "warmup",
+      configuration: {
+        name: "OpenAI warmup",
+        wireApi: "openai_responses",
+        baseURL: "https://api.openai.com/v1",
+        requestWarmup: true,
+        models: [{ id: "gpt-test" }],
+      },
+      apiKey: "fixture-key",
+    })
+    expect(saved.providers[0]?.configuration.requestWarmup).toBe(true)
+    expect(await readFile(configPath, "utf8")).toContain(
+      "request_warmup = true",
+    )
+    expect(
+      (await userConfig.readConfiguration()).modelProviders?.warmup
+        ?.requestWarmup,
+    ).toBe(true)
+    const providers = await service.reload()
+    const turn = providers.warmup?.startTurn()
+    try {
+      expect(turn?.warmup).toBeTypeOf("function")
+    } finally {
+      await turn?.close()
+    }
+  })
+
   it("uses documented preset models only when the official catalog endpoint is unsupported", async () => {
     const preset = providerPresets.find((entry) => entry.id === "minimax")
     if (!preset) throw new Error("Missing preset")

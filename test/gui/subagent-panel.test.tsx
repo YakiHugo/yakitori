@@ -592,3 +592,25 @@ it("retries a terminal subscription failure from the last durable cursor", () =>
   expect(screen.queryByRole("alert")).toBeNull()
   expect(screen.getByText("Review the renderer")).toBeDefined()
 })
+
+it("suspends a disconnected child trace and resumes after automatic replay", () => {
+  mount()
+  act(start)
+  act(() =>
+    stream.disconnect(new Error("The connection to the server was lost.")),
+  )
+  expect(screen.getByRole("alert").textContent).toContain(
+    "The connection to the server was lost.",
+  )
+  expect(screen.queryByText("Working")).toBeNull()
+  expect(stream.closed).toBe(false)
+  act(() => {
+    stream.emitSnapshot({
+      session: { ...snapshot, seq: 2, activeTurnId: "turn" },
+    })
+    stream.emitReplayComplete()
+  })
+  expect(screen.queryByRole("alert")).toBeNull()
+  expect(screen.getByText("Working")).toBeDefined()
+  expect(screen.getByText("Review the renderer")).toBeDefined()
+})

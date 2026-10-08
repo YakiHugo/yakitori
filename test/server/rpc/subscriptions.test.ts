@@ -1104,6 +1104,50 @@ describe("session/permission/request", () => {
     await processor.closeConnection(reconnecting.id)
   })
 
+  it.each([
+    "durable",
+    "transient",
+  ] as const)("retires unanswered permissions when their turn finishes via %s delivery", async (kind) => {
+    const { processor, eventHub, resolveCalls } = permissionSetup({})
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/replayComplete",
+    )
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
+    const request = permissionRequests(connection)[0]
+    expect(request).toBeDefined()
+    expect(processor.pendingServerRequests.size).toBe(1)
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_2", "perm_2"),
+    )
+    expect(processor.pendingServerRequests.size).toBe(2)
+    if (kind === "durable")
+      eventHub.publishDurable([makeTurnCompleted(sessionId, 1, "turn_1")])
+    else
+      eventHub.publishTransient({
+        type: "turn.finished",
+        sessionId,
+        turnId: "turn_1",
+        outcome: { status: "interrupted" },
+        createdAt: "2026-09-17T00:00:00.000Z",
+      })
+    await flush()
+    expect(
+      processor.pendingServerRequests.pendingForSession(sessionId),
+    ).toMatchObject([
+      { params: { turnId: "turn_2", permissionRequestId: "perm_2" } },
+    ])
+    connection.sendRaw(
+      JSON.stringify({ id: request?.id, result: { behavior: "allow" } }),
+    )
+    await flush()
+    expect(resolveCalls).toEqual([])
+  })
+
   it("prunes pending requests the snapshot no longer lists, without resolving", async () => {
     const permission = makePendingPermission({ permissionRequestId: "perm_1" })
     let snapshotPermissions = [permission]

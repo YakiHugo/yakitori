@@ -2793,6 +2793,53 @@ describe("model selection", () => {
     ).toEqual(inputParts("", [promoted]).attachments)
   })
 
+  it("preserves promoted attachment ownership in drafts parked during admission", async () => {
+    const original = {
+      name: "screen.png",
+      mediaType: "image/png" as const,
+      sizeBytes: 9,
+      file: {
+        rolloutId: "draft_parked",
+        path: "attachments/staging/parked/1.png",
+      },
+    }
+    const promoted = {
+      ...original,
+      file: {
+        rolloutId: "session_1",
+        path: "attachments/requests/parked/1.png",
+      },
+    }
+    const response = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input") return response.promise
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts("first message", [original]),
+    })
+    const submission = useAppStore
+      .getState()
+      .admitInput(inputParts("first message", [original]))
+    useAppStore
+      .getState()
+      .setPromptDraft(inputParts("next message", [original]))
+    await useAppStore.getState().selectSession("session_2")
+    const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+    }
+    response.resolve({
+      requestId: request.requestId,
+      content: inputFixture(inputParts("first message", [promoted])),
+    })
+    await submission
+    await useAppStore.getState().selectSession("session_1")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("next message", [promoted]),
+    )
+  })
+
   it("clears an attachment-only draft after admission", async () => {
     globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder(() =>

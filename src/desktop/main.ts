@@ -288,8 +288,7 @@ async function loadWithRetry(
       if (window.isDestroyed()) return
       if (attempt === maxLoadAttempts) {
         console.error(`yakitori: giving up loading ${targetUrl}`, error)
-        app.exit(1)
-        return
+        throw error
       }
       await new Promise<void>((resolve) => {
         setTimeout(resolve, loadRetryDelayMs)
