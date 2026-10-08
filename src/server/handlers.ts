@@ -17,8 +17,8 @@ import {
 import type { ThreadManager } from "../core/thread-manager.ts"
 import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
 import {
-  createUserInput,
   inputContentAttachments,
+  inputContentFromModelMessage,
   inputContentText,
   isInputContent,
   replaceInputAttachments,
@@ -2466,34 +2466,10 @@ function turnIdForInput(stored: StoredThread, inputId: string): string {
 function modelUserInputContent(
   message: import("../kernel/events.ts").ModelUserMessage,
 ): InputContent {
-  return createUserInput(
-    message.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join(""),
-    message.content.flatMap(
-      (block): import("../core/asset-types.ts").UserAttachment[] => {
-        if (block.type === "text") return []
-        if (block.file === undefined || block.sizeBytes === undefined)
-          throw invalidInput(
-            "Input attachments require portable asset sources.",
-          )
-        return [
-          {
-            name: block.name ?? "image",
-            mediaType: block.mediaType,
-            sizeBytes: block.sizeBytes,
-            file: block.file,
-            ...(block.type === "image"
-              ? { detail: block.detail ?? "high" }
-              : {}),
-          },
-        ]
-      },
-    ),
-    [],
-    message.contextAttachments,
-  )
+  const content = inputContentFromModelMessage(message)
+  if (content === undefined)
+    throw invalidInput("Input attachments require portable asset sources.")
+  return content
 }
 
 function requireRolloutAssets(

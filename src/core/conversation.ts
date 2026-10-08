@@ -46,8 +46,6 @@ export type ModelReasoningBlock = Readonly<{
 }>
 // Opaque history owned by one provider/account. Convert it through that owner
 // before a cross-provider handoff; dropping it would silently lose context.
-// Opaque history owned by one provider/account. Convert it through that owner
-// before a cross-provider handoff; dropping it would silently lose context.
 export type ModelCompactionBlock = Readonly<{
   type: "compaction"
   provider: string
@@ -136,7 +134,6 @@ export type FileObservation = Readonly<{
   created?: boolean
   optimisticRebase?: boolean
 }>
-// Tool content is data, not an assistant continuation or a host/UI metadata channel.
 // Tool content is data, not an assistant continuation or a host/UI metadata channel.
 export type ModelToolContentBlock =
   | Readonly<{

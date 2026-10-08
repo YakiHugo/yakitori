@@ -131,7 +131,7 @@ describe("user input", () => {
     expect(() => replaceInputAttachments(input, [])).toThrow("do not match")
   })
 
-  it("uses text-only developer input for goals and rejects old input shapes", () => {
+  it("uses text-only developer input for goals and rejects old live input shapes", () => {
     expect(
       inputContentToModelMessage(createUserInput("finish the task"), "goal_1"),
     ).toEqual({
@@ -142,8 +142,58 @@ describe("user input", () => {
     expect(() =>
       inputContentToModelMessage(createUserInput("inspect", [image]), "goal_1"),
     ).toThrow("only text")
-    expect(() => readStoredInputContent({ kind: "parts", parts: [] })).toThrow(
-      "Invalid stored",
+    expect(isInputContent({ kind: "parts", parts: [] })).toBe(false)
+    expect(isInputContent({ kind: "text", text: "old" })).toBe(false)
+  })
+
+  it("restores retired input shapes only at the storage boundary", () => {
+    expect(readStoredInputContent({ kind: "parts", parts: [] })).toEqual(
+      createUserInput(""),
     )
+    expect(readStoredInputContent({ kind: "text", text: "old" })).toEqual(
+      createUserInput("old"),
+    )
+    for (const parts of [
+      [{ type: "audio", data: "unsupported" }],
+      [{ type: "text", text: "old", hidden: "extra" }],
+      [{ type: "image", ...image, sizeBytes: -1 }],
+    ])
+      expect(() => readStoredInputContent({ kind: "parts", parts })).toThrow(
+        "Invalid stored input",
+      )
+    expect(() =>
+      readStoredInputContent({
+        kind: "text",
+        text: "old",
+        attachments: [null],
+      }),
+    ).toThrow("Invalid stored input")
+  })
+
+  it("restores a stored document atom with its source and UTF-16 position", () => {
+    const document = {
+      name: "report.pdf",
+      mediaType: "application/pdf",
+      sizeBytes: 42,
+      file: {
+        rolloutId: "rollout_saved",
+        path: "attachments/requests/saved/0.pdf",
+      },
+    }
+    expect(
+      readStoredInputContent({
+        kind: "parts",
+        parts: [
+          { type: "text", text: "👀" },
+          { type: "document", ...document },
+          { type: "text", text: "inspect" },
+        ],
+      }),
+    ).toEqual({
+      kind: "input",
+      text: "👀[Document 1]inspect",
+      elements: [{ startOffset: 2, endOffset: 14, attachmentIndex: 0 }],
+      attachments: [document],
+    })
   })
 })

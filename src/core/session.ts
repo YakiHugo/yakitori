@@ -42,7 +42,7 @@ import {
   type RolloutAppend,
   type SessionRolloutStore,
 } from "./thread-store.ts"
-import { createUserInput } from "./user-input.ts"
+import { createUserInput, inputContentFromModelMessage } from "./user-input.ts"
 
 export type { TurnCompletion } from "../kernel/events.ts"
 
@@ -197,6 +197,7 @@ export class Session {
     string,
     Readonly<{
       fingerprint: string | undefined
+      restoredFingerprint?: string
       inputItemId: string
       turnId: string
     }>
@@ -235,6 +236,13 @@ export class Session {
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
     this.#configuration = latestConfiguration(input.stored)
     this.#agentStatus = agentStatusFromStoredThread(input.stored)
+    const recordedInputs = new Map(
+      input.stored.rollout.flatMap((record) =>
+        record.item.type === "response_item"
+          ? [[record.item.item.id, record.item.item] as const]
+          : [],
+      ),
+    )
     let recordedTurnId: string | undefined
     for (const record of input.stored.rollout) {
       if (record.item.type === "agent_message") {
@@ -247,12 +255,15 @@ export class Session {
           record.item.item,
           recordedTurnId ?? record.item.item.turnId,
         )
-      if (
-        record.item.type === "turn_started" &&
-        record.item.requestFingerprint !== undefined
-      ) {
+      if (record.item.type === "turn_started") {
+        const recorded = recordedInputs.get(record.item.inputItemId)
+        const restoredFingerprint =
+          recorded === undefined || record.item.requestFingerprint === undefined
+            ? undefined
+            : recordedInputFingerprint(recorded, record.item.requestFingerprint)
         this.#submittedInputs.set(record.item.turnId, {
           fingerprint: record.item.requestFingerprint,
+          ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
           inputItemId: record.item.inputItemId,
           turnId: record.item.turnId,
         })
@@ -424,8 +435,16 @@ export class Session {
     // Older steering envelopes identify their request but did not persist its
     // fingerprint; reserve that ID and report a conflict rather than guessing
     // intent from lossy legacy model content and repeating its effects.
+    const restoredFingerprint =
+      item.submissionMetadata?.requestFingerprint === undefined
+        ? undefined
+        : recordedInputFingerprint(
+            item,
+            item.submissionMetadata.requestFingerprint,
+          )
     this.#submittedInputs.set(item.turnId, {
       fingerprint: item.submissionMetadata?.requestFingerprint,
+      ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
       inputItemId: item.id,
       turnId,
     })
@@ -438,7 +457,11 @@ export class Session {
     const fingerprint = fingerprintTurnInput(input)
     const submitted = this.#submittedInputs.get(input.submissionId)
     if (submitted !== undefined) {
-      if (submitted.fingerprint !== fingerprint) {
+      if (
+        submitted.fingerprint !== fingerprint &&
+        (submitted.restoredFingerprint === undefined ||
+          submitted.restoredFingerprint !== restoredInputFingerprint(input))
+      ) {
         return notSubmitted(Reason.RequestConflict)
       }
       return {
@@ -1410,6 +1433,58 @@ export class Session {
     )
     return result
   }
+}
+
+// Before drafts were persisted, model blocks and submission metadata retained
+// the input's meaning. The new draft folds empty/adjacent text blocks and makes
+// default image detail explicit. Compare that format only for restored IDs
+// that have an admission fingerprint; never infer identity for an unverified ID.
+function recordedInputFingerprint(
+  envelope: ResponseItemEnvelope,
+  admissionFingerprint: string,
+): string | undefined {
+  if (envelope.submissionMetadata?.content !== undefined) return undefined
+  const message = envelope.item
+  const content =
+    message.role === "user"
+      ? inputContentFromModelMessage(message)
+      : message.role === "developer" && message.context?.type === "goal"
+        ? createUserInput(message.content.map((block) => block.text).join(""))
+        : undefined
+  if (content === undefined) return undefined
+  return restoredInputFingerprint({
+    submissionId: envelope.turnId,
+    content,
+    ...(message.role === "developer" && message.context?.type === "goal"
+      ? { goalId: message.context.goalId }
+      : {}),
+    ...(admissionFingerprint.startsWith("compact:")
+      ? { manualCompact: true }
+      : {}),
+    ...(envelope.submissionMetadata?.modelSelection === undefined
+      ? {}
+      : { modelSelection: envelope.submissionMetadata.modelSelection }),
+    ...(envelope.submissionMetadata?.parentInputId === undefined
+      ? {}
+      : { parentInputId: envelope.submissionMetadata.parentInputId }),
+    ...(envelope.submissionMetadata?.metadata === undefined
+      ? {}
+      : { metadata: envelope.submissionMetadata.metadata }),
+  })
+}
+
+function restoredInputFingerprint(input: TurnInput): string {
+  return fingerprintTurnInput({
+    ...input,
+    content: {
+      ...input.content,
+      attachments: input.content.attachments.map((attachment) =>
+        attachment.mediaType === "application/pdf"
+          ? attachment
+          : { ...attachment, detail: attachment.detail ?? "high" },
+      ),
+    },
+  })
 }
 
 export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
