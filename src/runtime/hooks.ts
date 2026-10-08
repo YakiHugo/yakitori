@@ -129,6 +129,8 @@ async function runCommandHook(
   handler: HookHandler,
   request: HookRequest,
 ): Promise<HookOutcome> {
+  if (request.signal?.aborted)
+    throw new DOMException("The operation was aborted.", "AbortError")
   const child = spawn(process.env.SHELL ?? "/bin/sh", ["-c", handler.command], {
     cwd: request.cwd,
     stdio: ["pipe", "pipe", "pipe"],

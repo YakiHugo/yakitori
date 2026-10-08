@@ -105,6 +105,7 @@ export function createWebFetchTool(
 
           const location = redirectLocation(fetched)
           if (location !== undefined) {
+            await fetched.body?.cancel()
             const target = parseRedirectTarget(location, current)
             if (!target.ok) return target.result
             if (target.url.origin !== current.origin) {
@@ -201,6 +202,7 @@ async function buildResult(
   const contentType = response.headers.get("content-type")
   const kind = classifyContentType(contentType)
   if (kind === "binary") {
+    await response.body?.cancel()
     return failure(
       "unsupported_content_type",
       `web_fetch cannot return "${contentType ?? "unknown"}" content from ${url.href}. Only textual content (HTML, text/*, JSON, XML) is supported.`,
@@ -209,6 +211,7 @@ async function buildResult(
 
   const declaredLength = Number(response.headers.get("content-length"))
   if (Number.isFinite(declaredLength) && declaredLength > limits.maxBodyBytes) {
+    await response.body?.cancel()
     return failure(
       "response_too_large",
       `web_fetch refused ${url.href}: content-length ${declaredLength} bytes exceeds the ${limits.maxBodyBytes}-byte limit.`,

@@ -89,6 +89,7 @@ export function createExaMcpSearchProvider(
       })
       // Unlike web_fetch, a non-2xx here carries nothing useful for the model.
       if (!response.ok) {
+        await response.body?.cancel()
         return {
           ok: false,
           code: "search_error",

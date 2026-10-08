@@ -236,6 +236,7 @@ function multiAgentSection(
     depth: context.depth,
     maxDepth: context.maxDepth,
     maxConcurrentAgents: context.maxConcurrentAgents,
+    canSpawnAgent,
     ...(context.parentPath === undefined
       ? {}
       : { parentPath: context.parentPath }),
