@@ -27,10 +27,16 @@ afterEach(async () => {
 })
 
 describe("rollout assets", () => {
-  it("preserves mixed attachment order, original PDF bytes and lost-response retries", async () => {
+  it.each([
+    "promote",
+    "copy",
+  ] as const)("preserves mixed attachment order, original PDF bytes and lost-response %s retries", async (operation) => {
     const root = await makeRoot()
     const rolloutId = "rollout_mixed"
-    const files = await createTestRolloutAssets(root, rolloutId)
+    const target = operation === "promote" ? rolloutId : "rollout_target"
+    const files = await createTestRolloutAssets(root, rolloutId, target)
+    const prepare =
+      operation === "promote" ? files.promoteAttachments : files.copyAttachments
     const pdf = pdfFixture(["original PDF content"])
     const source = join(root, "document.pdf")
     await writeFile(source, pdf)
@@ -52,10 +58,13 @@ describe("rollout assets", () => {
       sizeBytes: pdf.byteLength,
       file: { rolloutId, path: "attachments/staging/mixed/2.pdf" },
     })
-    const first = await files.promoteAttachments(rolloutId, "request", drafts)
+    const first = await prepare(target, "request", drafts)
     await files.discardDraftAttachments(drafts)
-    const retry = await files.promoteAttachments(rolloutId, "request", drafts)
+    const retry = await prepare(target, "request", drafts)
     expect(retry.attachments).toEqual(first.attachments)
+    await expect(
+      prepare(target, "other_request", drafts),
+    ).rejects.toMatchObject({ code: "ENOENT" })
     await retry.rollback()
     const firstPdf = first.attachments[1]
     assert(firstPdf !== undefined)

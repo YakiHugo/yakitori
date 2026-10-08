@@ -334,10 +334,19 @@ export function createRolloutAssets(
             )
             if (existing !== undefined)
               requireMatchingAttachmentMetadata(existing, attachment, true)
-            const source = await inspectStoredAttachment(
-              sourcePath,
-              options.validatePdf,
-            )
+            const source =
+              existing === undefined
+                ? await inspectStoredAttachment(sourcePath, options.validatePdf)
+                : await inspectStoredAttachmentIfPresent(
+                    sourcePath,
+                    options.validatePdf,
+                  )
+            // Like promotion, a copied request snapshot survives cleanup of
+            // its original draft and remains available for lost-response retries.
+            if (source === undefined) {
+              copied.push({ ...attachment, file })
+              continue
+            }
             requireMatchingAttachmentMetadata(source, attachment)
             if (existing === undefined) {
               if (

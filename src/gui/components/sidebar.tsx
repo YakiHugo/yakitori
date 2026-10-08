@@ -11,7 +11,7 @@ import {
   SquarePen,
   X,
 } from "lucide-react"
-import { useContext, useEffect, useState } from "react"
+import { useContext, useEffect, useRef, useState } from "react"
 import type { ApiProject } from "../../server/protocol.ts"
 import { cn } from "../lib/utils.ts"
 import { sessionListKey, useAppStore } from "../store/app-store.ts"
@@ -304,6 +304,13 @@ function EditProjectDialog({
   const [roots, setRoots] = useState<string[]>([...project.roots])
   const [rootDraft, setRootDraft] = useState("")
   const [confirmingRemove, setConfirmingRemove] = useState(false)
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   const trimmedName = name.trim()
   const rootsChanged =
@@ -317,7 +324,7 @@ function EditProjectDialog({
       ...(trimmedName === project.name ? {} : { name: trimmedName }),
       ...(rootsChanged ? { roots } : {}),
     })
-    if (completed) onClose()
+    if (completed && mounted.current) onClose()
   }
 
   return (

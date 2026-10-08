@@ -1,13 +1,13 @@
+import { Check, ChevronRight, MoreHorizontal, X } from "lucide-react"
 import {
+  type ReactNode,
   useEffect,
   useId,
   useLayoutEffect,
   useRef,
   useState,
-  type ReactNode,
 } from "react"
 import { createPortal } from "react-dom"
-import { Check, ChevronRight, MoreHorizontal, X } from "lucide-react"
 
 export function SidebarDialog({
   title,
@@ -104,6 +104,7 @@ export function SidebarDialog({
 }
 
 type MenuAction = Readonly<{
+  id?: string
   label: string
   icon?: ReactNode
   destructive?: boolean
@@ -136,10 +137,22 @@ export function SidebarMenu({
   const [anchor, setAnchor] = useState<{ x: number; y: number }>()
   const [closing, setClosing] = useState(false)
   const [submenu, setSubmenu] = useState<{
-    item: Extract<MenuItem, { items: readonly MenuAction[] }>
+    label: string
     trigger: HTMLButtonElement
     keyboard: boolean
   }>()
+  const submenuItem = items.find((item) => item.label === submenu?.label)
+  useLayoutEffect(() => {
+    if (!submenu || (submenuItem && "items" in submenuItem)) return
+    setSubmenu(undefined)
+    if (document.activeElement === document.body) {
+      const next =
+        document.querySelector<HTMLButtonElement>(
+          `[data-menu-owner="${owner}"] button`,
+        ) ?? trigger.current
+      next?.focus()
+    }
+  }, [owner, submenu, submenuItem])
   const close = (restoreFocus = true) => {
     setSubmenu(undefined)
     setClosing(true)
@@ -231,21 +244,25 @@ export function SidebarMenu({
               closing={closing}
               focusOnOpen
               onClose={close}
-              activeSubmenu={submenu?.item.label}
+              activeSubmenu={submenu?.label}
               onSubmenu={(item, button, keyboard) =>
                 setSubmenu(
                   item && button
-                    ? { item, trigger: button, keyboard: keyboard ?? false }
+                    ? {
+                        label: item.label,
+                        trigger: button,
+                        keyboard: keyboard ?? false,
+                      }
                     : undefined,
                 )
               }
             />
-            {submenu && !closing && (
+            {submenu && submenuItem && "items" in submenuItem && !closing && (
               <MenuPanel
-                key={submenu.item.label}
+                key={submenuItem.label}
                 owner={owner}
-                label={submenu.item.label}
-                items={submenu.item.items}
+                label={submenuItem.label}
+                items={submenuItem.items}
                 anchor={{
                   x: submenu.trigger.getBoundingClientRect().right + 5,
                   y: submenu.trigger.getBoundingClientRect().top - 5,
@@ -297,11 +314,27 @@ function MenuPanel({
   ): void
 }>) {
   const ref = useRef<HTMLDivElement>(null)
+  const focusedItem = useRef<HTMLButtonElement | null>(null)
+  // A live refresh may remove the focused row. Preserve a usable keyboard
+  // target without moving focus away from surviving rows or another control.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items changes the rendered rows that own focus.
+  useLayoutEffect(() => {
+    if (
+      focusedItem.current &&
+      !focusedItem.current.isConnected &&
+      document.activeElement === document.body
+    ) {
+      const next =
+        ref.current?.querySelector<HTMLButtonElement>("button") ?? parentTrigger
+      next?.focus()
+    }
+  }, [items, parentTrigger])
   // Focus only when opening a panel; changing its highlighted row keeps focus.
   useLayoutEffect(() => {
     if (focusOnOpen)
       ref.current?.querySelector<HTMLButtonElement>("button")?.focus()
   }, [focusOnOpen])
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items changes the measured menu dimensions.
   useLayoutEffect(() => {
     const panel = ref.current
     if (!panel) return
@@ -313,7 +346,7 @@ function MenuPanel({
         : undefined
     panel.style.left = `${Math.max(8, Math.min(x === undefined ? anchor.x : x - rect.width - 5, window.innerWidth - rect.width - 8))}px`
     panel.style.top = `${Math.max(8, Math.min(anchor.y, window.innerHeight - rect.height - 8))}px`
-  }, [anchor.x, anchor.y, parentTrigger])
+  }, [anchor.x, anchor.y, parentTrigger, items])
   return (
     <div
       ref={ref}
@@ -324,6 +357,10 @@ function MenuPanel({
       inert={closing}
       data-closing={closing}
       style={{ left: anchor.x, top: anchor.y }}
+      onFocusCapture={(event) => {
+        if (event.target instanceof HTMLButtonElement)
+          focusedItem.current = event.target
+      }}
       onKeyDown={(event) => {
         if (event.key === "ArrowLeft" && onBack) {
           event.preventDefault()
@@ -359,7 +396,7 @@ function MenuPanel({
     >
       {items.map((item) => (
         <button
-          key={item.label}
+          key={"id" in item ? (item.id ?? item.label) : item.label}
           type="button"
           {...("checked" in item
             ? { role: "menuitemradio", "aria-checked": item.checked }
