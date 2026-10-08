@@ -600,8 +600,6 @@ export function createSideChatService(options: {
           content: originalContent,
           modelSelection: structuredClone(selection),
         })
-        if (promotion !== undefined)
-          await options.rolloutAssets?.discardDraftAttachments(attachments)
         chat.snapshot.modelSelection = structuredClone(selection)
         if (
           !chat.snapshot.messages.some(
@@ -622,6 +620,15 @@ export function createSideChatService(options: {
           else chat.snapshot.messages.splice(responseIndex, 0, message)
         }
         publish(chat)
+        // Admission is committed before staging cleanup. A failed unlink must
+        // not erase the accepted input or turn its idempotent reply into failure.
+        if (promotion !== undefined) {
+          try {
+            await options.rolloutAssets?.discardDraftAttachments(attachments)
+          } catch (error) {
+            options.reportError(error)
+          }
+        }
         return snapshot(chat)
       })()
       chat.importing.add(operation)

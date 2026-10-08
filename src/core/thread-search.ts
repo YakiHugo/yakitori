@@ -1,3 +1,7 @@
+import type { Nodes } from "mdast"
+import remarkGfm from "remark-gfm"
+import remarkParse from "remark-parse"
+import { unified } from "unified"
 import type { ThreadSummary } from "./rollout.ts"
 
 export type ThreadSearchOccurrence = Readonly<{
@@ -35,58 +39,77 @@ export function startAfterThreadCursor(
   return index < 0 ? summaries.length : index
 }
 
-export function markdownVisibleText(markdown: string): string {
-  const withoutFences = markdown.replace(/^\s*```[^\n]*$/gm, "")
-  return decodeMarkdownEntities(
-    withoutFences
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/^\s*(?:#{1,6}|>|[-+*]|\d+[.)])\s+/gm, "")
-      .replace(/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, "")
-      .replace(/^\s*\||\|\s*$/gm, "")
-      .replace(/\s*\|\s*/g, " ")
-      .replace(/(\*\*|__|~~|\*|_)/g, "")
-      .replace(/\\([\\`*{}[\]()#+.!_-])/g, "$1")
-      .replace(/<[^>]+>/g, ""),
-  )
-    .replace(/\s+/gu, " ")
-    .trim()
-}
+// Match the GUI's existing CommonMark/GFM parser. Regex removal cannot
+// distinguish literal punctuation, code, escaped text and table delimiters.
+const markdownParser = unified().use(remarkParse).use(remarkGfm)
 
-function decodeMarkdownEntities(value: string): string {
-  const named: Readonly<Record<string, string>> = {
-    amp: "&",
-    apos: "'",
-    gt: ">",
-    lt: "<",
-    quot: '"',
+export function markdownVisibleText(markdown: string): string {
+  const document = markdownParser.parse(markdown)
+  const footnotes = new Map<
+    string,
+    Extract<Nodes, { type: "footnoteDefinition" }>
+  >()
+  const collectFootnotes = (node: Nodes): void => {
+    // Definitions can occur in containers. Like the GUI's mdast-to-hast
+    // conversion, the first definition owns an identifier throughout the tree.
+    if (node.type === "footnoteDefinition" && !footnotes.has(node.identifier))
+      footnotes.set(node.identifier, node)
+    if ("children" in node) node.children.forEach(collectFootnotes)
   }
-  return value.replace(
-    /&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z]+));/gi,
-    (entity, decimal, hex, name) => {
-      if (typeof decimal !== "string" && typeof hex !== "string")
-        return named[String(name).toLowerCase()] ?? entity
-      const code = Number.parseInt(
-        typeof decimal === "string" ? decimal : hex,
-        typeof decimal === "string" ? 10 : 16,
-      )
-      // Match the GUI's CommonMark parser for controls, surrogates,
-      // noncharacters and code points outside Unicode's range.
-      if (
-        code < 9 ||
-        code === 11 ||
-        (code > 13 && code < 32) ||
-        (code > 126 && code < 160) ||
-        (code >= 0xd800 && code <= 0xdfff) ||
-        (code >= 0xfdd0 && code <= 0xfdef) ||
-        code % 0x10000 >= 0xfffe ||
-        code > 0x10ffff
-      )
-        return "\uFFFD"
-      return String.fromCodePoint(code)
-    },
-  )
+  collectFootnotes(document)
+  const referencedFootnotes: string[] = []
+  const visible = (node: Nodes): string => {
+    switch (node.type) {
+      case "text":
+      case "inlineCode":
+      case "code":
+      // react-markdown's default skipHtml=false displays raw HTML as text;
+      // it does not interpret markup or decode entities within that markup.
+      case "html":
+        return node.type === "code" ? ` ${node.value} ` : node.value
+      case "break":
+      case "thematicBreak":
+        return " "
+      case "definition":
+      case "footnoteDefinition":
+      case "image":
+      case "imageReference":
+        return ""
+      case "footnoteReference": {
+        let index = referencedFootnotes.indexOf(node.identifier)
+        if (index === -1) index = referencedFootnotes.push(node.identifier) - 1
+        return String(index + 1)
+      }
+      default: {
+        if (!("children" in node)) return ""
+        const phrasing =
+          node.type === "paragraph" ||
+          node.type === "heading" ||
+          node.type === "tableCell" ||
+          node.type === "emphasis" ||
+          node.type === "strong" ||
+          node.type === "delete" ||
+          node.type === "link" ||
+          node.type === "linkReference"
+        const content = node.children.map(visible).join(phrasing ? "" : " ")
+        return node.type === "emphasis" ||
+          node.type === "strong" ||
+          node.type === "delete" ||
+          node.type === "link" ||
+          node.type === "linkReference"
+          ? content
+          : ` ${content} `
+      }
+    }
+  }
+  let text = visible(document)
+  // Footnote definitions are rendered after the body in first-reference order.
+  // Iteration also visits definitions referenced from another footnote.
+  for (const identifier of referencedFootnotes) {
+    const definition = footnotes.get(identifier)
+    if (definition) text += ` ${definition.children.map(visible).join("")} `
+  }
+  return text.replace(/\s+/gu, " ").trim()
 }
 
 export function literalMatches(

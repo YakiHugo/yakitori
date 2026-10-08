@@ -281,6 +281,9 @@ export type RpcMethodContext = Readonly<{
 export type RpcMethodDefinition = Readonly<{
   method: string
   experimental?: boolean
+  // Existing-turn replies and connection/control maintenance are not new work.
+  // They remain available while process admission is closed and turns drain.
+  shutdownContinuation?: boolean
   // An undefined scope means the method is unserialized (Codex
   // serialization: None): it still runs under the connection gate but skips
   // the serialization queues entirely.
@@ -705,6 +708,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...computerMethods,
   {
     method: "server/ping",
+    shutdownContinuation: true,
     scope: () => undefined,
     async invoke() {
       return { result: {} }
@@ -972,13 +976,17 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.cancelInput(params),
   ),
-  handlerEntry<ApiCancelTurnResponse>(
-    "session/turn/cancel",
-    sessionScope,
-    (handlers, params) => handlers.cancelTurn(params),
-  ),
+  {
+    ...handlerEntry<ApiCancelTurnResponse>(
+      "session/turn/cancel",
+      sessionScope,
+      (handlers, params) => handlers.cancelTurn(params),
+    ),
+    shutdownContinuation: true,
+  },
   {
     method: "session/subscribe",
+    shutdownContinuation: true,
     scope: sessionScope,
     async invoke(params, context) {
       const request = parseSessionSubscribeParams(params)
@@ -993,6 +1001,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   },
   {
     method: "session/unsubscribe",
+    shutdownContinuation: true,
     scope: sessionScope,
     async invoke(params, context) {
       const request = parseSessionUnsubscribeParams(params)

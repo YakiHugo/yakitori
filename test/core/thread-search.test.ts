@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
@@ -211,6 +212,51 @@ describe("persisted thread search", () => {
       "session_m_middle",
     ])
   })
+})
+
+it("rebuilds old search text projections from unchanged authoritative rollouts", async () => {
+  const { root, store } = await setup()
+  const threadId = "session_old_projection"
+  await save(store, threadId, [
+    response("turn_literal", "assistant", "Use `foo_bar | baz` now."),
+    completed("turn_literal"),
+  ])
+  const stored = await store.readThread(threadId)
+  if (!stored) throw new Error("Missing persisted thread")
+  const rolloutPath = join(
+    root,
+    "rollouts",
+    stored.metadata.rolloutId,
+    "rollout.jsonl",
+  )
+  const authoritative = await readFile(rolloutPath)
+  const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+  try {
+    // Version 2 stripped literal punctuation. Keep the source stamps current:
+    // only changing the disposable projection version can rebuild this cache.
+    database
+      .prepare("UPDATE search_messages SET text = ? WHERE thread_id = ?")
+      .run("Use foobar baz now.", threadId)
+    database.exec("PRAGMA user_version = 2")
+  } finally {
+    database.close()
+  }
+  const reopened = new JsonlThreadStore({ root })
+  await expect(
+    reopened.searchThreadOccurrences({
+      threadId,
+      searchTerm: "foo_bar | baz",
+      limit: 10,
+    }),
+  ).resolves.toMatchObject({
+    occurrences: [
+      {
+        snippet: "Use foo_bar | baz now.",
+        snippetMatchRange: { start: 4, end: 17 },
+      },
+    ],
+  })
+  expect(await readFile(rolloutPath)).toEqual(authoritative)
 })
 
 async function setup() {

@@ -1,5 +1,6 @@
 import { type AssetSource, assetHttpUrl } from "../core/asset-types.ts"
 import type { RolloutAssets } from "../core/rollout-assets.ts"
+import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type {
   ModelDocumentBlock,
   ModelImageBlock,
@@ -114,7 +115,14 @@ export async function prepareProviderMedia(
         const prepared: ModelImageBlock = await prepareModelImage(
           bytes,
           block.detail ?? "high",
-        )
+        ).catch((cause: unknown) => {
+          // Byte reads happen above this boundary. Only an explicit decoder
+          // rejection is invalid input; IO, abort and unexpected errors retain
+          // their existing failure and retry behavior.
+          if (cause instanceof InvalidImageDataError)
+            throw new AssetMediaError(cause.message, { cause })
+          throw cause
+        })
         content.push(prepared)
       } else content.push({ ...block, data: bytes.toString("base64") })
     }

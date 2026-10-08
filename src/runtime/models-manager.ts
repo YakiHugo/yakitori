@@ -89,7 +89,10 @@ export function createDiscoveringModelsManager(input: {
         readonly models: Map<string, DiscoveredModel>
       }
     | undefined
-  const refreshTasks = new Map<string | undefined, Promise<void>>()
+  const refreshTasks = new Map<
+    string | undefined,
+    Promise<{ saveTask: Promise<void> } | undefined>
+  >()
   let diskLoadTask: Promise<void> | undefined
   let saveTask = Promise.resolve()
 
@@ -148,7 +151,9 @@ export function createDiscoveringModelsManager(input: {
         }),
       )
       .catch(() => undefined)
-    await saveTask
+    // Discovery is shareable only until publication. A pending disk write
+    // must not satisfy a new cold fetch after this identity was evicted.
+    return { saveTask }
   }
 
   const ensureFresh = async () => {
@@ -163,7 +168,7 @@ export function createDiscoveringModelsManager(input: {
       })
       refreshTasks.set(identity, task)
     }
-    if (cache === undefined) await task
+    if (cache === undefined) await (await task)?.saveTask
   }
   const discovered = (model: string) => cache?.models.get(model.toLowerCase())
 

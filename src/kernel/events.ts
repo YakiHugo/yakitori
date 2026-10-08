@@ -605,7 +605,10 @@ export type EventEnvelopeInput<Fact extends KernelEvent = KernelEvent> = {
 
 export function createEventEnvelope<const Fact extends KernelEvent>(
   input: EventEnvelopeInput<Fact>,
-): EventEnvelopeBase & Fact {
+): Fact extends KernelEvent
+  ? EventEnvelopeBase & Omit<Fact, keyof EventEnvelopeBase>
+  : never
+export function createEventEnvelope(input: EventEnvelopeInput): EventEnvelope {
   if (!Number.isInteger(input.seq) || input.seq <= 0) {
     throw new RangeError("Event sequence must be a positive integer.")
   }
@@ -617,12 +620,12 @@ export function createEventEnvelope<const Fact extends KernelEvent>(
   }
   requireKernelEvent(input.event)
   return {
+    ...input.event,
     id: input.id ?? createEventId(),
     sessionId: input.sessionId,
     seq: input.seq,
     version,
     createdAt: input.createdAt ?? new Date().toISOString(),
-    ...input.event,
   }
 }
 
