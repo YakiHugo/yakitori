@@ -1446,13 +1446,16 @@ export class JsonlThreadStore implements ThreadStore {
   async #materialize(
     rolloutId: string,
     seen: Set<string>,
+    position?: HistoryPosition,
   ): Promise<readonly StoredRolloutItem[]> {
     if (seen.has(rolloutId)) throw new Error("Thread history contains a cycle.")
     seen.add(rolloutId)
     try {
-      const local = await readPhysicalRollout(this.#rolloutPath(rolloutId), {
-        rolloutId,
-      })
+      const local = await readPhysicalRollout(
+        this.#rolloutPath(rolloutId),
+        { rolloutId },
+        position,
+      )
       const sessionMeta = local[0]
       if (sessionMeta?.item.type !== "session_meta") {
         throw new Error(`Rollout ${rolloutId} has no Session metadata item.`)
@@ -1472,8 +1475,9 @@ export class JsonlThreadStore implements ThreadStore {
     position: HistoryPosition,
     seen: Set<string>,
   ): Promise<readonly StoredRolloutItem[]> {
-    await this.#validateHistoryPosition(position)
-    const history = await this.#materialize(position.rolloutId, seen)
+    // A fork owns only this immutable byte range. Later ancestor records must
+    // not affect its replay or its cutoff validation.
+    const history = await this.#materialize(position.rolloutId, seen, position)
     const prefix = history.filter(
       (entry) =>
         entry.item.type !== "session_meta" &&
@@ -1509,19 +1513,6 @@ export class JsonlThreadStore implements ThreadStore {
       rolloutId,
       endSeqExclusive: seq + 1,
       endByteOffset: record.endByteOffset,
-    }
-  }
-
-  async #validateHistoryPosition(position: HistoryPosition): Promise<void> {
-    const record = (
-      await readRolloutRecords(this.#rolloutPath(position.rolloutId))
-    ).find(
-      (candidate) =>
-        candidate.entry.rolloutId === position.rolloutId &&
-        candidate.entry.seq + 1 === position.endSeqExclusive,
-    )
-    if (record?.endByteOffset !== position.endByteOffset) {
-      throw new Error("Thread history contains an invalid cutoff position.")
     }
   }
 
@@ -1877,8 +1868,20 @@ function modelContextAt(
 async function readPhysicalRollout(
   path: string,
   expected: { readonly rolloutId: string; readonly threadId?: string },
+  position?: HistoryPosition,
 ): Promise<readonly StoredRolloutItem[]> {
-  const entries = (await readRolloutRecords(path)).map((record) => record.entry)
+  const records = await readRolloutRecords(path, position?.endByteOffset)
+  if (position !== undefined) {
+    const last = records.at(-1)
+    if (
+      position.rolloutId !== expected.rolloutId ||
+      last?.entry.seq !== position.endSeqExclusive - 1 ||
+      last.endByteOffset !== position.endByteOffset
+    ) {
+      throw new Error("Thread history contains an invalid cutoff position.")
+    }
+  }
+  const entries = records.map((record) => record.entry)
   const sessionMeta = entries[0]
   if (sessionMeta?.item.type !== "session_meta" || sessionMeta.seq !== 0) {
     throw new Error(
@@ -1912,8 +1915,12 @@ async function readPhysicalRollout(
 
 async function readRolloutRecords(
   path: string,
+  endByteOffset?: number,
 ): Promise<readonly PhysicalRolloutRecord[]> {
-  const bytes = await readFile(path)
+  const bytes =
+    endByteOffset === undefined
+      ? await readFile(path)
+      : await readRolloutPrefix(path, endByteOffset)
   if (bytes.length === 0) return []
   const completeLength =
     bytes.at(-1) === 10 ? bytes.length : bytes.lastIndexOf(10) + 1
@@ -1935,6 +1942,42 @@ async function readRolloutRecords(
     start = index + 1
   }
   return records
+}
+
+async function readRolloutPrefix(
+  path: string,
+  endByteOffset: number,
+): Promise<Buffer> {
+  const file = await open(path, "r")
+  try {
+    if (
+      !Number.isSafeInteger(endByteOffset) ||
+      endByteOffset <= 0 ||
+      endByteOffset > (await file.stat()).size
+    ) {
+      throw new Error("Thread history contains an invalid cutoff position.")
+    }
+    const bytes = Buffer.alloc(endByteOffset)
+    let offset = 0
+    while (offset < endByteOffset) {
+      const { bytesRead } = await file.read(
+        bytes,
+        offset,
+        endByteOffset - offset,
+        offset,
+      )
+      if (bytesRead === 0) {
+        throw new Error("Thread history contains an invalid cutoff position.")
+      }
+      offset += bytesRead
+    }
+    if (bytes.at(-1) !== 10) {
+      throw new Error("Thread history contains an invalid cutoff position.")
+    }
+    return bytes
+  } finally {
+    await file.close()
+  }
 }
 
 async function repairTrailingJsonLine(path: string): Promise<void> {
