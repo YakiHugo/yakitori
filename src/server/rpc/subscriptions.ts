@@ -285,6 +285,7 @@ export function createSessionSubscriptions(
     })
     const entry = {
       close(): void {
+        if (closed) return
         closed = true
         hub.close()
       },
@@ -293,6 +294,12 @@ export function createSessionSubscriptions(
     set.set(input.connectionId, entry)
     bySession.set(input.sessionId, set)
 
+    const removeOwnedSubscription = (): void => {
+      if (bySession.get(input.sessionId)?.get(input.connectionId) === entry)
+        remove(input.connectionId, input.sessionId)
+      else entry.close()
+    }
+
     // Only reconcile answer channels that predate this read. The handler can
     // sample pendingPermissions before asynchronous storage work finishes;
     // channels opened meanwhile by another subscriber are newer than that
@@ -300,11 +307,19 @@ export function createSessionSubscriptions(
     const pendingBeforeSnapshot = options.pendingRequests.pendingForSession(
       input.sessionId,
     )
-    const snapshot = await options.handlers.readSession({
-      sessionId: input.sessionId,
-    })
+    let snapshot: Awaited<ReturnType<ServerHandlers["readSession"]>>
+    try {
+      snapshot = await options.handlers.readSession({
+        sessionId: input.sessionId,
+      })
+    } catch (error) {
+      // No replay consumer will be returned on a rejected snapshot read. Release
+      // this listener without removing a newer subscription for the same key.
+      removeOwnedSubscription()
+      throw error
+    }
     if (!snapshot.ok) {
-      remove(input.connectionId, input.sessionId)
+      removeOwnedSubscription()
       return { ok: false, result: snapshot }
     }
     const watermark = snapshot.body.session.seq

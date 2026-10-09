@@ -4,14 +4,14 @@ import {
   type ModelSelection,
 } from "../../kernel/events.ts"
 import {
-  SideChatError,
   type SideChatCreate,
+  SideChatError,
   type SideChatSend,
   type SideChatService,
   type SideChatSnapshot,
 } from "../side-chat.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
-import { RpcMethodError, type RpcMethodDefinition } from "./methods.ts"
+import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
 
 export type SideChatRpcParams = {
   "sideChat/create": SideChatCreate
@@ -70,7 +70,7 @@ function entry(
         ? undefined
         : {
             kind: "session",
-            sessionId: `side:${typeof params === "object" && params !== null && "sideChatId" in params ? String(params.sideChatId) : ""}`,
+            sessionId: `side:${typeof params === "object" && params !== null && "sideChatId" in params && typeof params.sideChatId === "string" ? params.sideChatId : ""}`,
           },
     async invoke(params, context) {
       if (context.sideChats === undefined)

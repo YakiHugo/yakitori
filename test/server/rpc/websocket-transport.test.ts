@@ -5,7 +5,10 @@ import { WebSocket } from "ws"
 import { createSessionEventHub } from "../../../src/server/event-hub.ts"
 import { createYakitoriHttpServer } from "../../../src/server/http.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
-import { PARSE_ERROR } from "../../../src/server/rpc/messages.ts"
+import {
+  METHOD_NOT_FOUND,
+  PARSE_ERROR,
+} from "../../../src/server/rpc/messages.ts"
 import {
   attachWebsocketRpcTransport,
   disconnectWebsocketRpcClients,
@@ -150,6 +153,39 @@ describe("websocket RPC transport", () => {
         await client.closed
       }
     } finally {
+      await closeServer(server)
+    }
+  })
+
+  it("keeps serving after malformed IDs in scoped side-chat requests", async () => {
+    const server = createYakitoriHttpServer({ handlers: createFakeHandlers() })
+    const port = await listen(server)
+    const client = connect(port)
+    try {
+      await client.open
+      await client.request("initialize", {
+        clientInfo: { name: "test-client", version: "0.0.0" },
+      })
+      for (const method of [
+        "sideChat/read",
+        "sideChat/send",
+        "sideChat/cancel",
+        "sideChat/resolvePermission",
+        "sideChat/close",
+      ]) {
+        const response = await client.request(method, {
+          sideChatId: { toString: null },
+        })
+        // This host has no side-chat service; normal method error handling must
+        // still run without evaluating user-provided coercion fields first.
+        expect(response).toMatchObject({ error: { code: METHOD_NOT_FOUND } })
+      }
+      expect(await client.request("server/ping", {})).toMatchObject({
+        result: {},
+      })
+    } finally {
+      client.ws.close()
+      await client.closed
       await closeServer(server)
     }
   })

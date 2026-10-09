@@ -20,7 +20,11 @@ import {
   type JsonRpcNotification,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
-import { reconcileBufferedSessionDeliveries } from "../../../src/server/rpc/subscriptions.ts"
+import { PendingServerRequests } from "../../../src/server/rpc/pending-requests.ts"
+import {
+  createSessionSubscriptions,
+  reconcileBufferedSessionDeliveries,
+} from "../../../src/server/rpc/subscriptions.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -533,6 +537,108 @@ describe("session/subscribe", () => {
     eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
     await flush()
     expect(connection.notifications("session/event")).toHaveLength(0)
+  })
+
+  it("releases the live listener when the initial snapshot rejects", async () => {
+    const eventHub = createSessionEventHub()
+    const subscribe = eventHub.subscribe.bind(eventHub)
+    const close = vi.fn()
+    vi.spyOn(eventHub, "subscribe").mockImplementation((id, listener) => {
+      const subscription = subscribe(id, listener)
+      return {
+        close() {
+          close()
+          subscription.close()
+        },
+      }
+    })
+    const { processor } = createTestProcessor({
+      eventHub,
+      handlers: createFakeHandlers({
+        readSession: async () => {
+          throw new Error("Snapshot storage is unavailable")
+        },
+      }),
+      reportOperationalFailure: () => {},
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    try {
+      expect(
+        await connection.sendRequest("session/subscribe", { sessionId }),
+      ).toMatchObject({ error: { code: INTERNAL_ERROR } })
+      // Closing the live listener is the ownership contract: otherwise every
+      // future event is retained in a replay buffer with no replay consumer.
+      expect(close).toHaveBeenCalledOnce()
+      expect(await connection.sendRequest("server/ping", {})).toMatchObject({
+        result: {},
+      })
+    } finally {
+      await processor.closeConnection(connection.id)
+    }
+  })
+
+  it.each([
+    "error result",
+    "rejection",
+  ])("a replaced snapshot failure leaves the current subscription alive (%s)", async (failureMode) => {
+    const firstSnapshot = deferred<void>()
+    const eventHub = createSessionEventHub()
+    const hubSubscribe = eventHub.subscribe.bind(eventHub)
+    const closedListeners: ReturnType<typeof vi.fn>[] = []
+    vi.spyOn(eventHub, "subscribe").mockImplementation((id, listener) => {
+      const subscription = hubSubscribe(id, listener)
+      const close = vi.fn(() => subscription.close())
+      closedListeners.push(close)
+      return { close }
+    })
+    const notify = vi.fn()
+    let reads = 0
+    const subscriptions = createSessionSubscriptions({
+      eventHub,
+      pendingRequests: new PendingServerRequests(),
+      handlers: createFakeHandlers({
+        readSession: async () => {
+          if (++reads === 1) {
+            await firstSnapshot.promise
+            if (failureMode === "rejection")
+              throw new Error("Snapshot read failed")
+            return errorResult("not_found", "Session unavailable")
+          }
+          return okResult({ session: makeSessionDetail(sessionId) })
+        },
+      }),
+      notify,
+      sendRequest: () => {},
+    })
+    const first = subscriptions.subscribe({
+      connectionId: 1,
+      sessionId,
+      after: 0,
+    })
+    const firstResult = first.catch((error: unknown) => error)
+    const replacement = await subscriptions.subscribe({
+      connectionId: 1,
+      sessionId,
+      after: 0,
+    })
+    expect(replacement.ok).toBe(true)
+    if (!replacement.ok) throw new Error("Expected replacement subscription")
+    await replacement.replay()
+    firstSnapshot.resolve()
+    await firstResult
+    expect(closedListeners[0]).toHaveBeenCalledOnce()
+    expect(closedListeners[1]).not.toHaveBeenCalled()
+    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
+    await flush()
+    expect(notify).toHaveBeenCalledWith(
+      1,
+      "session/event",
+      expect.objectContaining({ sessionId, seq: 1 }),
+    )
+    subscriptions.removeConnection(1)
+    expect(closedListeners[0]).toHaveBeenCalledOnce()
+    expect(closedListeners[1]).toHaveBeenCalledOnce()
   })
 
   it.each([
