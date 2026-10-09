@@ -1,4 +1,3 @@
-import type { ChatGPTConnections } from "./chatgpt-connections.ts"
 import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
@@ -8,6 +7,7 @@ import {
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import type { RolloutAssets } from "../kernel/index.ts"
+import type { ChatGPTConnections } from "./chatgpt-connections.ts"
 import { createSessionEventHub, type SessionEventHub } from "./event-hub.ts"
 import type { ServerHandlers } from "./handlers.ts"
 import type { McpService } from "./mcp-service.ts"
@@ -18,16 +18,14 @@ import {
 } from "./operational-errors.ts"
 import {
   ApiErrorCode,
-  type ApiHandlerResult,
   type ApiListProvidersResponse,
   type ApiReadSubscriptionResponse,
   type ApiSubscriptionProvider,
-  type ApiUserModelPreference,
 } from "./protocol.ts"
+import type { ProviderService } from "./provider-service.ts"
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
 import { MessageProcessor } from "./rpc/message-processor.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
-import type { ProviderService } from "./provider-service.ts"
 import type { SideChatService } from "./side-chat.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import type { UserConfigStore } from "./user-config.ts"
@@ -307,96 +305,7 @@ function routeRequest(method: string, url: URL): Route {
   return { kind: "notFound", segments }
 }
 
-function requireBodyRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return value as Record<string, unknown>
-  }
-  return {}
-}
-
-export function requireUserModelPreference(
-  value: unknown,
-  availableProviders: readonly string[],
-):
-  | { readonly ok: true; readonly value: ApiUserModelPreference }
-  | { readonly ok: false; readonly result: ApiHandlerResult<never> } {
-  const record = requireBodyRecord(value)
-  const provider = nonEmptyString(record.provider)
-  if (provider === undefined) {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        "provider must be a non-empty string.",
-      ),
-    }
-  }
-  if (!availableProviders.includes(provider)) {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        "provider must name a registered provider.",
-      ),
-    }
-  }
-  const model = nonEmptyString(record.model)
-  if (model === undefined) {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        "model must be a non-empty string.",
-      ),
-    }
-  }
-  const effort = optionalNonEmptyString(record, "effort")
-  if (!effort.ok) return effort
-  const speed = optionalNonEmptyString(record, "speed")
-  if (!speed.ok) return speed
-  return {
-    ok: true,
-    value: {
-      provider,
-      model,
-      ...(effort.value === undefined ? {} : { effort: effort.value }),
-      ...(speed.value === undefined ? {} : { speed: speed.value }),
-    },
-  }
-}
-
-function optionalNonEmptyString(
-  record: Record<string, unknown>,
-  field: "effort" | "speed",
-):
-  | { readonly ok: true; readonly value: string | undefined }
-  | { readonly ok: false; readonly result: ApiHandlerResult<never> } {
-  if (!(field in record)) return { ok: true, value: undefined }
-  const value = nonEmptyString(record[field])
-  if (value !== undefined) return { ok: true, value }
-  return {
-    ok: false,
-    result: errorResult(
-      400,
-      ApiErrorCode.InvalidInput,
-      `${field} must be a non-empty string when provided.`,
-    ),
-  }
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined
-  const trimmed = value.trim()
-  return trimmed === "" ? undefined : trimmed
-}
-
-function writeResult<T>(
-  response: ServerResponse,
-  result: ApiHandlerResult<T>,
-): void {
+function writeResult<T>(response: ServerResponse, result: HttpResult<T>): void {
   writeJson(response, result.status, result.body)
 }
 
@@ -415,9 +324,8 @@ function errorResult(
   status: number,
   code: ApiErrorCode,
   message: string,
-): ApiHandlerResult<never> {
+): HttpResult<import("../protocol/application.ts").ApiErrorResponse> {
   return {
-    ok: false,
     status,
     body: {
       error: {
@@ -653,3 +561,5 @@ function rolloutAssetContentType(path: string): string {
   if (extension === ".json") return "application/json; charset=utf-8"
   return "text/plain; charset=utf-8"
 }
+
+type HttpResult<T> = Readonly<{ status: number; body: T }>

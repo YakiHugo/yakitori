@@ -67,8 +67,8 @@ async function fixture(stream: StreamFn) {
 
 async function createMain(app: YakitoriApplication) {
   const created = await app.handlers.createSession({})
-  if (!created.ok) throw new Error(created.body.error.message)
-  return created.body.session.id
+  if (!created.ok) throw new Error(created.error.message)
+  return created.value.session.id
 }
 
 async function admit(
@@ -86,9 +86,9 @@ async function admit(
       { ...(references === undefined ? {} : { references }) }.references,
     ),
   })
-  if (!result.ok) throw new Error(result.body.error.message)
+  if (!result.ok) throw new Error(result.error.message)
   await until(() => app.threadManager.getThread(sessionId)?.status === "idle")
-  return result.body.inputId
+  return result.value.inputId
 }
 
 const excerpts: readonly ContextExcerpt[] = [
@@ -146,7 +146,7 @@ describe("structured context and ephemeral forks", () => {
       modelSelection: { provider: "openai", model: "gpt-5" },
       content,
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -154,25 +154,25 @@ describe("structured context and ephemeral forks", () => {
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
+    if (!events.ok) throw new Error(events.error.message)
     expect(
-      events.body.events.find((event) => event.type === "input.admitted"),
+      events.value.events.find((event) => event.type === "input.admitted"),
     ).toMatchObject({ data: { content } })
     const fork = await context.app.handlers.forkSession({
       sessionId: id,
-      atInputId: admitted.body.inputId,
+      atInputId: admitted.value.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-5" },
       content: { ...content, text: `${content.text} again` },
     })
-    if (!fork.ok) throw new Error(fork.body.error.message)
+    if (!fork.ok) throw new Error(fork.error.message)
     await until(
       () =>
-        context.app.threadManager.getThread(fork.body.session.id)?.status ===
+        context.app.threadManager.getThread(fork.value.session.id)?.status ===
         "idle",
     )
     const side = await context.app.sideChats.create({
-      sourceSessionId: fork.body.session.id,
+      sourceSessionId: fork.value.session.id,
     })
     await context.app.sideChats.send({
       sideChatId: side.id,
@@ -232,7 +232,7 @@ describe("structured context and ephemeral forks", () => {
       modelSelection: { provider: "openai", model: "gpt-5" },
       content: createUserInput("start"),
     })
-    if (!initial.ok) throw new Error(initial.body.error.message)
+    if (!initial.ok) throw new Error(initial.error.message)
     await until(() => requests.length === 1)
     const bytes = await sharp({
       create: { width: 2, height: 2, channels: 3, background: "#112233" },
@@ -271,10 +271,10 @@ describe("structured context and ephemeral forks", () => {
             content,
           })
     const accepted = await submit(content)
-    if (!accepted.ok) throw new Error(accepted.body.error.message)
+    if (!accepted.ok) throw new Error(accepted.error.message)
     expect(await submit(content)).toMatchObject({
       ok: true,
-      body: accepted.body,
+      value: accepted.value,
     })
     expect(
       await submit(
@@ -283,7 +283,7 @@ describe("structured context and ephemeral forks", () => {
           { type: "text", text: "before imageafter image" },
         ]),
       ),
-    ).toMatchObject({ ok: false, status: 409 })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     const [changed] = await context.app.rolloutAssets.importAttachmentBytes(
       id,
       "changed_draft",
@@ -299,7 +299,7 @@ describe("structured context and ephemeral forks", () => {
           { type: "text", text: "after image" },
         ]),
       ),
-    ).toMatchObject({ ok: false, status: 409 })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(await context.app.rolloutAssets.read(changed.file)).toEqual(
       changedBytes,
     )
@@ -379,8 +379,8 @@ describe("structured context and ephemeral forks", () => {
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
-    const admissions = events.body.events.filter(
+    if (!events.ok) throw new Error(events.error.message)
+    const admissions = events.value.events.filter(
       (entry) =>
         entry.type === "input.admitted" &&
         entry.data.requestId === "ordered_followup",
@@ -408,14 +408,13 @@ describe("structured context and ephemeral forks", () => {
     const replayed = await context.app.handlers.admitInput({
       sessionId: id,
       requestId: "ordered_followup",
-      content: accepted.body.content,
+      content: accepted.value.content,
     })
     expect(replayed).toMatchObject({
       ok: true,
-      status: 200,
-      body: {
+      value: {
         turnId: route === "steer" ? "ordered_active" : "ordered_followup",
-        content: accepted.body.content,
+        content: accepted.value.content,
       },
     })
     expect(requests).toHaveLength(2)
@@ -424,17 +423,17 @@ describe("structured context and ephemeral forks", () => {
         sessionId: id,
         requestId: "ordered_followup",
         content: {
-          ...accepted.body.content,
+          ...accepted.value.content,
           ...inputFixture(
-            [...draftToEditorParts(accepted.body.content)].reverse(),
+            [...draftToEditorParts(accepted.value.content)].reverse(),
           ),
         },
       }),
-    ).toMatchObject({ ok: false, status: 409 })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     if (route === "steer") {
-      expect(await submit(accepted.body.content)).toMatchObject({
+      expect(await submit(accepted.value.content)).toMatchObject({
         ok: true,
-        body: { turnId: "ordered_active", content: accepted.body.content },
+        value: { turnId: "ordered_active", content: accepted.value.content },
       })
       await context.restart(async () => {
         const path = join(
@@ -468,10 +467,9 @@ describe("structured context and ephemeral forks", () => {
           `${legacy.map((line) => JSON.stringify(line)).join("\n")}\n`,
         )
       })
-      expect(await submit(accepted.body.content)).toMatchObject({
+      expect(await submit(accepted.value.content)).toMatchObject({
         ok: false,
-        status: 409,
-        body: { error: { details: { reason: "request_conflict" } } },
+        error: { details: { reason: "request_conflict" } },
       })
       expect(requests).toHaveLength(2)
     }
@@ -509,7 +507,7 @@ describe("structured context and ephemeral forks", () => {
         modelSelection: { provider: "openai", model: "gpt-6-astra" },
         content: createUserInput("wait"),
       })
-      if (!initial.ok) throw new Error(initial.body.error.message)
+      if (!initial.ok) throw new Error(initial.error.message)
       await until(() => requests.length === 1)
     }
     const pdfBytes = pdfFixture(["Authored PDF"])
@@ -556,14 +554,14 @@ describe("structured context and ephemeral forks", () => {
           : context.app.handlers.admitInput(request)
     }
     const accepted = await submit(content)
-    if (!accepted.ok) throw new Error(accepted.body.error.message)
+    if (!accepted.ok) throw new Error(accepted.error.message)
     expect(await submit(content)).toMatchObject({
       ok: true,
-      body: accepted.body,
+      value: accepted.value,
     })
     expect(
       await submit({ ...content, text: `${content.text} changed input` }),
-    ).toMatchObject({ ok: false, status: 409 })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(
       await submit({
         ...content,
@@ -573,7 +571,7 @@ describe("structured context and ephemeral forks", () => {
             : attachment,
         ),
       }),
-    ).toMatchObject({ ok: false, status: 409 })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     release()
     await until(
       () =>
@@ -604,8 +602,8 @@ describe("structured context and ephemeral forks", () => {
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
-    const admission = events.body.events.find(
+    if (!events.ok) throw new Error(events.error.message)
+    const admission = events.value.events.find(
       (event) =>
         isKernelEvent(event) &&
         event.type === "input.admitted" &&
@@ -630,7 +628,7 @@ describe("structured context and ephemeral forks", () => {
         modelSelection: { provider: "openai", model: "gpt-6-astra" },
         content: admission.data.content,
       }),
-    ).toMatchObject({ ok: true, status: 200 })
+    ).toMatchObject({ ok: true })
     if (route === "direct") {
       const foreign = await context.app.handlers.forkSession({
         sessionId: id,
@@ -646,24 +644,27 @@ describe("structured context and ephemeral forks", () => {
           },
         ]),
       })
-      expect(foreign).toMatchObject({ ok: false, status: 400 })
+      expect(foreign).toMatchObject({
+        ok: false,
+        error: { code: "invalid_input" },
+      })
       const forked = await context.app.handlers.forkSession({
         sessionId: id,
         atInputId: admission.data.inputId,
         reason: "edit",
         content: inputFixture([storedPdf, { type: "text", text: "PDF first" }]),
       })
-      if (!forked.ok) throw new Error(forked.body.error.message)
+      if (!forked.ok) throw new Error(forked.error.message)
       await until(
         () =>
-          context.app.threadManager.getThread(forked.body.session.id)
+          context.app.threadManager.getThread(forked.value.session.id)
             ?.status === "idle",
       )
       expect(
         await context.app.handlers.deleteSession({ sessionId: id }),
       ).toMatchObject({ ok: true })
       const fork = await context.app.threadStore.readThread(
-        forked.body.session.id,
+        forked.value.session.id,
       )
       const document = fork?.rollout.flatMap(({ item }) =>
         item.type === "response_item" && item.item.item.role === "user"
@@ -672,7 +673,7 @@ describe("structured context and ephemeral forks", () => {
       )[0]
       if (!document) throw new Error("Missing fork PDF")
       expect(requireStoredAssetSource(document.file).rolloutId).toBe(
-        forked.body.session.id,
+        forked.value.session.id,
       )
       expect(await context.app.rolloutAssets.read(document.file)).toEqual(
         pdfBytes,
@@ -720,19 +721,19 @@ describe("structured context and ephemeral forks", () => {
         { type: "text", text: "after" },
       ]),
     })
-    if (!initial.ok) throw new Error(initial.body.error.message)
+    if (!initial.ok) throw new Error(initial.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
-    const source = events.body.events.find(
+    if (!events.ok) throw new Error(events.error.message)
+    const source = events.value.events.find(
       (entry) =>
         isKernelEvent(entry) &&
         entry.type === "input.admitted" &&
-        entry.data.inputId === initial.body.inputId,
+        entry.data.inputId === initial.value.inputId,
     )
     if (!isKernelEvent(source) || source.type !== "input.admitted")
       throw new Error("Missing source input")
@@ -744,7 +745,7 @@ describe("structured context and ephemeral forks", () => {
     const beforeInvalid = await context.app.threadStore.listThreadIds()
     const invalid = await context.app.handlers.forkSession({
       sessionId: id,
-      atInputId: initial.body.inputId,
+      atInputId: initial.value.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
       content: inputFixture([
@@ -759,10 +760,7 @@ describe("structured context and ephemeral forks", () => {
     })
     expect(invalid).toMatchObject({
       ok: false,
-      status: 400,
-      body: {
-        error: { message: expect.stringContaining("edited source input") },
-      },
+      error: { message: expect.stringContaining("edited source input") },
     })
     expect(await context.app.threadStore.listThreadIds()).toEqual(beforeInvalid)
     let releaseReceipt!: () => void
@@ -806,7 +804,7 @@ describe("structured context and ephemeral forks", () => {
     })
     const edited = await context.app.handlers.forkSession({
       sessionId: id,
-      atInputId: initial.body.inputId,
+      atInputId: initial.value.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
       content: inputFixture([
@@ -817,12 +815,12 @@ describe("structured context and ephemeral forks", () => {
         { type: "text", text: "changed after" },
       ]),
     })
-    if (!edited.ok) throw new Error(edited.body.error.message)
+    if (!edited.ok) throw new Error(edited.error.message)
     await until(() => heldReceipt)
     releaseReceipt()
     await publicationFinished
     forkSpy.mockRestore()
-    const childId = edited.body.session.id
+    const childId = edited.value.session.id
     await until(
       () => context.app.threadManager.getThread(childId)?.status === "idle",
     )
@@ -869,11 +867,11 @@ describe("structured context and ephemeral forks", () => {
       modelSelection: { provider: "openai", model: "gpt-6-astra" },
       content: createUserInput("remove the images"),
     })
-    if (!removed.ok) throw new Error(removed.body.error.message)
+    if (!removed.ok) throw new Error(removed.error.message)
     await until(
       () =>
-        context.app.threadManager.getThread(removed.body.session.id)?.status ===
-        "idle",
+        context.app.threadManager.getThread(removed.value.session.id)
+          ?.status === "idle",
     )
     expect(
       requests
@@ -963,7 +961,7 @@ describe("structured context and ephemeral forks", () => {
           .map((image) => ({ type: "image" as const, ...image })),
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -974,7 +972,7 @@ describe("structured context and ephemeral forks", () => {
       modelSelection: { provider: "openai", model: "gpt-5" },
       content: inputFixture([{ type: "text" as const, text: "continue" }]),
     })
-    if (!continued.ok) throw new Error(continued.body.error.message)
+    if (!continued.ok) throw new Error(continued.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -1014,12 +1012,12 @@ describe("structured context and ephemeral forks", () => {
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
+    if (!events.ok) throw new Error(events.error.message)
     expect(
-      events.body.events.find(
+      events.value.events.find(
         (entry) =>
           entry.type === "input.admitted" &&
-          entry.data.inputId === admitted.body.inputId,
+          entry.data.inputId === admitted.value.inputId,
       ),
     ).toMatchObject({
       data: {
@@ -1127,9 +1125,9 @@ describe("structured context and ephemeral forks", () => {
     const events = await context.app.handlers.readSessionEvents({
       sessionId: id,
     })
-    if (!events.ok) throw new Error(events.body.error.message)
-    expect(JSON.stringify(events.body)).toContain('"references"')
-    expect(JSON.stringify(events.body)).toContain('"text":"Explain this"')
+    if (!events.ok) throw new Error(events.error.message)
+    expect(JSON.stringify(events.value)).toContain('"references"')
+    expect(JSON.stringify(events.value)).toContain('"text":"Explain this"')
     await admit(context.app, id, "context_turn", "Explain this", excerpts)
     expect(requests).toHaveLength(1)
     await admit(context.app, id, "only_context", "", excerpts)
@@ -1156,14 +1154,14 @@ describe("structured context and ephemeral forks", () => {
         { type: "text" as const, text: "Fresh question" },
       ]),
     })
-    if (!forked.ok) throw new Error(forked.body.error.message)
+    if (!forked.ok) throw new Error(forked.error.message)
     await until(
       () =>
-        context.app.threadManager.getThread(forked.body.session.id)?.status ===
+        context.app.threadManager.getThread(forked.value.session.id)?.status ===
         "idle",
     )
     const child = await context.app.threadStore.readThread(
-      forked.body.session.id,
+      forked.value.session.id,
     )
     expect(
       child?.rollout.find(
@@ -1221,7 +1219,7 @@ describe("structured context and ephemeral forks", () => {
         { type: "text" as const, text: "unfinished parent task" },
       ]),
     })
-    if (!active.ok) throw new Error(active.body.error.message)
+    if (!active.ok) throw new Error(active.error.message)
     await until(() => requests.length === 2)
     const side = await context.app.sideChats.create({ sourceSessionId: id })
     expect(side).toMatchObject({
@@ -1233,7 +1231,7 @@ describe("structured context and ephemeral forks", () => {
       sessionId: id,
       turnId: "parent_active",
     })
-    if (!cancelled.ok) throw new Error(cancelled.body.error.message)
+    if (!cancelled.ok) throw new Error(cancelled.error.message)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -1388,7 +1386,7 @@ describe("structured context and ephemeral forks", () => {
         })),
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await until(
       () => context.app.threadManager.getThread(parentId)?.status === "idle",
     )
@@ -1465,7 +1463,7 @@ describe("structured context and ephemeral forks", () => {
     const deleted = await context.app.handlers.deleteSession({
       sessionId: parentId,
     })
-    if (!deleted.ok) throw new Error(deleted.body.error.message)
+    if (!deleted.ok) throw new Error(deleted.error.message)
     await expect(
       context.app.rolloutAssets.read(parentImage.file),
     ).rejects.toMatchObject({ code: "ENOENT" })
@@ -1521,7 +1519,7 @@ describe("structured context and ephemeral forks", () => {
     const deleted = await context.app.handlers.deleteSession({
       sessionId: parentId,
     })
-    if (!deleted.ok) throw new Error(deleted.body.error.message)
+    if (!deleted.ok) throw new Error(deleted.error.message)
     expect(cancelled).toEqual(["active side chat"])
     for (const id of [side.id, nested.id, sibling.id]) {
       expect(() => context.app.sideChats.read(id)).toThrow(
@@ -1661,7 +1659,7 @@ describe("structured context and ephemeral forks", () => {
     const removed = await context.app.handlers.deleteSession({
       sessionId: ordinary,
     })
-    if (!removed.ok) throw new Error(removed.body.error.message)
+    if (!removed.ok) throw new Error(removed.error.message)
     expect(await context.app.rolloutAssets.read(attachment.file)).toEqual(
       await readFile(imagePath),
     )

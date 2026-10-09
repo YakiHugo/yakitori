@@ -8,6 +8,7 @@ import {
   sessionTransientMethod,
 } from "../../protocol/rpc-wire.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
+import type { ApplicationResult } from "../application-result.ts"
 import type { SessionDelivery, SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import {
@@ -16,7 +17,6 @@ import {
   reportOperationalFailure,
 } from "../operational-errors.ts"
 import type {
-  ApiHandlerResult,
   ApiPendingPermission,
   ApiReadSessionResponse,
 } from "../protocol.ts"
@@ -47,7 +47,7 @@ export type SessionSubscribeOutcome =
       // replayComplete, permission replay, then the reconciled live buffer.
       replay(): Promise<void>
     }>
-  | Readonly<{ ok: false; result: ApiHandlerResult<never> }>
+  | Readonly<{ ok: false; result: ApplicationResult<never> }>
 
 export type SessionSubscriptions = Readonly<{
   subscribe(input: SessionSubscribeInput): Promise<SessionSubscribeOutcome>
@@ -148,7 +148,7 @@ export function createSessionSubscriptions(
     reportOperationalFailure(reporter, {
       component: "session-subscriptions",
       operation: "resolve-permission",
-      cause: new Error(result.body.error.message),
+      cause: new Error(result.error.message),
       sessionId: params.sessionId,
       turnId: params.turnId,
     })
@@ -332,12 +332,12 @@ export function createSessionSubscriptions(
       removeOwnedSubscription()
       return { ok: false, result: snapshot }
     }
-    const watermark = snapshot.body.session.seq
+    const watermark = snapshot.value.session.seq
     // Entries the snapshot no longer lists belong to Turns that ended while
     // nobody was subscribed; rejecting them with the turn-transition marker
     // keeps the pending map bounded and their continuations silent.
     const snapshotPendingIds = new Set(
-      snapshot.body.session.pendingPermissions.map(
+      snapshot.value.session.pendingPermissions.map(
         (permission) => permission.permissionRequestId,
       ),
     )
@@ -379,12 +379,12 @@ export function createSessionSubscriptions(
             through: watermark,
             limit: replayPageLimit,
           })
-          if (!page.ok) throw new Error(page.body.error.message)
-          for (const event of page.body.events) {
+          if (!page.ok) throw new Error(page.error.message)
+          for (const event of page.value.events) {
             deliver({ kind: "durable", events: [event] })
           }
-          if (page.body.nextAfter === undefined) break
-          cursor = page.body.nextAfter
+          if (page.value.nextAfter === undefined) break
+          cursor = page.value.nextAfter
         }
         if (closed) return
         options.notify(input.connectionId, sessionReplayCompleteMethod, {
@@ -398,7 +398,7 @@ export function createSessionSubscriptions(
         // session/permission/request (register-or-reuse dedupe) so a
         // reconnected client can answer.
         for (const permission of unbufferedPendingPermissions(
-          snapshot.body.session.pendingPermissions,
+          snapshot.value.session.pendingPermissions,
           buffered,
         )) {
           options.sendRequest(
@@ -412,7 +412,7 @@ export function createSessionSubscriptions(
         }
         reconcileBufferedSessionDeliveries(
           buffered,
-          snapshot.body.session.activeTurnId,
+          snapshot.value.session.activeTurnId,
           deliver,
         )
         buffered.length = 0
@@ -436,7 +436,7 @@ export function createSessionSubscriptions(
         })
       }
     }
-    return { ok: true, response: snapshot.body, replay }
+    return { ok: true, response: snapshot.value, replay }
   }
 
   return {

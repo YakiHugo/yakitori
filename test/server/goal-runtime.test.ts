@@ -13,7 +13,8 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
+
 import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
 
@@ -78,10 +79,10 @@ async function close(application: YakitoriApplication): Promise<void> {
   await application.close()
 }
 
-function body<T>(result: ApiHandlerResult<T>): T {
+function body<T>(result: ApplicationResult<T>): T {
   if (!result.ok)
-    throw new Error(`${result.body.error.code}: ${result.body.error.message}`)
-  return result.body
+    throw new Error(`${result.error.code}: ${result.error.message}`)
+  return result.value
 }
 
 const final = (

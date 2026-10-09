@@ -416,9 +416,9 @@ describe("Turn recovery", () => {
     })
     const replay = async () => {
       const result = await handlers.readSessionEvents({ sessionId: thread.id })
-      if (!result.ok) throw new Error(result.body.error.message)
+      if (!result.ok) throw new Error(result.error.message)
       let state = createExecutionViewState()
-      for (const event of result.body.events)
+      for (const event of result.value.events)
         state = reduceExecutionView(state, { type: "durable", event })
       return projectExecutionView(state)
     }

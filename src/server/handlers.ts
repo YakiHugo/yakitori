@@ -55,6 +55,7 @@ import type {
 } from "../runtime/permission-gate.ts"
 import type { SkillMetadata } from "../runtime/skills.ts"
 import { GoalToolError } from "../runtime/tools/goal.ts"
+import type { ApplicationResult } from "./application-result.ts"
 import {
   InputQueue,
   InputQueueFullError,
@@ -79,7 +80,6 @@ import {
   type ApiDeleteSessionResponse,
   ApiErrorCode,
   type ApiForkSessionResponse,
-  type ApiHandlerResult,
   type ApiListAgentsResponse,
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
@@ -166,60 +166,66 @@ export type ThreadServerHandlerOptions = {
 }
 
 export type ServerHandlers = {
-  readGoal(input: unknown): Promise<ApiHandlerResult<ApiReadGoalResponse>>
-  setGoal(input: unknown): Promise<ApiHandlerResult<ApiSetGoalResponse>>
-  clearGoal(input: unknown): Promise<ApiHandlerResult<ApiClearGoalResponse>>
-  listAgents(input: unknown): Promise<ApiHandlerResult<ApiListAgentsResponse>>
-  readSidebar(): Promise<ApiHandlerResult<SessionSidebar>>
-  updateSidebar(input: unknown): Promise<ApiHandlerResult<SessionSidebar>>
-  readUsage(): Promise<ApiHandlerResult<ApiReadUsageResponse>>
+  readGoal(input: unknown): Promise<ApplicationResult<ApiReadGoalResponse>>
+  setGoal(input: unknown): Promise<ApplicationResult<ApiSetGoalResponse>>
+  clearGoal(input: unknown): Promise<ApplicationResult<ApiClearGoalResponse>>
+  listAgents(input: unknown): Promise<ApplicationResult<ApiListAgentsResponse>>
+  readSidebar(): Promise<ApplicationResult<SessionSidebar>>
+  updateSidebar(input: unknown): Promise<ApplicationResult<SessionSidebar>>
+  readUsage(): Promise<ApplicationResult<ApiReadUsageResponse>>
   createSession(
     input?: unknown,
-  ): Promise<ApiHandlerResult<ApiCreateSessionResponse>>
+  ): Promise<ApplicationResult<ApiCreateSessionResponse>>
   listSessions(
     input?: unknown,
-  ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
+  ): Promise<ApplicationResult<ApiListSessionsResponse>>
   searchSessions(
     input?: unknown,
-  ): Promise<ApiHandlerResult<ApiSearchSessionsResponse>>
+  ): Promise<ApplicationResult<ApiSearchSessionsResponse>>
   searchSessionOccurrences(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiSearchSessionOccurrencesResponse>>
-  readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
-  listSkills(input: unknown): Promise<ApiHandlerResult<ApiListSkillsResponse>>
+  ): Promise<ApplicationResult<ApiSearchSessionOccurrencesResponse>>
+  readSession(
+    input: unknown,
+  ): Promise<ApplicationResult<ApiReadSessionResponse>>
+  listSkills(input: unknown): Promise<ApplicationResult<ApiListSkillsResponse>>
   deleteSession(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
+  ): Promise<ApplicationResult<ApiDeleteSessionResponse>>
   closeSession(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
-  forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
-  admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
-  queueInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  ): Promise<ApplicationResult<ApiDeleteSessionResponse>>
+  forkSession(
+    input: unknown,
+  ): Promise<ApplicationResult<ApiForkSessionResponse>>
+  admitInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  queueInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
   listQueuedInputs(
     input: unknown,
-  ): Promise<ApiHandlerResult<{ items: readonly QueuedInput[] }>>
+  ): Promise<ApplicationResult<{ items: readonly QueuedInput[] }>>
   updateQueuedInput(
     input: unknown,
-  ): Promise<ApiHandlerResult<{ item: QueuedInput }>>
+  ): Promise<ApplicationResult<{ item: QueuedInput }>>
   reorderQueuedInputs(
     input: unknown,
-  ): Promise<ApiHandlerResult<{ items: readonly QueuedInput[] }>>
+  ): Promise<ApplicationResult<{ items: readonly QueuedInput[] }>>
   startQueuedInput(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
-  steerInput(input: unknown): Promise<ApiHandlerResult<ApiSteerInputResponse>>
+  ): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  steerInput(input: unknown): Promise<ApplicationResult<ApiSteerInputResponse>>
   compactSession(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiCompactSessionResponse>>
-  cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
-  cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
+  ): Promise<ApplicationResult<ApiCompactSessionResponse>>
+  cancelInput(
+    input: unknown,
+  ): Promise<ApplicationResult<ApiCancelInputResponse>>
+  cancelTurn(input: unknown): Promise<ApplicationResult<ApiCancelTurnResponse>>
   resolvePermission(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiResolvePermissionResponse>>
+  ): Promise<ApplicationResult<ApiResolvePermissionResponse>>
   readSessionEvents(
     input: unknown,
-  ): Promise<ApiHandlerResult<ApiReadSessionEventsResponse>>
+  ): Promise<ApplicationResult<ApiReadSessionEventsResponse>>
 }
 
 export type ThreadServerHandlers = ServerHandlers & {
@@ -903,7 +909,7 @@ export function createThreadServerHandlers(
           }
         }
         rollbackPromotion = undefined
-        return ok(submitted.type === "replayed" ? 200 : 201, {
+        return ok({
           requestId: request.requestId,
           turnId: submitted.turnId,
           inputId: submitted.inputItemId,
@@ -970,7 +976,7 @@ export function createThreadServerHandlers(
         }
         publishedThrough.set(thread.id, event.seq)
         options.eventHub?.publishDurable([event])
-        return ok(201, {
+        return ok({
           session: await mapStoredThread(stored, thread, queueOptions),
           event,
         })
@@ -981,7 +987,7 @@ export function createThreadServerHandlers(
 
     async readSidebar() {
       try {
-        return ok(200, await options.store.readSessionSidebar())
+        return ok(await options.store.readSessionSidebar())
       } catch (error) {
         return fail(error, reporter, "read-sidebar")
       }
@@ -1001,10 +1007,10 @@ export function createThreadServerHandlers(
               throw conflict(
                 "Wait for the active turn to finish before archiving.",
               )
-            return ok(200, await options.store.updateSessionSidebar(change))
+            return ok(await options.store.updateSessionSidebar(change))
           })
         }
-        return ok(200, await options.store.updateSessionSidebar(change))
+        return ok(await options.store.updateSessionSidebar(change))
       } catch (error) {
         return fail(error, reporter, "update-sidebar")
       }
@@ -1012,7 +1018,7 @@ export function createThreadServerHandlers(
 
     async readUsage() {
       try {
-        return ok(200, { usage: await options.store.readUsageSummary() })
+        return ok({ usage: await options.store.readUsageSummary() })
       } catch (error) {
         return fail(error, reporter, "read-usage")
       }
@@ -1029,7 +1035,7 @@ export function createThreadServerHandlers(
             // Orphan-on-delete at the read path: a filter naming a deleted (or
             // never known) project matches nothing, since orphaned Sessions
             // read as having no project.
-            return ok(200, { sessions: [] })
+            return ok({ sessions: [] })
           }
         }
         const result = await options.manager.listThreads({
@@ -1059,7 +1065,7 @@ export function createThreadServerHandlers(
               }),
         })
         const liveProjects = await liveProjectIds(options, result.threads)
-        return ok(200, {
+        return ok({
           sessions: result.threads.map((thread) => {
             const summary = mapThreadSummary(
               thread,
@@ -1112,7 +1118,7 @@ export function createThreadServerHandlers(
           options,
           result.matches.map(({ summary }) => summary),
         )
-        return ok(200, {
+        return ok({
           data: result.matches.map(({ summary, snippet }) => ({
             session: mapThreadSummary(
               summary,
@@ -1163,7 +1169,7 @@ export function createThreadServerHandlers(
             sessionId: request.sessionId,
           })
         }
-        return ok(200, {
+        return ok({
           data: result.occurrences,
           ...(result.nextCursor === undefined
             ? {}
@@ -1185,7 +1191,7 @@ export function createThreadServerHandlers(
       try {
         const { sessionId } = requireDeleteSessionRequest(input)
         await requireStoredThread(options.store, sessionId)
-        return ok(200, { goal: options.goals?.read(sessionId) ?? null })
+        return ok({ goal: options.goals?.read(sessionId) ?? null })
       } catch (error) {
         return fail(error, reporter, "read-goal")
       }
@@ -1279,7 +1285,7 @@ export function createThreadServerHandlers(
           await resumeRequired(sessionId)
           options.goals.wake(sessionId)
         }
-        return ok(200, { goal })
+        return ok({ goal })
       } catch (error) {
         return fail(error, reporter, "set-goal")
       }
@@ -1290,7 +1296,7 @@ export function createThreadServerHandlers(
         const { sessionId } = requireDeleteSessionRequest(input)
         await requireStoredThread(options.store, sessionId)
         options.goals?.clear(sessionId)
-        return ok(200, { goal: null })
+        return ok({ goal: null })
       } catch (error) {
         return fail(error, reporter, "clear-goal")
       }
@@ -1307,7 +1313,7 @@ export function createThreadServerHandlers(
         if (stored === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-        return ok(200, {
+        return ok({
           session: await mapStoredThread(stored, live, queueOptions),
         })
       } catch (error) {
@@ -1322,7 +1328,7 @@ export function createThreadServerHandlers(
         if (stored === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-        return ok(200, {
+        return ok({
           agents: (await options.listAgents?.(stored)) ?? [],
         })
       } catch (error) {
@@ -1338,12 +1344,12 @@ export function createThreadServerHandlers(
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
         if (options.listSessionSkills === undefined) {
-          return ok(200, { skills: [] })
+          return ok({ skills: [] })
         }
         const workingDirectory =
           stored.metadata.workingDirectory ??
           options.sessionDefaults?.workingDirectory
-        if (workingDirectory === undefined) return ok(200, { skills: [] })
+        if (workingDirectory === undefined) return ok({ skills: [] })
         const discovered = await options.listSessionSkills({
           sessionId,
           workingDirectory,
@@ -1351,7 +1357,7 @@ export function createThreadServerHandlers(
             ? {}
             : { projectId: stored.metadata.projectId }),
         })
-        return ok(200, {
+        return ok({
           skills: discovered
             .filter((skill) => skill.enabled !== false)
             .map((skill) => ({
@@ -1388,7 +1394,7 @@ export function createThreadServerHandlers(
         })
         options.goals?.clear(sessionId)
         publishedThrough.delete(sessionId)
-        return ok(200, { sessionId })
+        return ok({ sessionId })
       } catch (error) {
         return fail(error, reporter, "delete-session")
       }
@@ -1400,7 +1406,7 @@ export function createThreadServerHandlers(
         if (!(await options.manager.closeThread(sessionId))) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-        return ok(200, { sessionId })
+        return ok({ sessionId })
       } catch (error) {
         return fail(error, reporter, "close-session")
       }
@@ -1545,7 +1551,7 @@ export function createThreadServerHandlers(
         )
         publishedThrough.set(forked.thread.id, threadSeq(stored))
         options.eventHub?.publishDurable(events)
-        return ok(201, {
+        return ok({
           session: await mapStoredThread(stored, forked.thread, queueOptions),
           historyEndSeqExclusive:
             (forked.result.historyEndSeqExclusive ?? 1) + 1,
@@ -1686,7 +1692,7 @@ export function createThreadServerHandlers(
           }
         })
         queuedItems.wake(request.sessionId)
-        return ok(201, {
+        return ok({
           requestId: request.requestId,
           turnId: request.requestId,
           inputId: item.id,
@@ -1708,7 +1714,7 @@ export function createThreadServerHandlers(
       try {
         const { sessionId } = requireReadSessionRequest(input)
         await requireStoredThread(options.store, sessionId)
-        return ok(200, { items: queuedItems.list(sessionId) })
+        return ok({ items: queuedItems.list(sessionId) })
       } catch (error) {
         return fail(error, reporter, "list-queued-inputs")
       }
@@ -1793,7 +1799,7 @@ export function createThreadServerHandlers(
             throw error
           }
         })
-        return ok(200, { item })
+        return ok({ item })
       } catch (error) {
         return fail(
           error instanceof QueuedInputTooLargeError
@@ -1827,7 +1833,7 @@ export function createThreadServerHandlers(
             )
           return queuedItems.reorder(sessionId, inputIds)
         })
-        return ok(200, { items })
+        return ok({ items })
       } catch (error) {
         return fail(error, reporter, "reorder-queued-inputs")
       }
@@ -1861,7 +1867,7 @@ export function createThreadServerHandlers(
             throw internalError("Queue start returned an unexpected result.")
           return { item, submission }
         })
-        return ok(200, {
+        return ok({
           requestId: result.item.input.submissionId,
           turnId: result.submission.turnId,
           inputId: result.submission.inputItemId,
@@ -1955,7 +1961,7 @@ export function createThreadServerHandlers(
         // Steering acceptance is ephemeral. Preserve draft assets until the
         // model records this input, so a lost response or an interrupted Turn
         // leaves the client's draft retryable.
-        return ok(200, {
+        return ok({
           requestId: request.requestId,
           turnId: submitted.turnId,
           content: promoted.content,
@@ -1988,7 +1994,7 @@ export function createThreadServerHandlers(
           })
         if (submitted.type !== "started" && submitted.type !== "replayed")
           throw internalError("Compaction unexpectedly queued or steered.")
-        return ok(submitted.type === "replayed" ? 200 : 201, {
+        return ok({
           requestId,
           turnId: submitted.turnId,
         })
@@ -2022,7 +2028,7 @@ export function createThreadServerHandlers(
             stored.metadata.rolloutId,
             ownerId,
           )
-        return ok(200, {
+        return ok({
           sessionId: request.sessionId,
           inputId: request.inputId,
         })
@@ -2048,7 +2054,7 @@ export function createThreadServerHandlers(
             turnId: request.turnId,
           })
         }
-        return ok(200, {
+        return ok({
           sessionId: request.sessionId,
           turnId: request.turnId,
         })
@@ -2066,7 +2072,7 @@ export function createThreadServerHandlers(
             { permissionRequestId: request.permissionRequestId },
           )
         }
-        return ok(200, request)
+        return ok(request)
       } catch (error) {
         return fail(error, reporter, "resolve-permission")
       }
@@ -2090,7 +2096,7 @@ export function createThreadServerHandlers(
         })
         const page = matching.slice(0, limit)
         const last = page.at(-1)
-        return ok(200, {
+        return ok({
           events: page.map((record) =>
             mapRolloutEvent(record, request.sessionId),
           ),
@@ -3205,21 +3211,17 @@ function parseCursorPayload(cursor: string): Record<string, unknown> {
   })
 }
 
-function ok<T>(status: number, body: T): ApiHandlerResult<T> {
-  return {
-    ok: true,
-    status,
-    body,
-  }
+function ok<T>(value: T): ApplicationResult<T> {
+  return { ok: true, value }
 }
 
 function fail(
   error: unknown,
   reporter?: OperationalFailureReporter,
   operation?: string,
-): ApiHandlerResult<never> {
+): ApplicationResult<never> {
   const mapped = mapError(error)
-  if (mapped.status >= 500 && reporter !== undefined) {
+  if (mapped.code === ApiErrorCode.InternalError && reporter !== undefined) {
     const sessionId =
       mapped.details !== undefined &&
       typeof mapped.details.sessionId === "string"
@@ -3239,13 +3241,10 @@ function fail(
   }
   return {
     ok: false,
-    status: mapped.status,
-    body: {
-      error: {
-        code: mapped.code,
-        message: mapped.message,
-        ...(mapped.details === undefined ? {} : { details: mapped.details }),
-      },
+    error: {
+      code: mapped.code,
+      message: mapped.message,
+      ...(mapped.details === undefined ? {} : { details: mapped.details }),
     },
   }
 }
@@ -3274,46 +3273,39 @@ function invalidInput(
   message: string,
   details?: EventMetadata,
 ): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.InvalidInput, 400, message, details)
+  return new ApiBoundaryError(ApiErrorCode.InvalidInput, message, details)
 }
 
 function invalidCursor(
   message: string,
   details?: EventMetadata,
 ): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.InvalidCursor, 400, message, details)
+  return new ApiBoundaryError(ApiErrorCode.InvalidCursor, message, details)
 }
 
 function notFound(message: string, details?: EventMetadata): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.NotFound, 404, message, details)
+  return new ApiBoundaryError(ApiErrorCode.NotFound, message, details)
 }
 
 function conflict(message: string, details?: EventMetadata): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.Conflict, 409, message, details)
+  return new ApiBoundaryError(ApiErrorCode.Conflict, message, details)
 }
 
 function internalError(
   message: string,
   details?: EventMetadata,
 ): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.InternalError, 500, message, details)
+  return new ApiBoundaryError(ApiErrorCode.InternalError, message, details)
 }
 
 class ApiBoundaryError extends Error {
   readonly code: ApiErrorCode
-  readonly status: number
   readonly details?: EventMetadata
 
-  constructor(
-    code: ApiErrorCode,
-    status: number,
-    message: string,
-    details?: EventMetadata,
-  ) {
+  constructor(code: ApiErrorCode, message: string, details?: EventMetadata) {
     super(message)
     this.name = "ApiBoundaryError"
     this.code = code
-    this.status = status
     if (details !== undefined) this.details = details
   }
 }

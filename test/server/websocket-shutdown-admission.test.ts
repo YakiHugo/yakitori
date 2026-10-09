@@ -69,8 +69,8 @@ describe("WebSocket admissions during graceful shutdown", () => {
       })
       const { url, app } = await listening.promise
       const created = await app.handlers.createSession({})
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       const [draft] = await app.rolloutAssets.importAttachmentBytes(
         sessionId,
         "draft",

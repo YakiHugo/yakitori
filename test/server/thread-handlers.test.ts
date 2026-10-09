@@ -84,7 +84,7 @@ describe("thread server handlers", () => {
       }
       expect(
         await method({ ...request, content: { kind: "text", text: "x" } }),
-      ).toMatchObject({ ok: false, status: 400 })
+      ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
       expect(
         await method({
           ...request,
@@ -95,21 +95,20 @@ describe("thread server handlers", () => {
         }),
       ).toMatchObject({
         ok: false,
-        status: 400,
-        body: { error: { details: { field: "content.text", maxBytes: 3 } } },
+        error: { details: { field: "content.text", maxBytes: 3 } },
       })
       expect(
         await method({
           ...request,
           content: inputFixture([{ type: "audio", data: "unsupported" }]),
         }),
-      ).toMatchObject({ ok: false, status: 400 })
+      ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
       expect(
         await method({
           ...request,
           content: { ...createUserInput(""), unexpected: "parallel" },
         }),
-      ).toMatchObject({ ok: false, status: 400 })
+      ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
       const document = {
         type: "document",
         name: "report.pdf",
@@ -134,7 +133,7 @@ describe("thread server handlers", () => {
             ...request,
             content: inputFixture([invalid]),
           }),
-        ).toMatchObject({ ok: false, status: 400 })
+        ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
     }
   })
 
@@ -183,8 +182,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_before_compact",
@@ -192,7 +191,7 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "Remember the goal" },
       ]),
     })
-    if (!first.ok) throw new Error(first.body.error.message)
+    if (!first.ok) throw new Error(first.error.message)
     const thread = manager.getThread(sessionId)
     if (thread === undefined) throw new Error("Missing live Session.")
     await waitForValue(() =>
@@ -206,9 +205,9 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_manual_compact",
     })
-    if (!compact.ok) throw new Error(compact.body.error.message)
-    expect(compact.status).toBe(201)
-    expect(compact.body).toMatchObject({
+    if (!compact.ok) throw new Error(compact.error.message)
+    expect(compact.ok).toBe(true)
+    expect(compact.value).toMatchObject({
       requestId: "request_manual_compact",
       turnId: "request_manual_compact",
     })
@@ -218,17 +217,13 @@ describe("thread server handlers", () => {
     })
     expect(replay).toMatchObject({
       ok: true,
-      status: 200,
-      body: { turnId: compact.body.turnId },
+      value: { turnId: compact.value.turnId },
     })
     const busy = await handlers.compactSession({
       sessionId,
       requestId: "request_manual_compact_again",
     })
-    expect(busy).toMatchObject({
-      ok: false,
-      status: 409,
-    })
+    expect(busy).toMatchObject({ ok: false, error: { code: "conflict" } })
     const incompatibleReplay = await handlers.admitInput({
       sessionId,
       requestId: "request_manual_compact",
@@ -236,7 +231,7 @@ describe("thread server handlers", () => {
     })
     expect(incompatibleReplay).toMatchObject({
       ok: false,
-      status: 409,
+      error: { code: "conflict" },
     })
     releaseCompaction()
     await waitForValue(() =>
@@ -277,8 +272,8 @@ describe("thread server handlers", () => {
       ),
     ).toBe(true)
     const events = await handlers.readSessionEvents({ sessionId })
-    if (!events.ok) throw new Error(events.body.error.message)
-    expect(events.body.events).toEqual(
+    if (!events.ok) throw new Error(events.error.message)
+    expect(events.value.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "session.cursor",
@@ -337,8 +332,7 @@ describe("thread server handlers", () => {
     })
     expect(resumedReplay).toMatchObject({
       ok: true,
-      status: 200,
-      body: { turnId: compact.body.turnId },
+      value: { turnId: compact.value.turnId },
     })
     expect(requests).toBe(2)
   })
@@ -365,11 +359,11 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const empty = await handlers.readSession({ sessionId })
-    if (!empty.ok) throw new Error(empty.body.error.message)
-    expect(empty.body.session.cacheExpiry).toBeUndefined()
+    if (!empty.ok) throw new Error(empty.error.message)
+    expect(empty.value.session.cacheExpiry).toBeUndefined()
 
     await store.appendItems(sessionId, [
       {
@@ -403,9 +397,9 @@ describe("thread server handlers", () => {
     if (completedAt === undefined)
       throw new Error("Missing durable completion.")
     const read = await handlers.readSession({ sessionId })
-    if (!read.ok) throw new Error(read.body.error.message)
-    expect(read.body.session.currentModel?.provider).toBe("openai")
-    expect(read.body.session.cacheExpiry).toEqual({
+    if (!read.ok) throw new Error(read.error.message)
+    expect(read.value.session.currentModel?.provider).toBe("openai")
+    expect(read.value.session.cacheExpiry).toEqual({
       provider: "anthropic",
       lastTurnCompletedAt: completedAt,
       lastRequestStartedAt: "2026-09-20T10:00:00.000Z",
@@ -465,15 +459,15 @@ describe("thread server handlers", () => {
       mateRevisionId: "mate_revision_test",
     })
 
-    if (!created.ok) throw new Error(created.body.error.message)
-    expect(created.body.session.gitInfo).toEqual({
+    if (!created.ok) throw new Error(created.error.message)
+    expect(created.value.session.gitInfo).toEqual({
       sha,
       branch: "feat/session-context",
       originUrl: "https://github.com/example/project.git",
     })
     expect(
-      (await store.readThread(created.body.session.id))?.metadata.gitInfo,
-    ).toEqual(created.body.session.gitInfo)
+      (await store.readThread(created.value.session.id))?.metadata.gitInfo,
+    ).toEqual(created.value.session.gitInfo)
   })
 
   it("steers input into an active turn and rejects steering an idle session", async () => {
@@ -520,8 +514,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
 
     const idle = await handlers.steerInput({
       sessionId,
@@ -532,7 +526,7 @@ describe("thread server handlers", () => {
       ]),
     })
     expect(idle.ok).toBe(false)
-    if (!idle.ok) expect(idle.body.error.message).toContain("no_active_turn")
+    if (!idle.ok) expect(idle.error.message).toContain("no_active_turn")
 
     const admitted = await handlers.admitInput({
       sessionId,
@@ -541,7 +535,7 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "start the work" },
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() => (requests.length === 1 ? true : undefined))
 
     const wrongTurn = await handlers.steerInput({
@@ -552,7 +546,7 @@ describe("thread server handlers", () => {
     })
     expect(wrongTurn.ok).toBe(false)
     if (!wrongTurn.ok)
-      expect(wrongTurn.body.error.message).toContain("turn_mismatch")
+      expect(wrongTurn.error.message).toContain("turn_mismatch")
 
     const steered = await handlers.steerInput({
       sessionId,
@@ -562,8 +556,8 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "also handle this" },
       ]),
     })
-    if (!steered.ok) throw new Error(steered.body.error.message)
-    expect(steered.body.turnId).toBe("request_first")
+    if (!steered.ok) throw new Error(steered.error.message)
+    expect(steered.value.turnId).toBe("request_first")
 
     releaseFirst()
     await waitForValue(() =>
@@ -575,9 +569,9 @@ describe("thread server handlers", () => {
     expect(requests).toHaveLength(2)
     expect(requests[1]).toContain("also handle this")
     const events = await handlers.readSessionEvents({ sessionId })
-    if (!events.ok) throw new Error(events.body.error.message)
+    if (!events.ok) throw new Error(events.error.message)
     expect(
-      events.body.events.find(
+      events.value.events.find(
         (event) =>
           isKernelEvent(event) &&
           event.type === "input.admitted" &&
@@ -658,8 +652,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
 
     const admitted = await handlers.admitInput({
       sessionId,
@@ -668,7 +662,7 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "start the work" },
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() => (requests.length === 1 ? true : undefined))
 
     await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
@@ -686,18 +680,18 @@ describe("thread server handlers", () => {
         ...attachments.map((image) => ({ type: attachmentType, ...image })),
       ]),
     })
-    if (!queued.ok) throw new Error(queued.body.error.message)
-    expect(queued.status).toBe(201)
+    if (!queued.ok) throw new Error(queued.error.message)
+    expect(queued.ok).toBe(true)
     const queuedEvents = await handlers.readSessionEvents({ sessionId })
-    if (!queuedEvents.ok) throw new Error(queuedEvents.body.error.message)
-    expect(queuedEvents.body.events.map((event) => event.type)).not.toContain(
+    if (!queuedEvents.ok) throw new Error(queuedEvents.error.message)
+    expect(queuedEvents.value.events.map((event) => event.type)).not.toContain(
       "input.queued",
     )
     const queuedList = await handlers.listQueuedInputs({ sessionId })
-    if (!queuedList.ok) throw new Error(queuedList.body.error.message)
-    expect(queuedList.body.items).toEqual([
+    if (!queuedList.ok) throw new Error(queuedList.error.message)
+    expect(queuedList.value.items).toEqual([
       expect.objectContaining({
-        id: queued.body.inputId,
+        id: queued.value.inputId,
         input: expect.objectContaining({
           content: expect.objectContaining({
             text: `run after[${attachmentType === "image" ? "Image" : "Document"} 1]`,
@@ -713,7 +707,8 @@ describe("thread server handlers", () => {
     expect(
       (await store.readThread(sessionId))?.rollout.some(
         ({ item }) =>
-          item.type === "response_item" && item.item.id === queued.body.inputId,
+          item.type === "response_item" &&
+          item.item.id === queued.value.inputId,
       ),
     ).toBe(false)
 
@@ -724,7 +719,7 @@ describe("thread server handlers", () => {
     )
     const edited = await handlers.updateQueuedInput({
       sessionId,
-      inputId: queued.body.inputId,
+      inputId: queued.value.inputId,
       requestId: "request_queued_edit",
       content: inputFixture([
         { type: "text" as const, text: "run after" },
@@ -734,8 +729,8 @@ describe("thread server handlers", () => {
         })),
       ]),
     })
-    if (!edited.ok) throw new Error(edited.body.error.message)
-    expect(edited.body.item.input.submissionId).toBe("request_queued")
+    if (!edited.ok) throw new Error(edited.error.message)
+    expect(edited.value.item.input.submissionId).toBe("request_queued")
     await expect(
       rolloutAssets.read({
         rolloutId: sessionId,
@@ -744,12 +739,12 @@ describe("thread server handlers", () => {
     ).rejects.toMatchObject({ code: "ENOENT" })
 
     const detail = await handlers.readSession({ sessionId })
-    if (!detail.ok) throw new Error(detail.body.error.message)
-    expect(detail.body.session.pendingInputs).toEqual([
+    if (!detail.ok) throw new Error(detail.error.message)
+    expect(detail.value.session.pendingInputs).toEqual([
       expect.objectContaining({ text: "run after" }),
     ])
-    expect(detail.body.session.counts.inputs).toBe(1)
-    const queuedInputId = detail.body.session.pendingInputs[0]?.id
+    expect(detail.value.session.counts.inputs).toBe(1)
+    const queuedInputId = detail.value.session.pendingInputs[0]?.id
     if (queuedInputId === undefined) throw new Error("Missing queued input.")
 
     const cancelled = await handlers.cancelInput({
@@ -757,7 +752,7 @@ describe("thread server handlers", () => {
       inputId: queuedInputId,
       reason: "user_cancel",
     })
-    if (!cancelled.ok) throw new Error(cancelled.body.error.message)
+    if (!cancelled.ok) throw new Error(cancelled.error.message)
     expect((await handlers.listQueuedInputs({ sessionId })).ok).toBe(true)
     await expect(
       rolloutAssets.read({
@@ -767,8 +762,8 @@ describe("thread server handlers", () => {
     ).rejects.toMatchObject({ code: "ENOENT" })
 
     const after = await handlers.readSession({ sessionId })
-    if (!after.ok) throw new Error(after.body.error.message)
-    expect(after.body.session.pendingInputs).toEqual([])
+    if (!after.ok) throw new Error(after.error.message)
+    expect(after.value.session.pendingInputs).toEqual([])
 
     // Cancelling an already-started or unknown input conflicts.
     const missing = await handlers.cancelInput({
@@ -776,7 +771,7 @@ describe("thread server handlers", () => {
       inputId: queuedInputId,
     })
     expect(missing.ok).toBe(false)
-    if (!missing.ok) expect(missing.status).toBe(409)
+    if (!missing.ok) expect(missing.ok).toBe(false)
 
     const nextAttachments = await rolloutAssets.importAttachmentBytes(
       sessionId,
@@ -794,7 +789,7 @@ describe("thread server handlers", () => {
         })),
       ]),
     })
-    if (!next.ok) throw new Error(next.body.error.message)
+    if (!next.ok) throw new Error(next.error.message)
     releaseFirst()
     await waitForValue(() =>
       requests.length === 2 && manager.getThread(sessionId)?.status === "idle"
@@ -806,8 +801,8 @@ describe("thread server handlers", () => {
     expect(requests[1]).toContain("run second")
     expect(requests[1]).not.toContain("run after")
     const replay = await handlers.readSessionEvents({ sessionId })
-    if (!replay.ok) throw new Error(replay.body.error.message)
-    const admittedNext = replay.body.events.filter(
+    if (!replay.ok) throw new Error(replay.error.message)
+    const admittedNext = replay.value.events.filter(
       (event) =>
         event.type === "input.admitted" &&
         isKernelEvent(event) &&
@@ -874,26 +869,26 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_interrupt_first",
       content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
-    if (!first.ok) throw new Error(first.body.error.message)
+    if (!first.ok) throw new Error(first.error.message)
     await firstStarted.promise
     const queued = await handlers.queueInput({
       sessionId,
       requestId: "request_interrupt_queued",
       content: inputFixture([{ type: "text" as const, text: "queued" }]),
     })
-    if (!queued.ok) throw new Error(queued.body.error.message)
+    if (!queued.ok) throw new Error(queued.error.message)
     const interrupted = await handlers.cancelTurn({
       sessionId,
       turnId: "request_interrupt_first",
     })
-    if (!interrupted.ok) throw new Error(interrupted.body.error.message)
+    if (!interrupted.ok) throw new Error(interrupted.error.message)
     releaseFirst.resolve()
     await waitForValue(() =>
       manager.getThread(sessionId)?.agentStatus === "interrupted" &&
@@ -903,9 +898,9 @@ describe("thread server handlers", () => {
     )
     expect(requests).toEqual(["first"])
     const waiting = await handlers.listQueuedInputs({ sessionId })
-    if (!waiting.ok) throw new Error(waiting.body.error.message)
-    expect(waiting.body.items.map((item) => item.id)).toEqual([
-      queued.body.inputId,
+    if (!waiting.ok) throw new Error(waiting.error.message)
+    expect(waiting.value.items.map((item) => item.id)).toEqual([
+      queued.value.inputId,
     ])
 
     expect(await manager.closeThread(sessionId)).toBe(true)
@@ -918,12 +913,12 @@ describe("thread server handlers", () => {
       requestId: "request_interrupt_manual",
       content: inputFixture([{ type: "text" as const, text: "manual" }]),
     })
-    if (!manual.ok) throw new Error(manual.body.error.message)
+    if (!manual.ok) throw new Error(manual.error.message)
     await waitForValue(() => (requests.length === 3 ? true : undefined))
     expect(requests).toEqual(["first", "manual", "queued"])
     const drained = await handlers.listQueuedInputs({ sessionId })
-    if (!drained.ok) throw new Error(drained.body.error.message)
-    expect(drained.body.items).toEqual([])
+    if (!drained.ok) throw new Error(drained.error.message)
+    expect(drained.value.items).toEqual([])
   })
 
   it("queues a cold thread without resuming it and dispatches on resume", async () => {
@@ -978,8 +973,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     expect(await manager.closeThread(sessionId)).toBe(true)
     await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
     const attachment = await rolloutAssets.importAttachmentBytes(
@@ -995,7 +990,7 @@ describe("thread server handlers", () => {
         ...attachment.map((image) => ({ type: "image" as const, ...image })),
       ]),
     })
-    if (!queued.ok) throw new Error(queued.body.error.message)
+    if (!queued.ok) throw new Error(queued.error.message)
     expect(manager.getThread(sessionId)).toBeUndefined()
     expect(seen).toEqual([])
     expect(queue.list(sessionId)).toHaveLength(1)
@@ -1012,7 +1007,7 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "x".repeat(300_000) },
       ]),
     })
-    if (!longText.ok) throw new Error(longText.body.error.message)
+    if (!longText.ok) throw new Error(longText.error.message)
     expect(queue.list(sessionId)).toHaveLength(2)
     expect(
       await handlers.queueInput({
@@ -1022,21 +1017,24 @@ describe("thread server handlers", () => {
           { type: "text" as const, text: "x".repeat(1_048_577) },
         ]),
       }),
-    ).toMatchObject({ ok: false, status: 400 })
+    ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
     expect(
-      await handlers.cancelInput({ sessionId, inputId: longText.body.inputId }),
+      await handlers.cancelInput({
+        sessionId,
+        inputId: longText.value.inputId,
+      }),
     ).toMatchObject({ ok: true })
     expect(await handlers.startQueuedInput({ sessionId })).toMatchObject({
       ok: false,
-      status: 409,
+      error: { code: "conflict" },
     })
 
     expect(await manager.resumeThread(sessionId)).toBeDefined()
     await waitForValue(() => (seen.length === 1 ? true : undefined))
     expect(seen).toEqual(["after resume[Image 1]"])
     const drained = await handlers.listQueuedInputs({ sessionId })
-    if (!drained.ok) throw new Error(drained.body.error.message)
-    expect(drained.body.items).toEqual([])
+    if (!drained.ok) throw new Error(drained.error.message)
+    expect(drained.value.items).toEqual([])
   })
 
   it("keeps a queued prompt out of history when its hook blocks dispatch", async () => {
@@ -1089,14 +1087,14 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const started = await handlers.admitInput({
       sessionId,
       requestId: "request_running_before_block",
       content: inputFixture([{ type: "text" as const, text: "running input" }]),
     })
-    if (!started.ok) throw new Error(started.body.error.message)
+    if (!started.ok) throw new Error(started.error.message)
     await waitForValue(() => (modelCalls === 1 ? true : undefined))
     const queued = await handlers.queueInput({
       sessionId,
@@ -1105,11 +1103,11 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "blocked queued input" },
       ]),
     })
-    if (!queued.ok) throw new Error(queued.body.error.message)
+    if (!queued.ok) throw new Error(queued.error.message)
     const beforeDispatch = await handlers.readSessionEvents({ sessionId })
-    if (!beforeDispatch.ok) throw new Error(beforeDispatch.body.error.message)
+    if (!beforeDispatch.ok) throw new Error(beforeDispatch.error.message)
     expect(
-      beforeDispatch.body.events
+      beforeDispatch.value.events
         .filter(
           (event) =>
             isKernelEvent(event) &&
@@ -1131,9 +1129,9 @@ describe("thread server handlers", () => {
       .toBe(true)
     expect(modelCalls).toBe(1)
     const afterDispatch = await handlers.readSessionEvents({ sessionId })
-    if (!afterDispatch.ok) throw new Error(afterDispatch.body.error.message)
+    if (!afterDispatch.ok) throw new Error(afterDispatch.error.message)
     expect(
-      afterDispatch.body.events.filter(
+      afterDispatch.value.events.filter(
         (event) =>
           isKernelEvent(event) &&
           event.type === "input.admitted" &&
@@ -1141,9 +1139,9 @@ describe("thread server handlers", () => {
       ),
     ).toEqual([])
     const detail = await handlers.readSession({ sessionId })
-    if (!detail.ok) throw new Error(detail.body.error.message)
-    expect(detail.body.session.pendingInputs).toEqual([])
-    expect(detail.body.session.counts.inputs).toBe(1)
+    if (!detail.ok) throw new Error(detail.error.message)
+    expect(detail.value.session.pendingInputs).toEqual([])
+    expect(detail.value.session.counts.inputs).toBe(1)
   })
 
   it("updates and reorders waiting inputs before automatic dispatch", async () => {
@@ -1192,14 +1190,14 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const first = await handlers.admitInput({
       sessionId,
       requestId: "request_running",
       content: inputFixture([{ type: "text" as const, text: "running" }]),
     })
-    if (!first.ok) throw new Error(first.body.error.message)
+    if (!first.ok) throw new Error(first.error.message)
     await waitForValue(() => (seen.length === 1 ? true : undefined))
     const a = await handlers.queueInput({
       sessionId,
@@ -1214,54 +1212,54 @@ describe("thread server handlers", () => {
     if (!a.ok || !b.ok) throw new Error("Queue admission failed")
     const editedInPlace = await handlers.updateQueuedInput({
       sessionId,
-      inputId: a.body.inputId,
+      inputId: a.value.inputId,
       requestId: "request_a",
       content: inputFixture([
         { type: "text" as const, text: "changed in place" },
       ]),
     })
-    if (!editedInPlace.ok) throw new Error(editedInPlace.body.error.message)
-    expect(editedInPlace.body.item.input.submissionId).toBe("request_a")
+    if (!editedInPlace.ok) throw new Error(editedInPlace.error.message)
+    expect(editedInPlace.value.item.input.submissionId).toBe("request_a")
     const editedWithAnotherRequestId = await handlers.updateQueuedInput({
       sessionId,
-      inputId: a.body.inputId,
+      inputId: a.value.inputId,
       requestId: "request_b",
       content: inputFixture([{ type: "text" as const, text: "changed again" }]),
     })
     if (!editedWithAnotherRequestId.ok)
-      throw new Error(editedWithAnotherRequestId.body.error.message)
-    expect(editedWithAnotherRequestId.body.item.input.submissionId).toBe(
+      throw new Error(editedWithAnotherRequestId.error.message)
+    expect(editedWithAnotherRequestId.value.item.input.submissionId).toBe(
       "request_a",
     )
     expect(
       await handlers.reorderQueuedInputs({
         sessionId,
-        inputIds: [a.body.inputId],
+        inputIds: [a.value.inputId],
       }),
-    ).toMatchObject({ ok: false, status: 400 })
+    ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
     const updated = await handlers.updateQueuedInput({
       sessionId,
-      inputId: a.body.inputId,
+      inputId: a.value.inputId,
       requestId: "request_a_edited",
       content: inputFixture([{ type: "text" as const, text: "a edited" }]),
     })
-    if (!updated.ok) throw new Error(updated.body.error.message)
-    expect(updated.body.item.id).toBe(a.body.inputId)
-    expect(updated.body.item.input.submissionId).toBe("request_a")
+    if (!updated.ok) throw new Error(updated.error.message)
+    expect(updated.value.item.id).toBe(a.value.inputId)
+    expect(updated.value.item.input.submissionId).toBe("request_a")
     const reordered = await handlers.reorderQueuedInputs({
       sessionId,
-      inputIds: [b.body.inputId, a.body.inputId],
+      inputIds: [b.value.inputId, a.value.inputId],
     })
-    if (!reordered.ok) throw new Error(reordered.body.error.message)
-    expect(reordered.body.items.map((item) => item.id)).toEqual([
-      b.body.inputId,
-      a.body.inputId,
+    if (!reordered.ok) throw new Error(reordered.error.message)
+    expect(reordered.value.items.map((item) => item.id)).toEqual([
+      b.value.inputId,
+      a.value.inputId,
     ])
     const busyStart = await handlers.startQueuedInput({
       sessionId,
-      inputId: a.body.inputId,
+      inputId: a.value.inputId,
     })
-    expect(busyStart).toMatchObject({ ok: false, status: 409 })
+    expect(busyStart).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(
       (await store.readThread(sessionId))?.rollout.some(
         ({ item }) =>
@@ -1279,8 +1277,8 @@ describe("thread server handlers", () => {
       ),
     ).toBe(true)
     const listed = await handlers.listQueuedInputs({ sessionId })
-    if (!listed.ok) throw new Error(listed.body.error.message)
-    expect(listed.body.items).toEqual([])
+    if (!listed.ok) throw new Error(listed.error.message)
+    expect(listed.value.items).toEqual([])
   })
 
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
@@ -1318,18 +1316,18 @@ describe("thread server handlers", () => {
     })
 
     const result = await handlers.searchSessions({ searchTerm: "project" })
-    if (!result.ok) throw new Error(result.body.error.message)
-    expect(result.body.data.map(({ session }) => session.id)).toEqual([
+    if (!result.ok) throw new Error(result.error.message)
+    expect(result.value.data.map(({ session }) => session.id)).toEqual([
       "session_healthy",
     ])
-    expect(result.body.unavailableSessionCount).toBe(1)
+    expect(result.value.unavailableSessionCount).toBe(1)
 
     const archived = await handlers.searchSessions({
       searchTerm: "project",
       archived: true,
     })
-    if (!archived.ok) throw new Error(archived.body.error.message)
-    expect(archived.body).toEqual({ data: [] })
+    if (!archived.ok) throw new Error(archived.error.message)
+    expect(archived.value).toEqual({ data: [] })
   })
 
   it("searches durable visible history after a Session is closed", async () => {
@@ -1359,8 +1357,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const admitted = await handlers.admitInput({
       sessionId,
       requestId: "request_search",
@@ -1368,20 +1366,20 @@ describe("thread server handlers", () => {
         { type: "text" as const, text: "A needle in user text" },
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() =>
       manager.getThread(sessionId)?.status === "idle" ? true : undefined,
     )
     const closed = await handlers.closeSession({ sessionId })
-    if (!closed.ok) throw new Error(closed.body.error.message)
+    if (!closed.ok) throw new Error(closed.error.message)
     expect(manager.getThread(sessionId)).toBeUndefined()
 
     const searched = await handlers.searchSessions({
       searchTerm: "NeEdLe",
       limit: 10,
     })
-    if (!searched.ok) throw new Error(searched.body.error.message)
-    expect(searched.body.data).toEqual([
+    if (!searched.ok) throw new Error(searched.error.message)
+    expect(searched.value.data).toEqual([
       expect.objectContaining({
         session: expect.objectContaining({ id: sessionId }),
         snippet: "A needle in user text",
@@ -1393,29 +1391,29 @@ describe("thread server handlers", () => {
       searchTerm: "needle",
       limit: 1,
     })
-    if (!firstPage.ok) throw new Error(firstPage.body.error.message)
-    expect(firstPage.body.data).toEqual([
+    if (!firstPage.ok) throw new Error(firstPage.error.message)
+    expect(firstPage.value.data).toEqual([
       expect.objectContaining({
-        itemId: admitted.body.inputId,
+        itemId: admitted.value.inputId,
         snippet: "A needle in user text",
         snippetMatchRange: { start: 2, end: 8 },
       }),
     ])
-    expect(firstPage.body.nextCursor).toBeTypeOf("string")
+    expect(firstPage.value.nextCursor).toBeTypeOf("string")
     const secondPage = await handlers.searchSessionOccurrences({
       sessionId,
       searchTerm: "needle",
       limit: 1,
-      cursor: firstPage.body.nextCursor,
+      cursor: firstPage.value.nextCursor,
     })
-    if (!secondPage.ok) throw new Error(secondPage.body.error.message)
-    expect(secondPage.body.data).toEqual([
+    if (!secondPage.ok) throw new Error(secondPage.error.message)
+    expect(secondPage.value.data).toEqual([
       expect.objectContaining({
         snippet: "Final NEEDLE response",
         snippetMatchRange: { start: 6, end: 12 },
       }),
     ])
-    expect(secondPage.body.nextCursor).toBeUndefined()
+    expect(secondPage.value.nextCursor).toBeUndefined()
   })
 
   it("sums billing usage across Turns while keeping the latest active context", async () => {
@@ -1451,8 +1449,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
 
     for (const text of ["first", "second"]) {
       const admitted = await handlers.admitInput({
@@ -1460,15 +1458,15 @@ describe("thread server handlers", () => {
         requestId: `request_${text}`,
         content: inputFixture([{ type: "text" as const, text: text }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       await waitForValue(() =>
         manager.getThread(sessionId)?.status === "idle" ? true : undefined,
       )
     }
 
     const read = await handlers.readSession({ sessionId })
-    if (!read.ok) throw new Error(read.body.error.message)
-    expect(read.body.session.usage).toEqual({
+    if (!read.ok) throw new Error(read.error.message)
+    expect(read.value.session.usage).toEqual({
       inputTokens: 14,
       outputTokens: 3,
       activeContextTokens: 3,
@@ -1505,8 +1503,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const delivered: string[] = []
     const subscription = eventHub.subscribe(sessionId, (delivery) => {
       if (delivery.kind === "durable")
@@ -1521,7 +1519,7 @@ describe("thread server handlers", () => {
       content: inputFixture([{ type: "text" as const, text: "answer" }]),
       modelSelection: { provider: "openai", model: "gpt-6-sol" },
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() =>
       manager.getThread(sessionId)?.status === "idle" ? true : undefined,
     )
@@ -1537,8 +1535,8 @@ describe("thread server handlers", () => {
     )
 
     const events = await handlers.readSessionEvents({ sessionId })
-    if (!events.ok) throw new Error(events.body.error.message)
-    const snapshots = events.body.events.filter(
+    if (!events.ok) throw new Error(events.error.message)
+    const snapshots = events.value.events.filter(
       (event) => event.type === "context.tokens",
     )
     expect(snapshots).toEqual([
@@ -1598,8 +1596,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const outcomes: unknown[] = []
     const subscription = eventHub.subscribe(sessionId, (delivery) => {
       if (
@@ -1614,7 +1612,7 @@ describe("thread server handlers", () => {
       requestId: "request_completion",
       content: inputFixture([{ type: "text" as const, text: "answer" }]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() => outcomes[0])
     const expected = expect.objectContaining({
       status: "completed",
@@ -1623,9 +1621,9 @@ describe("thread server handlers", () => {
     })
     expect(outcomes).toEqual([expected])
     const replay = await handlers.readSessionEvents({ sessionId })
-    if (!replay.ok) throw new Error(replay.body.error.message)
+    if (!replay.ok) throw new Error(replay.error.message)
     expect(
-      replay.body.events.find(
+      replay.value.events.find(
         (event) => isKernelEvent(event) && event.type === "turn.completed",
       ),
     ).toMatchObject({
@@ -1673,8 +1671,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const deliveries: string[] = []
     const durable: { seq: number; type: string }[] = []
     const subscription = eventHub.subscribe(sessionId, (delivery) => {
@@ -1720,7 +1718,7 @@ describe("thread server handlers", () => {
       content: inputFixture([{ type: "text" as const, text: "answer" }]),
     })
     const result = await admitted
-    if (!result.ok) throw new Error(result.body.error.message)
+    if (!result.ok) throw new Error(result.error.message)
     await waitForValue(() =>
       deliveries.includes("turn.completed") ? true : undefined,
     )
@@ -1740,14 +1738,14 @@ describe("thread server handlers", () => {
 
     store.readThread = originalRead
     const replay = await handlers.readSessionEvents({ sessionId })
-    if (!replay.ok) throw new Error(replay.body.error.message)
+    if (!replay.ok) throw new Error(replay.error.message)
     expect(durable).toEqual(
-      replay.body.events
+      replay.value.events
         .filter(({ seq }) => seq > 1)
         .map(({ seq, type }) => ({ seq, type })),
     )
     expect(
-      replay.body.events.find(
+      replay.value.events.find(
         (event) => isKernelEvent(event) && event.type === "turn.completed",
       ),
     ).toMatchObject({
@@ -1757,7 +1755,7 @@ describe("thread server handlers", () => {
       },
     })
     expect(
-      replay.body.events.find(
+      replay.value.events.find(
         (event) =>
           isKernelEvent(event) &&
           event.type === "item.completed" &&
@@ -1773,8 +1771,8 @@ describe("thread server handlers", () => {
       },
     })
     const restored = await handlers.readSession({ sessionId })
-    if (!restored.ok) throw new Error(restored.body.error.message)
-    expect(restored.body.session.counts).toMatchObject({ items: 2, tools: 0 })
+    if (!restored.ok) throw new Error(restored.error.message)
+    expect(restored.value.session.counts).toMatchObject({ items: 2, tools: 0 })
   })
 
   it("publishes structured model retry diagnostics as a runtime warning", async () => {
@@ -1839,8 +1837,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     let warning: unknown
     const subscription = eventHub.subscribe(sessionId, (delivery) => {
       if (
@@ -1858,7 +1856,7 @@ describe("thread server handlers", () => {
       requestId: "request_retry_warning",
       content: inputFixture([{ type: "text" as const, text: "recover" }]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await waitForValue(() => (warning === undefined ? undefined : true))
 
     expect(warning).toMatchObject({
@@ -1950,8 +1948,7 @@ describe("thread server handlers", () => {
     })
     expect(invalid).toMatchObject({
       ok: false,
-      status: 400,
-      body: { error: { code: "invalid_input" } },
+      error: { code: "invalid_input" },
     })
 
     const admitted = await handlers.admitInput({
@@ -1962,7 +1959,7 @@ describe("thread server handlers", () => {
         ...attachments.map((image) => ({ type: "image" as const, ...image })),
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await vi.waitFor(async () => {
       const stored = await store.readThread(threadId)
       const image = stored?.rollout.flatMap((record) =>
@@ -2021,8 +2018,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const rolloutId = (await store.readThread(sessionId))?.metadata.rolloutId
     if (rolloutId === undefined) throw new Error("Missing rollout id.")
     await mkdir(join(workspace, "rollouts", rolloutId), { recursive: true })
@@ -2040,7 +2037,7 @@ describe("thread server handlers", () => {
         { type: "image" as const, ...draft },
       ]),
     })
-    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    if (!admitted.ok) throw new Error(admitted.error.message)
     await expect
       .poll(async () =>
         (await store.readThread(sessionId))?.rollout.some(
@@ -2059,7 +2056,7 @@ describe("thread server handlers", () => {
         { type: "image" as const, ...draft },
       ]),
     })
-    expect(replayed).toMatchObject({ ok: true, status: 200 })
+    expect(replayed).toMatchObject({ ok: true })
     await expect(rolloutAssets.read(draft.file)).resolves.toEqual(pngBytes())
     await vi.waitFor(async () => {
       await expect(
@@ -2129,8 +2126,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
     await writeFile(
       join(workspace, "rollouts", sessionId, "rollout.jsonl"),
@@ -2146,7 +2143,7 @@ describe("thread server handlers", () => {
       requestId: "request_active",
       content: inputFixture([{ type: "text" as const, text: "first" }]),
     })
-    if (!first.ok) throw new Error(first.body.error.message)
+    if (!first.ok) throw new Error(first.error.message)
     await started.promise
 
     const steered = await handlers.steerInput({
@@ -2158,20 +2155,20 @@ describe("thread server handlers", () => {
         ...draft.map((image) => ({ type: "image" as const, ...image })),
       ]),
     })
-    if (!steered.ok) throw new Error(steered.body.error.message)
+    if (!steered.ok) throw new Error(steered.error.message)
     expect(
-      draftToEditorParts(steered.body.content).find(
+      draftToEditorParts(steered.value.content).find(
         (part) => part.type === "image",
       )?.name,
     ).toBe("original.png")
     expect(
       requireStoredAssetSource(
-        draftToEditorParts(steered.body.content).find(
+        draftToEditorParts(steered.value.content).find(
           (part) => part.type === "image",
         )?.file,
       ).path,
     ).toContain("attachments/requests/")
-    const promoted = draftToEditorParts(steered.body.content).find(
+    const promoted = draftToEditorParts(steered.value.content).find(
       (part) => part.type === "image",
     )
     if (promoted === undefined) throw new Error("Image was not promoted.")
@@ -2181,7 +2178,7 @@ describe("thread server handlers", () => {
       sessionId,
       turnId: "request_active",
     })
-    if (!interrupted.ok) throw new Error(interrupted.body.error.message)
+    if (!interrupted.ok) throw new Error(interrupted.error.message)
     release.resolve()
     await waitForValue(() =>
       manager.getThread(sessionId)?.status === "idle" ? true : undefined,
@@ -2195,8 +2192,8 @@ describe("thread server handlers", () => {
         promoted,
       ]),
     })
-    if (!retried.ok) throw new Error(retried.body.error.message)
-    expect(retried.body.inputId).toMatch(/^input_/)
+    if (!retried.ok) throw new Error(retried.error.message)
+    expect(retried.value.inputId).toMatch(/^input_/)
   })
 
   it("maps attachment ownership lost to concurrent deletion as not found", async () => {
@@ -2235,8 +2232,8 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const rolloutId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const rolloutId = created.value.session.id
 
     const admitted = await handlers.admitInput({
       sessionId: rolloutId,
@@ -2256,11 +2253,7 @@ describe("thread server handlers", () => {
       ]),
     })
 
-    expect(admitted).toMatchObject({
-      ok: false,
-      status: 404,
-      body: { error: { code: "not_found" } },
-    })
+    expect(admitted).toMatchObject({ ok: false, error: { code: "not_found" } })
   })
 
   it("lists discoverable skills for a session, hiding disabled ones", async () => {
@@ -2313,13 +2306,13 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
 
     const listed = await handlers.listSkills({ sessionId })
 
-    if (!listed.ok) throw new Error(listed.body.error.message)
-    expect(listed.body.skills).toEqual([
+    if (!listed.ok) throw new Error(listed.error.message)
+    expect(listed.value.skills).toEqual([
       {
         name: "Template Creator",
         description: "Makes templates",
@@ -2350,21 +2343,18 @@ describe("thread server handlers", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
+    if (!created.ok) throw new Error(created.error.message)
 
     const listed = await handlers.listSkills({
-      sessionId: created.body.session.id,
+      sessionId: created.value.session.id,
     })
-    if (!listed.ok) throw new Error(listed.body.error.message)
-    expect(listed.body.skills).toEqual([])
+    if (!listed.ok) throw new Error(listed.error.message)
+    expect(listed.value.skills).toEqual([])
 
     const missing = await handlers.listSkills({
       sessionId: "session_00000000-0000-0000-0000-000000000000",
     })
-    expect(missing).toMatchObject({
-      ok: false,
-      body: { error: { code: "not_found" } },
-    })
+    expect(missing).toMatchObject({ ok: false, error: { code: "not_found" } })
   })
 })
 

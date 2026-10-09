@@ -19,7 +19,8 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
+
 import { inputFixture } from "../fixtures/user-input.ts"
 import {
   createFauxProvider,
@@ -53,7 +54,7 @@ describe("rollout asset lineage", () => {
     })
     const created = await initial.handlers.createSession()
     expectOk(created)
-    const threadId = created.body.session.id
+    const threadId = created.value.session.id
     const sessionStoreRoot = initial.sessionStoreRoot
     await initial.threadStore.persistThread(threadId, PersistContext.TurnStart)
     await initial.close()
@@ -192,7 +193,7 @@ describe("rollout asset lineage", () => {
 
     const created = await application.handlers.createSession()
     expectOk(created)
-    const sourceId = created.body.session.id
+    const sourceId = created.value.session.id
     await application.threadStore.persistThread(
       sourceId,
       PersistContext.TurnStart,
@@ -223,12 +224,12 @@ describe("rollout asset lineage", () => {
 
     const child = await application.handlers.forkSession({
       sessionId: sourceId,
-      atInputId: second.body.inputId,
+      atInputId: second.value.inputId,
       reason: "edit",
       content: inputFixture([{ type: "text" as const, text: "child input" }]),
     })
     expectOk(child)
-    const childId = child.body.session.id
+    const childId = child.value.session.id
     await waitForThreadIdle(application, childId)
     const childInputId = await localInputId(application, childId)
 
@@ -241,7 +242,7 @@ describe("rollout asset lineage", () => {
       ]),
     })
     expectOk(grandchild)
-    const grandchildId = grandchild.body.session.id
+    const grandchildId = grandchild.value.session.id
     await waitForThreadIdle(application, grandchildId)
 
     expectOk(await application.handlers.deleteSession({ sessionId: sourceId }))
@@ -305,7 +306,7 @@ describe("rollout asset lineage", () => {
     })
     const created = await application.handlers.createSession()
     expectOk(created)
-    const sourceId = created.body.session.id
+    const sourceId = created.value.session.id
     expectOk(
       await application.handlers.admitInput({
         sessionId: sourceId,
@@ -330,12 +331,12 @@ describe("rollout asset lineage", () => {
     await waitForThreadIdle(application, sourceId)
     const child = await application.handlers.forkSession({
       sessionId: sourceId,
-      atInputId: second.body.inputId,
+      atInputId: second.value.inputId,
       reason: "edit",
       content: inputFixture([{ type: "text" as const, text: "child" }]),
     })
     expectOk(child)
-    const childId = child.body.session.id
+    const childId = child.value.session.id
     await waitForThreadIdle(application, childId)
     expectOk(await application.handlers.deleteSession({ sessionId: sourceId }))
     await application.close()
@@ -491,11 +492,11 @@ function pngBuffer(size: number): Buffer {
 }
 
 function expectOk<T>(
-  result: ApiHandlerResult<T>,
-): asserts result is Extract<ApiHandlerResult<T>, { readonly ok: true }> {
+  result: ApplicationResult<T>,
+): asserts result is Extract<ApplicationResult<T>, { readonly ok: true }> {
   if (!result.ok) {
     throw new Error(
-      `Expected success: ${result.body.error.code}: ${result.body.error.message}`,
+      `Expected success: ${result.error.code}: ${result.error.message}`,
     )
   }
 }

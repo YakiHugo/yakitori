@@ -8,12 +8,13 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
+
 import { inputFixture } from "../fixtures/user-input.ts"
 
-function body<T>(response: ApiHandlerResult<T>): T {
-  if (!response.ok) throw new Error(JSON.stringify(response.body))
-  return response.body
+function body<T>(response: ApplicationResult<T>): T {
+  if (!response.ok) throw new Error(JSON.stringify(response.error))
+  return response.value
 }
 
 async function until(check: () => Promise<boolean>) {

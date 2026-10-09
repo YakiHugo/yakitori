@@ -24,9 +24,9 @@ import {
   resolveWorkspaceDirectory,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
 import {
   ApiErrorCode,
-  type ApiHandlerResult,
   type ApiListAgentsResponse,
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
@@ -280,7 +280,7 @@ describe("application composition", () => {
           title: "Endpoint verification",
         })
         expectOk(created)
-        const sessionId = created.body.session.id
+        const sessionId = created.value.session.id
         expectOk(
           await application.handlers.admitInput({
             sessionId,
@@ -349,7 +349,7 @@ describe("application composition", () => {
           title: "Background task",
         })
         expectOk(created)
-        const sessionId = created.body.session.id
+        const sessionId = created.value.session.id
         const input = {
           sessionId,
           requestId: "request_completion",
@@ -448,7 +448,7 @@ describe("application composition", () => {
       try {
         const empty = await application.handlers.createSession()
         expectOk(empty)
-        emptyId = empty.body.session.id
+        emptyId = empty.value.session.id
         const readEmpty = await application.handlers.readSession({
           sessionId: emptyId,
         })
@@ -457,7 +457,7 @@ describe("application composition", () => {
           sessionId: emptyId,
         })
         expectOk(emptyEvents)
-        expect(emptyEvents.body.events.map((event) => event.type)).toEqual([
+        expect(emptyEvents.value.events.map((event) => event.type)).toEqual([
           "session.created",
         ])
         expect((await application.threadStore.listThreads()).threads).toEqual(
@@ -466,7 +466,7 @@ describe("application composition", () => {
 
         const created = await application.handlers.createSession()
         expectOk(created)
-        committedId = created.body.session.id
+        committedId = created.value.session.id
         const admitted = await application.handlers.admitInput({
           sessionId: committedId,
           requestId: "request_first_commit",
@@ -490,7 +490,7 @@ describe("application composition", () => {
           })
           expectOk(replay)
           expect(
-            replay.body.events
+            replay.value.events
               .map((event) => event.type)
               .filter((type) =>
                 ["session.created", "input.admitted", "turn.started"].includes(
@@ -572,7 +572,7 @@ describe("application composition", () => {
       try {
         const created = await application.handlers.createSession()
         expectOk(created)
-        rootThreadId = created.body.session.id
+        rootThreadId = created.value.session.id
         const other = await application.handlers.createSession()
         expectOk(other)
         const admitted = await application.handlers.admitInput({
@@ -609,11 +609,11 @@ describe("application composition", () => {
           rootThreadId,
         ])
         expect(
-          application.threadManager.getThread(other.body.session.id)?.status,
+          application.threadManager.getThread(other.value.session.id)?.status,
         ).toBe("idle")
         expect(
           await rpcRequest(baseUrl, "agent/list", {
-            sessionId: other.body.session.id,
+            sessionId: other.value.session.id,
           }),
         ).toEqual({ agents: [] })
         expect(
@@ -654,7 +654,7 @@ describe("application composition", () => {
           sessionId: rootThreadId,
         })
         expectOk(listed)
-        expect(listed.body.agents).toEqual([
+        expect(listed.value.agents).toEqual([
           {
             agentId: childThreadId,
             taskName: "survey",
@@ -760,7 +760,7 @@ describe("application composition", () => {
         })
         const created = await application.handlers.createSession()
         expectOk(created)
-        const rootSessionId = created.body.session.id
+        const rootSessionId = created.value.session.id
         await subscribe(rootSessionId)
         expectOk(
           await application.handlers.admitInput({
@@ -776,7 +776,7 @@ describe("application composition", () => {
           sessionId: rootSessionId,
         })
         expectOk(listed)
-        const childSessionId = listed.body.agents[0]?.agentId
+        const childSessionId = listed.value.agents[0]?.agentId
         if (childSessionId === undefined)
           throw new Error("Child was not spawned.")
         await subscribe(childSessionId)
@@ -894,7 +894,7 @@ describe("application composition", () => {
       try {
         const created = await first.handlers.createSession()
         expectOk(created)
-        rootSessionId = created.body.session.id
+        rootSessionId = created.value.session.id
         expectOk(
           await first.handlers.admitInput({
             sessionId: rootSessionId,
@@ -910,10 +910,10 @@ describe("application composition", () => {
             sessionId: rootSessionId,
           })
           expectOk(listed)
-          expect(listed.body.agents[0]?.status).toEqual({
+          expect(listed.value.agents[0]?.status).toEqual({
             completed: "initial result",
           })
-          childSessionId = listed.body.agents[0]?.agentId ?? ""
+          childSessionId = listed.value.agents[0]?.agentId ?? ""
         }, 10_000)
       } finally {
         await first.close()
@@ -1161,7 +1161,7 @@ describe("application composition", () => {
       try {
         const created = await application.handlers.createSession()
         expectOk(created)
-        const rootThreadId = created.body.session.id
+        const rootThreadId = created.value.session.id
         const admitted = await application.handlers.admitInput({
           sessionId: rootThreadId,
           requestId: "request_spawn_child",
@@ -1297,7 +1297,7 @@ describe("application composition", () => {
       })
       const created = await first.handlers.createSession()
       expectOk(created)
-      const rootThreadId = created.body.session.id
+      const rootThreadId = created.value.session.id
       const admitted = await first.handlers.admitInput({
         sessionId: rootThreadId,
         requestId: "request_spawn_persisted",
@@ -1475,7 +1475,7 @@ describe("application composition", () => {
         const baseUrl = await listen(server)
         const created = await application.handlers.createSession({})
         expectOk(created)
-        const sessionId = created.body.session.id
+        const sessionId = created.value.session.id
         await application.threadStore.persistThread(
           sessionId,
           PersistContext.TurnStart,
@@ -1506,7 +1506,7 @@ describe("application composition", () => {
           sessionId,
         })
         expectOk(events)
-        const admittedEvent = events.body.events.find(
+        const admittedEvent = events.value.events.find(
           (event) => event.type === "input.admitted",
         )
         expect(admittedEvent).toMatchObject({
@@ -1608,7 +1608,7 @@ describe("application composition", () => {
           ]),
         })
         expectError(conflictingImage, 409, ApiErrorCode.Conflict)
-        expect(conflictingImage.body.error.details).toMatchObject({
+        expect(conflictingImage.error.details).toMatchObject({
           reason: "request_conflict",
         })
         expect(
@@ -1628,7 +1628,7 @@ describe("application composition", () => {
 
         const rejectedFork = await application.handlers.forkSession({
           sessionId,
-          atInputId: admitted.body.inputId,
+          atInputId: admitted.value.inputId,
           reason: "edit",
           content: inputFixture([
             { type: "text" as const, text: "changed" },
@@ -1642,13 +1642,12 @@ describe("application composition", () => {
           ]),
         })
         expect(rejectedFork).toMatchObject({
-          status: 400,
-          body: { error: { code: ApiErrorCode.InvalidInput } },
+          error: { code: ApiErrorCode.InvalidInput },
         })
 
         const forked = await application.handlers.forkSession({
           sessionId,
-          atInputId: admitted.body.inputId,
+          atInputId: admitted.value.inputId,
           reason: "edit",
           content: inputFixture([
             { type: "text" as const, text: "inspect more closely" },
@@ -1666,15 +1665,15 @@ describe("application composition", () => {
           ]),
         })
         expectOk(forked)
-        expect(forked.body.historyEndSeqExclusive).toBe(2)
-        await waitForThreadIdle(application, forked.body.session.id)
+        expect(forked.value.historyEndSeqExclusive).toBe(2)
+        await waitForThreadIdle(application, forked.value.session.id)
 
         const child = await application.threadStore.readThread(
-          forked.body.session.id,
+          forked.value.session.id,
         )
         expect(child?.metadata).toMatchObject({
           parentThreadId: sessionId,
-          forkedFromInputId: admitted.body.inputId,
+          forkedFromInputId: admitted.value.inputId,
           forkReason: "edit",
         })
         const childInput = child?.rollout.find(
@@ -1687,7 +1686,7 @@ describe("application composition", () => {
               content: [
                 {
                   file: {
-                    rolloutId: forked.body.session.id,
+                    rolloutId: forked.value.session.id,
                     path: expect.stringMatching(
                       /^attachments\/requests\/request_.+\/1\.png$/,
                     ),
@@ -1715,7 +1714,7 @@ describe("application composition", () => {
             join(
               application.sessionStoreRoot,
               "rollouts",
-              forked.body.session.id,
+              forked.value.session.id,
               "files",
               childImagePath,
             ),
@@ -1725,24 +1724,24 @@ describe("application composition", () => {
         const concurrentSession = await application.handlers.createSession()
         expectOk(concurrentSession)
         await application.threadStore.persistThread(
-          concurrentSession.body.session.id,
+          concurrentSession.value.session.id,
           PersistContext.TurnStart,
         )
         const [draftA, draftB] = await Promise.all([
           application.rolloutAssets.importAttachmentBytes(
-            concurrentSession.body.session.id,
+            concurrentSession.value.session.id,
             "draft_concurrent_a",
             [{ name: "screen.png", data: imageBytes }],
           ),
           application.rolloutAssets.importAttachmentBytes(
-            concurrentSession.body.session.id,
+            concurrentSession.value.session.id,
             "draft_concurrent_b",
             [{ name: "screen.png", data: imageBytes }],
           ),
         ])
         const concurrent = await Promise.all([
           application.handlers.admitInput({
-            sessionId: concurrentSession.body.session.id,
+            sessionId: concurrentSession.value.session.id,
             requestId: "request_concurrent_image",
             content: inputFixture([
               { type: "text" as const, text: "A" },
@@ -1753,7 +1752,7 @@ describe("application composition", () => {
             ]),
           }),
           application.handlers.admitInput({
-            sessionId: concurrentSession.body.session.id,
+            sessionId: concurrentSession.value.session.id,
             requestId: "request_concurrent_image",
             content: inputFixture([
               { type: "text" as const, text: "B" },
@@ -1764,12 +1763,14 @@ describe("application composition", () => {
             ]),
           }),
         ])
-        expect(concurrent.map((result) => result.status).sort()).toEqual([
-          201, 409,
-        ])
+        expect(
+          concurrent
+            .map((result) => (result.ok ? "accepted" : result.error.code))
+            .sort(),
+        ).toEqual(["accepted", "conflict"])
         await expect(
           application.rolloutAssets.read({
-            rolloutId: concurrentSession.body.session.id,
+            rolloutId: concurrentSession.value.session.id,
             path: "attachments/requests/request_concurrent_image/1.png",
           }),
         ).resolves.toEqual(imageBytes)
@@ -1795,7 +1796,7 @@ describe("application composition", () => {
       try {
         const created = await first.handlers.createSession()
         expectOk(created)
-        existingSessionId = created.body.session.id
+        existingSessionId = created.value.session.id
         expectOk(
           await first.handlers.admitInput({
             sessionId: existingSessionId,
@@ -1850,19 +1851,19 @@ describe("application composition", () => {
         const created = await application.handlers.createSession()
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_close_active",
           content: inputFixture([{ type: "text" as const, text: "wait" }]),
         })
         expectOk(admitted)
         expect(
-          application.threadManager.getThread(created.body.session.id)?.status,
+          application.threadManager.getThread(created.value.session.id)?.status,
         ).toBe("active")
 
         await application.close()
 
         expect(
-          application.threadManager.getThread(created.body.session.id)?.status,
+          application.threadManager.getThread(created.value.session.id)?.status,
         ).toBeUndefined()
       } finally {
         await application.close()
@@ -1890,7 +1891,7 @@ describe("application composition", () => {
       try {
         const created = await application.handlers.createSession({})
         expectOk(created)
-        const sessionId = created.body.session.id
+        const sessionId = created.value.session.id
         await application.threadStore.persistThread(
           sessionId,
           PersistContext.TurnStart,
@@ -1945,7 +1946,7 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         await application.threadStore.persistThread(
-          created.body.session.id,
+          created.value.session.id,
           PersistContext.TurnStart,
         )
         const imageBytes = pngBuffer(128 * 1024 + 17)
@@ -1953,7 +1954,7 @@ describe("application composition", () => {
         await writeFile(sourcePath, imageBytes)
         const [attachment] =
           await application.rolloutAssets.importAttachmentPaths(
-            created.body.session.id,
+            created.value.session.id,
             "draft_large_http",
             [sourcePath],
           )
@@ -2140,7 +2141,7 @@ describe("application composition", () => {
           title: "Pinned",
         })
         expectOk(createdSession)
-        expect(createdSession.body.session).toMatchObject({
+        expect(createdSession.value.session).toMatchObject({
           title: "Pinned",
           workingDirectory: application.workspace,
           mateId: created.mate.id,
@@ -2212,7 +2213,7 @@ describe("application composition", () => {
           workingDirectory: join(rootDir, "missing-dir"),
         })
         expectError(rejected, 400, ApiErrorCode.InvalidInput)
-        expect(rejected.body.error.message).toContain(
+        expect(rejected.error.message).toContain(
           "workingDirectory must be an existing directory",
         )
 
@@ -2223,11 +2224,13 @@ describe("application composition", () => {
           title: "Other project",
         })
         expectOk(accepted)
-        expect(accepted.body.session.workingDirectory).toBe(
+        expect(accepted.value.session.workingDirectory).toBe(
           await realpath(other),
         )
-        expect(accepted.body.session.mateId).toBe(application.activeMate.mateId)
-        expect(accepted.body.session.mateRevisionId).toBe(
+        expect(accepted.value.session.mateId).toBe(
+          application.activeMate.mateId,
+        )
+        expect(accepted.value.session.mateRevisionId).toBe(
           application.activeMate.mateRevisionId,
         )
       } finally {
@@ -2275,12 +2278,12 @@ describe("application composition", () => {
         })
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_project_config",
           content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
 
         expect(request?.system.map((section) => section.text)).toContain(
           "Use the Session project instructions.",
@@ -2337,12 +2340,12 @@ describe("application composition", () => {
         })
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_outside_project_config",
           content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
         expect(request?.system.map((section) => section.text)).toContain(
           "Use the outside Project configuration.",
         )
@@ -2444,12 +2447,12 @@ describe("application composition", () => {
           ),
         )
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_mcp_reload",
           content: inputFixture([{ type: "text" as const, text: "run" }]),
         })
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
         expect(provider.callCount).toBe(1)
         expect(await readFile(observedCwd, "utf8")).toBe(
           await realpath(nextDirectory),
@@ -2477,15 +2480,15 @@ describe("application composition", () => {
         const created = await application.handlers.createSession()
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_provider_config",
           content: inputFixture([{ type: "text" as const, text: "hello" }]),
         })
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
 
         const stored = await application.threadStore.readThread(
-          created.body.session.id,
+          created.value.session.id,
         )
         expect(
           stored?.rollout.find((entry) => entry.item.type === "turn_context")
@@ -2559,14 +2562,14 @@ describe("application composition", () => {
         expectOk(created)
         expectOk(
           await application.handlers.admitInput({
-            sessionId: created.body.session.id,
+            sessionId: created.value.session.id,
             requestId: "configure-source",
             content: inputFixture([
               { type: "text" as const, text: "Add my local coding source." },
             ]),
           }),
         )
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
         const configured = await rpcRequest<ProviderConfigurationResponse>(
           baseUrl,
           "provider/configuration/read",
@@ -2659,7 +2662,7 @@ describe("application composition", () => {
         expectOk(created)
         expectError(
           await application.handlers.admitInput({
-            sessionId: created.body.session.id,
+            sessionId: created.value.session.id,
             requestId: "missing-configured-key",
             content: inputFixture([
               { type: "text" as const, text: "Use the configured endpoint" },
@@ -2703,7 +2706,7 @@ describe("application composition", () => {
         ).toMatchObject({ availability: "requires_login", models: [] })
         expectError(
           await application.handlers.admitInput({
-            sessionId: created.body.session.id,
+            sessionId: created.value.session.id,
             requestId: "missing-reloaded-key",
             content: inputFixture([
               { type: "text" as const, text: "Use the configured endpoint" },
@@ -2805,13 +2808,13 @@ describe("application composition", () => {
         const created = await application.handlers.createSession()
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_switch_provider",
           content: inputFixture([{ type: "text" as const, text: "switch" }]),
           modelSelection: { provider: "openai", model: "gpt-6-astra" },
         })
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
 
         expect(primary.callCount).toBe(0)
         expect(selected.callCount).toBe(1)
@@ -2842,7 +2845,7 @@ describe("application composition", () => {
         const created = await application.handlers.createSession()
         expectOk(created)
         const admitted = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_switch_grok_oidc",
           content: inputFixture([{ type: "text" as const, text: "use grok" }]),
           modelSelection: { provider: "grok", model: "grok-4.5" },
@@ -2875,16 +2878,16 @@ describe("application composition", () => {
           ["request_second", "second"],
         ] as const) {
           const admitted = await application.handlers.admitInput({
-            sessionId: created.body.session.id,
+            sessionId: created.value.session.id,
             requestId,
             content: inputFixture([{ type: "text" as const, text: text }]),
           })
           expectOk(admitted)
-          await waitForThreadIdle(application, created.body.session.id)
+          await waitForThreadIdle(application, created.value.session.id)
         }
 
         const stored = await application.threadStore.readThread(
-          created.body.session.id,
+          created.value.session.id,
         )
         const terminals = stored?.rollout.filter(
           (entry) => entry.item.type === "turn_completed",
@@ -2918,7 +2921,7 @@ describe("application composition", () => {
         const created = await application.handlers.createSession()
         expectOk(created)
         const input = {
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_idempotent_host",
           content: inputFixture([{ type: "text" as const, text: "only once" }]),
           modelSelection: { provider: "faux", model: "scripted" },
@@ -2927,11 +2930,11 @@ describe("application composition", () => {
         }
         const admitted = await application.handlers.admitInput(input)
         expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
         const replayed = await application.handlers.admitInput(input)
         expectOk(replayed)
-        expect(replayed.status).toBe(200)
-        expect(replayed.body).toEqual(admitted.body)
+        expect(replayed.ok).toBe(true)
+        expect(replayed.value).toEqual(admitted.value)
 
         const conflicting = await application.handlers.admitInput({
           ...input,
@@ -2939,19 +2942,21 @@ describe("application composition", () => {
         })
         expectError(conflicting, 409, ApiErrorCode.Conflict)
         const read = await application.handlers.readSession({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
         })
         expectOk(read)
-        expect(read.body.session.counts.inputs).toBe(1)
+        expect(read.value.session.counts.inputs).toBe(1)
         const events = await application.handlers.readSessionEvents({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
         })
         expectOk(events)
         expect(
-          events.body.events.filter((event) => event.type === "input.admitted"),
+          events.value.events.filter(
+            (event) => event.type === "input.admitted",
+          ),
         ).toHaveLength(1)
         expect(
-          events.body.events.find((event) => event.type === "input.admitted"),
+          events.value.events.find((event) => event.type === "input.admitted"),
         ).toMatchObject({
           data: {
             modelSelection: input.modelSelection,
@@ -2988,25 +2993,25 @@ describe("application composition", () => {
         })
         expectOk(created)
         const first = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_fork_first",
           content: inputFixture([{ type: "text" as const, text: "first" }]),
         })
         expectOk(first)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
         const second = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
           requestId: "request_fork_second",
           content: inputFixture([
             { type: "text" as const, text: "replace this" },
           ]),
         })
         expectOk(second)
-        await waitForThreadIdle(application, created.body.session.id)
+        await waitForThreadIdle(application, created.value.session.id)
 
         const forked = await application.handlers.forkSession({
-          sessionId: created.body.session.id,
-          atInputId: second.body.inputId,
+          sessionId: created.value.session.id,
+          atInputId: second.value.inputId,
           reason: "edit",
           content: inputFixture([
             { type: "text" as const, text: "replacement" },
@@ -3014,20 +3019,20 @@ describe("application composition", () => {
           modelSelection: forkModelSelection,
         })
         expectOk(forked)
-        await waitForThreadIdle(application, forked.body.session.id)
+        await waitForThreadIdle(application, forked.value.session.id)
 
         const source = await application.threadStore.readThread(
-          created.body.session.id,
+          created.value.session.id,
         )
         const target = await application.threadStore.readThread(
-          forked.body.session.id,
+          forked.value.session.id,
         )
         expect(completedTurnCount(source)).toBe(2)
         expect(userTexts(source)).toEqual(["first", "replace this"])
         expect(completedTurnCount(target)).toBe(2)
         expect(userTexts(target)).toEqual(["first", "replacement"])
         expect(target?.metadata).toMatchObject({
-          parentThreadId: created.body.session.id,
+          parentThreadId: created.value.session.id,
           forkedFromTurnId: "request_fork_second",
           workingDirectory: application.workspace,
         })
@@ -3329,29 +3334,29 @@ describe("application composition", () => {
       const created = await first.handlers.createSession()
       expectOk(created)
       const admitted = await first.handlers.admitInput({
-        sessionId: created.body.session.id,
+        sessionId: created.value.session.id,
         requestId: "request_before_restart",
         content: inputFixture([
           { type: "text" as const, text: "resume after restart" },
         ]),
       })
       expectOk(admitted)
-      await waitForThreadIdle(first, created.body.session.id)
+      await waitForThreadIdle(first, created.value.session.id)
       await first.close()
 
       const started = await createYakitoriApplication(
         testApplicationOptions({ rootDir, workspace }),
       )
       try {
-        expect(started.threadManager.getThread(created.body.session.id)).toBe(
+        expect(started.threadManager.getThread(created.value.session.id)).toBe(
           undefined,
         )
         const read = await started.handlers.readSession({
-          sessionId: created.body.session.id,
+          sessionId: created.value.session.id,
         })
         expectOk(read)
-        expect(read.body.session.counts.turns).toBe(1)
-        expect(started.threadManager.getThread(created.body.session.id)).toBe(
+        expect(read.value.session.counts.turns).toBe(1)
+        expect(started.threadManager.getThread(created.value.session.id)).toBe(
           undefined,
         )
       } finally {
@@ -3495,7 +3500,7 @@ describe("provider login registration", () => {
             const created = await application.handlers.createSession()
             expectOk(created)
             const admitted = await application.handlers.admitInput({
-              sessionId: created.body.session.id,
+              sessionId: created.value.session.id,
               requestId: `import-turn-${restarted}`,
               content: inputFixture([
                 { type: "text" as const, text: "Use the imported account." },
@@ -3503,12 +3508,12 @@ describe("provider login registration", () => {
               modelSelection: { provider: "codex", model: "gpt-6-astra" },
             })
             expectOk(admitted)
-            await waitForThreadIdle(application, created.body.session.id)
+            await waitForThreadIdle(application, created.value.session.id)
             const read = await application.handlers.readSessionEvents({
-              sessionId: created.body.session.id,
+              sessionId: created.value.session.id,
             })
             expectOk(read)
-            expect(JSON.stringify(read.body)).toContain(
+            expect(JSON.stringify(read.value)).toContain(
               "Imported account reply",
             )
           } finally {
@@ -3841,7 +3846,7 @@ describe("provider login registration", () => {
         })
         const created = await application.handlers.createSession()
         expectOk(created)
-        const sessionId = created.body.session.id
+        const sessionId = created.value.session.id
         expectOk(
           await application.handlers.admitInput({
             sessionId,
@@ -3981,21 +3986,21 @@ function pngBuffer(size: number): Buffer {
 }
 
 function expectOk<T>(
-  result: ApiHandlerResult<T>,
-): asserts result is Extract<ApiHandlerResult<T>, { readonly ok: true }> {
+  result: ApplicationResult<T>,
+): asserts result is Extract<ApplicationResult<T>, { readonly ok: true }> {
   if (!result.ok) {
     throw new Error(
-      `Expected success: ${result.body.error.code}: ${result.body.error.message}`,
+      `Expected success: ${result.error.code}: ${result.error.message}`,
     )
   }
 }
 
 function expectError<T>(
-  result: ApiHandlerResult<T>,
-  status: number,
+  result: ApplicationResult<T>,
+  _status: number,
   code: ApiErrorCode,
-): asserts result is Extract<ApiHandlerResult<T>, { readonly ok: false }> {
+): asserts result is Extract<ApplicationResult<T>, { readonly ok: false }> {
   if (result.ok) throw new Error("Expected error response.")
-  expect(result.status).toBe(status)
-  expect(result.body.error.code).toBe(code)
+  expect(result.ok).toBe(false)
+  expect(result.error.code).toBe(code)
 }

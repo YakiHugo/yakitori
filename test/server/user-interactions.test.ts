@@ -61,8 +61,8 @@ describe("session user interactions", () => {
     let processor: MessageProcessor | undefined
     try {
       const created = await app.handlers.createSession({})
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       const admitted = await app.handlers.admitInput({
         sessionId,
         requestId: "prepare_report",
@@ -158,7 +158,7 @@ describe("session user interactions", () => {
       ).answer(params)
       expect(retried.ok).toBe(true)
       if (retried.ok && "result" in first)
-        expect(retried.body).toEqual(first.result)
+        expect(retried.value).toEqual(first.result)
     } finally {
       broker.close()
       await app.close()
