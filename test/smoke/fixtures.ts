@@ -66,6 +66,7 @@ export async function createSmokeEnvironment(): Promise<
     YAKITORI_WORKSPACE: workspace,
     YAKITORI_PROVIDER: "faux",
     YAKITORI_FAUX_SCENARIO: "text",
+    YAKITORI_APPROVAL_POLICY: "auto_file_tools",
     HOST: "127.0.0.1",
     PORT: "0",
   })
@@ -136,6 +137,8 @@ export async function runProviderFlow(
     authorization: string | undefined
     body: string
   }[] = []
+  let interruptedStreamClosed = false
+  let approvedCommandResults = 0
   const endpoint = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" })
@@ -166,7 +169,79 @@ export async function runProviderFlow(
         model: "smoke-model",
       }
       const sent = JSON.parse(body) as {
-        messages?: { role: string; content?: unknown }[]
+        messages?: { role: string; content?: unknown; tool_call_id?: string }[]
+      }
+      const latestUser = sent.messages
+        ?.filter((message) => message.role === "user")
+        .at(-1)
+      if (
+        latestUser?.content === "Verify approval and interrupted streaming."
+      ) {
+        const commandResult = sent.messages?.find(
+          (message) =>
+            message.role === "tool" &&
+            message.tool_call_id === "smoke_approval_command",
+        )
+        if (commandResult === undefined) {
+          response.end(
+            `data: ${JSON.stringify({
+              ...completion,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "smoke_approval_command",
+                        type: "function",
+                        function: {
+                          name: "exec_command",
+                          arguments: JSON.stringify({
+                            cmd: "printf smoke-approved-command",
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: "tool_calls",
+                },
+              ],
+            })}\n\ndata: [DONE]\n\n`,
+          )
+        } else {
+          approvedCommandResults += 1
+          // The actual command result must cross the native engine and provider
+          // boundary. Merely showing an approval fixture cannot satisfy this.
+          if (
+            typeof commandResult.content !== "string" ||
+            !commandResult.content.includes("smoke-approved-command")
+          ) {
+            response.destroy(new Error("Approved command did not execute."))
+            return
+          }
+          response.write(
+            `data: ${JSON.stringify({
+              ...completion,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: "assistant",
+                    content: "Streaming after approved command",
+                  },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`,
+          )
+          // Remain in flight until the user's Interrupt reaches the provider.
+          response.on("close", () => {
+            interruptedStreamClosed = true
+          })
+        }
+        return
       }
       if (
         sent.messages?.some(
@@ -576,6 +651,10 @@ export async function runProviderFlow(
       { type: "text", text: "Before PDF. [Document 1]After PDF." },
     ])
 
+    await runApprovalAndInterruption(page)
+    expect(approvedCommandResults).toBe(1)
+    await expect.poll(() => interruptedStreamClosed).toBe(true)
+
     await openProviderSettings(page)
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
     await page.getByRole("tab", { name: "Usage", exact: true }).click()
@@ -653,6 +732,55 @@ export async function runProviderFlow(
       endpoint.close((error) => (error ? reject(error) : resolve())),
     )
   }
+}
+
+// Run unchanged against the built browser app and the packaged Electron app.
+// Reload while approval and streaming are pending to exercise real socket replay.
+async function runApprovalAndInterruption(page: Page): Promise<void> {
+  const replies = page
+    .getByRole("region", { name: "Response", exact: true })
+    .getByText("Mock provider reply", { exact: true })
+  const previousReplyCount = await replies.count()
+  const composer = page.getByRole("textbox", {
+    name: "Message the Mate",
+    exact: true,
+  })
+  const interrupt = page.getByRole("button", { name: "Interrupt", exact: true })
+  const permission = page.getByRole("group", {
+    name: "Permission · command_execution: printf smoke-approved-command",
+    exact: true,
+  })
+  await composer.fill("Verify approval and interrupted streaming.")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(permission).toBeVisible()
+  await expect(interrupt).toBeVisible()
+  await page.reload()
+  await expect(permission).toBeVisible()
+  await permission.getByRole("button", { name: "Allow", exact: true }).click()
+  await expect(permission).toHaveCount(0)
+  const streamed = page
+    .getByRole("region", { name: "Response", exact: true })
+    .getByText("Streaming after approved command", { exact: true })
+  await expect(streamed).toBeVisible()
+  await expect(interrupt).toBeVisible()
+  await page.reload()
+  await expect(streamed).toBeVisible()
+  await expect(interrupt).toBeVisible()
+  await interrupt.click()
+  await expect(interrupt).toHaveCount(0)
+  await expect(permission).toHaveCount(0)
+  await page.reload()
+  await expect(
+    page
+      .getByRole("main")
+      .getByText("Verify approval and interrupted streaming.", { exact: true }),
+  ).toBeVisible()
+  await expect(interrupt).toHaveCount(0)
+  // Starting another turn detects a stale busy engine after cancellation.
+  await composer.fill("Verify a new turn after interruption.")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(replies).toHaveCount(previousReplyCount + 1)
+  await expect(interrupt).toHaveCount(0)
 }
 
 async function openProviderSettings(page: Page): Promise<void> {
