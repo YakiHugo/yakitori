@@ -45,6 +45,7 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import type { AppSessionEventEnvelope } from "../protocol/events.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
@@ -95,8 +96,8 @@ import {
 import {
   MAX_QUEUED_INPUT_TEXT_CHARS,
   QueuedInputTooLargeError,
-  QueuedSessionArchivedError,
   QueuedItemService,
+  QueuedSessionArchivedError,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
@@ -2251,7 +2252,7 @@ async function liveProjectIds(
 function mapRolloutEvent(
   record: StoredRolloutItem,
   threadId: string,
-): StoredEventEnvelope {
+): AppSessionEventEnvelope {
   const item = record.item
   const base = {
     sessionId: threadId,
@@ -2401,8 +2402,8 @@ function mapRolloutEvent(
   return {
     ...base,
     version: EVENT_SCHEMA_VERSION,
-    type: "rollout.item",
-    data: { item: item as unknown as import("../kernel/events.ts").JsonValue },
+    type: "session.cursor",
+    data: {},
   }
 }
 

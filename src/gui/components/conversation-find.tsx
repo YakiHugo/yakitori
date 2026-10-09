@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react"
-import type { ApiSearchSessionOccurrencesResponse } from "../../server/protocol.ts"
+import type { ApiSearchSessionOccurrencesResponse } from "../../protocol/application.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { conversationFindRanges } from "./conversation-find-text.ts"

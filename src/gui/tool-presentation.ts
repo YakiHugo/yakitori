@@ -1,4 +1,4 @@
-import type { FileChange, ToolExecutionItem } from "../kernel/events.ts"
+import type { FileChange, ToolExecutionItem } from "../protocol/events.ts"
 import type {
   CommandResult,
   ExecutionEntry,

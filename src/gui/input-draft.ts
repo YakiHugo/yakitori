@@ -1,10 +1,7 @@
-import type { ImageAttachment, PdfAttachment } from "../core/asset-types.ts"
-import type { ContextExcerpt } from "../core/input-context.ts"
-import {
-  createUserInput,
-  type InputContent,
-  type InputDraft,
-} from "../core/user-input.ts"
+import { createUserInput } from "../core/user-input.ts"
+import type { ImageAttachment, PdfAttachment } from "../protocol/asset-types.ts"
+import type { ContextExcerpt } from "../protocol/input-context.ts"
+import type { InputContent, InputDraft } from "../protocol/user-input.ts"
 export type EditorPart =
   | Readonly<{ type: "text"; text: string }>
   | (Readonly<{ type: "image" }> & ImageAttachment)

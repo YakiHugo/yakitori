@@ -1,30 +1,11 @@
-export type ContextSource = Readonly<{
-  kind: "message" | "file" | "browser"
-  label: string
-  sessionId?: string
-  messageId?: string
-  path?: string
-  url?: string
-}>
+import type { ContextExcerpt } from "../protocol/input-context.ts"
 
-export type SelectedTextAttachment = Readonly<{
-  id: string
-  kind: "selection"
-  text: string
-  source: ContextSource
-}>
-
-export type ResponseAnnotation = Readonly<{
-  id: string
-  kind: "annotation"
-  text: string
-  comment?: string
-  source: ContextSource
-  // UTF-16 offsets in the rendered source text, independent of provider citations.
-  anchor: Readonly<{ startOffset: number; endOffset: number }>
-}>
-
-export type ContextExcerpt = SelectedTextAttachment | ResponseAnnotation
+export type {
+  ContextExcerpt,
+  ContextSource,
+  ResponseAnnotation,
+  SelectedTextAttachment,
+} from "../protocol/input-context.ts"
 
 export function isContextExcerpt(value: unknown): value is ContextExcerpt {
   if (typeof value !== "object" || value === null) return false

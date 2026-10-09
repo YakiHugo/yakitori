@@ -1,11 +1,11 @@
 import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
 import { useRef, useState } from "react"
-import type { InputDraft } from "../../core/user-input.ts"
 import {
   inputContentAttachments,
   inputContentText,
 } from "../../core/user-input.ts"
-import type { ImageAttachment } from "../../kernel/events.ts"
+import type { ImageAttachment } from "../../protocol/asset-types.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { textInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"

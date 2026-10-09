@@ -281,13 +281,8 @@ describe("thread server handlers", () => {
     expect(events.body.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          type: "rollout.item",
-          data: {
-            item: expect.objectContaining({
-              type: "compacted",
-              turnId: "request_manual_compact",
-            }),
-          },
+          type: "session.cursor",
+          data: {},
         }),
         expect.objectContaining({
           type: "item.completed",
@@ -695,9 +690,9 @@ describe("thread server handlers", () => {
     expect(queued.status).toBe(201)
     const queuedEvents = await handlers.readSessionEvents({ sessionId })
     if (!queuedEvents.ok) throw new Error(queuedEvents.body.error.message)
-    expect(
-      queuedEvents.body.events.some((event) => event.type === "input.queued"),
-    ).toBe(false)
+    expect(queuedEvents.body.events.map((event) => event.type)).not.toContain(
+      "input.queued",
+    )
     const queuedList = await handlers.listQueuedInputs({ sessionId })
     if (!queuedList.ok) throw new Error(queuedList.body.error.message)
     expect(queuedList.body.items).toEqual([
@@ -1731,7 +1726,7 @@ describe("thread server handlers", () => {
     )
     expect(reads).toBe(auxiliary ? 1 : 0)
     if (extra !== undefined)
-      expect(durable[0]).toEqual({ seq: 2, type: "rollout.item" })
+      expect(durable[0]).toEqual({ seq: 2, type: "session.cursor" })
 
     expect(deliveries.indexOf("turn.started")).toBeLessThan(
       deliveries.indexOf("assistant.delta"),

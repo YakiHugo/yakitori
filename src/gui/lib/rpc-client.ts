@@ -1,10 +1,18 @@
 import packageJson from "../../../package.json" with { type: "json" }
-import type { StoredEventEnvelope } from "../../kernel/index.ts"
+import type { ApiErrorCode } from "../../protocol/application.ts"
+import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
+import type { LiveSessionEvent } from "../../protocol/live-events.ts"
+import {
+  type JsonRpcMessage,
+  JsonRpcParseError,
+  parseJsonRpcMessage,
+  type RequestId,
+} from "../../protocol/rpc-messages.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
-  providerConfigurationChangedMethod,
   projectChangedMethod,
+  providerConfigurationChangedMethod,
   sessionCompletedMethod,
   sessionEventMethod,
   sessionPermissionRequestedMethod,
@@ -18,8 +26,6 @@ import {
   sideChatChangedMethod,
   websocketRpcPath,
 } from "../../protocol/rpc-wire.ts"
-import type { LiveSessionEvent } from "../../runtime/live-events.ts"
-import type { ApiErrorCode } from "../../server/protocol.ts"
 import type {
   GoalChangedNotification,
   McpStatusChangedNotification,
@@ -64,7 +70,7 @@ export function rpcUrl(apiBase: string): string {
 
 export type SessionStreamHandlers = {
   readonly onSnapshot: (response: SessionSubscribeResponse) => void
-  readonly onEvent: (event: StoredEventEnvelope) => void
+  readonly onEvent: (event: AppSessionEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
   readonly onReplayComplete: () => void
   // The stream stays registered and will be re-subscribed after reconnect.
@@ -185,7 +191,7 @@ export function createAppRpcClient(options: {
   // Answer channels for server→client permission requests, keyed by
   // permissionRequestId; ids are process-global on the server, so a responder
   // stays valid across reconnects until answered or pruned.
-  const permissionResponders = new Map<string, { readonly id: number }>()
+  const permissionResponders = new Map<string, { readonly id: RequestId }>()
   const sidebarChangeListeners = new Set<
     (notification: SidebarChangedNotification) => void
   >()
@@ -371,25 +377,22 @@ export function createAppRpcClient(options: {
   }
 
   function onMessage(text: string): void {
-    let message: unknown
+    let message: JsonRpcMessage
     try {
-      message = JSON.parse(text)
-    } catch {
-      return
+      message = parseJsonRpcMessage(text)
+    } catch (error) {
+      if (error instanceof JsonRpcParseError) return
+      throw error
     }
-    if (typeof message !== "object" || message === null) return
     if ("method" in message && "id" in message) {
-      onServerRequest(
-        message as { id: number; method: string; params?: unknown },
-      )
+      onServerRequest(message)
       return
     }
     if ("method" in message) {
-      onNotification(message as { method: string; params?: unknown })
+      onNotification(message)
       return
     }
-    if (!("id" in message)) return
-    const id = (message as { id: unknown }).id
+    const id = message.id
     if (typeof id !== "number") return
     const pending = inflight.get(id)
     if (pending === undefined) return
@@ -398,11 +401,11 @@ export function createAppRpcClient(options: {
       pending.reject(toApiRequestError(message.error))
       return
     }
-    pending.resolve((message as Record<string, unknown>).result)
+    pending.resolve(message.result)
   }
 
   function onServerRequest(message: {
-    id: number
+    id: RequestId
     method: string
     params?: unknown
   }): void {

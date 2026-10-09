@@ -1,5 +1,5 @@
 import { useState } from "react"
-import type { ModelToolContentBlock } from "../../../kernel/events.ts"
+import type { ModelToolContentBlock } from "../../../protocol/conversation.ts"
 import { openUrlTarget } from "../../lib/open-resource.ts"
 import { rolloutAssetUrl } from "../../rollout-asset-url.ts"
 

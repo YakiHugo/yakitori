@@ -1,6 +1,10 @@
-import type { ForkedModelContext } from "./model-context.ts"
-import type { TurnCompletion } from "../kernel/events.ts"
+import type { AgentSummary } from "../protocol/agents.ts"
+
+export type { AgentSummary } from "../protocol/agents.ts"
+
 import type { AgentStatus } from "../core/session-io.ts"
+import type { TurnCompletion } from "../kernel/events.ts"
+import type { ForkedModelContext } from "./model-context.ts"
 import { RolloutBudget, type RolloutBudgetConfig } from "./rollout-budget.ts"
 
 export type AgentType = "general" | "explore"
@@ -97,14 +101,6 @@ export type BoundAgentControl = Readonly<{
     readonly previousStatus: AgentStatus
   }>
   list(pathPrefix?: string): Promise<readonly AgentSummary[]>
-}>
-
-export type AgentSummary = Readonly<{
-  agentId: string
-  taskName: string
-  path: string
-  parentPath?: string
-  status: AgentStatus
 }>
 
 export type AgentUpdate = Readonly<{

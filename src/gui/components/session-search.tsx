@@ -1,6 +1,6 @@
 import { Search } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { ApiSearchSessionsResponse } from "../../server/protocol.ts"
+import type { ApiSearchSessionsResponse } from "../../protocol/application.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"

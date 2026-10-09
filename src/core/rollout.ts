@@ -1,3 +1,7 @@
+import type { GitInfo } from "../protocol/session-metadata.ts"
+
+export type { GitInfo } from "../protocol/session-metadata.ts"
+
 import type {
   CompletedExecutionItem,
   EventMetadata,
@@ -18,12 +22,6 @@ export type HistoryPosition = {
   readonly endSeqExclusive: number
   readonly endByteOffset: number
 }
-
-export type GitInfo = Readonly<{
-  sha?: string
-  branch?: string
-  originUrl?: string
-}>
 
 export type ThreadMetadata = {
   readonly id: string

@@ -4,7 +4,7 @@ import type {
   SessionStreamHandlers,
 } from "../../src/gui/lib/rpc-client.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
-import type { StoredEventEnvelope } from "../../src/kernel/index.ts"
+import type { AppSessionEventEnvelope } from "../../src/protocol/events.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
@@ -37,7 +37,7 @@ export class FakeSessionStream implements SessionStream {
     this.handlers.onSnapshot(response)
   }
 
-  emitEvent(event: StoredEventEnvelope): void {
+  emitEvent(event: AppSessionEventEnvelope): void {
     this.handlers.onEvent(event)
   }
 

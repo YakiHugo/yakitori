@@ -10,7 +10,7 @@ import { useEffect, useState } from "react"
 import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
-} from "../../server/protocol.ts"
+} from "../../protocol/application.ts"
 import { useAppStore } from "../store/app-store.ts"
 
 const subscriptionProviderNames = new Set(["codex", "grok", "kimi"])

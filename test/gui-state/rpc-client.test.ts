@@ -343,7 +343,10 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it("answers a server permission request over the same channel", async () => {
+  it.each([
+    77,
+    "permission-77",
+  ])("answers permission request %s over the same channel", async (requestId) => {
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     const pending = client.request("provider/list", {})
     const socket = FakeWebSocket.instances[0]
@@ -353,7 +356,7 @@ describe("app RPC client", () => {
     await pending
 
     socket?.emitMessage({
-      id: 77,
+      id: requestId,
       method: "session/permission/request",
       params: {
         sessionId: "session_1",
@@ -370,7 +373,7 @@ describe("app RPC client", () => {
     })
 
     expect(socket?.sentFrames().at(-1)).toEqual({
-      id: 77,
+      id: requestId,
       result: { behavior: "allow", reason: { kind: "user_allowed" } },
     })
     // The answer channel is single-use.
@@ -732,4 +735,23 @@ describe("app RPC client", () => {
     expect(received).toEqual(["snapshot", "snapshot", "replayComplete"])
     client.close()
   })
+})
+
+it("ignores malformed envelopes without consuming the pending response", async () => {
+  const client = createAppRpcClient({ apiBase: "http://api.test" })
+  const pending = client.request("provider/list", {})
+  const socket = FakeWebSocket.instances[0]
+  completeHandshake(socket)
+  await flushMicrotasks()
+  let settled = false
+  void pending.then(() => {
+    settled = true
+  })
+  socket?.emitMessage({ id: 1 })
+  socket?.emitMessage({ id: 1, error: { code: "invalid", message: "bad" } })
+  await flushMicrotasks()
+  expect(settled).toBe(false)
+  socket?.emitMessage({ id: 1, result: { providers: [] } })
+  await expect(pending).resolves.toEqual({ providers: [] })
+  client.close()
 })

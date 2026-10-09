@@ -1400,7 +1400,7 @@ describe("execution view", () => {
     ])
   })
 
-  it("keeps unknown facts in catch-up state without rendering or throwing", () => {
+  it("advances the replay cursor without rendering native-only records", () => {
     const state = reduceExecutionView(createExecutionViewState(), {
       type: "durable",
       event: {
@@ -1409,8 +1409,8 @@ describe("execution view", () => {
         seq: 1,
         version: 5,
         createdAt: "2026-07-24T00:00:00.000Z",
-        type: "provider.future_fact",
-        data: { payload: true },
+        type: "session.cursor",
+        data: {},
       },
     })
 

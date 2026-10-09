@@ -1,4 +1,4 @@
-import type { ModelUsage } from "../core/sqlite-thread-usage-projection.ts"
+import type { ModelUsage } from "../protocol/usage.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 
 // Historical token counts are priced with the current catalog/user rates.

@@ -1,7 +1,7 @@
 import { type Node, Schema } from "prosemirror-model"
-import type { InputDraft } from "../../core/user-input.ts"
 import type { EditorPart } from "../../gui/input-draft.ts"
-import type { UserAttachment } from "../../kernel/events.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import { draftFromEditorParts, draftToEditorParts } from "../input-draft.ts"
 
 export type SkillMention = Readonly<{ name: string; path: string }>

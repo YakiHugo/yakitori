@@ -6,18 +6,18 @@ import {
   useRef,
   useState,
 } from "react"
-import type { ModelSelection } from "../../kernel/events.ts"
 import type {
   ApiProviderModel,
   ApiProviderSummary,
-} from "../../server/protocol.ts"
-import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
+} from "../../protocol/application.ts"
+import type { ModelSelection } from "../../protocol/events.ts"
 import { cn } from "../lib/utils.ts"
 import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../store/app-store.ts"
+import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 
 function displayName(
   providers: readonly ApiProviderSummary[],

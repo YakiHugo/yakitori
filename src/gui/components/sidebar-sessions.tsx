@@ -10,7 +10,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { useState } from "react"
-import type { ApiSessionSummary } from "../../server/protocol.ts"
+import type { ApiSessionSummary } from "../../protocol/application.ts"
 import {
   type SidebarListFilter,
   sessionListKey,

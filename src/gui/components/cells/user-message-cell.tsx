@@ -16,11 +16,11 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import { assetSourceKey } from "../../../core/asset-types.ts"
-import type { ContextExcerpt } from "../../../core/input-context.ts"
 import {
   inputContent,
   inputContentAttachments,
 } from "../../../core/user-input.ts"
+import type { ContextExcerpt } from "../../../protocol/input-context.ts"
 import { attachmentUrl } from "../../composer-attachments.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"

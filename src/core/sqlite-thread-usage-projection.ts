@@ -1,39 +1,19 @@
+import type { ThreadUsageSummary } from "../protocol/usage.ts"
+
+export type {
+  ModelUsage,
+  ThreadUsageSummary,
+  UsageTokenTotals,
+} from "../protocol/usage.ts"
+
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { StoredThread } from "./rollout.ts"
-import type { UsageHistory } from "./usage-history.ts"
 import type { ThreadSearchProjectionStamp } from "./sqlite-thread-search-projection.ts"
+import type { UsageHistory } from "./usage-history.ts"
 
 export type ThreadUsageProjectionStamp = ThreadSearchProjectionStamp
-
-export type UsageTokenTotals = Readonly<{
-  inputTokens: number
-  outputTokens: number
-  cacheReadInputTokens: number
-  cacheWriteInputTokens: number
-}>
-
-export type ModelUsage = UsageTokenTotals &
-  Readonly<{ provider: string; model: string; turns: number }>
-
-export type ThreadUsageSummary = Readonly<{
-  generatedAt: string
-  unavailableThreads?: number
-  models: readonly ModelUsage[]
-  modelDays: readonly (ModelUsage & Readonly<{ date: string }>)[]
-  totals: UsageTokenTotals & Readonly<{ turns: number }>
-  days: readonly (UsageTokenTotals &
-    Readonly<{ date: string; turns: number }>)[]
-  threads: readonly (UsageTokenTotals &
-    Readonly<{
-      threadId: string
-      title: string
-      updatedAt: string
-      turns: number
-      totalTokens: number
-    }>)[]
-}>
 
 type StampRow = Readonly<{
   metadata_size: number

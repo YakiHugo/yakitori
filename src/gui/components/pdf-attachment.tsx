@@ -1,5 +1,5 @@
 import { useState } from "react"
-import type { PdfAttachment } from "../../kernel/events.ts"
+import type { PdfAttachment } from "../../protocol/asset-types.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { rolloutAssetUrl } from "../rollout-asset-url.ts"
 

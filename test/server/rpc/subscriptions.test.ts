@@ -1,9 +1,6 @@
+import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import { describe, expect, it, vi } from "vitest"
-import {
-  createEventEnvelope,
-  EventType,
-  type StoredEventEnvelope,
-} from "../../../src/kernel/index.ts"
+import { createEventEnvelope, EventType } from "../../../src/kernel/index.ts"
 import type { LiveRuntimeWarning } from "../../../src/runtime/live-events.ts"
 import {
   createSessionEventHub,
@@ -48,7 +45,7 @@ import {
 const sessionId = "session_1"
 
 function subscribeSetup(options: {
-  events: readonly StoredEventEnvelope[]
+  events: readonly AppSessionEventEnvelope[]
   detail?: Partial<ApiSessionDetail>
   blockFirstPage?: {
     gate: ReturnType<typeof deferred<void>>
@@ -1298,5 +1295,48 @@ describe("session/permission/request", () => {
       processor.pendingServerRequests.pendingForSession(sessionId),
     ).toHaveLength(0)
     expect(resolveCalls).toHaveLength(0)
+  })
+})
+
+describe("application event projection", () => {
+  it("advances an opaque native record's cursor without sending its payload", async () => {
+    const { processor, eventHub } = subscribeSetup({ events: [] })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    await flush()
+    eventHub.publishDurable([
+      {
+        id: "native-record",
+        sessionId,
+        seq: 9,
+        version: 7,
+        createdAt: "2026-10-09T00:00:00.000Z",
+        type: "rollout.item",
+        data: {
+          item: { type: "compacted", nativeContext: "private engine state" },
+        },
+      },
+    ])
+    await flush()
+    const event = connection.frames.findLast(
+      (frame) => "method" in frame && frame.method === "session/event",
+    )
+    expect(event).toEqual({
+      method: "session/event",
+      params: {
+        sessionId,
+        seq: 9,
+        event: {
+          id: "native-record",
+          sessionId,
+          seq: 9,
+          version: 7,
+          createdAt: "2026-10-09T00:00:00.000Z",
+          type: "session.cursor",
+          data: {},
+        },
+      },
+    })
   })
 })

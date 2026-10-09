@@ -1,6 +1,6 @@
 import { FileText, Folder, type LucideIcon, Package } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
-import type { ApiSkillSummary } from "../../server/protocol.ts"
+import type { ApiSkillSummary } from "../../protocol/application.ts"
 
 export type ComposerSuggestion =
   | Readonly<{

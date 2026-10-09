@@ -1,5 +1,6 @@
-import type { InputContent, ModelSelection } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
+import type { ModelSelection } from "../protocol/events.ts"
+import type { InputContent } from "../protocol/user-input.ts"
 
 export type AdmissionDraft = Readonly<{
   apiBase: string
