@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   AgentControlError,
+  createAgentControl,
   type BoundAgentControl,
 } from "../../../src/runtime/agent-control.ts"
 import type {
   JsonValue,
   ToolExecutionDescriptor,
 } from "../../../src/kernel/index.ts"
+import { createToolExecutionGate } from "../../../src/runtime/tool-execution-gate.ts"
 import { createMultiAgentTools } from "../../../src/runtime/tools/multi-agent.ts"
 import { canonicalToolName } from "../../../src/runtime/tools/tool-name.ts"
 import type {
@@ -16,6 +18,84 @@ import type {
 } from "../../../src/runtime/tools/types.ts"
 
 describe("multi-agent tools", () => {
+  it("cancels mailbox waits and releases tool admission for the next turn", async () => {
+    vi.useFakeTimers()
+    const agentControl = createAgentControl({
+      rootSessionId: "root",
+      adapter: {
+        async createChild() {
+          throw new Error("unused")
+        },
+        async runChild() {
+          throw new Error("unused")
+        },
+        async ensureLoaded() {},
+        async getStatus() {
+          return "running"
+        },
+        async failChild() {
+          return "interrupted"
+        },
+        async completionDeliveryId() {
+          return "unused"
+        },
+        async interruptChild() {},
+        async deliverMessage() {},
+        async rollbackChild() {},
+        captureForkContext() {
+          return undefined
+        },
+      },
+    })
+    const gate = createToolExecutionGate()
+    const controller = new AbortController()
+    let outcome: "pending" | "resolved" | "aborted" = "pending"
+    let nextTurnAdmitted = false
+    try {
+      const waiting = gate
+        .reserve(false, controller.signal)
+        .run(() =>
+          requireTool("wait_agent").execute(
+            { timeout_ms: 300_000 },
+            {
+              workspaceRoot: "/workspace",
+              signal: controller.signal,
+              agentControl: agentControl.bind("root", {
+                provider: "faux",
+                model: "scripted",
+              }),
+            },
+          ),
+        )
+        .then(
+          () => {
+            outcome = "resolved"
+          },
+          (error: unknown) => {
+            expect(error).toMatchObject({ name: "AbortError" })
+            outcome = "aborted"
+          },
+        )
+      await vi.advanceTimersByTimeAsync(0)
+      expect(vi.getTimerCount()).toBe(1)
+      controller.abort()
+      const nextTurn = gate
+        .reserve(true, new AbortController().signal)
+        .run(async () => {
+          nextTurnAdmitted = true
+        })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(outcome).toBe("aborted")
+      expect(nextTurnAdmitted).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+      await Promise.all([waiting, nextTurn])
+    } finally {
+      await vi.runAllTimersAsync()
+      await agentControl.close()
+      vi.useRealTimers()
+    }
+  })
+
   it("registers the Codex V2 control surface with stable schemas", () => {
     const tools = createMultiAgentTools()
     expect(tools.map((tool) => canonicalToolName(tool.toolName))).toEqual([

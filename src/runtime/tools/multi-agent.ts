@@ -181,7 +181,10 @@ function createWaitAgentTool(): RuntimeTool {
       const parsed = parseWaitInput(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        const updates = await control.value.wait(parsed.timeoutMs)
+        const updates = await control.value.wait(
+          parsed.timeoutMs,
+          context.signal,
+        )
         const output = { timedOut: updates.length === 0, updates }
         return success(output, JSON.stringify(output))
       })

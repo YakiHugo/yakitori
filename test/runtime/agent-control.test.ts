@@ -14,6 +14,33 @@ import {
 const TARGET = { provider: "faux", model: "scripted" }
 
 describe("agent control", () => {
+  it("keeps queued completion updates when a cancelled turn tries to wait", async () => {
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "survey",
+      message: "inspect",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "findings" })
+    await expect.poll(() => harness.deliveredMessages.length).toBe(1)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(root.wait(0, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    })
+    await expect(root.wait(0)).resolves.toEqual([
+      {
+        agentId: child.agentId,
+        path: child.path,
+        status: { completed: "findings" },
+      },
+    ])
+  })
+
   it("spawns in the background and reports completion through wait and mailbox", async () => {
     const harness = createHarness()
     const root = harness.control.bind("root_session", TARGET)

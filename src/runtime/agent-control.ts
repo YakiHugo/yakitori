@@ -90,7 +90,10 @@ export type BoundAgentControl = Readonly<{
     readonly target: string
     readonly message: string
   }): Promise<{ readonly agentId: string; readonly path: string }>
-  wait(timeoutMs?: number): Promise<readonly AgentUpdate[]>
+  wait(
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<readonly AgentUpdate[]>
   interrupt(target: string): Promise<{
     readonly agentId: string
     readonly path: string
@@ -429,8 +432,10 @@ export function createAgentControl(input: {
           releaseIdleExecutionSlot(targetAgent.path)
         }
       },
-      async wait(timeoutMs = 30_000) {
+      async wait(timeoutMs = 30_000, signal) {
+        signal?.throwIfAborted()
         await ensureReady()
+        signal?.throwIfAborted()
         retryPendingDeliveries()
         const pending = drainUpdates(sessionId)
         if (pending.length > 0 || timeoutMs <= 0) return pending
@@ -440,12 +445,19 @@ export function createAgentControl(input: {
           const wake = () => {
             if (timer !== undefined) clearTimeout(timer)
             listeners.delete(wake)
+            if (listeners.size === 0) waiters.delete(sessionId)
+            signal?.removeEventListener("abort", wake)
             resolve()
           }
           listeners.add(wake)
           waiters.set(sessionId, listeners)
           timer = setTimeout(wake, timeoutMs)
+          signal?.addEventListener("abort", wake, { once: true })
+          if (signal?.aborted) wake()
         })
+        // Cancellation releases the tool's execution reservation without
+        // consuming mailbox updates that belong to the next live Turn.
+        signal?.throwIfAborted()
         return drainUpdates(sessionId)
       },
       async interrupt(targetName) {
