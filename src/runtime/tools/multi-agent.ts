@@ -158,7 +158,7 @@ function createWaitAgentTool(): RuntimeTool {
   return {
     toolName: plainToolName("wait_agent"),
     description:
-      "Wait for a mailbox or final-status update from any agent in the current tree. Returns immediately when an update is already queued, or after the timeout with an empty update list.",
+      "Wait for mailbox activity or a final-status update from any agent in the current tree. Queued status updates return immediately. The result identifies the wake reason; message content is delivered separately, and an empty update list does not imply a timeout.",
     approvalRequirement: noToolApprovalRequired,
     effect: "opaque",
     describeExecution: collaborationExecution("wait"),
@@ -181,11 +181,11 @@ function createWaitAgentTool(): RuntimeTool {
       const parsed = parseWaitInput(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        const updates = await control.value.wait(
+        const result = await control.value.wait(
           parsed.timeoutMs,
           context.signal,
         )
-        const output = { timedOut: updates.length === 0, updates }
+        const output = { timedOut: result.reason === "timeout", ...result }
         return success(output, JSON.stringify(output))
       })
     },

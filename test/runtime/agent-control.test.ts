@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ModelMessage } from "../../src/kernel/events.ts"
 import {
   type AgentControlAdapter,
@@ -14,6 +14,136 @@ import {
 const TARGET = { provider: "faux", model: "scripted" }
 
 describe("agent control", () => {
+  it("distinguishes an expired deadline from a status arriving after it", async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    try {
+      const child = await root.spawn({
+        taskName: "worker",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      const waiting = root.wait(100)
+      await vi.advanceTimersByTimeAsync(0)
+      vi.advanceTimersByTime(100)
+      harness.runs
+        .get(child.agentId)?.[0]
+        ?.resolve({ type: "completed", text: "done" })
+      await expect(waiting).resolves.toEqual({ reason: "timeout", updates: [] })
+      await expect(root.wait(1_000)).resolves.toEqual({
+        reason: "status",
+        updates: [
+          {
+            agentId: child.agentId,
+            path: child.path,
+            status: { completed: "done" },
+          },
+        ],
+      })
+      await expect(root.wait(0)).resolves.toEqual({
+        reason: "timeout",
+        updates: [],
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    { type: "completed", text: "done" },
+    { type: "errored", error: "failed" },
+    { type: "interrupted" },
+  ] as const)("clears the deadline when a child reports $type before timeout", async (outcome) => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    try {
+      const child = await root.spawn({
+        taskName: "worker",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      const waiting = root.wait(100)
+      await vi.advanceTimersByTimeAsync(99)
+      harness.runs.get(child.agentId)?.[0]?.resolve(outcome)
+      await expect(waiting).resolves.toMatchObject({
+        reason: "status",
+        updates: [{ agentId: child.agentId }],
+      })
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(root.wait(0)).resolves.toEqual({
+        reason: "timeout",
+        updates: [],
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("preserves status updates and clears the deadline when abort wins", async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    try {
+      const child = await root.spawn({
+        taskName: "worker",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      const controller = new AbortController()
+      const waiting = root.wait(100, controller.signal)
+      const rejected = expect(waiting).rejects.toMatchObject({
+        name: "AbortError",
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      harness.runs
+        .get(child.agentId)?.[0]
+        ?.resolve({ type: "completed", text: "done" })
+      controller.abort()
+      await rejected
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(root.wait(0)).resolves.toMatchObject({
+        reason: "status",
+        updates: [{ agentId: child.agentId, status: { completed: "done" } }],
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("rejects cancellation without losing the separately delivered mailbox message", async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    try {
+      const controller = new AbortController()
+      const waiting = root.wait(100, controller.signal)
+      const rejected = expect(waiting).rejects.toMatchObject({
+        name: "AbortError",
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      const sending = root.sendMessage({ target: "/root", message: "progress" })
+      controller.abort()
+      await sending
+      await rejected
+      expect(harness.deliveredMessages).toHaveLength(1)
+      expect(vi.getTimerCount()).toBe(0)
+      await expect(root.wait(0)).resolves.toEqual({
+        reason: "timeout",
+        updates: [],
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("keeps queued completion updates when a cancelled turn tries to wait", async () => {
     const harness = createHarness()
     const root = harness.control.bind("root_session", TARGET)
@@ -32,7 +162,9 @@ describe("agent control", () => {
     await expect(root.wait(0, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     })
-    await expect(root.wait(0)).resolves.toEqual([
+    await expect(
+      root.wait(0).then((result) => result.updates),
+    ).resolves.toEqual([
       {
         agentId: child.agentId,
         path: child.path,
@@ -71,7 +203,8 @@ describe("agent control", () => {
       type: "completed",
       text: "findings",
     })
-    const updates = await root.wait(1_000)
+    const { reason, updates } = await root.wait(1_000)
+    expect(reason).toBe("status")
 
     expect(updates).toEqual([
       {
@@ -103,7 +236,7 @@ describe("agent control", () => {
     harness.runs
       .get(child.agentId)?.[0]
       ?.resolve({ type: "completed", text: "partial answer", reason })
-    expect(await root.wait(1_000)).toMatchObject([
+    expect((await root.wait(1_000)).updates).toMatchObject([
       { status: { completed: "partial answer", reason } },
     ])
     expect(harness.deliveredMessages).toMatchObject([
@@ -244,7 +377,9 @@ describe("agent control", () => {
       "first",
       "second",
     ])
-    await expect(root.wait(1_000)).resolves.toEqual([
+    await expect(
+      root.wait(1_000).then((result) => result.updates),
+    ).resolves.toEqual([
       {
         agentId: child.agentId,
         path: "/root/worker",
@@ -255,7 +390,9 @@ describe("agent control", () => {
       type: "completed",
       text: "second result",
     })
-    await expect(root.wait(1_000)).resolves.toEqual([
+    await expect(
+      root.wait(1_000).then((result) => result.updates),
+    ).resolves.toEqual([
       {
         agentId: child.agentId,
         path: "/root/worker",
@@ -405,7 +542,7 @@ describe("agent control", () => {
     ])
     releaseDelivery.resolve()
     releaseCompletion.resolve()
-    expect(await root.wait(1_000)).toMatchObject([
+    expect((await root.wait(1_000)).updates).toMatchObject([
       { agentId: child.agentId, status: { completed: "done" } },
     ])
     expect(harness.runRequests.map((request) => request.message)).toEqual([
@@ -439,7 +576,7 @@ describe("agent control", () => {
         forkTurns: "none",
       }),
     ).rejects.toMatchObject({ code: "agent_concurrency_limit_reached" })
-    expect(await root.wait(1_000)).toMatchObject([
+    expect((await root.wait(1_000)).updates).toMatchObject([
       { agentId: child.agentId, status: { completed: "first done" } },
     ])
     await expect
@@ -474,7 +611,7 @@ describe("agent control", () => {
       forkTurns: "none",
     })
     harness.runs.get(child.agentId)?.[0]?.reject(new Error("launch failed"))
-    expect(await root.wait(1_000)).toMatchObject([
+    expect((await root.wait(1_000)).updates).toMatchObject([
       { status: { errored: "launch failed" } },
     ])
     await root.followup({ target: child.agentId, message: "retry" })
@@ -526,7 +663,7 @@ describe("agent control", () => {
       forkTurns: "none",
     })
     expect(next.path).toBe("/root/second")
-    expect(await root.wait(1_000)).toMatchObject([
+    expect((await root.wait(1_000)).updates).toMatchObject([
       { agentId: child.agentId, status: { completed: "done" } },
     ])
     expect(harness.runRequests.map((request) => request.sessionId)).toEqual([
@@ -571,7 +708,9 @@ describe("agent control", () => {
     })
     harness.runs.get(child.agentId)?.[0]?.reject(new Error("launch failed"))
 
-    await expect(root.wait(1_000)).resolves.toEqual([
+    await expect(
+      root.wait(1_000).then((result) => result.updates),
+    ).resolves.toEqual([
       {
         agentId: child.agentId,
         path: child.path,
@@ -672,7 +811,10 @@ describe("agent control", () => {
       text: "done",
     })
 
-    await expect(root.wait(1_000)).resolves.toEqual([])
+    await expect(root.wait(1_000)).resolves.toEqual({
+      reason: "background_error",
+      updates: [],
+    })
     expect(harness.backgroundErrors).toEqual([
       {
         error: expect.objectContaining({ message: "delivery failed" }),
@@ -680,7 +822,9 @@ describe("agent control", () => {
         operation: "task-worker",
       },
     ])
-    await expect(root.wait(1_000)).resolves.toEqual([
+    await expect(
+      root.wait(1_000).then((result) => result.updates),
+    ).resolves.toEqual([
       expect.objectContaining({
         agentId: child.agentId,
         status: { completed: "done" },

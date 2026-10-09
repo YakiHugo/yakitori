@@ -9,6 +9,8 @@ import { createSessionId } from "../../src/kernel/ids.ts"
 import type { AgentControl } from "../../src/runtime/agent-control.ts"
 import { createAgentRuntime } from "../../src/runtime/agent-runtime.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createMultiAgentTools } from "../../src/runtime/tools/multi-agent.ts"
+import { canonicalToolName } from "../../src/runtime/tools/tool-name.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
@@ -18,6 +20,98 @@ import { createFauxProvider } from "../support/faux-provider.ts"
 const TARGET = { provider: "faux", model: "scripted" }
 
 describe("agent runtime", () => {
+  it("wakes wait_agent for a separately delivered message while the child keeps running", async () => {
+    const store = new MemoryThreadStore()
+    const graph = memoryGraphStore()
+    const controls = new Map<string, AgentControl>()
+    const childCompletion = deferred<void>()
+    let manager: ThreadManager
+    const runtime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => manager,
+    })
+    manager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        controls.set(stored.metadata.id, runtime.registerThread(stored))
+        return {
+          ...immediateProcessor(),
+          start() {
+            return {
+              completion: childCompletion.promise,
+              abort() {
+                childCompletion.resolve()
+              },
+            }
+          },
+        }
+      },
+    })
+    try {
+      const root = await manager.createThread()
+      const control = controls.get(root.id)
+      if (control === undefined) throw new Error("missing root control")
+      const parent = control.bind(root.id, TARGET)
+      const child = await parent.spawn({
+        taskName: "report_progress",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      await expect
+        .poll(() => manager.getThread(child.agentId)?.agentStatus)
+        .toBe("running")
+      const tool = createMultiAgentTools().find(
+        (tool) => canonicalToolName(tool.toolName) === "wait_agent",
+      )
+      if (tool === undefined) throw new Error("missing wait_agent tool")
+      const waiting = tool.execute(
+        { timeout_ms: 300_000 },
+        {
+          workspaceRoot: process.cwd(),
+          agentControl: parent,
+        },
+      )
+      await control.bind(child.agentId, TARGET).sendMessage({
+        target: "/root",
+        message: "Still working; first finding is ready.",
+      })
+      await expect(waiting).resolves.toMatchObject({
+        ok: true,
+        output: { timedOut: false, reason: "mailbox", updates: [] },
+      })
+      expect(manager.getThread(child.agentId)?.agentStatus).toBe("running")
+      const messages = (await store.readThread(root.id))?.rollout.filter(
+        (record) => record.item.type === "agent_message",
+      )
+      expect(messages).toHaveLength(1)
+      expect(JSON.stringify(messages)).toContain(
+        "Still working; first finding is ready.",
+      )
+      childCompletion.resolve()
+      await expect(parent.wait(1_000)).resolves.toMatchObject({
+        reason: "status",
+        updates: [{ agentId: child.agentId, status: { completed: "" } }],
+      })
+      await expect(
+        tool.execute(
+          { timeout_ms: 0 },
+          {
+            workspaceRoot: process.cwd(),
+            agentControl: parent,
+          },
+        ),
+      ).resolves.toMatchObject({
+        ok: true,
+        output: { timedOut: true, reason: "timeout", updates: [] },
+      })
+    } finally {
+      childCompletion.resolve()
+      await runtime.close()
+      await manager.shutdown()
+    }
+  })
+
   it.each([
     "all",
     1,
@@ -292,7 +386,7 @@ describe("agent runtime", () => {
         agentType: "general",
         forkTurns: "none",
       })
-      expect(await agent.wait(1_000)).toMatchObject([
+      expect((await agent.wait(1_000)).updates).toMatchObject([
         { status: { completed: "Continuation.", reason } },
       ])
       const notification = (await store.readThread(root.id))?.rollout
@@ -605,7 +699,7 @@ describe("agent runtime", () => {
     const updates: import("../../src/runtime/agent-control.ts").AgentUpdate[] =
       []
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      updates.push(...(await control.bind(root.id, TARGET).wait(250)))
+      updates.push(...(await control.bind(root.id, TARGET).wait(250)).updates)
       if (new Set(updates.map((update) => update.agentId)).size === 2) break
     }
     expect(updates).toEqual(

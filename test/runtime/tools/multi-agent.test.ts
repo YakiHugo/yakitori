@@ -168,14 +168,17 @@ describe("multi-agent tools", () => {
       {},
       context(
         control({
-          wait: async () => [
-            { agentId: "session_1", path: "/root/one", status: "running" },
-            {
-              agentId: "session_2",
-              path: "/root/two",
-              status: { completed: "done" },
-            },
-          ],
+          wait: async () => ({
+            reason: "status",
+            updates: [
+              { agentId: "session_1", path: "/root/one", status: "running" },
+              {
+                agentId: "session_2",
+                path: "/root/two",
+                status: { completed: "done" },
+              },
+            ],
+          }),
         }),
       ),
     )
@@ -255,7 +258,7 @@ function control(
       path: "/root/default",
     }),
     followup: async () => ({ agentId: "agent_default", path: "/root/default" }),
-    wait: async () => [],
+    wait: async () => ({ reason: "timeout", updates: [] }),
     interrupt: async () => ({
       agentId: "agent_default",
       path: "/root/default",
