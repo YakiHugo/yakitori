@@ -225,6 +225,196 @@ describe("anthropic provider conversion", () => {
     ])
   })
 
+  it.each([
+    "anthropic",
+    "kimi",
+  ])("replays fragmented assistant tool batches as one %s wire message", async (provider) => {
+    let body: Record<string, unknown> | undefined
+    const client = new Anthropic({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        body = JSON.parse(String(init?.body))
+        let response = ""
+        for await (const event of anthropicRawMessage({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "done" }],
+        })) {
+          response += `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+        }
+        return new Response(response, {
+          headers: { "content-type": "text/event-stream" },
+        })
+      },
+    })
+    const messages: ModelRequest["messages"] = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "Search both sources" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "Search in parallel.",
+            providerMetadata: {
+              anthropic: { provider, scope: "scope_1", signature: "sig_1" },
+            },
+          },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Checking." }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "web_search:0",
+            name: "web_search",
+            input: { query: "first" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "web_search:1",
+            name: "web_search",
+            input: { query: "second" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "web_search:0",
+        content: [{ type: "text", text: "first result" }],
+      },
+      {
+        role: "tool",
+        toolCallId: "web_search:1",
+        content: [{ type: "text", text: "second result" }],
+        isError: true,
+      },
+    ]
+    const original = structuredClone(messages)
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "test",
+      client,
+    })
+    const events: ModelStreamEvent[] = []
+    const request: ModelRequest = {
+      ...effortRequest(provider, undefined),
+      messages,
+      continuationScope: "scope_1",
+      tools: [
+        {
+          name: "web_search",
+          description: "Search",
+          inputSchema: { type: "object" },
+        },
+      ],
+    }
+    for await (const event of stream(request)) events.push(event)
+    expect(events.at(-1)?.type).toBe("response")
+    expect(body?.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Search both sources" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "Search in parallel.",
+            signature: "sig_1",
+          },
+          { type: "text", text: "Checking." },
+          {
+            type: "tool_use",
+            id: "web_search:0",
+            name: "web_search",
+            input: { query: "first" },
+          },
+          {
+            type: "tool_use",
+            id: "web_search:1",
+            name: "web_search",
+            input: { query: "second" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "web_search:0",
+            content: "first result",
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "web_search:1",
+            content: "second result",
+            is_error: true,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ])
+    expect(messages).toEqual(original)
+    const firstBody = structuredClone(body)
+    for await (const event of stream(request)) events.push(event)
+    expect(events.at(-1)?.type).toBe("response")
+    expect(body).toEqual(firstBody)
+    expect(messages).toEqual(original)
+  })
+
+  it("preserves assistant block order and user boundaries when coalescing history", () => {
+    expect(
+      toAnthropicMessages([
+        { role: "assistant", content: [{ type: "text", text: "First" }] },
+        { role: "assistant", content: [] },
+        {
+          role: "assistant",
+          content: [{ type: "reasoning", text: "unbound" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "",
+              providerMetadata: { anthropic: { redactedData: "opaque" } },
+            },
+          ],
+        },
+        { role: "assistant", content: [{ type: "text", text: "Second" }] },
+        { role: "developer", content: [{ type: "text", text: "New context" }] },
+        { role: "assistant", content: [{ type: "text", text: "Third" }] },
+        { role: "user", content: [{ type: "text", text: "New question" }] },
+        { role: "assistant", content: [{ type: "text", text: "Fourth" }] },
+      ]),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "First" },
+          { type: "redacted_thinking", data: "opaque" },
+          { type: "text", text: "Second" },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "New context" }] },
+      { role: "assistant", content: [{ type: "text", text: "Third" }] },
+      { role: "user", content: [{ type: "text", text: "New question" }] },
+      { role: "assistant", content: [{ type: "text", text: "Fourth" }] },
+    ])
+  })
+
   it("round-trips custom tool search through deferred definitions and tool references", () => {
     const searchCall = fromAnthropicMessage({
       stop_reason: "tool_use",
@@ -1602,6 +1792,49 @@ describe("anthropic provider error classification", () => {
         cause: error,
       },
     ])
+  })
+
+  it("preserves structured request rejection reasons from the HTTP response", async () => {
+    const reason = "tool_result references missing tool_use id: web_search:0"
+    const client = new Anthropic({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            type: "error",
+            error: { type: "invalid_request_error", message: reason },
+            unrelated: "DO_NOT_COPY_RAW_BODY",
+          }),
+          {
+            status: 400,
+            headers: {
+              "content-type": "application/json",
+              "request-id": "request_bad_history",
+            },
+          },
+        ),
+    })
+    const events = await collectWithClient(client)
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "invalid_request",
+          stage: "connect",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          status: 400,
+          providerCode: "invalid_request_error",
+          providerRequestId: "request_bad_history",
+          message: expect.stringContaining(reason),
+          details: expect.objectContaining({ providerMessage: reason }),
+        }),
+      }),
+    ])
+    const event = events[0]
+    if (event?.type !== "failure") throw new Error("Expected failure")
+    expect(event.failure.message).not.toContain("DO_NOT_COPY_RAW_BODY")
   })
 
   it("keeps a 400 API error free of retry details", async () => {

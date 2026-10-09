@@ -23,6 +23,34 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("shows the persisted provider rejection reason in the failed turn", () => {
+    const message =
+      "The model provider rejected the request. (HTTP 400, invalid_request_error) Missing tool_result for call_read."
+    const state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_failed",
+            outcome: {
+              status: "failed",
+              error: { code: "model.invalid_request", message },
+            },
+          },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).entries).toContainEqual({
+      kind: "turn_terminal",
+      turnId: "turn_failed",
+      state: "failed",
+      message,
+    })
+  })
+
   it("reconciles one ordered tool completion identically live, repeated and replayed", () => {
     const image = {
       type: "image" as const,
