@@ -759,7 +759,7 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
   await permission.getByRole("button", { name: "Allow", exact: true }).click()
   await expect(permission).toHaveCount(0)
   const streamed = page
-    .getByRole("region", { name: "Response", exact: true })
+    .getByRole("region", { name: "Current response", exact: true })
     .getByText("Streaming after approved command", { exact: true })
   await expect(streamed).toBeVisible()
   await expect(interrupt).toBeVisible()
