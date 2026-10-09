@@ -2430,6 +2430,148 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread("thread_source")
   })
 
+  it.each([
+    "invalid JSON",
+    "invalid schema",
+    "sequence gap",
+  ])("reads and resumes a fork without parsing an ancestor's later %s", async (corruption) => {
+    const { root, store } = await createStore()
+    await createPersistentThread(store, metadata("thread_source"))
+    await store.appendItems("thread_source", [
+      response("turn_one", "你好 prefix"),
+    ])
+    const prepared = await store.prepareFork({
+      sourceThreadId: "thread_source",
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared,
+      target: metadata("thread_child", { parentThreadId: "thread_source" }),
+    })
+    await store.shutdownThread("thread_child")
+    await store.shutdownThread("thread_source")
+    const sourcePath = join(root, "rollouts", "thread_source", "rollout.jsonl")
+    const prefix = await readFile(sourcePath, "utf8")
+    const previous = JSON.parse(prefix.trim().split("\n").at(-1) ?? "") as {
+      seq: number
+      item: unknown
+    }
+    const suffix =
+      corruption === "invalid JSON"
+        ? "not json"
+        : JSON.stringify({
+            ...previous,
+            seq: corruption === "sequence gap" ? 99 : previous.seq + 1,
+            item:
+              corruption === "invalid schema"
+                ? { type: "unknown_record" }
+                : response("turn_later", "outside fork"),
+          })
+    await appendFile(sourcePath, `${suffix}\n`)
+    await expect(store.readThread("thread_source")).rejects.toThrow()
+    const reader = new JsonlThreadStore({ root })
+    for (const stored of [
+      await reader.readThread("thread_child"),
+      await reader.resumeThread("thread_child"),
+    ]) {
+      expect(
+        stored?.rollout.flatMap(({ item }) =>
+          item.type === "response_item" ? [item.item.turnId] : [],
+        ),
+      ).toEqual(["turn_one"])
+    }
+    await reader.shutdownThread("thread_child")
+    expect(await readFile(sourcePath, "utf8")).toBe(`${prefix}${suffix}\n`)
+  })
+
+  it("keeps every inherited generation bounded after source metadata deletion", async () => {
+    const { root, store } = await createStore()
+    await createPersistentThread(store, metadata("thread_source"))
+    await store.appendItems("thread_source", [response("turn_root", "root")])
+    for (const [source, target] of [
+      ["thread_source", "thread_child"],
+      ["thread_child", "thread_grandchild"],
+    ] as const) {
+      const prepared = await store.prepareFork({
+        sourceThreadId: source,
+        boundary: { type: "latest" },
+      })
+      await store.createFork({
+        prepared,
+        target: metadata(target, { parentThreadId: source }),
+      })
+      await store.appendItems(target, [response(`turn_${target}`, target)])
+    }
+    for (const id of ["thread_source", "thread_child", "thread_grandchild"]) {
+      await store.shutdownThread(id)
+    }
+    for (const id of ["thread_source", "thread_child"]) {
+      await appendFile(
+        join(root, "rollouts", id, "rollout.jsonl"),
+        "unrelated corrupt suffix\n",
+      )
+      await store.deleteThread(id)
+    }
+    const stored = await store.resumeThread("thread_grandchild")
+    expect(
+      stored?.rollout.flatMap(({ item }) =>
+        item.type === "response_item" ? [item.item.turnId] : [],
+      ),
+    ).toEqual(["turn_root", "turn_thread_child", "turn_thread_grandchild"])
+    await store.shutdownThread("thread_grandchild")
+  })
+
+  it.each([
+    "included corruption",
+    "middle of line",
+    "blank line cutoff",
+    "wrong sequence",
+  ])("still rejects an inherited prefix with %s", async (invalid) => {
+    const { root, store } = await createStore()
+    await createPersistentThread(store, metadata("thread_source"))
+    await store.appendItems("thread_source", [
+      response("turn_one", "你好 prefix"),
+    ])
+    const prepared = await store.prepareFork({
+      sourceThreadId: "thread_source",
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared,
+      target: metadata("thread_child", { parentThreadId: "thread_source" }),
+    })
+    await store.shutdownThread("thread_source")
+    await store.shutdownThread("thread_child")
+    const sourcePath = join(root, "rollouts", "thread_source", "rollout.jsonl")
+    const childPath = join(root, "rollouts", "thread_child", "rollout.jsonl")
+    const childMeta = JSON.parse(
+      (await readFile(childPath, "utf8")).trim(),
+    ) as {
+      item: {
+        metadata: {
+          historyBase: { endByteOffset: number; endSeqExclusive: number }
+        }
+      }
+    }
+    const position = childMeta.item.metadata.historyBase
+    if (invalid === "included corruption") {
+      const bytes = await readFile(sourcePath)
+      bytes[bytes.length - 2] = 120
+      await writeFile(sourcePath, bytes)
+    } else if (invalid === "middle of line") {
+      const bytes = await readFile(sourcePath)
+      position.endByteOffset = bytes.indexOf(Buffer.from("你好")) + 1
+    } else if (invalid === "blank line cutoff") {
+      await appendFile(sourcePath, "\n")
+      position.endByteOffset += 1
+    } else {
+      position.endSeqExclusive += 1
+    }
+    await writeFile(childPath, `${JSON.stringify(childMeta)}\n`)
+    await expect(store.readThread("thread_child")).rejects.toThrow()
+    await expect(store.resumeThread("thread_child")).rejects.toThrow()
+  })
+
   it("rejects a forged byte cutoff instead of silently widening history", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_source"))
