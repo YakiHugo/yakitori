@@ -1,6 +1,6 @@
 import { FileCode2, Save, WrapText } from "lucide-react"
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
-import type { WorkspaceReadForEditResponse } from "../../server/workspace.ts"
+import type { WorkspaceReadForEditResponse } from "../../protocol/workspace.ts"
 import { ApiRequestError, getAppRpcClient } from "../lib/rpc-client.ts"
 import { CopyIconButton } from "./response-actions.tsx"
 import "./workspace-files.css"

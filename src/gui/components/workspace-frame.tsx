@@ -1,3 +1,4 @@
+import { useEngineStore } from "../store/engine-store.ts"
 import {
   Files,
   GitCompareArrows,
@@ -60,7 +61,18 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const expanded = useWorkspaceStore((state) => state.expanded)
   const tabs = useWorkspaceStore((state) => state.tabs)
   const activeId = useWorkspaceStore((state) => state.activeId)
-  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const nativeSessionId = useAppStore((state) => state.selection.sessionId)
+  const externalEngine = useEngineStore((state) => state.engineId)
+  const externalSessionId = useEngineStore((state) => state.sessionId)
+  const externalCwd = useEngineStore(
+    (state) =>
+      state.snapshot?.session.cwd ??
+      state.sessions.find((session) => session.id === state.sessionId)?.cwd,
+  )
+  const external = externalEngine !== undefined
+  const sessionId = external
+    ? (externalSessionId ?? `engine-draft:${externalEngine}`)
+    : nativeSessionId
   const visibleTabs = tabs.filter((tab) => tab.workspaceSessionId === sessionId)
   const activeFile = visibleTabs.find(
     (tab): tab is Extract<WorkspaceTab, { kind: "file" }> =>
@@ -106,7 +118,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const [adding, setAdding] = useState(false)
   const [resizing, setResizing] = useState(false)
   const apiBase = useAppStore((state) => state.apiBase)
-  const cwd = useAppStore((state) =>
+  const nativeCwd = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? state.projects.find((project) => project.id === state.currentProject)
           ?.roots[0]
@@ -114,6 +126,11 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
         ? state.selectedSession.workingDirectory
         : undefined,
   )
+  const cwd = external
+    ? externalSessionId === undefined
+      ? nativeCwd
+      : externalCwd
+    : nativeCwd
   const addToMain = (excerpt: ContextExcerpt) => {
     useWorkspaceStore.getState().setExpanded(false)
     if (window.innerWidth < 1180) setOpen(false)
@@ -176,7 +193,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     return window.yakitoriDesktop?.browser?.onShortcut((action) => {
       if (action === "toggle-workspace")
         setOpen(!useWorkspaceStore.getState().open)
-      else
+      else if (!external || action !== "new-side-chat")
         addTab(
           action === "new-browser"
             ? "browser"
@@ -186,7 +203,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           sessionId,
         )
     })
-  }, [addTab, setOpen, sessionId])
+  }, [addTab, setOpen, sessionId, external])
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (
@@ -216,7 +233,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           event.preventDefault()
           addTab("files")
         }
-        if (key === "s" && event.altKey) {
+        if (key === "s" && event.altKey && !external) {
           event.preventDefault()
           addTab("chat", sessionId)
         }
@@ -239,7 +256,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       window.removeEventListener("keydown", keydown)
       window.removeEventListener("pointerdown", dismiss)
     }
-  }, [setOpen, addTab, adding, sessionId])
+  }, [setOpen, addTab, adding, sessionId, external])
 
   return (
     <div
@@ -386,27 +403,35 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 aria-label="Open workspace view"
                 className="workspace-add-menu"
               >
-                {views.map(({ id, label, icon: Icon }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      addTab(id, sessionId)
-                      setAdding(false)
-                    }}
-                  >
-                    <Icon size={17} />
-                    <span>{label}</span>
-                    {id === "browser" ? (
-                      <kbd>⌘T</kbd>
-                    ) : id === "files" ? (
-                      <kbd>⌘P</kbd>
-                    ) : id === "chat" ? (
-                      <kbd>⌥⌘S</kbd>
-                    ) : null}
-                  </button>
-                ))}
+                {views
+                  .filter(
+                    ({ id }) =>
+                      !external ||
+                      id === "changes" ||
+                      id === "files" ||
+                      id === "browser",
+                  )
+                  .map(({ id, label, icon: Icon }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        addTab(id, sessionId)
+                        setAdding(false)
+                      }}
+                    >
+                      <Icon size={17} />
+                      <span>{label}</span>
+                      {id === "browser" ? (
+                        <kbd>⌘T</kbd>
+                      ) : id === "files" ? (
+                        <kbd>⌘P</kbd>
+                      ) : id === "chat" ? (
+                        <kbd>⌥⌘S</kbd>
+                      ) : null}
+                    </button>
+                  ))}
               </div>
             )}
           </div>
@@ -487,6 +512,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     useWorkspaceStore.getState().setBrowserTitle(tab.id, title)
                   }
                   onSelection={(selection) => {
+                    if (external) return
                     const workspace = useWorkspaceStore.getState()
                     if (
                       !workspace.open ||
@@ -562,7 +588,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               )}
             </div>
           ))}
-          {visibleTabs.length === 0 && (
+          {visibleTabs.length === 0 && !external && (
             <div className="workspace-empty">
               <MessageCirclePlus size={30} strokeWidth={1.25} />
               <strong>Open something alongside your conversation</strong>
@@ -603,49 +629,51 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           }}
         />
       ) : null}
-      <SelectionActions
-        key={`${apiBase}:${sessionId ?? "draft"}:${open}:${activeId}`}
-        annotations={[
-          ...excerpts,
-          ...visibleTabs.flatMap((tab) =>
-            tab.kind === "chat" ? tab.excerpts : [],
-          ),
-        ].filter((excerpt) => excerpt.kind === "annotation")}
-        annotationDetails={Object.fromEntries([
-          ...excerpts
-            .filter((excerpt) => excerpt.kind === "annotation")
-            .map((excerpt, index) => [
-              excerpt.id,
-              { number: index + 1, conversation: "main conversation" },
-            ]),
-          ...visibleTabs.flatMap((tab) =>
-            tab.kind === "chat"
-              ? tab.excerpts
-                  .filter((excerpt) => excerpt.kind === "annotation")
-                  .map((excerpt, index) => [
-                    excerpt.id,
-                    { number: index + 1, conversation: tabLabel(tab) },
-                  ])
-              : [],
-          ),
-        ])}
-        onAddToConversation={(excerpt, sideChatId) => {
-          if (sideChatId)
-            useWorkspaceStore.getState().addChatExcerpt(sideChatId, excerpt)
-          else addToMain(excerpt)
-        }}
-        onUpdateAnnotation={(excerpt) => {
-          updateExcerpt(excerpt)
-          useWorkspaceStore.getState().updateChatExcerpt(excerpt)
-        }}
-        onRemoveAnnotation={(id) => {
-          removeExcerpt(id)
-          useWorkspaceStore.getState().removeChatExcerpt(id)
-        }}
-        onAskInSideChat={(excerpt, sideChatId) =>
-          askInSideChat(excerpt, sessionId, sideChatId)
-        }
-      />
+      {!external && (
+        <SelectionActions
+          key={`${apiBase}:${sessionId ?? "draft"}:${open}:${activeId}`}
+          annotations={[
+            ...excerpts,
+            ...visibleTabs.flatMap((tab) =>
+              tab.kind === "chat" ? tab.excerpts : [],
+            ),
+          ].filter((excerpt) => excerpt.kind === "annotation")}
+          annotationDetails={Object.fromEntries([
+            ...excerpts
+              .filter((excerpt) => excerpt.kind === "annotation")
+              .map((excerpt, index) => [
+                excerpt.id,
+                { number: index + 1, conversation: "main conversation" },
+              ]),
+            ...visibleTabs.flatMap((tab) =>
+              tab.kind === "chat"
+                ? tab.excerpts
+                    .filter((excerpt) => excerpt.kind === "annotation")
+                    .map((excerpt, index) => [
+                      excerpt.id,
+                      { number: index + 1, conversation: tabLabel(tab) },
+                    ])
+                : [],
+            ),
+          ])}
+          onAddToConversation={(excerpt, sideChatId) => {
+            if (sideChatId)
+              useWorkspaceStore.getState().addChatExcerpt(sideChatId, excerpt)
+            else addToMain(excerpt)
+          }}
+          onUpdateAnnotation={(excerpt) => {
+            updateExcerpt(excerpt)
+            useWorkspaceStore.getState().updateChatExcerpt(excerpt)
+          }}
+          onRemoveAnnotation={(id) => {
+            removeExcerpt(id)
+            useWorkspaceStore.getState().removeChatExcerpt(id)
+          }}
+          onAskInSideChat={(excerpt, sideChatId) =>
+            askInSideChat(excerpt, sessionId, sideChatId)
+          }
+        />
+      )}
       {closing && (
         <CloseSideChatDialog
           title={tabLabel(closing)}

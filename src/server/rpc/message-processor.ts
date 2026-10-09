@@ -1,3 +1,4 @@
+import type { EngineRegistry } from "../engine-registry.ts"
 import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import { ConfigurationError } from "../config-errors.ts"
 import { createSessionEventHub, type SessionEventHub } from "../event-hub.ts"
@@ -67,6 +68,7 @@ export type MessageProcessorOptions = Readonly<{
   providerConfiguration?: ProviderService
   mcp?: McpService
   interactions?: SessionInteractions
+  engines?: EngineRegistry
   sideChats?: SideChatService
   handlers: ServerHandlers
   eventHub?: SessionEventHub
@@ -111,6 +113,7 @@ export class MessageProcessor {
   readonly pendingServerRequests = new PendingServerRequests()
 
   private readonly handlers: ServerHandlers
+  private readonly engines: EngineRegistry | undefined
   private readonly sideChats: SideChatService | undefined
   private readonly interactions: SessionInteractions | undefined
   private readonly chatgpt: ChatGPTConnections | undefined
@@ -141,6 +144,7 @@ export class MessageProcessor {
 
   constructor(options: MessageProcessorOptions) {
     this.handlers = options.handlers
+    this.engines = options.engines
     this.sideChats = options.sideChats
     this.interactions = options.interactions
     this.providerConfiguration = options.providerConfiguration
@@ -310,6 +314,7 @@ export class MessageProcessor {
       return
     }
     const context: RpcMethodContext = {
+      ...(this.engines === undefined ? {} : { engines: this.engines }),
       ...(this.sideChats === undefined ? {} : { sideChats: this.sideChats }),
       ...(this.interactions === undefined
         ? {}

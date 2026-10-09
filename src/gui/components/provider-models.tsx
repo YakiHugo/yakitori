@@ -1,7 +1,9 @@
 import { Plus } from "lucide-react"
 import { useState } from "react"
-import type { ConfiguredModel } from "../../runtime/provider-presets.ts"
-import type { ProviderConfiguration } from "../../server/provider-configuration.ts"
+import type {
+  ConfiguredModel,
+  ProviderConfiguration,
+} from "../../protocol/providers.ts"
 import { Button } from "./ui/button.tsx"
 import { Field, FieldGroup, FieldLabel, Input } from "./ui/field.tsx"
 

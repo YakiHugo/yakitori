@@ -37,6 +37,8 @@ describe("existing-work controls during process drain", () => {
         .map((entry) => entry.method)
         .sort(),
     ).toEqual([
+      "engineSession/cancel",
+      "engineSession/respondPermission",
       "server/ping",
       "session/elicitation/answer",
       "session/elicitation/list",

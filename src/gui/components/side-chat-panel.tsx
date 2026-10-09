@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { inputContent, inputContentAttachments } from "../../core/user-input.ts"
 import type { ImageAttachment } from "../../protocol/asset-types.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
+import type { SideChatSnapshot } from "../../protocol/side-chat.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
-import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import {
   attachmentUrl,
   discardDraftAttachments,

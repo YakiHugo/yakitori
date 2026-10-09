@@ -1,40 +1,18 @@
+import type { SideChatRpcParams } from "../../protocol/rpc-side-chat.ts"
+
+export type {
+  SideChatRpcParams,
+  SideChatRpcResponses,
+} from "../../protocol/rpc-side-chat.ts"
+
 import {
   isInputContent,
   isModelSelection,
   type ModelSelection,
 } from "../../kernel/events.ts"
-import {
-  type SideChatCreate,
-  SideChatError,
-  type SideChatSend,
-  type SideChatService,
-  type SideChatSnapshot,
-} from "../side-chat.ts"
+import { SideChatError, type SideChatService } from "../side-chat.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
-
-export type SideChatRpcParams = {
-  "sideChat/create": SideChatCreate
-  "sideChat/read": { sideChatId: string }
-  "sideChat/send": SideChatSend
-  "sideChat/cancel": { sideChatId: string; turnId: string }
-  "sideChat/close": { sideChatId: string }
-  "sideChat/resolvePermission": {
-    sideChatId: string
-    turnId: string
-    permissionRequestId: string
-    behavior: "allow" | "deny"
-  }
-}
-
-export type SideChatRpcResponses = {
-  "sideChat/create": SideChatSnapshot
-  "sideChat/read": SideChatSnapshot
-  "sideChat/send": SideChatSnapshot
-  "sideChat/cancel": SideChatSnapshot
-  "sideChat/close": Record<string, never>
-  "sideChat/resolvePermission": SideChatSnapshot
-}
 
 function string(params: Record<string, unknown>, key: string): string {
   const value = params[key]

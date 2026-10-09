@@ -1,42 +1,39 @@
+import type {
+  ProviderConfigurationResponse,
+  ProviderWriteInput,
+} from "../protocol/providers.ts"
+
+export type {
+  ProviderConfigurationResponse,
+  ProviderWriteInput,
+} from "../protocol/providers.ts"
+
+import { join } from "node:path"
 import {
   createProviderContinuationScope,
-  providerPresets,
   type ModelProvider,
+  providerPresets,
 } from "../runtime/index.ts"
+import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { ConfigurationError } from "./config-errors.ts"
-import { createProviderCredentialStore } from "./provider-credentials.ts"
+import { createConfiguredProvider } from "./configured-provider.ts"
 import {
   type ApiConfiguredProvider,
-  providerConfigValue,
   type ProviderConfiguration,
+  providerConfigValue,
   requireProviderConfiguration,
   requireProviderId,
   type StoredProviderConfiguration,
 } from "./provider-configuration.ts"
-import type { UserConfigStore } from "./user-config.ts"
-import { discoverProviderModels } from "./provider-model-discovery.ts"
-import { createProviderModelCatalog } from "./provider-model-catalog.ts"
-import { join } from "node:path"
-import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import { createConfiguredProvider } from "./configured-provider.ts"
 import { createProviderConfigurationHistory } from "./provider-configuration-history.ts"
+import { createProviderCredentialStore } from "./provider-credentials.ts"
+import { createProviderModelCatalog } from "./provider-model-catalog.ts"
+import { discoverProviderModels } from "./provider-model-discovery.ts"
 import type {
   SubscriptionConnection,
   SubscriptionConnections,
 } from "./subscription-connections.ts"
-
-export type ProviderConfigurationResponse = Readonly<{
-  providers: readonly ApiConfiguredProvider[]
-  presets: typeof providerPresets
-  subscriptions: readonly SubscriptionConnection[]
-  undoId?: string
-}>
-
-export type ProviderWriteInput = Readonly<{
-  id?: string
-  configuration: ProviderConfiguration
-  apiKey?: string
-}>
+import type { UserConfigStore } from "./user-config.ts"
 
 export type ProviderService = {
   read(): Promise<ProviderConfigurationResponse>

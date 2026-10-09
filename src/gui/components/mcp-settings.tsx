@@ -1,6 +1,6 @@
 import { Plug, RefreshCw } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
-import type { RpcMethodResponses } from "../../server/rpc/methods.ts"
+import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"

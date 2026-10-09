@@ -10,11 +10,11 @@ import {
   WrapText,
 } from "lucide-react"
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
-import type { WorkspaceReadOfficeResponse } from "../../server/office-preview.ts"
 import type {
   WorkspaceReadMediaResponse,
+  WorkspaceReadOfficeResponse,
   WorkspaceReadResponse,
-} from "../../server/workspace.ts"
+} from "../../protocol/workspace.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import { fileActionLabel, openFileTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"

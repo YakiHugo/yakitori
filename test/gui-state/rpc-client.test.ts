@@ -235,6 +235,35 @@ describe("app RPC client", () => {
     client.close()
   })
 
+  it("invalidates external engine history after changes and reconnection", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const changes = vi.fn()
+    const unsubscribe = client.subscribeToEngineSessionChanges(changes)
+    const pending = client.request("engine/list", {})
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({ id: 1, result: { engines: [] } })
+    await pending
+    socket.emitMessage({
+      method: "engineSession/changed",
+      params: { sessionId: "external" },
+    })
+    expect(changes).toHaveBeenLastCalledWith("external")
+    socket.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    const restored = completeHandshake(FakeWebSocket.instances[1])
+    expect(changes).toHaveBeenLastCalledWith(undefined)
+    unsubscribe()
+    changes.mockClear()
+    restored.emitMessage({
+      method: "engineSession/changed",
+      params: { sessionId: "external" },
+    })
+    expect(changes).not.toHaveBeenCalled()
+    client.close()
+  })
+
   it("derives the WebSocket URL from the api base", async () => {
     const client = createAppRpcClient({ apiBase: "https://api.test:8443/base" })
     const pending = client.request("provider/list", {})

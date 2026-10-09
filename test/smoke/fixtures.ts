@@ -2,7 +2,7 @@ import { once } from "node:events"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { expect, type Page, type TestInfo } from "@playwright/test"
 import type { PdfAttachment } from "../../src/kernel/events.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
@@ -67,6 +67,14 @@ export async function createSmokeEnvironment(): Promise<
     YAKITORI_PROVIDER: "faux",
     YAKITORI_FAUX_SCENARIO: "text",
     YAKITORI_APPROVAL_POLICY: "auto_file_tools",
+    YAKITORI_ACP_ENGINES: JSON.stringify([
+      {
+        id: "smoke-acp",
+        label: "Smoke ACP",
+        command: process.execPath,
+        args: [resolve("test/fixtures/acp/agent.mjs"), "resume"],
+      },
+    ]),
     HOST: "127.0.0.1",
     PORT: "0",
   })
@@ -772,6 +780,7 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
   await page.reload()
   await expect(
     page
+      .getByRole("main")
       .getByRole("paragraph")
       .filter({ hasText: /^Verify approval and interrupted streaming\.$/ }),
   ).toBeVisible()
@@ -1139,4 +1148,53 @@ async function runPdfInputFlow(
         Reflect.deleteProperty(window, "yakitoriDesktop"),
       )
   }
+}
+
+// Configured executable -> production app RPC -> shared workspace, on both CI
+// platforms. No provider credentials or model service are used by this child.
+export async function runExternalEngineFlow(page: Page): Promise<void> {
+  await page
+    .getByRole("combobox", { name: "New session engine" })
+    .selectOption("smoke-acp")
+  const composer = page.getByRole("textbox", { name: "Message the Mate" })
+  await composer.fill("permission")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  const permission = page.getByRole("group", {
+    name: "Permission · Run fixture command",
+    exact: true,
+  })
+  await expect(permission).toBeVisible()
+  await expect(permission).toContainText("echo fixture")
+  await page.reload()
+  await expect(permission).toBeVisible()
+  await permission
+    .getByRole("button", { name: "Allow this", exact: true })
+    .click()
+  await expect(permission).toHaveCount(0)
+  const responses = page.getByRole("region", { name: "Response", exact: true })
+  await expect(responses).toContainText("opaque:allow/once")
+  await expect(
+    page.getByRole("button", { name: "Interrupt", exact: true }),
+  ).toHaveCount(0)
+  await composer.fill("cancel")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await expect(responses).toHaveCount(2)
+  await expect(
+    page.getByRole("button", { name: "Interrupt", exact: true }),
+  ).toBeVisible()
+  await page.reload()
+  await expect(responses).toHaveCount(2)
+  await page.getByRole("button", { name: "Interrupt", exact: true }).click()
+  await expect(responses.last()).toContainText("cancellation tail")
+  await expect(
+    page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
+  ).toHaveCount(0)
+  await page.reload()
+  await expect(responses.last()).toContainText("cancellation tail")
+  await expect(
+    page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Select model and effort", exact: true }),
+  ).toHaveCount(0)
 }

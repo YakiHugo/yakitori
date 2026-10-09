@@ -1,10 +1,6 @@
 import { useMemo } from "react"
 import { create } from "zustand"
 import { assetSourceKey } from "../../core/asset-types.ts"
-import type {
-  SessionSidebar,
-  SidebarChange,
-} from "../../core/session-sidebar.ts"
 import {
   inputContent,
   inputContentAttachments,
@@ -32,9 +28,10 @@ import type {
 } from "../../protocol/events.ts"
 import type { ThreadGoal } from "../../protocol/goal.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { QueuedInput } from "../../protocol/input-queue.ts"
 import type { LiveSessionEvent } from "../../protocol/live-events.ts"
+import type { SessionSidebar, SidebarChange } from "../../protocol/sidebar.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
-import type { QueuedInput } from "../../server/input-queue.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -206,6 +203,7 @@ export type AppStoreActions = {
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
+  clearSessionSelection(input?: { projectId: string | undefined }): void
   startNewSession(projectId?: string): void
   setNewSessionProject(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
@@ -1615,6 +1613,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
     },
 
+    clearSessionSelection: (input) => {
+      closeStream()
+      set((state) => ({
+        sessionDrafts: stashSessionDraft(state),
+        currentProject:
+          input === undefined ? state.currentProject : input.projectId,
+        selection: {},
+        selectedSession: undefined,
+        execution: createExecutionViewState(),
+        sessionSkills: [],
+        sessionSkillsError: undefined,
+        commandPanel: undefined,
+        promptDraft: state.newSessionPrompt,
+        promptExcerpts: state.newSessionExcerpts,
+        hydratingSessionId: undefined,
+        settingsSection: undefined,
+        sessionSelectionIntentRevision:
+          state.sessionSelectionIntentRevision + 1,
+      }))
+    },
     startNewSession: (projectId = get().currentProject) => {
       if (
         get().selection.sessionId === undefined &&

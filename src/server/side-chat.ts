@@ -1,3 +1,17 @@
+import type {
+  SideChatCreate,
+  SideChatMessage,
+  SideChatSend,
+  SideChatSnapshot,
+} from "../protocol/side-chat.ts"
+
+export type {
+  SideChatCreate,
+  SideChatMessage,
+  SideChatSend,
+  SideChatSnapshot,
+} from "../protocol/side-chat.ts"
+
 import { realpath, stat } from "node:fs/promises"
 import { isAbsolute } from "node:path"
 import { AgentThread } from "../core/agent-thread.ts"
@@ -25,47 +39,10 @@ import {
   type UserAttachment,
 } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import type {
-  PermissionGate,
-  RuntimePermissionRequest,
-} from "../runtime/permission-gate.ts"
-
-export type SideChatMessage = {
-  id: string
-  turnId: string
-  streaming: boolean
-} & (
-  | { role: "user"; content: InputContent }
-  | { role: "assistant"; text: string }
-)
+import type { PermissionGate } from "../runtime/permission-gate.ts"
 
 export const sideChatInstructions =
   "This is a temporary side conversation. Answer the new side-chat user's request. Do not spawn or delegate to subagents. You may inspect the workspace to answer questions. Make changes only when the user explicitly asks for those changes in this side conversation."
-
-export type SideChatSnapshot = {
-  id: string
-  revision: number
-  cwd: string
-  modelSelection: ModelSelection
-  expiresAt: string
-  messages: SideChatMessage[]
-  activeTurnId?: string
-  error?: string
-  pendingPermissions?: readonly RuntimePermissionRequest[]
-}
-
-export type SideChatCreate = {
-  sourceSessionId?: string
-  cwd?: string
-  modelSelection?: ModelSelection
-}
-
-export type SideChatSend = {
-  content: InputContent
-  sideChatId: string
-  requestId: string
-  modelSelection?: ModelSelection
-}
 
 export type SideChatService = {
   create(input: SideChatCreate): Promise<SideChatSnapshot>

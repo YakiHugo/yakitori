@@ -18,7 +18,7 @@ import type { SessionCacheExpiry } from "../../protocol/session-cache-expiry.ts"
 import type {
   GitPullRequestsResponse,
   GitStatusResponse,
-} from "../../server/workspace.ts"
+} from "../../protocol/workspace.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { useSessionAgents } from "../hooks/use-session-agents.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"

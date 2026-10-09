@@ -1,40 +1,6 @@
-import type { InstructionProfileId } from "./model-catalog.ts"
+import type { ProviderPreset } from "../protocol/providers.ts"
 
-export type ConfiguredModel = Readonly<{
-  id: string
-  displayName?: string
-  contextWindowTokens?: number
-  contextWindowScope?: "input" | "total"
-  maxOutputTokens?: number
-  inputModalities?: readonly ("text" | "image" | "video")[]
-  efforts?: readonly string[]
-  defaultEffort?: string
-  instructionProfileId?: InstructionProfileId
-  pricing?: Readonly<{
-    inputPerMillion: number
-    outputPerMillion: number
-    cacheReadPerMillion?: number
-    cacheWritePerMillion?: number
-  }>
-}>
-
-export type ProviderPreset = Readonly<{
-  id: string
-  name: string
-  baseURL: string
-  wireApi:
-    | "openai_responses"
-    | "openai_chat_completions"
-    | "anthropic_messages"
-    | "gemini_generate_content"
-  envKey?: string
-  kind?: "vendor" | "relay" | "local" | "subscription"
-  noKey?: boolean
-  flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral"
-  catalogProvider?: string
-  models: readonly ConfiguredModel[]
-  documentationURL: string
-}>
+export type { ConfiguredModel, ProviderPreset } from "../protocol/providers.ts"
 
 // Presets are editable starting points. Optional model facts are included only
 // when first-party documentation states them; omitted capacities remain unknown.

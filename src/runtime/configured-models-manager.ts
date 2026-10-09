@@ -1,13 +1,14 @@
+import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
 import {
-  catalogModelCapacity,
   type CatalogModel,
+  catalogModelCapacity,
   listCatalogModels,
   type ModelCapacity,
   type ResolvedModel,
+  requireInstructionProfileId,
   resolveModel,
 } from "./model-catalog.ts"
-import type { ModelsManager, ModelSelectionInput } from "./models-manager.ts"
-import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
+import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
 import type { ConfiguredModel, ProviderPreset } from "./provider-presets.ts"
 
 export class ModelNotConfiguredError extends Error {
@@ -67,7 +68,11 @@ export function createConfiguredModelsManager(input: {
       model: configured.id,
       ...(configured.instructionProfileId === undefined
         ? {}
-        : { instructionProfileId: configured.instructionProfileId }),
+        : {
+            instructionProfileId: requireInstructionProfileId(
+              configured.instructionProfileId,
+            ),
+          }),
       ...(configured.inputModalities === undefined
         ? {}
         : { inputModalities: [...configured.inputModalities] }),

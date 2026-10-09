@@ -1,7 +1,7 @@
 import { Gauge, Server } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { ApiSubscriptionProvider } from "../../protocol/application.ts"
-import type { RpcMethodResponses } from "../../server/rpc/methods.ts"
+import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 

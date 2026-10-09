@@ -1,20 +1,12 @@
+import type { McpServerSummary } from "../protocol/connections.ts"
+
+export type { McpServerSummary } from "../protocol/connections.ts"
+
 import type {
   McpConnectionManager,
   McpServerConfig,
 } from "../runtime/mcp-connection-manager.ts"
 import type { McpOAuth } from "../runtime/mcp-oauth.ts"
-
-export type McpServerSummary = Readonly<{
-  name: string
-  transport: "stdio" | "http"
-  enabled: boolean
-  state: "ready" | "stopped" | "failed" | "unconnected" | "connecting"
-  toolCount: number
-  required: boolean
-  authenticated: boolean
-  loginState?: "pending" | "failed"
-  error?: string
-}>
 
 export class McpServiceError extends Error {}
 

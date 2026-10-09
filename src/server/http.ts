@@ -1,3 +1,4 @@
+import type { EngineRegistry } from "./engine-registry.ts"
 import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
@@ -40,6 +41,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly chatgpt?: ChatGPTConnections
   readonly mcp?: McpService
   readonly interactions?: SessionInteractions
+  readonly engines?: EngineRegistry
   readonly sideChats?: SideChatService
   readonly eventHub?: SessionEventHub
   readonly staticAssets?: YakitoriStaticAssets
@@ -133,6 +135,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       ...(options.interactions === undefined
         ? {}
         : { interactions: options.interactions }),
+      ...(options.engines === undefined ? {} : { engines: options.engines }),
       ...(options.sideChats === undefined
         ? {}
         : { sideChats: options.sideChats }),

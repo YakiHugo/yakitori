@@ -1,3 +1,7 @@
+import type { QueuedInput } from "../protocol/input-queue.ts"
+
+export type { QueuedInput } from "../protocol/input-queue.ts"
+
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -12,13 +16,6 @@ export class InputQueueFullError extends Error {
     super(`Queue cannot hold more than ${MAX_QUEUED_ITEMS} inputs.`)
   }
 }
-
-export type QueuedInput = Readonly<{
-  id: string
-  sessionId: string
-  input: TurnInput
-  createdAt: string
-}>
 
 type QueueRow = Readonly<{
   id: string

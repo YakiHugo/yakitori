@@ -5,7 +5,7 @@ import {
   Presentation,
 } from "lucide-react"
 import { useState } from "react"
-import type { WorkspaceReadOfficeResponse } from "../../server/office-preview.ts"
+import type { WorkspaceReadOfficeResponse } from "../../protocol/workspace.ts"
 import "./office-preview.css"
 
 export function OfficePreview({

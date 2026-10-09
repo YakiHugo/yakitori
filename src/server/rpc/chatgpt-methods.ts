@@ -1,20 +1,12 @@
-import type {
-  ChatGPTConnectionState,
-  ChatGPTConnections,
-} from "../chatgpt-connections.ts"
+export type {
+  ChatGPTRpcParams,
+  ChatGPTRpcResponses,
+} from "../../protocol/rpc-chatgpt.ts"
+
+import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import { ConfigurationError } from "../config-errors.ts"
 import type { RpcMethodDefinition } from "./methods.ts"
 
-export type ChatGPTRpcParams = {
-  "chatgpt/read": Record<string, never>
-  "chatgpt/signIn": Readonly<{ accountId?: string; label?: string }>
-  "chatgpt/cancel": Readonly<{ attemptId: string }>
-  "chatgpt/signOut": Readonly<{ accountId: string }>
-  "chatgpt/acknowledge": Record<string, never>
-}
-export type ChatGPTRpcResponses = {
-  [Method in keyof ChatGPTRpcParams]: ChatGPTConnectionState
-}
 export const chatGPTMethods: readonly RpcMethodDefinition[] = [
   {
     method: "chatgpt/read",

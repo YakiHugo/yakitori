@@ -1,8 +1,10 @@
 import { Plus, Search } from "lucide-react"
 import { useState } from "react"
-import type { ProviderPreset } from "../../runtime/provider-presets.ts"
-import type { SubscriptionConnection } from "../../server/subscription-connections.ts"
-import type { ApiConfiguredProvider } from "../../server/provider-configuration.ts"
+import type {
+  ApiConfiguredProvider,
+  ProviderPreset,
+  SubscriptionConnection,
+} from "../../protocol/providers.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { Button } from "./ui/button.tsx"
 import { Input } from "./ui/field.tsx"

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import type { ApiConfiguredProvider } from "../../server/provider-configuration.ts"
+import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
 import { estimateModelCost } from "../provider-usage-view.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { totalTokens, type UsageRange, usageView } from "../usage-view.ts"

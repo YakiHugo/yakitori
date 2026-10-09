@@ -1,46 +1,19 @@
-import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
-import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import { requireInstructionProfileId } from "../runtime/model-catalog.ts"
-import { ConfigurationError } from "./config-errors.ts"
+import type { ProviderConfiguration } from "../protocol/providers.ts"
 
-export type ProviderConfiguration = Readonly<{
-  name: string
-  wireApi:
-    | "openai_responses"
-    | "openai_chat_completions"
-    | "anthropic_messages"
-    | "gemini_generate_content"
-  baseURL: string
-  envKey?: string
-  preset?: string
-  noKey?: boolean
-  enabled?: boolean
-  // Explicit opt-in: request preparation may have provider-reported usage.
-  requestWarmup?: boolean
-  modelSelection?: "all" | "selected"
-  models: readonly ConfiguredModel[]
-}>
+export type {
+  ApiConfiguredProvider,
+  ProviderConfiguration,
+} from "../protocol/providers.ts"
+
+import { requireInstructionProfileId } from "../runtime/model-catalog.ts"
+import type { ConfiguredModel } from "../runtime/provider-presets.ts"
+import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
+import { ConfigurationError } from "./config-errors.ts"
 
 export type StoredProviderConfiguration = ProviderConfiguration &
   Readonly<{
     credentialRef?: string
   }>
-
-export type ApiConfiguredProvider = Readonly<{
-  id: string
-  configuration: ProviderConfiguration
-  credential: "stored" | "environment" | "missing" | "optional"
-  catalog?: Readonly<{
-    models: readonly ConfiguredModel[]
-    fetchedAt?: number
-    error?: string
-  }>
-  connection?: Readonly<{
-    state: "ready" | "error"
-    checkedAt: number
-    message?: string
-  }>
-}>
 
 export function requireProviderId(value: unknown): string {
   if (

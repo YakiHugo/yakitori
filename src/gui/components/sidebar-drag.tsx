@@ -6,7 +6,7 @@ import {
   useState,
 } from "react"
 import { createPortal } from "react-dom"
-import type { SidebarChange } from "../../core/session-sidebar.ts"
+import type { SidebarChange } from "../../protocol/sidebar.ts"
 import { sessionListKey, useAppStore } from "../store/app-store.ts"
 
 export const SidebarDragKind = createContext<string | undefined>(undefined)

@@ -38,3 +38,13 @@ export type SessionPermissionEvent =
       readonly reason?: SessionPermissionReason
       readonly createdAt: string
     }
+export type RuntimePermissionRequest = {
+  readonly permissionRequestId: string
+  readonly sessionId: string
+  readonly turnId: string
+  readonly toolCallId: string
+  readonly action: string
+  readonly subject?: string
+  readonly reason?: string
+  readonly createdAt: string
+}

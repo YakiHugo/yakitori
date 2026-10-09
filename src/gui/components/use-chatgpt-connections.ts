@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { ChatGPTConnectionState } from "../../server/chatgpt-connections.ts"
+import type { ChatGPTConnectionState } from "../../protocol/connections.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 

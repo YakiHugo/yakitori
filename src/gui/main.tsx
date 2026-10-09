@@ -1,3 +1,4 @@
+import { initializeEngineSessions } from "./store/engine-store.ts"
 import { createRoot } from "react-dom/client"
 import { App } from "./app.tsx"
 import { useAppStore } from "./store/app-store.ts"
@@ -13,7 +14,10 @@ if (new URLSearchParams(window.location.search).get("mock") === "transcript") {
   const { seedMockTranscript } = await import("./mock-transcript.ts")
   seedMockTranscript()
 } else {
-  void useAppStore.getState().boot()
+  void useAppStore
+    .getState()
+    .boot()
+    .then(() => initializeEngineSessions())
 }
 
 createRoot(root).render(<App />)
