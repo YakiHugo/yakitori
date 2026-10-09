@@ -1723,6 +1723,76 @@ describe("JsonlThreadStore", () => {
     ).toEqual(["turn_partial"])
   })
 
+  it("keeps the committed prefix searchable after a later record fails and is retried", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_search_drain_retry"
+    await createPersistentThread(store, metadata(id))
+    const probe = await open(join(root, "probe-search-drain"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as {
+      write(
+        buffer: Buffer,
+        offset: number,
+        length: number,
+      ): Promise<{ readonly bytesWritten: number; readonly buffer: Buffer }>
+    }
+    const originalWrite = prototype.write
+    let attempts = 0
+    prototype.write = async function write(buffer, offset, length) {
+      attempts += 1
+      if (attempts === 2 || attempts === 3) {
+        throw new Error("later record write failed")
+      }
+      return originalWrite.call(this, buffer, offset, length)
+    }
+    try {
+      await expect(
+        store.appendItems(id, [
+          response("turn_prefix", "committed-prefix-needle"),
+          response("turn_suffix", "retried-suffix-needle"),
+        ]),
+      ).rejects.toThrow("later record write failed")
+    } finally {
+      prototype.write = originalWrite
+      await probe.close()
+    }
+    await store.flushThread(id)
+    expect(
+      (await store.readThread(id))?.rollout.flatMap(({ item }) =>
+        item.type === "response_item" ? [item.item.turnId] : [],
+      ),
+    ).toEqual(["turn_prefix", "turn_suffix"])
+    for (const restart of [false, true]) {
+      if (restart) await store.shutdownThread(id)
+      const reader = restart ? new JsonlThreadStore({ root }) : store
+      await reader.readThread(id)
+      for (const searchTerm of [
+        "committed-prefix-needle",
+        "retried-suffix-needle",
+      ]) {
+        await expect(
+          reader.searchThreads({ searchTerm, limit: 10 }),
+        ).resolves.toMatchObject({
+          matches: [{ summary: { id } }],
+        })
+        await expect(
+          reader.searchThreadOccurrences({
+            threadId: id,
+            searchTerm,
+            limit: 10,
+          }),
+        ).resolves.toMatchObject({
+          occurrences: [
+            {
+              turnId: searchTerm.startsWith("committed")
+                ? "turn_prefix"
+                : "turn_suffix",
+            },
+          ],
+        })
+      }
+    }
+  })
+
   it("does not duplicate a record when write completion is reported as failure", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_ack_lost"))
