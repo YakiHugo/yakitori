@@ -694,7 +694,15 @@ it("does not display replayed activity until the selected session finishes resto
     "Loading conversation…",
   )
   expect(screen.queryByText("First request")).toBeNull()
-  expect(screen.queryByRole("textbox", { name: "Message the Mate" })).toBeNull()
+  expect(
+    screen
+      .getByRole("textbox", { name: "Message the Mate" })
+      .getAttribute("contenteditable"),
+  ).toBe("true")
+  expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+    "disabled",
+    true,
+  )
 })
 
 it("keeps pending approvals visible alongside intent updates", () => {

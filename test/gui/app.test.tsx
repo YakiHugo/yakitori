@@ -124,6 +124,22 @@ describe("app shell", () => {
     expect(screen.queryByRole("alert")).toBeNull()
   })
 
+  it("keeps archived session actions unavailable until replay completes", () => {
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail({ archived: true }),
+      hydratingSessionId: sessionId,
+    })
+    render(<App />)
+    expect(
+      screen.queryByRole("button", { name: "Restore conversation" }),
+    ).toBeNull()
+    act(() => useAppStore.setState({ hydratingSessionId: undefined }))
+    expect(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    ).toBeDefined()
+  })
+
   it("restores an archived session via the composer restore button", async () => {
     const user = userEvent.setup()
     const changeSidebar = vi.fn((_change: SidebarChange) =>

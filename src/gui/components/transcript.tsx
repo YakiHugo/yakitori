@@ -95,7 +95,15 @@ function entryKey(entry: ExecutionEntry): string {
   }
 }
 
-export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
+export function Transcript({
+  children,
+  emptyState,
+  loading = false,
+}: Readonly<{
+  children?: ReactNode
+  emptyState?: ReactNode
+  loading?: boolean
+}>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const scroll = usePinnedScroll(sessionId)
@@ -259,8 +267,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
       <div
         ref={surfaceRef}
         className="conversation-surface relative flex min-h-0 flex-1"
+        data-empty={emptyState !== undefined || undefined}
       >
-        {sessionId ? (
+        {sessionId && !loading ? (
           <ConversationFind
             key={sessionId}
             sessionId={sessionId}
@@ -269,7 +278,10 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
           />
         ) : null}
         <ScrollArea
-          className="min-h-0 min-w-0 flex-1"
+          className={cn(
+            "min-h-0 min-w-0 flex-1",
+            emptyState !== undefined && "hidden",
+          )}
           viewportClassName="conversation-transcript-viewport"
           viewportRef={scroll.viewportRef}
           onScroll={updateScroll}
@@ -278,7 +290,14 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
             ref={scroll.contentRef}
             className="conversation-content mx-auto flex w-full flex-col gap-8 pt-8"
           >
-            {view.entries.length === 0 && view.activeTurnId === undefined ? (
+            {loading ? (
+              <p
+                role="status"
+                className="py-12 text-center text-sm text-muted-foreground"
+              >
+                Loading conversation…
+              </p>
+            ) : view.entries.length === 0 && view.activeTurnId === undefined ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
                 Conversation will appear here
               </p>
@@ -318,7 +337,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                 )
               })
             )}
-            {view.activeTurnId !== undefined && activeBlockIndex === -1 ? (
+            {!loading &&
+            view.activeTurnId !== undefined &&
+            activeBlockIndex === -1 ? (
               <TurnBlock
                 key={view.activeTurnId}
                 entries={[]}
@@ -330,16 +351,18 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
             ) : null}
           </div>
         </ScrollArea>
-        <ConversationNavigation
-          entries={view.entries}
-          visibleInputs={visibleInputs}
-          viewportRef={scroll.viewportRef}
-          contentRef={scroll.contentRef}
-          onJump={(inputId) => {
-            const node = anchors.current.get(inputId)
-            if (node) scroll.jumpToElement(node)
-          }}
-        />
+        {loading ? null : (
+          <ConversationNavigation
+            entries={view.entries}
+            visibleInputs={visibleInputs}
+            viewportRef={scroll.viewportRef}
+            contentRef={scroll.contentRef}
+            onJump={(inputId) => {
+              const node = anchors.current.get(inputId)
+              if (node) scroll.jumpToElement(node)
+            }}
+          />
+        )}
         {
           <button
             type="button"
@@ -355,8 +378,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         }
         {children === undefined ? null : (
           <div ref={dockRef} className="conversation-dock">
+            {emptyState}
             <div className="max-h-[45vh] overflow-y-auto">
-              <SessionElicitation />
+              {loading ? null : <SessionElicitation />}
             </div>
             {children}
           </div>
