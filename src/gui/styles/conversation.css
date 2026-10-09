@@ -31,6 +31,15 @@
   z-index: 30;
   pointer-events: none;
 }
+/* Keep the editor mounted while a new session is created and replayed. Only
+   its dock geometry changes; browser-owned edits and composition stay live. */
+.conversation-surface[data-empty] {
+  align-items: center;
+}
+.conversation-surface[data-empty] > .conversation-dock {
+  position: relative;
+  width: 100%;
+}
 .conversation-dock > * {
   pointer-events: auto;
 }

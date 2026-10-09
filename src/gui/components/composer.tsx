@@ -42,7 +42,12 @@ export function Composer() {
   const sessionSkillsError = useAppStore((state) => state.sessionSkillsError)
   const sessionSkills = useAppStore((state) => state.sessionSkills)
   const apiBase = useAppStore((state) => state.apiBase)
-  const busy = useAppStore((state) => state.busy)
+  const busy = useAppStore(
+    (state) =>
+      state.busy ||
+      (state.hydratingSessionId !== undefined &&
+        state.hydratingSessionId === state.selection.sessionId),
+  )
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
   const restoringModelSelectionFor = useAppStore(
     (state) => state.restoringModelSelectionFor,

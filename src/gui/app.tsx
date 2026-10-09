@@ -46,28 +46,24 @@ export function App() {
             <SettingsPage />
           ) : externalSession !== undefined ? (
             <EngineConversation key={externalSessionId ?? externalSession} />
-          ) : hydrating ? (
-            <div
-              role="status"
-              className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
-            >
-              Loading conversation…
-            </div>
-          ) : hasSession ? (
+          ) : (
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
-                <SessionHeader />
-                <Transcript>
-                  <ApprovalBar />
-                  <QueuedInputs />
-                  <GoalBar />
+                {hasSession && !hydrating ? <SessionHeader /> : null}
+                <Transcript
+                  loading={hydrating}
+                  emptyState={
+                    !hasSession && !hydrating ? <EmptyState /> : undefined
+                  }
+                >
+                  {hydrating ? null : <ApprovalBar />}
+                  {hydrating ? null : <QueuedInputs />}
+                  {hydrating ? null : <GoalBar />}
                   <SessionComposer />
                 </Transcript>
               </div>
-              <GoalEditor />
+              {hasSession && !hydrating ? <GoalEditor /> : null}
             </div>
-          ) : (
-            <EmptyState />
           )}
         </main>
       </WorkspaceFrame>
@@ -84,7 +80,13 @@ function SessionComposer() {
   const pending = useAppStore((state) =>
     state.inFlightActions.has("sidebar-update"),
   )
+  const hydrating = useAppStore(
+    (state) =>
+      state.hydratingSessionId !== undefined &&
+      state.hydratingSessionId === state.selection.sessionId,
+  )
   if (!session?.archived) return <Composer />
+  if (hydrating) return null
   const stopping =
     activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)
   return (
@@ -192,33 +194,30 @@ function EmptyState() {
   const currentProject = useAppStore((state) => state.currentProject)
   const project = projects.find((candidate) => candidate.id === currentProject)
   return (
-    <div className="flex min-h-0 flex-1 flex-col justify-center">
-      <div className="mx-auto w-full max-w-3xl">
-        <h2 className="mb-3 text-center text-xl font-medium">
-          {project
-            ? `What would you like to build in ${project.name}?`
-            : "What would you like to work on?"}
-        </h2>
-        <div className="mb-7 flex justify-center gap-3">
-          <select
-            aria-label="New session project"
-            value={currentProject ?? ""}
-            className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
-            onChange={(event) =>
-              useAppStore
-                .getState()
-                .setNewSessionProject(event.target.value || undefined)
-            }
-          >
-            <option value="">No project</option>
-            {projects.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <Composer />
+    <div className="mx-auto w-full max-w-3xl">
+      <h2 className="mb-3 text-center text-xl font-medium">
+        {project
+          ? `What would you like to build in ${project.name}?`
+          : "What would you like to work on?"}
+      </h2>
+      <div className="mb-7 flex justify-center gap-3">
+        <select
+          aria-label="New session project"
+          value={currentProject ?? ""}
+          className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
+          onChange={(event) =>
+            useAppStore
+              .getState()
+              .setNewSessionProject(event.target.value || undefined)
+          }
+        >
+          <option value="">No project</option>
+          {projects.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.name}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   )

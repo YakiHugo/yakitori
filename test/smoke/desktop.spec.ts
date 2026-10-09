@@ -35,6 +35,20 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   let sidecarPid: number | undefined
   const rendererErrors: string[] = []
   const logs: string[] = []
+  const tracePath = testInfo.outputPath("desktop-renderer-trace.zip")
+  let tracing = false
+  let traceSaved = false
+  async function stopRendererTrace(): Promise<void> {
+    if (!tracing || application === undefined) return
+    tracing = false
+    try {
+      await application.context().tracing.stop({ path: tracePath })
+      traceSaved = true
+    } catch (error) {
+      // Diagnostics must not replace the failure or prevent app cleanup.
+      logs.push(`Renderer trace capture failed: ${String(error)}`)
+    }
+  }
   try {
     application = await playwright._electron.launch({
       executablePath: resolve(
@@ -53,6 +67,13 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     if (child.pid === undefined)
       throw new Error("Electron process PID is missing.")
     mainPid = child.pid
+    // This manually launched context is separate from Playwright's test trace.
+    await application.context().tracing.start({
+      screenshots: true,
+      snapshots: true,
+      sources: true,
+    })
+    tracing = true
     page = await application.firstWindow()
     page.on("pageerror", (error) => rendererErrors.push(error.message))
     page.on("console", (message) => {
@@ -139,6 +160,8 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     await runExternalEngineFlow(page)
     expect(rendererErrors).toEqual([])
 
+    // Export while the renderer is alive, including for later quit failures.
+    await stopRendererTrace()
     // Playwright's graceful close invokes the real app.quit(). It must finish
     // the main process's will-quit handler before either process disappears.
     await closeApplication(application)
@@ -150,6 +173,17 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     await expect.poll(() => processExists(sidecarPid)).toBe(false)
     await expect.poll(() => acceptsConnections(sidecarUrl)).toBe(false)
   } catch (error) {
+    await stopRendererTrace()
+    if (traceSaved) {
+      try {
+        await testInfo.attach("desktop-renderer-trace", {
+          path: tracePath,
+          contentType: "application/zip",
+        })
+      } catch (captureError) {
+        logs.push(`Renderer trace attachment failed: ${String(captureError)}`)
+      }
+    }
     await testInfo.attach("desktop-diagnostics", {
       body: JSON.stringify({ rendererErrors, logs }, null, 2),
       contentType: "application/json",
@@ -170,6 +204,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     throw error
   } finally {
     try {
+      await stopRendererTrace()
       if (application !== undefined) await closeApplication(application)
     } finally {
       try {
