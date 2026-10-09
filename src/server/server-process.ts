@@ -280,14 +280,16 @@ function listen(
   return new Promise((resolve, reject) => {
     const onError = (error: Error): void => reject(error)
     server.once("error", onError)
-    server.listen(port, host, () => {
+    server.listen(port, host === "[::1]" ? "::1" : host, () => {
       server.off("error", onError)
       const address = server.address()
       if (address === null || typeof address === "string") {
         reject(new Error("Yakitori server did not bind a TCP address."))
         return
       }
-      resolve(`http://${host}:${address.port}`)
+      const urlHost =
+        address.family === "IPv6" ? `[${address.address}]` : address.address
+      resolve(`http://${urlHost}:${address.port}`)
     })
   })
 }
