@@ -772,8 +772,8 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
   await page.reload()
   await expect(
     page
-      .getByRole("main")
-      .getByText("Verify approval and interrupted streaming.", { exact: true }),
+      .getByRole("paragraph")
+      .filter({ hasText: /^Verify approval and interrupted streaming\.$/ }),
   ).toBeVisible()
   await expect(interrupt).toHaveCount(0)
   // Starting another turn detects a stale busy engine after cancellation.

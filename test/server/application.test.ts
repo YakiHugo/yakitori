@@ -782,6 +782,7 @@ describe("application composition", () => {
         await subscribe(childSessionId)
         frames.length = 0
         childMayFinish.resolve()
+        await waitForThreadIdle(application, childSessionId)
         await vi.waitFor(() =>
           expect(frames).toContainEqual({
             method: "session/transient",
@@ -826,6 +827,9 @@ describe("application composition", () => {
             ]),
           }),
         )
+        // Runtime completion follows the persistence flush. Wait for the actor,
+        // then check transport delivery rather than timing the entire turn.
+        await waitForThreadIdle(application, rootSessionId)
         await vi.waitFor(() =>
           expect(frames).toContainEqual({
             method: "session/transient",
