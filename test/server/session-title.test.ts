@@ -272,15 +272,15 @@ describe("admitInput title trigger", () => {
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     for (const text of ["first request", "second request"]) {
       const admitted = await handlers.admitInput({
         sessionId,
         requestId: `request_${text.split(" ")[0]}`,
         content: inputFixture([{ type: "text" as const, text: text }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       if (text === "first request") {
         await waitForValue(() =>
           manager.getThread(sessionId)?.status === "idle" ? true : undefined,

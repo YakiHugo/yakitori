@@ -50,15 +50,15 @@ describe("archived conversation queue admission", () => {
         mateId: "mate_test",
         mateRevisionId: "mate_revision_test",
       })
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       await manager.closeThread(sessionId)
       const queued = await handlers.queueInput({
         sessionId,
         requestId: "request_archived_queue",
         content: createUserInput("retained queued work"),
       })
-      if (!queued.ok) throw new Error(queued.body.error.message)
+      if (!queued.ok) throw new Error(queued.error.message)
       expect(
         await handlers.updateSidebar({
           type: "session",
@@ -71,9 +71,9 @@ describe("archived conversation queue admission", () => {
       expect(
         await handlers.startQueuedInput({
           sessionId,
-          inputId: queued.body.inputId,
+          inputId: queued.value.inputId,
         }),
-      ).toMatchObject({ ok: false, status: 409 })
+      ).toMatchObject({ ok: false, error: { code: "conflict" } })
       expect(seen).toEqual([])
       expect(
         queue.list(sessionId).map((item) => item.input.content.text),
@@ -91,7 +91,7 @@ describe("archived conversation queue admission", () => {
       expect(
         await handlers.startQueuedInput({
           sessionId,
-          inputId: queued.body.inputId,
+          inputId: queued.value.inputId,
         }),
       ).toMatchObject({ ok: true })
       await waitForValue(() => (seen.length === 1 ? true : undefined))
@@ -151,8 +151,8 @@ describe("archived conversation queue admission", () => {
         mateId: "mate_test",
         mateRevisionId: "mate_revision_test",
       })
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       // Drain the install wake before arranging a persisted waiting row.
       expect(
         await handlers.reorderQueuedInputs({ sessionId, inputIds: [] }),
@@ -174,7 +174,10 @@ describe("archived conversation queue admission", () => {
       })
       releaseAdmission.resolve()
       expect(await starting).toMatchObject({ ok: true })
-      expect(await archiving).toMatchObject({ ok: false, status: 409 })
+      expect(await archiving).toMatchObject({
+        ok: false,
+        error: { code: "conflict" },
+      })
       expect(await readPresentation(sessionId)).not.toMatchObject({
         archived: true,
       })

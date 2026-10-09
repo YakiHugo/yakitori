@@ -75,10 +75,10 @@ createInterface({input:process.stdin}).on("line", line => {
     const other = await application.handlers.createSession({
       workingDirectory: otherDirectory,
     })
-    if (!selected.ok) throw new Error(selected.body.error.message)
-    if (!other.ok) throw new Error(other.body.error.message)
-    const selectedId = selected.body.session.id
-    const otherId = other.body.session.id
+    if (!selected.ok) throw new Error(selected.error.message)
+    if (!other.ok) throw new Error(other.error.message)
+    const selectedId = selected.value.session.id
+    const otherId = other.value.session.id
     await application.threadStore.persistThread(
       selectedId,
       PersistContext.TurnStart,

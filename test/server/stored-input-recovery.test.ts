@@ -29,10 +29,10 @@ describe("stored input recovery", () => {
     const queued = f.queue.list(f.id)[0]
     expect(queued?.input.content).toEqual(f.expected)
     const detail = await f.handlers.readSession({ sessionId: f.id })
-    expect(detail).toMatchObject({ ok: true, status: 200 })
+    expect(detail).toMatchObject({ ok: true })
     const events = await f.handlers.readSessionEvents({ sessionId: f.id })
-    if (!events.ok) throw new Error(events.body.error.message)
-    const admission = events.body.events.find(
+    if (!events.ok) throw new Error(events.error.message)
+    const admission = events.value.events.find(
       (event) => event.type === "input.admitted",
     )
     expect(admission).toMatchObject({ data: { content: f.expected } })
@@ -54,7 +54,7 @@ describe("stored input recovery", () => {
       content: f.expected,
       metadata: { source: "saved" },
     })
-    expect(retry).toMatchObject({ ok: true, status: 200 })
+    expect(retry).toMatchObject({ ok: true })
     await expect.poll(() => f.queue.list(f.id).length).toBe(0)
     expect(f.runs()).toBe(0)
     expect(await readFile(f.rolloutPath, "utf8")).toBe(originalBytes)

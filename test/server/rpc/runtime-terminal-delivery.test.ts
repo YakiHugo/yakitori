@@ -66,8 +66,8 @@ describe("runtime terminal delivery", () => {
         try {
           await initializeConnection(client)
           const created = await handlers.createSession()
-          if (!created.ok) throw new Error(created.body.error.message)
-          const sessionId = created.body.session.id
+          if (!created.ok) throw new Error(created.error.message)
+          const sessionId = created.value.session.id
           expect(
             await client.sendRequest("session/subscribe", { sessionId }),
           ).toHaveProperty("result")
@@ -81,7 +81,7 @@ describe("runtime terminal delivery", () => {
             requestId: turnId,
             content: inputFixture([{ type: "text" as const, text: "finish" }]),
           })
-          if (!admitted.ok) throw new Error(admitted.body.error.message)
+          if (!admitted.ok) throw new Error(admitted.error.message)
           store.failNextAppend = failure !== "flush"
           store.failNextFlush = failure !== "append"
           if (outcome === "interrupted") {
@@ -154,7 +154,7 @@ describe("runtime terminal delivery", () => {
           expect(transients.at(-1)?.type).toBe("turn.finished")
 
           const history = await handlers.readSessionEvents({ sessionId })
-          if (!history.ok) throw new Error(history.body.error.message)
+          if (!history.ok) throw new Error(history.error.message)
           const durable = client
             .notifications("session/event")
             .map(
@@ -162,13 +162,13 @@ describe("runtime terminal delivery", () => {
             )
           expect(durable).toEqual(
             failure === "append"
-              ? history.body.events.filter(
+              ? history.value.events.filter(
                   (event) => event.type !== "turn.completed",
                 )
-              : history.body.events,
+              : history.value.events,
           )
           expect(
-            history.body.events.some(
+            history.value.events.some(
               (event) => event.type === "turn.completed",
             ),
           ).toBe(failure !== "append and flush")
@@ -216,8 +216,8 @@ describe("runtime terminal delivery", () => {
           },
         },
       })
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       await client.sendRequest("session/subscribe", { sessionId })
       await client.waitForFrame(
         (frame) =>
@@ -228,7 +228,7 @@ describe("runtime terminal delivery", () => {
         requestId: "child_request",
         content: inputFixture([{ type: "text" as const, text: "Child task" }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       await client.waitForFrame(
         (frame) =>
           "method" in frame &&
@@ -269,8 +269,8 @@ describe("runtime terminal delivery", () => {
     try {
       await initializeConnection(client)
       const created = await handlers.createSession()
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       expect(
         await client.sendRequest("session/subscribe", { sessionId }),
       ).toHaveProperty("result")
@@ -284,7 +284,7 @@ describe("runtime terminal delivery", () => {
         requestId: turnId,
         content: inputFixture([{ type: "text" as const, text: "finish" }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       await client.waitForFrame(
         (frame) =>
           "method" in frame &&
@@ -403,8 +403,8 @@ describe("runtime terminal delivery", () => {
     try {
       await initializeConnection(client)
       const created = await handlers.createSession()
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       expect(
         await client.sendRequest("session/subscribe", { sessionId }),
       ).toHaveProperty("result")
@@ -417,7 +417,7 @@ describe("runtime terminal delivery", () => {
         requestId: "request_retry",
         content: inputFixture([{ type: "text" as const, text: "retry" }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       await client.waitForFrame(
         (frame) =>
           "method" in frame &&
@@ -528,8 +528,8 @@ describe("runtime terminal delivery", () => {
     try {
       await initializeConnection(client)
       const created = await handlers.createSession()
-      if (!created.ok) throw new Error(created.body.error.message)
-      const sessionId = created.body.session.id
+      if (!created.ok) throw new Error(created.error.message)
+      const sessionId = created.value.session.id
       await client.sendRequest("session/subscribe", { sessionId })
       await client.waitForFrame(
         (frame) =>
@@ -540,7 +540,7 @@ describe("runtime terminal delivery", () => {
         requestId: "request_active",
         content: inputFixture([{ type: "text" as const, text: "start" }]),
       })
-      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      if (!admitted.ok) throw new Error(admitted.error.message)
       await client.waitForFrame(
         (frame) =>
           "method" in frame &&
@@ -552,7 +552,7 @@ describe("runtime terminal delivery", () => {
         requestId: "request_queued",
         content: inputFixture([{ type: "text" as const, text: "later" }]),
       })
-      if (!queued.ok) throw new Error(queued.body.error.message)
+      if (!queued.ok) throw new Error(queued.error.message)
       continueOutput.resolve()
       await client.waitForFrame(
         (frame) =>

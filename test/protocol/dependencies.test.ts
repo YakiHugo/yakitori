@@ -21,6 +21,7 @@ it("keeps the application contract independent of native and server implementati
         node.moduleSpecifier &&
         ts.isStringLiteral(node.moduleSpecifier)
       ) {
+        expect(node.moduleSpecifier.text.startsWith("./"), filename).toBe(true)
         expect(
           dirname(resolve(directory, node.moduleSpecifier.text)),
           filename,
@@ -31,6 +32,7 @@ it("keeps the application contract independent of native and server implementati
         ts.isLiteralTypeNode(node.argument) &&
         ts.isStringLiteral(node.argument.literal)
       ) {
+        expect(node.argument.literal.text.startsWith("./"), filename).toBe(true)
         expect(
           dirname(resolve(directory, node.argument.literal.text)),
           filename,

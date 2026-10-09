@@ -15,7 +15,8 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
+
 import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
 
@@ -74,10 +75,10 @@ async function close(application: YakitoriApplication): Promise<void> {
   await application.close()
 }
 
-function body<T>(result: ApiHandlerResult<T>): T {
+function body<T>(result: ApplicationResult<T>): T {
   if (!result.ok)
-    throw new Error(`${result.body.error.code}: ${result.body.error.message}`)
-  return result.body
+    throw new Error(`${result.error.code}: ${result.error.message}`)
+  return result.value
 }
 
 const final = (
@@ -196,7 +197,7 @@ describe("goal handlers", () => {
           objective: "Should not save",
           ...fields,
         }),
-      ).toMatchObject({ ok: false, body: { error: { code: "invalid_input" } } })
+      ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
       expect(await readGoal(application, sessionId)).toBeNull()
     }
     const original = body(
@@ -233,7 +234,7 @@ describe("goal handlers", () => {
     ]) {
       expect(
         await application.handlers.setGoal({ sessionId, ...fields }),
-      ).toMatchObject({ ok: false, body: { error: { code: "conflict" } } })
+      ).toMatchObject({ ok: false, error: { code: "conflict" } })
       expect(await readGoal(application, sessionId)).toBeNull()
     }
     const paused = body(
@@ -288,7 +289,7 @@ describe("goal handlers", () => {
       if (live) await application.threadManager.resumeThread(sessionId)
       expect(
         await application.handlers.setGoal({ sessionId, status: "active" }),
-      ).toMatchObject({ ok: false, body: { error: { code: "conflict" } } })
+      ).toMatchObject({ ok: false, error: { code: "conflict" } })
       expect(await readGoal(application, sessionId)).toEqual(paused)
     }
     expect(provider.requests).toHaveLength(0)

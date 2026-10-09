@@ -490,10 +490,10 @@ describe("session methods over real handlers", () => {
       await expect
         .poll(async () => {
           const read = await handlers.readSession({ sessionId })
-          if (!read.ok) throw new Error(read.body.error.message)
+          if (!read.ok) throw new Error(read.error.message)
           return {
-            inputs: read.body.session.counts.inputs,
-            active: Boolean(read.body.session.active),
+            inputs: read.value.session.counts.inputs,
+            active: Boolean(read.value.session.active),
           }
         })
         .toEqual({ inputs: index + 1, active: false })

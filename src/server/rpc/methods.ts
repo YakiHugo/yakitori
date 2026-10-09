@@ -1,10 +1,3 @@
-import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
-import type { ChatGPTConnections } from "../chatgpt-connections.ts"
-import {
-  chatGPTMethods,
-  type ChatGPTRpcParams,
-  type ChatGPTRpcResponses,
-} from "./chatgpt-methods.ts"
 import { realpath, stat } from "node:fs/promises"
 import { basename, dirname, isAbsolute, normalize } from "node:path"
 import type { ThreadGoal } from "../../core/goal.ts"
@@ -13,14 +6,16 @@ import type {
   SidebarChange,
 } from "../../core/session-sidebar.ts"
 import { isYakitoriError, YakitoriErrorCode } from "../../kernel/index.ts"
+import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
 import {
   projectChangedMethod,
   sidebarChangedMethod,
 } from "../../protocol/rpc-wire.ts"
 import { createSkillsLoader, type SkillMetadata } from "../../runtime/skills.ts"
+import type { ApplicationResult } from "../application-result.ts"
+import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import type { ComputerUseStatus } from "../computer-use.ts"
 import type { ServerHandlers } from "../handlers.ts"
-import { requireUserModelPreference } from "../http.ts"
 import type { QueuedInput } from "../input-queue.ts"
 import type { McpService } from "../mcp-service.ts"
 import {
@@ -39,7 +34,6 @@ import {
   ApiErrorCode,
   type ApiForkSessionRequest,
   type ApiForkSessionResponse,
-  type ApiHandlerResult,
   type ApiListAgentsResponse,
   type ApiListProjectsResponse,
   type ApiListProvidersResponse,
@@ -69,11 +63,6 @@ import {
   type ApiUserModelPreference,
 } from "../protocol.ts"
 import type { ProviderService } from "../provider-service.ts"
-import {
-  providerMethods,
-  type ProviderRpcParams,
-  type ProviderRpcResponses,
-} from "./provider-methods.ts"
 import type { SideChatService } from "../side-chat.ts"
 import {
   InvalidProjectCursorError,
@@ -83,11 +72,17 @@ import {
 } from "../sqlite-project-store.ts"
 import type { ConfigurationSnapshot, UserConfigStore } from "../user-config.ts"
 import type { SessionInteractions } from "../user-interactions.ts"
+import { requireUserModelPreference } from "../user-model-preference.ts"
 import {
   readWorkspaceFile,
   WorkspaceError,
   type WorkspaceReadResponse,
 } from "../workspace.ts"
+import {
+  type ChatGPTRpcParams,
+  type ChatGPTRpcResponses,
+  chatGPTMethods,
+} from "./chatgpt-methods.ts"
 import { computerMethods } from "./computer-methods.ts"
 import {
   type InteractionRpcParams,
@@ -100,6 +95,11 @@ import {
   mcpMethods,
 } from "./mcp-methods.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
+import {
+  type ProviderRpcParams,
+  type ProviderRpcResponses,
+  providerMethods,
+} from "./provider-methods.ts"
 import type { RequestSerializationScope } from "./serialization.ts"
 import {
   type SideChatRpcParams,
@@ -324,9 +324,9 @@ export function parseInitializeParams(params: unknown): InitializeParams {
   }
 }
 
-export function adaptHandlerResult<T>(result: ApiHandlerResult<T>): T {
-  if (result.ok) return result.body
-  const { error } = result.body
+export function adaptHandlerResult<T>(result: ApplicationResult<T>): T {
+  if (result.ok) return result.value
+  const { error } = result
   const rpcCode =
     error.code === ApiErrorCode.InvalidInput ||
     error.code === ApiErrorCode.InvalidCursor
@@ -636,7 +636,7 @@ function handlerEntry<TResult>(
   call: (
     handlers: ServerHandlers,
     params: unknown,
-  ) => Promise<ApiHandlerResult<TResult>>,
+  ) => Promise<ApplicationResult<TResult>>,
   changesSidebar = false,
 ): RpcMethodDefinition {
   return {

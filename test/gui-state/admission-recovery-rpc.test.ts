@@ -85,14 +85,14 @@ it("retries a committed queued input with the original snapshot when its RPC ack
       mateId: "mate_test",
       mateRevisionId: "mate_revision_test",
     })
-    if (!created.ok) throw new Error(created.body.error.message)
-    const sessionId = created.body.session.id
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
     const started = await handlers.admitInput({
       sessionId,
       requestId: "request_active",
       content: inputFixture(inputParts("Keep working")),
     })
-    if (!started.ok) throw new Error(started.body.error.message)
+    if (!started.ok) throw new Error(started.error.message)
 
     const client = new FakeRpcClient()
     fakeRef.current = client
@@ -133,9 +133,9 @@ it("retries a committed queued input with the original snapshot when its RPC ack
       "The connection to the server was lost.",
     )
     const queued = await handlers.listQueuedInputs({ sessionId })
-    if (!queued.ok) throw new Error(queued.body.error.message)
-    expect(queued.body.items).toHaveLength(1)
-    const first = queued.body.items[0]
+    if (!queued.ok) throw new Error(queued.error.message)
+    expect(queued.value.items).toHaveLength(1)
+    const first = queued.value.items[0]
     if (first === undefined) throw new Error("Missing committed queued input")
 
     useAppStore.setState({

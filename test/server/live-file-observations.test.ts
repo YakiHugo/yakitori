@@ -7,7 +7,8 @@ import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
-import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import type { ApplicationResult } from "../../src/server/application-result.ts"
+
 import { inputFixture } from "../fixtures/user-input.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
@@ -45,7 +46,7 @@ describe("live file observations", () => {
       })
       const created = await first.handlers.createSession()
       expectOk(created)
-      const sessionId = created.body.session.id
+      const sessionId = created.value.session.id
       expectOk(
         await first.handlers.admitInput({
           sessionId,
@@ -137,11 +138,11 @@ async function waitForThreadIdle(
 }
 
 function expectOk<T>(
-  result: ApiHandlerResult<T>,
-): asserts result is Extract<ApiHandlerResult<T>, { readonly ok: true }> {
+  result: ApplicationResult<T>,
+): asserts result is Extract<ApplicationResult<T>, { readonly ok: true }> {
   if (!result.ok) {
     throw new Error(
-      `Expected success: ${result.body.error.code}: ${result.body.error.message}`,
+      `Expected success: ${result.error.code}: ${result.error.message}`,
     )
   }
 }

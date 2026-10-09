@@ -1,5 +1,3 @@
-import type { ApiErrorResponse } from "../protocol/application.ts"
-
 export {
   type ApiAdmitInputRequest,
   type ApiAdmitInputResponse,
@@ -56,15 +54,3 @@ export {
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
 } from "../protocol/application.ts"
-
-export type ApiHandlerResult<T> =
-  | {
-      readonly ok: true
-      readonly status: number
-      readonly body: T
-    }
-  | {
-      readonly ok: false
-      readonly status: number
-      readonly body: ApiErrorResponse
-    }

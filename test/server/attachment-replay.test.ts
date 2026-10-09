@@ -51,9 +51,9 @@ describe("attachment admission replay", () => {
       )
       if (draft === undefined) throw new Error("Missing imported draft")
       const created = await app.handlers.createSession({})
-      if (!created.ok) throw new Error(created.body.error.message)
+      if (!created.ok) throw new Error(created.error.message)
       const request = {
-        sessionId: created.body.session.id,
+        sessionId: created.value.session.id,
         requestId: "request_original",
         content: inputFixture([
           { type: "text", text: "Explain this image" },
@@ -61,7 +61,7 @@ describe("attachment admission replay", () => {
         ]),
       }
       const submitted = await app.handlers.admitInput(request)
-      if (!submitted.ok) throw new Error(submitted.body.error.message)
+      if (!submitted.ok) throw new Error(submitted.error.message)
       await vi.waitFor(() =>
         expect(app?.threadManager.runningTurnCount).toBe(0),
       )
@@ -76,11 +76,7 @@ describe("attachment admission replay", () => {
       }
       // A lost response leaves the renderer with the original source reference.
       const replayed = await app.handlers.admitInput(request)
-      expect(replayed).toMatchObject({
-        ok: true,
-        status: 200,
-        body: submitted.body,
-      })
+      expect(replayed).toMatchObject({ ok: true, value: submitted.value })
       expect(modelCalls).toBe(1)
       const changedText = await app.handlers.admitInput({
         ...request,
@@ -89,7 +85,10 @@ describe("attachment admission replay", () => {
           { type: "image", ...draft },
         ]),
       })
-      expect(changedText).toMatchObject({ ok: false, status: 409 })
+      expect(changedText).toMatchObject({
+        ok: false,
+        error: { code: "conflict" },
+      })
       const changed = Buffer.from(png)
       changed[12] = 1
       const [replacement] = await app.rolloutAssets.importAttachmentBytes(
@@ -106,8 +105,11 @@ describe("attachment admission replay", () => {
           { type: "image", ...replacement },
         ]),
       })
-      expect(changedImage).toMatchObject({ ok: false, status: 409 })
-      const [accepted] = inputContentAttachments(submitted.body.content)
+      expect(changedImage).toMatchObject({
+        ok: false,
+        error: { code: "conflict" },
+      })
+      const [accepted] = inputContentAttachments(submitted.value.content)
       if (accepted === undefined) throw new Error("Missing accepted media")
       expect(await app.rolloutAssets.read(accepted.file)).toEqual(png)
       expect(await app.rolloutAssets.read(replacement.file)).toEqual(changed)

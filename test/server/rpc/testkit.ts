@@ -5,6 +5,7 @@ import {
 } from "../../../src/kernel/index.ts"
 import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import type { LiveSessionEvent } from "../../../src/runtime/live-events.ts"
+import type { ApplicationResult } from "../../../src/server/application-result.ts"
 import {
   createSessionEventHub,
   type SessionEventHub,
@@ -12,7 +13,6 @@ import {
 import type { ServerHandlers } from "../../../src/server/handlers.ts"
 import type {
   ApiErrorCode,
-  ApiHandlerResult,
   ApiPendingPermission,
   ApiSessionDetail,
 } from "../../../src/server/protocol.ts"
@@ -291,15 +291,15 @@ export function pagedEventsHandler(
   }
 }
 
-export function okResult<T>(body: T): ApiHandlerResult<T> {
-  return { ok: true, status: 200, body }
+export function okResult<T>(body: T): ApplicationResult<T> {
+  return { ok: true, value: body }
 }
 
 export function errorResult(
   code: ApiErrorCode,
   message: string,
-): ApiHandlerResult<never> {
-  return { ok: false, status: 400, body: { error: { code, message } } }
+): ApplicationResult<never> {
+  return { ok: false, error: { code, message } }
 }
 
 export function makeSessionDetail(

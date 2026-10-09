@@ -8,8 +8,9 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv
 import type { ThreadStore } from "../core/thread-store.ts"
 import { createUserInput } from "../core/user-input.ts"
 import { parseUserQuestions } from "../kernel/user-interaction.ts"
+import type { ApplicationResult } from "./application-result.ts"
 import type { ServerHandlers } from "./handlers.ts"
-import type { ApiAdmitInputResponse, ApiHandlerResult } from "./protocol.ts"
+import type { ApiAdmitInputResponse } from "./protocol.ts"
 
 export type PendingElicitation = Readonly<{
   requestId: string
@@ -108,7 +109,7 @@ export function createSessionInteractions(
     elicitations,
     async answer(
       request: AnswerQuestionRequest,
-    ): Promise<ApiHandlerResult<ApiAdmitInputResponse>> {
+    ): Promise<ApplicationResult<ApiAdmitInputResponse>> {
       const stored = await store.readThread(request.sessionId)
       const completed = stored?.rollout.find(
         ({ item }) =>
