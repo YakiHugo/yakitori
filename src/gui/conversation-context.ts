@@ -5,7 +5,7 @@ export type {
   ContextSource,
   ResponseAnnotation,
   SelectedTextAttachment,
-} from "../core/input-context.ts"
+} from "../protocol/input-context.ts"
 
 export function contextSourceAttributes(source: ContextSource) {
   return {

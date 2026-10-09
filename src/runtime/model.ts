@@ -1,3 +1,7 @@
+import type { ModelFailureKind } from "../protocol/model-failure.ts"
+
+export type { ModelFailureKind } from "../protocol/model-failure.ts"
+
 import type { AssetSource, RolloutAssetReference } from "../core/asset-types.ts"
 import type {
   JsonObject,
@@ -145,17 +149,6 @@ export type ModelUsage = Readonly<{
   // Unlike billing counters, callers keep the latest value rather than sum it.
   activeContextTokens?: number
 }>
-
-export type ModelFailureKind =
-  | "authentication"
-  | "connection_failed"
-  | "idle_timeout"
-  | "invalid_request"
-  | "protocol_error"
-  | "provider_error"
-  | "rate_limited"
-  | "server_error"
-  | "stream_disconnected"
 
 export type ModelFailureStage =
   | "connect"

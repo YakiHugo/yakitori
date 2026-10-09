@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { inputContent, inputContentText } from "../../core/user-input.ts"
+import { inputContent, inputContentText } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {

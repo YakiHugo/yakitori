@@ -3,8 +3,7 @@ import { useEffect, useState } from "react"
 import {
   parseSessionPlan,
   parseUserQuestions,
-} from "../../../kernel/user-interaction.ts"
-import { ToolResultParts } from "./tool-result-parts.tsx"
+} from "../../../protocol/user-interaction.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import {
   fileActionLabel,
@@ -21,6 +20,7 @@ import {
 } from "../ui/collapsible.tsx"
 import { PlanCell, UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
+import { ToolResultParts } from "./tool-result-parts.tsx"
 import "../activity-timeline.css"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>

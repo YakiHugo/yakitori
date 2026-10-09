@@ -29,17 +29,17 @@ import {
   useRef,
   useState,
 } from "react"
-import { assetSourceKey } from "../../core/asset-types.ts"
+import type { ApiSkillSummary } from "../../protocol/application.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import { assetSourceKey } from "../../protocol/asset-types.ts"
+import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../protocol/directives.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
   inputContentText,
-} from "../../core/user-input.ts"
-import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../kernel/events.ts"
-import type { ApiSkillSummary } from "../../protocol/application.ts"
-import type { UserAttachment } from "../../protocol/asset-types.ts"
-import type { ContextExcerpt } from "../../protocol/input-context.ts"
-import type { InputDraft } from "../../protocol/user-input.ts"
+} from "../../protocol/user-input.ts"
 import {
   appendAttachmentFiles,
   appendPickedAttachments,

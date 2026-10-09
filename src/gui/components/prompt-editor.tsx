@@ -15,13 +15,13 @@ import {
   useLayoutEffect,
   useRef,
 } from "react"
-import { assetSourceKey } from "../../core/asset-types.ts"
 import type {
   ImageAttachment,
   ImageDetail,
   PdfAttachment,
   UserAttachment,
 } from "../../protocol/asset-types.ts"
+import { assetSourceKey } from "../../protocol/asset-types.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { sameInputDraft } from "../input-draft.ts"

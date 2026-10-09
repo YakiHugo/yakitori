@@ -1,4 +1,3 @@
-import { inputContentText } from "../core/user-input.ts"
 import type {
   ApiPendingInput,
   ApiPendingPermission,
@@ -15,8 +14,9 @@ import type {
 } from "../protocol/events.ts"
 import type { ContextExcerpt } from "../protocol/input-context.ts"
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
+import type { ModelFailureKind } from "../protocol/model-failure.ts"
 import type { InputDraft } from "../protocol/user-input.ts"
-import type { ModelFailureKind } from "../runtime/model.ts"
+import { inputContentText } from "../protocol/user-input.ts"
 import { type CitationSource, citationSources } from "./citation-sources.ts"
 
 export type ExecutionEntry =

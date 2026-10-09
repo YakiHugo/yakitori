@@ -3,7 +3,7 @@ import { useId, useState } from "react"
 import type {
   SessionPlan,
   UserQuestions,
-} from "../../../kernel/user-interaction.ts"
+} from "../../../protocol/user-interaction.ts"
 import { getAppRpcClient } from "../../lib/rpc-client.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { Button } from "../ui/button.tsx"

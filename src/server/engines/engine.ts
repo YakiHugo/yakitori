@@ -1,8 +1,5 @@
-import type {
-  EventMetadata,
-  InputContent,
-  ModelSelection,
-} from "../../kernel/events.ts"
+import type { EventMetadata, ModelSelection } from "../../protocol/events.ts"
+import type { InputContent } from "../../protocol/user-input.ts"
 
 // An engine owns the complete agent loop and its context. Model providers are
 // internal to an engine; changing a provider does not change this binding.

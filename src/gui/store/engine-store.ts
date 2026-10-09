@@ -1,10 +1,10 @@
 import { create } from "zustand"
-import type { InputDraft } from "../../core/user-input.ts"
 import type {
   EngineDescriptor,
   EngineSessionSnapshot,
   EngineSessionSummary,
 } from "../../protocol/engine.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
 import { textInputDraft } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
