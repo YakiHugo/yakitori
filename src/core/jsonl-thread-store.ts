@@ -1322,21 +1322,28 @@ export class JsonlThreadStore implements ThreadStore {
     endSeqExclusive: number,
   ): Promise<void> {
     const drained: StoredRolloutItem[] = []
-    while (writer.pending.length > 0) {
-      const pending = writer.pending[0]
-      if (pending === undefined) break
-      if (pending.entry.seq >= endSeqExclusive) break
-      while (pending.offset < pending.bytes.length) {
-        const result = await this.#writePending(writer, pending)
-        if (result.bytesWritten === 0) {
-          throw new Error("Rollout writer made no forward progress.")
+    try {
+      while (writer.pending.length > 0) {
+        const pending = writer.pending[0]
+        if (pending === undefined) break
+        if (pending.entry.seq >= endSeqExclusive) break
+        while (pending.offset < pending.bytes.length) {
+          const result = await this.#writePending(writer, pending)
+          if (result.bytesWritten === 0) {
+            throw new Error("Rollout writer made no forward progress.")
+          }
+          pending.offset += result.bytesWritten
         }
-        pending.offset += result.bytesWritten
+        writer.pending.shift()
+        drained.push(pending.entry)
       }
-      writer.pending.shift()
-      drained.push(pending.entry)
+      await this.#touchMetadata(threadId)
+    } catch (error) {
+      // Earlier records may already be committed and removed from pending.
+      // A later drain must rebuild rather than stamp only its remaining suffix.
+      this.#searchProjectionDirty = true
+      throw error
     }
-    await this.#touchMetadata(threadId)
     await this.#withSearchProjection(async () => {
       if (this.#searchProjectionDirty) return
       try {
