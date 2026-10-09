@@ -256,11 +256,16 @@ describe("ChatGPT connection lifecycle", () => {
     const identity = (await f.service.available())[0]?.identity
     if (!identity) throw new Error("Missing fixture identity")
     const activeToken = await f.service.resolve(identity)
+    // Observe cancellation like an active request. Node lazily derives an
+    // unobserved composite signal from weak references that GC may clear.
+    const aborted = vi.fn()
+    activeToken.signal.addEventListener("abort", aborted, { once: true })
     await f.service.signIn({ accountId: first.accounts[0]?.id ?? "" })
     expect(f.protocol.authorization.searchParams.has("prompt")).toBe(false)
     f.protocol.permissions("openid profile email")
     const disabled = await complete(f)
     expect(disabled.accounts[0]?.state).toBe("identity_only")
+    expect(aborted).toHaveBeenCalledTimes(1)
     expect(activeToken.signal.aborted).toBe(true)
     expect(await f.service.available()).toEqual([])
     await expect(f.service.resolve(identity)).rejects.toMatchObject({

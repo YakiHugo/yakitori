@@ -29,17 +29,17 @@ import {
   useRef,
   useState,
 } from "react"
-import { assetSourceKey } from "../../core/asset-types.ts"
+import type { ApiSkillSummary } from "../../protocol/application.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import { assetSourceKey } from "../../protocol/asset-types.ts"
+import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../protocol/directives.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
   inputContentText,
-} from "../../core/user-input.ts"
-import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../kernel/events.ts"
-import type { ApiSkillSummary } from "../../protocol/application.ts"
-import type { UserAttachment } from "../../protocol/asset-types.ts"
-import type { ContextExcerpt } from "../../protocol/input-context.ts"
-import type { InputDraft } from "../../protocol/user-input.ts"
+} from "../../protocol/user-input.ts"
 import {
   appendAttachmentFiles,
   appendPickedAttachments,
@@ -171,6 +171,7 @@ export function ComposerSurface({
   placeholder = "Ask anything",
   className = "conversation-composer-footer pt-3 pb-3",
   allowCommands = true,
+  allowAttachments = true,
   sendLabel = "Send",
   stopLabel = "Interrupt",
 }: Readonly<{
@@ -216,6 +217,7 @@ export function ComposerSurface({
   placeholder?: string
   className?: string
   allowCommands?: boolean
+  allowAttachments?: boolean
   sendLabel?: string
   stopLabel?: string
 }>) {
@@ -949,33 +951,35 @@ export function ComposerSurface({
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
             <div className="relative flex shrink-0 items-center gap-1">
-              <Button
-                ref={addContextRef}
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                disabled={readingAttachments || sending}
-                aria-label="Add context"
-                aria-expanded={addMenuOpen}
-                aria-controls={`${suggestionsId}-add`}
-                title="Add context"
-                className={`relative rounded-full text-muted-foreground hover:text-foreground ${addMenuOpen ? "z-20" : ""}`}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  editorRef.current?.focus()
-                  setAddHighlight(searchFiles ? 0 : 1)
-                  setAddMenuOpen((open) => !open)
-                  setDismissedQuery(queryKey)
-                }}
-              >
-                {readingAttachments ? (
-                  <LoaderCircle className="animate-spin" />
-                ) : (
-                  <Plus
-                    className={`transition-transform duration-150 ${addMenuOpen ? "rotate-45" : ""}`}
-                  />
-                )}
-              </Button>
+              {allowAttachments && (
+                <Button
+                  ref={addContextRef}
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={readingAttachments || sending}
+                  aria-label="Add context"
+                  aria-expanded={addMenuOpen}
+                  aria-controls={`${suggestionsId}-add`}
+                  title="Add context"
+                  className={`relative rounded-full text-muted-foreground hover:text-foreground ${addMenuOpen ? "z-20" : ""}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    editorRef.current?.focus()
+                    setAddHighlight(searchFiles ? 0 : 1)
+                    setAddMenuOpen((open) => !open)
+                    setDismissedQuery(queryKey)
+                  }}
+                >
+                  {readingAttachments ? (
+                    <LoaderCircle className="animate-spin" />
+                  ) : (
+                    <Plus
+                      className={`transition-transform duration-150 ${addMenuOpen ? "rotate-45" : ""}`}
+                    />
+                  )}
+                </Button>
+              )}
             </div>
 
             <div className="flex min-w-0 items-center gap-1">

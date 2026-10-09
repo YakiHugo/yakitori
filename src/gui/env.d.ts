@@ -12,7 +12,7 @@ type YakitoriDesktopBridge = {
       sessionId?: string
       selectionId: string
     }>,
-  ): Promise<readonly import("../kernel/events.ts").UserAttachment[]>
+  ): Promise<readonly import("../protocol/asset-types.ts").UserAttachment[]>
   discardPickedAttachments(
     input: Readonly<{
       selectionId: string
@@ -23,9 +23,9 @@ type YakitoriDesktopBridge = {
       sessionId?: string
       files: readonly File[]
     }>,
-  ): Promise<readonly import("../kernel/events.ts").UserAttachment[]>
+  ): Promise<readonly import("../protocol/asset-types.ts").UserAttachment[]>
   discardDraftAttachments(
-    input: readonly import("../kernel/events.ts").UserAttachment[],
+    input: readonly import("../protocol/asset-types.ts").UserAttachment[],
   ): Promise<void>
   openFile(input: {
     readonly path: string

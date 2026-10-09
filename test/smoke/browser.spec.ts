@@ -8,6 +8,7 @@ import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runFauxTurn,
+  runExternalEngineFlow,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
@@ -51,6 +52,7 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
     if (pdf?.mediaType !== "application/pdf")
       throw new Error("Browser PDF fixture import failed")
     await runProviderFlow(page, testInfo, { browserPdf: pdf })
+    await runExternalEngineFlow(page)
     expect(errors).toEqual([])
   } finally {
     try {

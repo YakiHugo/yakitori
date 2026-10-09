@@ -1,22 +1,22 @@
 import { ArrowLeft, Plus } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
-import type { ProviderPreset } from "../../runtime/provider-presets.ts"
 import type {
   ApiConfiguredProvider,
   ProviderConfiguration,
-} from "../../server/provider-configuration.ts"
+  ProviderConfigurationResponse,
+  ProviderPreset,
+  SubscriptionConnection,
+} from "../../protocol/providers.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { ChatGPTConnections } from "./chatgpt-connections.tsx"
 import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { ProviderCatalog } from "./provider-catalog.tsx"
-import { ProviderSubscription } from "./provider-subscription.tsx"
-import { SidebarDialog } from "./sidebar-surfaces.tsx"
-import type { SubscriptionConnection } from "../../server/subscription-connections.ts"
-import { ProviderEditor, type ProviderDraft } from "./provider-editor.tsx"
 import { ProviderConnectionList } from "./provider-connection-list.tsx"
+import { type ProviderDraft, ProviderEditor } from "./provider-editor.tsx"
+import { ProviderSubscription } from "./provider-subscription.tsx"
 import { ProviderUsage } from "./provider-usage.tsx"
-import type { ProviderConfigurationResponse } from "../../server/provider-service.ts"
+import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
 import "./provider-settings.css"
 

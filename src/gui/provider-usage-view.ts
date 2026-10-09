@@ -1,5 +1,5 @@
+import type { ConfiguredModel } from "../protocol/providers.ts"
 import type { ModelUsage } from "../protocol/usage.ts"
-import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 
 // Historical token counts are priced with the current catalog/user rates.
 // Missing cache prices stay unknown rather than borrowing the input rate.

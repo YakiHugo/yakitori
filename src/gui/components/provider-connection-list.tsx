@@ -1,6 +1,8 @@
 import { ChevronRight } from "lucide-react"
-import type { ApiConfiguredProvider } from "../../server/provider-configuration.ts"
-import type { SubscriptionConnection } from "../../server/subscription-connections.ts"
+import type {
+  ApiConfiguredProvider,
+  SubscriptionConnection,
+} from "../../protocol/providers.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { Badge } from "./ui/badge.tsx"
 

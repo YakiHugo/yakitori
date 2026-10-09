@@ -1,8 +1,10 @@
-import { supportsOpenAIRequestWarmup } from "../../shared/request-warmup-policy.ts"
 import { Check } from "lucide-react"
 import { type FormEvent, useState } from "react"
-import type { ProviderPreset } from "../../runtime/provider-presets.ts"
-import type { ProviderConfiguration } from "../../server/provider-configuration.ts"
+import type {
+  ProviderConfiguration,
+  ProviderPreset,
+} from "../../protocol/providers.ts"
+import { supportsOpenAIRequestWarmup } from "../../shared/request-warmup-policy.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { ProviderModels } from "./provider-models.tsx"
@@ -15,7 +17,7 @@ export type ProviderDraft = {
   configuration: ProviderConfiguration
   apiKey: string
   existing: boolean
-  availableModels?: readonly import("../../runtime/provider-presets.ts").ConfiguredModel[]
+  availableModels?: readonly import("../../protocol/providers.ts").ConfiguredModel[]
 }
 
 export function ProviderEditor({
@@ -49,7 +51,7 @@ export function ProviderEditor({
   onTest(): void
   onRemove(): void
   onAddAnother?(): void
-  catalog?: import("../../server/provider-configuration.ts").ApiConfiguredProvider["catalog"]
+  catalog?: import("../../protocol/providers.ts").ApiConfiguredProvider["catalog"]
 }>) {
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [openError, setOpenError] = useState<string>()

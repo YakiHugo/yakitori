@@ -1,5 +1,5 @@
-import { createRequestId } from "../kernel/ids.ts"
 import type { ModelSelection } from "../protocol/events.ts"
+import { createRequestId } from "../protocol/request-id.ts"
 import type { InputContent } from "../protocol/user-input.ts"
 
 export type AdmissionDraft = Readonly<{

@@ -1,6 +1,6 @@
 import { Check, LoaderCircle, Monitor, RefreshCw, Unplug } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
-import type { ComputerUseStatus } from "../../server/computer-use.ts"
+import type { ComputerUseStatus } from "../../protocol/connections.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"

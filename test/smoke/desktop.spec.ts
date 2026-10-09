@@ -13,6 +13,7 @@ import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runFauxTurn,
+  runExternalEngineFlow,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
@@ -135,6 +136,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
         return readFile(downloadPath)
       },
     })
+    await runExternalEngineFlow(page)
     expect(rendererErrors).toEqual([])
 
     // Playwright's graceful close invokes the real app.quit(). It must finish

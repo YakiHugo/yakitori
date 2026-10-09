@@ -1,29 +1,10 @@
+import type { WorkspaceReadOfficeResponse } from "../protocol/workspace.ts"
+
+export type { WorkspaceReadOfficeResponse } from "../protocol/workspace.ts"
+
 import { posix } from "node:path"
 import { SaxesParser } from "saxes"
 import { type Entry, fromBufferPromise, type ZipFile } from "yauzl"
-
-export type WorkspaceReadOfficeResponse =
-  | {
-      path: string
-      kind: "docx"
-      blocks: (
-        | { kind: "paragraph"; text: string }
-        | { kind: "table"; rows: string[][] }
-      )[]
-      truncated: boolean
-    }
-  | {
-      path: string
-      kind: "xlsx"
-      sheets: { name: string; rows: string[][] }[]
-      truncated: boolean
-    }
-  | {
-      path: string
-      kind: "pptx"
-      slides: { number: number; paragraphs: string[]; notes: string[] }[]
-      truncated: boolean
-    }
 
 export class OfficePreviewError extends Error {}
 

@@ -1,4 +1,23 @@
 import {
+  isInputAdmittedData,
+  isKernelError,
+  isModelSelection,
+  isTurnCompletedData,
+} from "../protocol/event-validation.ts"
+
+export {
+  isModelSelection,
+  isTokenUsage,
+  isTurnCompletion,
+  isTurnMetrics,
+} from "../protocol/event-validation.ts"
+
+import { isJsonObject, isJsonValue } from "../protocol/json.ts"
+
+export { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../protocol/directives.ts"
+export { isJsonObject, isJsonValue } from "../protocol/json.ts"
+
+import {
   type AgentMessageExecutionItem,
   type CollaborationAction,
   type CollaborationReceiver,
@@ -7,25 +26,17 @@ import {
   EventType,
   type FileChange,
   ForkReason,
-  InputRole,
   type ItemCompletedEvent,
   type ItemContent,
   ItemStatus,
   type JsonObject,
-  type JsonValue,
-  type KernelError,
   type KernelEvent,
   type ModelSelection,
   type ReasoningExecutionItem,
   type SessionHistoryPosition,
   type StartedExecutionItem,
   type TextContent,
-  type TokenUsage,
   type ToolExecutionItem,
-  type TurnCompletion,
-  type TurnLatency,
-  type TurnMetrics,
-  type TurnOutcome,
 } from "../protocol/events.ts"
 
 export {
@@ -102,22 +113,10 @@ export { isImageAttachment, isPdfAttachment } from "../core/asset-types.ts"
 
 export const EVENT_SCHEMA_VERSION = 7
 
-// A Runtime-role Input whose text equals this directive triggers a
-// compaction-only Turn: the runner folds all uncovered completed Turns into a
-// checkpoint instead of making a regular model call. Shared by the server
-// (compact endpoint), the runner (dispatch), and the GUI (composer shortcut).
-export const COMPACT_DIRECTIVE = "/compact"
-
-// GUI-local composer directive: "/goal <text>" sets the session goal, a bare
-// "/goal" opens the goal editor. Never admitted as an Input.
-export const GOAL_DIRECTIVE = "/goal"
-
 // Recorded on tools left open at a terminal Turn so GUI and model context
 // render one fact instead of synthesizing different missing-result text.
 export const MISSING_TOOL_RESULT_TEXT =
   "No tool result was recorded. Execution status and side effects are unknown. Inspect the current state before retrying."
-
-import { isInputContent } from "../core/user-input.ts"
 
 export { type InputContent, isInputContent } from "../core/user-input.ts"
 
@@ -320,25 +319,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             isSessionHistoryPosition(data.historyBase))
         )
       case EventType.InputAdmitted:
-        return (
-          onlyKeys(data, [
-            "requestId",
-            "inputId",
-            "role",
-            "content",
-            "modelSelection",
-            "parentInputId",
-            "metadata",
-            "steered",
-          ]) &&
-          isString(data.requestId) &&
-          isString(data.inputId) &&
-          isInputRole(data.role) &&
-          isInputContent(data.content) &&
-          (data.modelSelection === undefined ||
-            isModelSelection(data.modelSelection)) &&
-          (data.steered === undefined || data.steered === true)
-        )
+        return isInputAdmittedData(data)
       case EventType.TurnStarted:
         return (
           onlyKeys(data, ["turnId", "inputId", "parentTurnId", "metadata"]) &&
@@ -347,22 +328,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.parentTurnId === undefined || isString(data.parentTurnId))
         )
       case EventType.TurnCompleted:
-        return (
-          onlyKeys(data, [
-            "turnId",
-            "outcome",
-            "usage",
-            "sessionUsage",
-            "metrics",
-            "metadata",
-          ]) &&
-          isString(data.turnId) &&
-          isTurnOutcome(data.outcome) &&
-          (data.usage === undefined || isTokenUsage(data.usage)) &&
-          (data.sessionUsage === undefined ||
-            isTokenUsage(data.sessionUsage)) &&
-          (data.metrics === undefined || isTurnMetrics(data.metrics))
-        )
+        return isTurnCompletedData(data)
       case EventType.ItemStarted:
         return (
           onlyKeys(data, ["turnId", "item"]) &&
@@ -1265,78 +1231,6 @@ function onlyKeys(
   return Object.keys(value).every((key) => keys.includes(key))
 }
 
-function isInputRole(value: unknown): value is InputRole {
-  return typeof value === "string" && inputRoles.has(value)
-}
-
-export function isTokenUsage(value: unknown): value is TokenUsage {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [
-      "inputTokens",
-      "outputTokens",
-      "cacheReadInputTokens",
-      "cacheWriteInputTokens",
-      "activeContextTokens",
-    ]) &&
-    isNonNegativeInteger(value.inputTokens) &&
-    isNonNegativeInteger(value.outputTokens) &&
-    (value.cacheReadInputTokens === undefined ||
-      isNonNegativeInteger(value.cacheReadInputTokens)) &&
-    (value.cacheWriteInputTokens === undefined ||
-      isNonNegativeInteger(value.cacheWriteInputTokens)) &&
-    (value.activeContextTokens === undefined ||
-      isNonNegativeInteger(value.activeContextTokens))
-  )
-}
-
-export function isTurnMetrics(value: unknown): value is TurnMetrics {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [
-      "modelCalls",
-      "toolCalls",
-      "modelDurationMs",
-      "toolDurationMs",
-      "averageTimeToFirstTokenMs",
-      "latency",
-    ]) &&
-    isNonNegativeInteger(value.modelCalls) &&
-    isNonNegativeInteger(value.toolCalls) &&
-    isNonNegativeInteger(value.modelDurationMs) &&
-    isNonNegativeInteger(value.toolDurationMs) &&
-    (value.averageTimeToFirstTokenMs === undefined ||
-      isNonNegativeInteger(value.averageTimeToFirstTokenMs)) &&
-    (value.latency === undefined || isTurnLatency(value.latency))
-  )
-}
-
-function isTurnLatency(value: unknown): value is TurnLatency {
-  const required = [
-    "setupMs",
-    "backgroundCompactionMs",
-    "backgroundCompactionOverlapMs",
-    "backgroundCompactionsApplied",
-    "backgroundCompactionsDiscarded",
-  ]
-  const optional = [
-    "admissionMs",
-    "firstRequestMs",
-    "firstUsefulOutputMs",
-    "firstToolMs",
-    "warmupMs",
-    "warmupOverlapMs",
-  ]
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [...required, ...optional]) &&
-    required.every((key) => isNonNegativeInteger(value[key])) &&
-    optional.every(
-      (key) => value[key] === undefined || isNonNegativeInteger(value[key]),
-    )
-  )
-}
-
 function isTextContent(value: unknown): value is TextContent {
   return (
     isRecord(value) &&
@@ -1366,21 +1260,6 @@ function isImageDetail(value: unknown): value is ImageDetail {
   return value === "high" || value === "original"
 }
 
-export function isModelSelection(value: unknown): value is ModelSelection {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["provider", "model", "effort", "speed"]) &&
-    isString(value.provider) &&
-    value.provider.length > 0 &&
-    isString(value.model) &&
-    value.model.length > 0 &&
-    (value.effort === undefined ||
-      (isString(value.effort) && value.effort.length > 0)) &&
-    (value.speed === undefined ||
-      (isString(value.speed) && value.speed.length > 0))
-  )
-}
-
 function isItemContent(value: unknown): value is ItemContent {
   if (!isRecord(value)) return false
   if (value.kind === "text") return isTextContent(value)
@@ -1400,69 +1279,6 @@ function isItemContent(value: unknown): value is ItemContent {
   return false
 }
 
-function isKernelError(value: unknown): value is KernelError {
-  return (
-    isRecord(value) &&
-    isString(value.message) &&
-    (value.code === undefined || isString(value.code)) &&
-    (value.details === undefined || isJsonObject(value.details))
-  )
-}
-
-function isTurnOutcome(value: unknown): value is TurnOutcome {
-  if (!isRecord(value)) return false
-  switch (value.status) {
-    case "completed":
-      return (
-        onlyKeys(value, ["status", "reason", "answerItemIds"]) &&
-        isTurnCompletion({
-          ...(value.reason === undefined ? {} : { reason: value.reason }),
-          ...(value.answerItemIds === undefined
-            ? {}
-            : { answerItemIds: value.answerItemIds }),
-        })
-      )
-    case "failed":
-      return onlyKeys(value, ["status", "error"]) && isKernelError(value.error)
-    case "cancelled":
-    case "interrupted":
-      return (
-        onlyKeys(value, ["status", "reason"]) &&
-        (value.reason === undefined || isString(value.reason))
-      )
-    default:
-      return false
-  }
-}
-
-export function isTurnCompletion(value: unknown): value is TurnCompletion {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["reason", "answerItemIds"]) &&
-    (value.reason === undefined ||
-      value.reason === "truncated" ||
-      value.reason === "refused") &&
-    (value.answerItemIds === undefined ||
-      (Array.isArray(value.answerItemIds) &&
-        value.answerItemIds.every(
-          (id) => typeof id === "string" && id.length > 0,
-        ) &&
-        new Set(value.answerItemIds).size === value.answerItemIds.length))
-  )
-}
-
-export function isJsonObject(value: unknown): value is JsonObject {
-  return isRecord(value) && Object.values(value).every(isJsonValue)
-}
-
-export function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return true
-  if (typeof value === "number") return Number.isFinite(value)
-  if (Array.isArray(value)) return value.every(isJsonValue)
-  return isJsonObject(value)
-}
-
 function isNonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
@@ -1480,7 +1296,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const eventTypes = new Set<string>(Object.values(EventType))
-const inputRoles = new Set<string>(Object.values(InputRole))
 
 function isModelDocumentBlock(value: unknown): value is ModelDocumentBlock {
   return (

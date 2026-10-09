@@ -56,6 +56,7 @@ import type {
 import type { SkillMetadata } from "../runtime/skills.ts"
 import { GoalToolError } from "../runtime/tools/goal.ts"
 import type { ApplicationResult } from "./application-result.ts"
+import { YakitoriEngineAdapter } from "./engines/yakitori.ts"
 import {
   InputQueue,
   InputQueueFullError,
@@ -100,6 +101,7 @@ import {
   QueuedSessionArchivedError,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
+import { AppSessionService } from "./session-service.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import { readWorkspaceGitInfo } from "./workspace.ts"
@@ -247,6 +249,16 @@ type RolloutPublication = {
 export function createThreadServerHandlers(
   options: ThreadServerHandlerOptions,
 ): ThreadServerHandlers {
+  const engine = new YakitoriEngineAdapter({
+    manager: options.manager,
+    ...(options.sessionDefaults === undefined
+      ? {}
+      : { defaults: options.sessionDefaults }),
+    ...(options.resolvePermission === undefined
+      ? {}
+      : { resolvePermission: options.resolvePermission }),
+  })
+  const sessions = new AppSessionService(engine)
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const pumps = new Map<AgentThread, Promise<void>>()
@@ -472,6 +484,7 @@ export function createThreadServerHandlers(
             pumpsStopped.then(() => undefined),
           ])
           if (event === undefined) break
+          engine.observe(event)
           if (event.type === "rollout.appended") {
             for (const publisher of streams.values()) publisher.flush()
             try {
@@ -700,6 +713,14 @@ export function createThreadServerHandlers(
       })
     }
     await ensureEventPump(thread)
+    await sessions.bind({
+      appSessionId: thread.id,
+      engineSessionId: thread.id,
+      cwd:
+        thread.snapshot().metadata.workingDirectory ??
+        options.sessionDefaults?.workingDirectory ??
+        process.cwd(),
+    })
     return thread
   }
 
@@ -932,6 +953,7 @@ export function createThreadServerHandlers(
       await Promise.allSettled([...pumpReady.values()])
       await Promise.allSettled([...pumps.values()])
       if (options.inputQueue === undefined) inputQueue.close()
+      await sessions.close()
     },
     async createSession(input = {}) {
       try {
@@ -1576,9 +1598,10 @@ export function createThreadServerHandlers(
             },
           )
         }
-        return await admitTurnInput(request, (thread, content) =>
-          thread.startIfIdle({
-            submissionId: request.requestId,
+        return await admitTurnInput(request, async (_thread, content) => {
+          const submitted = await sessions.send(request.sessionId, {
+            requestId: request.requestId,
+            text: inputContentText(content),
             content,
             ...(request.modelSelection === undefined
               ? {}
@@ -1589,8 +1612,26 @@ export function createThreadServerHandlers(
             ...(request.parentInputId === undefined
               ? {}
               : { parentInputId: request.parentInputId }),
-          }),
-        )
+          })
+          if (submitted.status === "rejected") {
+            const reason = submitted.reason
+            if (
+              reason !== "not_idle" &&
+              reason !== "no_active_turn" &&
+              reason !== "turn_mismatch" &&
+              reason !== "request_conflict"
+            )
+              throw internalError(`Unexpected native rejection: ${reason}`)
+            return { type: "not_submitted", reason }
+          }
+          if (submitted.inputId === undefined)
+            throw internalError("Native engine did not return an input ID.")
+          return {
+            type: submitted.replayed ? "replayed" : "started",
+            turnId: submitted.turnId,
+            inputItemId: submitted.inputId,
+          }
+        })
       } catch (error) {
         return fail(error, reporter, "admit-input")
       }
@@ -2040,15 +2081,16 @@ export function createThreadServerHandlers(
     async cancelTurn(input) {
       try {
         const request = requireCancelTurnRequest(input)
-        const thread = await resumeRequired(request.sessionId)
+        await resumeRequired(request.sessionId)
         options.goals?.pauseForInterrupt(request.sessionId, request.turnId)
-        const interrupted = await thread.interruptTurn(
+        const cancellation = await sessions.cancel(
+          request.sessionId,
           request.turnId,
           "reason" in request && typeof request.reason === "string"
             ? request.reason
             : undefined,
         )
-        if (!interrupted) {
+        if (cancellation.status === "not_running") {
           throw notFound(`Active Turn ${request.turnId} was not found.`, {
             sessionId: request.sessionId,
             turnId: request.turnId,
@@ -2066,7 +2108,15 @@ export function createThreadServerHandlers(
     async resolvePermission(input) {
       try {
         const request = requireResolvePermissionRequest(input)
-        if (!options.resolvePermission?.(request)) {
+        await resumeRequired(request.sessionId)
+        if (
+          !(await sessions.respondPermission(request.sessionId, {
+            requestId: request.permissionRequestId,
+            optionId: request.behavior,
+            turnId: request.turnId,
+            ...(request.reason === undefined ? {} : { reason: request.reason }),
+          }))
+        ) {
           throw notFound(
             `Active permission ${request.permissionRequestId} was not found.`,
             { permissionRequestId: request.permissionRequestId },

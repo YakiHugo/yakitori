@@ -1,31 +1,16 @@
+export type {
+  InteractionRpcParams,
+  InteractionRpcResponses,
+} from "../../protocol/rpc-interaction.ts"
+
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js"
-import type { ApiAdmitInputResponse } from "../protocol.ts"
-import {
-  type AnswerQuestionRequest,
-  type PendingElicitation,
-  UserInteractionError,
-} from "../user-interactions.ts"
+import { UserInteractionError } from "../user-interactions.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS } from "./messages.ts"
 import {
   adaptHandlerResult,
   type RpcMethodDefinition,
   RpcMethodError,
 } from "./methods.ts"
-
-export type InteractionRpcParams = {
-  "session/question/answer": AnswerQuestionRequest
-  "session/elicitation/list": { sessionId: string }
-  "session/elicitation/answer": {
-    sessionId: string
-    requestId: string
-    result: import("@modelcontextprotocol/sdk/types.js").ElicitResult
-  }
-}
-export type InteractionRpcResponses = {
-  "session/question/answer": ApiAdmitInputResponse
-  "session/elicitation/list": { requests: readonly PendingElicitation[] }
-  "session/elicitation/answer": Record<string, never>
-}
 
 export const interactionMethods: readonly RpcMethodDefinition[] = [
   "session/question/answer",

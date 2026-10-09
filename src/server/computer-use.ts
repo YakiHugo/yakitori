@@ -1,21 +1,17 @@
+import type { ComputerUseStatus } from "../protocol/connections.ts"
+
+export type { ComputerUseStatus } from "../protocol/connections.ts"
+
 import { constants } from "node:fs"
-import { access, readFile, readdir } from "node:fs/promises"
+import { access, readdir, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
+import { computerUseServerName } from "../protocol/connections.ts"
 import { McpClient, McpConnectionError } from "../runtime/mcp-client.ts"
 import type { McpServerConfig } from "../runtime/mcp-config.ts"
 import type { UserConfigStore } from "./user-config.ts"
 
-export const computerUseServerName = "cua_repl"
-
-export type ComputerUseStatus = Readonly<{
-  available: boolean
-  connected: boolean
-  backend: "codex-unified" | null
-  serverName: typeof computerUseServerName
-  tools: readonly string[]
-  message?: string
-}>
+export { computerUseServerName } from "../protocol/connections.ts"
 
 export type ComputerUseDiscoveryOptions = Readonly<{
   codexHome?: string

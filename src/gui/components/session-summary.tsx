@@ -11,14 +11,14 @@ import {
 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { assetSourceKey } from "../../core/asset-types.ts"
 import type { UserAttachment } from "../../protocol/asset-types.ts"
+import { assetSourceKey } from "../../protocol/asset-types.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import type { SessionCacheExpiry } from "../../protocol/session-cache-expiry.ts"
 import type {
   GitPullRequestsResponse,
   GitStatusResponse,
-} from "../../server/workspace.ts"
+} from "../../protocol/workspace.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { useSessionAgents } from "../hooks/use-session-agents.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -60,7 +60,7 @@ function SummaryPopover({
 }: Readonly<{
   cwd: string | undefined
   apiBase: string
-  gitInfo: import("../../core/rollout.ts").GitInfo | undefined
+  gitInfo: import("../../protocol/session-metadata.ts").GitInfo | undefined
   cacheExpiry: SessionCacheExpiry | undefined
 }>) {
   const id = useId()

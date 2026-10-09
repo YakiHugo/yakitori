@@ -1,7 +1,7 @@
-import { createUserInput } from "../core/user-input.ts"
 import type { ImageAttachment, PdfAttachment } from "../protocol/asset-types.ts"
 import type { ContextExcerpt } from "../protocol/input-context.ts"
 import type { InputContent, InputDraft } from "../protocol/user-input.ts"
+import { createUserInput } from "../protocol/user-input.ts"
 export type EditorPart =
   | Readonly<{ type: "text"; text: string }>
   | (Readonly<{ type: "image" }> & ImageAttachment)
@@ -65,7 +65,7 @@ export function draftToEditorParts(draft: InputDraft): readonly EditorPart[] {
   return parts
 }
 
-import { assetSourceKey } from "../core/asset-types.ts"
+import { assetSourceKey } from "../protocol/asset-types.ts"
 
 export function textInputDraft(text: string): InputDraft {
   return { kind: "input", text, elements: [], attachments: [] }

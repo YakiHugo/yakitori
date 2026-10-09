@@ -1,3 +1,7 @@
+import type { TurnInput } from "../protocol/input-queue.ts"
+
+export type { TurnInput } from "../protocol/input-queue.ts"
+
 import type {
   AgentStatus,
   SessionPermissionEvent,
@@ -10,10 +14,7 @@ export type {
 } from "../protocol/permissions.ts"
 
 import type {
-  EventMetadata,
-  InputContent,
   KernelError,
-  ModelSelection,
   StartedExecutionItem,
   TurnCompletion,
 } from "../kernel/events.ts"
@@ -34,17 +35,6 @@ export const SessionStatus = {
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus]
 
 export type SessionIdleCause = "completed" | "interrupted" | "failed"
-
-export type TurnInput = Readonly<{
-  submissionId: string
-  content: InputContent
-  manualCompact?: boolean
-  modelSelection?: ModelSelection
-  metadata?: EventMetadata
-  parentInputId?: string
-  // Host-generated continuation, not a user message or user authorization.
-  goalId?: string
-}>
 
 export type SubmitTurnInput = Omit<TurnInput, "submissionId"> & {
   readonly submissionId?: string

@@ -1,3 +1,5 @@
+import { chooseNewEngine, useEngineStore } from "../store/engine-store.ts"
+import { EngineSelector, EngineSessionItems } from "./engine-session.tsx"
 import {
   ArrowDown,
   ArrowUp,
@@ -26,6 +28,7 @@ import { Button } from "./ui/button.tsx"
 import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 
 export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
+  const engineId = useEngineStore((state) => state.engineId)
   const navRef = useSidebarMotion()
   const dragging = useContext(SidebarDragKind)
   const emptyPinned = useAppStore((state) => {
@@ -63,12 +66,19 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
           </button>
         </div>
       </div>
+      <div className="px-2 pb-2">
+        <EngineSelector />
+      </div>
       <div className="relative px-2 pb-3">
         <button
           type="button"
           aria-label="New session"
           className={cn("sidebar-row w-full", showPinTarget && "invisible")}
-          onClick={() => startNewSession()}
+          onClick={() =>
+            engineId === undefined
+              ? startNewSession()
+              : chooseNewEngine(engineId)
+          }
         >
           <SquarePen size={16} />
           <span className="flex-1 text-left">New session</span>
@@ -99,6 +109,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
               ))}
           />
           <ProjectsSection />
+          <EngineSessionItems />
           {projects.length === 0 ? (
             <SessionItems projectId={undefined} />
           ) : (

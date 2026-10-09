@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { SubscriptionConnection } from "../../server/subscription-connections.ts"
+import type { SubscriptionConnection } from "../../protocol/providers.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"

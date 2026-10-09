@@ -3,6 +3,17 @@ import { createConfiguredModelsManager } from "../../src/runtime/configured-mode
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
 describe("configured models manager", () => {
+  it("validates wire instruction profile IDs before using native model metadata", () => {
+    expect(() =>
+      createConfiguredModelsManager({
+        provider: "custom",
+        models: [
+          { id: "custom-model", instructionProfileId: "unknown-profile" },
+        ],
+      }),
+    ).toThrow("Unknown instruction profile ID")
+  })
+
   it("lists only configured models and routes known metadata through the connection ID", async () => {
     const manager = createConfiguredModelsManager({
       provider: "openai-work",

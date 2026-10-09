@@ -1,3 +1,4 @@
+export { createRequestId, isRequestId } from "../protocol/request-id.ts"
 export const IdPrefix = {
   Compaction: "compaction",
   Event: "event",
@@ -26,10 +27,6 @@ export function createItemId(): string {
   return createPrefixedId(IdPrefix.Item)
 }
 
-export function createRequestId(): string {
-  return createPrefixedId(IdPrefix.Request)
-}
-
 export function createSessionId(): string {
   return createPrefixedId(IdPrefix.Session)
 }
@@ -40,10 +37,6 @@ export function createTurnId(): string {
 
 export function isIdWithPrefix(value: string, prefix: IdPrefix): boolean {
   return value.startsWith(`${prefix}_`)
-}
-
-export function isRequestId(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
 }
 
 export function isGeneratedSessionId(value: string): boolean {

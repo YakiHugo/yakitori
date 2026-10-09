@@ -1,3 +1,8 @@
+import {
+  readAcpEngineConfiguration,
+  type AcpEngineConfiguration,
+} from "./engine-configuration.ts"
+import { EngineRegistry } from "./engine-registry.ts"
 import { createHash } from "node:crypto"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
@@ -173,6 +178,7 @@ const MCP_STEP_GRACE_MS = 1_000
 const serverUserAgent = `${packageJson.name}/${packageJson.version}`
 
 export type YakitoriApplicationOptions = {
+  readonly acpEngines?: readonly AcpEngineConfiguration[]
   readonly chatgpt?: Readonly<{
     fetchFn?: typeof fetch
     openAuthorization?: (url: string, signal?: AbortSignal) => Promise<void>
@@ -234,6 +240,9 @@ export async function createYakitoriApplication(
       : requireAssetBaseUrl(options.assetBaseUrl)
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
+  const engineConfigurations = readAcpEngineConfiguration(
+    options.acpEngines ?? process.env.YAKITORI_ACP_ENGINES,
+  )
   const rootDir = options.rootDir ?? ".yakitori"
   const configuredSessionStoreRoot =
     options.sessionStoreRoot ?? join(rootDir, "sessions")
@@ -249,6 +258,7 @@ export async function createYakitoriApplication(
   const approvalPolicy = resolveApprovalPolicy(
     process.env.YAKITORI_APPROVAL_POLICY,
   )
+  let engines: EngineRegistry | undefined
   let goals: GoalRuntime | undefined
   let runtimeLock: RuntimeLock | undefined
   let threadManagerForCleanup: ThreadManager | undefined
@@ -283,6 +293,14 @@ export async function createYakitoriApplication(
     await mkdir(configuredSessionStoreRoot, { recursive: true })
     const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
     runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
+    const engineRegistry = new EngineRegistry({
+      configurations: engineConfigurations,
+      databasePath: join(rootDir, "external-sessions.sqlite"),
+      workspace,
+      changed: (sessionId) =>
+        broadcastNotification?.("engineSession/changed", { sessionId }),
+    })
+    engines = engineRegistry
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
     })
@@ -1282,6 +1300,7 @@ export async function createYakitoriApplication(
       },
       createHttpServer(httpOptions = {}) {
         return createYakitoriHttpServer({
+          engines: engineRegistry,
           mcp,
           interactions,
           sideChats,
@@ -1338,6 +1357,7 @@ export async function createYakitoriApplication(
           sideChats,
           closeExtensions,
           goals,
+          engines,
         )
         await closePromise
       },
@@ -1357,6 +1377,7 @@ export async function createYakitoriApplication(
         sideChatsForCleanup,
         closeExtensions,
         goals,
+        engines,
       )
     } catch (cleanupError) {
       throw new AggregateError(
@@ -1940,8 +1961,14 @@ async function closeApplicationResources(
   sideChats?: SideChatService,
   closeExtensions?: () => Promise<void>,
   goals?: GoalRuntime,
+  engines?: EngineRegistry,
 ): Promise<void> {
   const errors: unknown[] = []
+  try {
+    await engines?.close()
+  } catch (error) {
+    errors.push(error)
+  }
   try {
     await closeExtensions?.()
   } catch (error) {

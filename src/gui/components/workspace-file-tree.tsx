@@ -16,7 +16,7 @@ import { memo, useEffect, useState } from "react"
 import type {
   WorkspaceFindFilesResponse,
   WorkspaceListResponse,
-} from "../../server/workspace.ts"
+} from "../../protocol/workspace.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { languageForPath } from "../lib/syntax-highlighter.ts"
 import { useAppStore } from "../store/app-store.ts"

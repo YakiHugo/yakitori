@@ -1,4 +1,4 @@
-import { literalMatches } from "../../core/thread-search.ts"
+import { literalMatches } from "../../shared/literal-matches.ts"
 
 // Search the logical message, keeping a map back to its rendered text nodes.
 // Inline Markdown and syntax spans must not split a phrase into separate hits.

@@ -1,0 +1,10 @@
+export type ModelFailureKind =
+  | "authentication"
+  | "connection_failed"
+  | "idle_timeout"
+  | "invalid_request"
+  | "protocol_error"
+  | "provider_error"
+  | "rate_limited"
+  | "server_error"
+  | "stream_disconnected"

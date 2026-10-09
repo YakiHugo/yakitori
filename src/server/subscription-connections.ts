@@ -1,16 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process"
-import { ConfigurationError } from "./config-errors.ts"
+import type { SubscriptionConnection } from "../protocol/providers.ts"
 
-export type SubscriptionConnection = Readonly<{
-  id: "codex" | "grok"
-  name: string
-  available: boolean
-  login?: Readonly<{
-    state: "running" | "succeeded" | "failed"
-    url?: string
-    message?: string
-  }>
-}>
+export type { SubscriptionConnection } from "../protocol/providers.ts"
+
+import { type ChildProcess, spawn } from "node:child_process"
+import { ConfigurationError } from "./config-errors.ts"
 
 export type SubscriptionConnections = {
   read(): Promise<readonly SubscriptionConnection[]>

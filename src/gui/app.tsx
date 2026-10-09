@@ -1,3 +1,5 @@
+import { EngineConversation } from "./components/engine-session.tsx"
+import { useEngineStore } from "./store/engine-store.ts"
 import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
@@ -14,6 +16,8 @@ import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 
 export function App() {
+  const externalSession = useEngineStore((state) => state.engineId)
+  const externalSessionId = useEngineStore((state) => state.sessionId)
   const message = useAppStore((state) => state.message || state.providersError)
   const hydrating = useAppStore(
     (state) =>
@@ -40,6 +44,8 @@ export function App() {
           )}
           {settingsOpen ? (
             <SettingsPage />
+          ) : externalSession !== undefined ? (
+            <EngineConversation key={externalSessionId ?? externalSession} />
           ) : hydrating ? (
             <div
               role="status"
@@ -193,7 +199,7 @@ function EmptyState() {
             ? `What would you like to build in ${project.name}?`
             : "What would you like to work on?"}
         </h2>
-        <div className="mb-7 flex justify-center">
+        <div className="mb-7 flex justify-center gap-3">
           <select
             aria-label="New session project"
             value={currentProject ?? ""}

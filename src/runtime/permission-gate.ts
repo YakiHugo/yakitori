@@ -1,3 +1,7 @@
+import type { RuntimePermissionRequest } from "../protocol/permissions.ts"
+
+export type { RuntimePermissionRequest } from "../protocol/permissions.ts"
+
 import type { RuntimePermissionEvent } from "../protocol/permission-events.ts"
 
 export type { RuntimePermissionEvent } from "../protocol/permission-events.ts"
@@ -5,17 +9,6 @@ export type { RuntimePermissionEvent } from "../protocol/permission-events.ts"
 import type { SessionPermissionReason } from "../core/session-io.ts"
 
 export type RuntimePermissionReason = SessionPermissionReason
-
-export type RuntimePermissionRequest = {
-  readonly permissionRequestId: string
-  readonly sessionId: string
-  readonly turnId: string
-  readonly toolCallId: string
-  readonly action: string
-  readonly subject?: string
-  readonly reason?: string
-  readonly createdAt: string
-}
 
 export type RuntimePermissionOutcome =
   | { readonly kind: "allow"; readonly reason?: RuntimePermissionReason }

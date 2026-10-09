@@ -1,33 +1,20 @@
+import type { ChatGPTConnectionState } from "../protocol/connections.ts"
+
+export type { ChatGPTConnectionState } from "../protocol/connections.ts"
+
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import { openChatGPTAuthorization } from "./chatgpt-browser.ts"
 import { createChatGPTConnectionMetadata } from "./chatgpt-connection-metadata.ts"
 import {
-  createChatGPTCredentialStore,
   type ChatGPTAccountIdentity,
+  createChatGPTCredentialStore,
 } from "./chatgpt-credential-store.ts"
 import { createChatGPTLoopback } from "./chatgpt-loopback.ts"
 import { ChatGPTAuthError, createChatGPTOAuth } from "./chatgpt-oauth.ts"
 import { createChatGPTTokenClient } from "./chatgpt-token-client.ts"
 import { ConfigurationError } from "./config-errors.ts"
 
-export type ChatGPTConnectionState = Readonly<{
-  accounts: readonly Readonly<{
-    id: string
-    label: string
-    email?: string
-    providerId: string
-    state: "connected" | "identity_only" | "signed_out"
-    remoteRevocation?: "confirmed" | "unconfirmed"
-  }>[]
-  attempt?: Readonly<{
-    id: string
-    accountId?: string
-    state: "waiting" | "succeeded" | "cancelled" | "failed" | "identity_only"
-    message?: string
-  }>
-  welcomeRequired: boolean
-}>
 export type ChatGPTConnections = ReturnType<typeof createChatGPTConnections>
 
 // This owner joins verified OAuth, protected credentials and display metadata.

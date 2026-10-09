@@ -1,8 +1,17 @@
-import { mcpServersFromConfig } from "./mcp-configuration.ts"
-import {
-  providersFromConfig,
-  type StoredProviderConfiguration,
-} from "./provider-configuration.ts"
+import type { ConfigurationSnapshot as WireConfigurationSnapshot } from "../protocol/configuration.ts"
+export type ConfigurationSnapshot = WireConfigurationSnapshot<UserConfiguration>
+
+import type {
+  ConfigLayerSource,
+  ConfigOrigin,
+} from "../protocol/configuration.ts"
+
+export type {
+  ConfigLayerSnapshot,
+  ConfigLayerSource,
+  ConfigOrigin,
+} from "../protocol/configuration.ts"
+
 import { createHash, randomUUID } from "node:crypto"
 import {
   mkdir,
@@ -18,15 +27,13 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { flock } from "fs-ext"
 import {
   parse,
-  TomlError,
   stringify,
+  TomlError,
   type TomlTable,
   type TomlTableWithoutBigInt,
   type TomlValue,
   type TomlValueWithoutBigInt,
 } from "smol-toml"
-import { ConfigurationError } from "./config-errors.ts"
-import { resolveYakitoriHome } from "./env-file.ts"
 import type {
   AutoCompactTokenLimitScope,
   ModelRequestPolicy,
@@ -43,7 +50,14 @@ import { MAX_TIMER_DELAY_MS } from "../runtime/model-request.ts"
 import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
 import type { SkillConfiguration } from "../runtime/skills.ts"
 import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
+import { ConfigurationError } from "./config-errors.ts"
+import { resolveYakitoriHome } from "./env-file.ts"
+import { mcpServersFromConfig } from "./mcp-configuration.ts"
 import type { ApiUserModelPreference } from "./protocol.ts"
+import {
+  providersFromConfig,
+  type StoredProviderConfiguration,
+} from "./provider-configuration.ts"
 
 export type UserConfigStore = {
   read(): Promise<ApiUserModelPreference | undefined>
@@ -54,30 +68,6 @@ export type UserConfigStore = {
 }
 
 export type ConfigReadInput = Readonly<{ cwd?: string }>
-
-export type ConfigLayerSource = "user" | "project"
-
-export type ConfigLayerSnapshot = Readonly<{
-  source: ConfigLayerSource
-  path: string
-  version: string
-  disabledReason?: string
-}>
-
-export type ConfigOrigin = Readonly<{
-  source: ConfigLayerSource
-  path: string
-  version: string
-}>
-
-export type ConfigurationSnapshot = Readonly<{
-  configuration: UserConfiguration
-  // JSON has no bigint representation. TOML integers outside its safe range
-  // are exposed as exact base-10 strings on the RPC wire.
-  effective: TomlTableWithoutBigInt
-  origins: Readonly<Record<string, ConfigOrigin>>
-  layers: readonly ConfigLayerSnapshot[]
-}>
 
 export type ConfigValueWrite = Readonly<{
   keyPath: readonly string[]

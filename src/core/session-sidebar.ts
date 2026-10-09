@@ -1,35 +1,19 @@
+import type {
+  SessionPresentation,
+  SessionSidebar,
+  SidebarChange,
+  SidebarSection,
+} from "../protocol/sidebar.ts"
+
+export type {
+  SessionPresentation,
+  SessionSidebar,
+  SidebarChange,
+  SidebarSection,
+} from "../protocol/sidebar.ts"
+
 import { randomUUID } from "node:crypto"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
-
-export type SessionPresentation = Readonly<{
-  title?: string
-  archived?: boolean
-  sectionId?: string
-  sectionPosition?: number
-}>
-export type SidebarSection = Readonly<{ id: string; name: string }>
-export type SessionSidebar = Readonly<{
-  sections: readonly SidebarSection[]
-  entries: Readonly<Record<string, SessionPresentation>>
-}>
-export type SidebarChange =
-  | Readonly<{
-      type: "session"
-      sessionId: string
-      title?: string
-      archived?: boolean
-      sectionId?: string | null
-    }>
-  | Readonly<{
-      type: "move-session"
-      sessionId: string
-      sectionId: string | null
-      beforeSessionId?: string
-    }>
-  | Readonly<{ type: "create-section"; name: string }>
-  | Readonly<{ type: "rename-section"; sectionId: string; name: string }>
-  | Readonly<{ type: "delete-section"; sectionId: string }>
-  | Readonly<{ type: "reorder-sections"; sectionIds: readonly string[] }>
 
 export function emptySessionSidebar(): SessionSidebar {
   return { sections: [], entries: {} }

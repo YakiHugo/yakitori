@@ -1,3 +1,13 @@
+import type {
+  AnswerQuestionRequest,
+  PendingElicitation,
+} from "../protocol/interactions.ts"
+
+export type {
+  AnswerQuestionRequest,
+  PendingElicitation,
+} from "../protocol/interactions.ts"
+
 import { createHash, randomUUID } from "node:crypto"
 import type {
   ElicitRequest,
@@ -11,12 +21,6 @@ import { parseUserQuestions } from "../kernel/user-interaction.ts"
 import type { ApplicationResult } from "./application-result.ts"
 import type { ServerHandlers } from "./handlers.ts"
 import type { ApiAdmitInputResponse } from "./protocol.ts"
-
-export type PendingElicitation = Readonly<{
-  requestId: string
-  serverName: string
-  params: ElicitRequest["params"]
-}>
 
 export class UserInteractionError extends Error {}
 
@@ -93,12 +97,6 @@ export function createElicitationBroker() {
 }
 
 export type ElicitationBroker = ReturnType<typeof createElicitationBroker>
-
-export type AnswerQuestionRequest = Readonly<{
-  sessionId: string
-  toolCallId: string
-  answers: readonly string[]
-}>
 
 export function createSessionInteractions(
   store: ThreadStore,

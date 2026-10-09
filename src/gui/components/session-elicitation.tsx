@@ -1,7 +1,7 @@
 import type { ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ExternalLink } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
-import type { PendingElicitation } from "../../server/user-interactions.ts"
+import type { PendingElicitation } from "../../protocol/interactions.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"

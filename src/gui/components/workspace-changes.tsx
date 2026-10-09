@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react"
 import type {
   GitDiffResponse,
   GitStatusResponse,
-} from "../../server/workspace.ts"
+} from "../../protocol/workspace.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"

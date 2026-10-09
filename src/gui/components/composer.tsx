@@ -1,10 +1,10 @@
 import { useCallback, useContext, useRef, useState } from "react"
+import { GOAL_DIRECTIVE } from "../../protocol/directives.ts"
 import {
   inputContent,
   inputContentAttachments,
   inputContentText,
-} from "../../core/user-input.ts"
-import { GOAL_DIRECTIVE } from "../../kernel/events.ts"
+} from "../../protocol/user-input.ts"
 import {
   discardDraftAttachments,
   requireDesktopBridge,

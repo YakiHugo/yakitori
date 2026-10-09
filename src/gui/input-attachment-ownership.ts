@@ -1,7 +1,7 @@
-import { assetSourceKey } from "../core/asset-types.ts"
-import { inputContentAttachments } from "../core/user-input.ts"
 import type { UserAttachment } from "../protocol/asset-types.ts"
+import { assetSourceKey } from "../protocol/asset-types.ts"
 import type { InputContent, InputDraft } from "../protocol/user-input.ts"
+import { inputContentAttachments } from "../protocol/user-input.ts"
 
 // Editor Undo steps can outlive staging files. This renderer-local ownership
 // map resolves those references to the server's promoted assets; it never

@@ -8,6 +8,21 @@ import {
   parseJsonRpcMessage,
   type RequestId,
 } from "../../protocol/rpc-messages.ts"
+import type {
+  GoalChangedNotification,
+  McpStatusChangedNotification,
+  ProjectChangedNotification,
+  RpcMethodParams,
+  RpcMethodResponses,
+  SessionCompletedNotification,
+  SessionEventNotification,
+  SessionPermissionRequestParams,
+  SessionPermissionRequestResult,
+  SessionReplayCompleteNotification,
+  SessionSubscribeResponse,
+  SessionSubscriptionErrorNotification,
+  SidebarChangedNotification,
+} from "../../protocol/rpc-methods.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
@@ -26,22 +41,7 @@ import {
   sideChatChangedMethod,
   websocketRpcPath,
 } from "../../protocol/rpc-wire.ts"
-import type {
-  GoalChangedNotification,
-  McpStatusChangedNotification,
-  ProjectChangedNotification,
-  RpcMethodParams,
-  RpcMethodResponses,
-  SessionCompletedNotification,
-  SessionEventNotification,
-  SessionPermissionRequestParams,
-  SessionPermissionRequestResult,
-  SessionReplayCompleteNotification,
-  SessionSubscribeResponse,
-  SessionSubscriptionErrorNotification,
-  SidebarChangedNotification,
-} from "../../server/rpc/methods.ts"
-import type { SideChatSnapshot } from "../../server/side-chat.ts"
+import type { SideChatSnapshot } from "../../protocol/side-chat.ts"
 
 // The GUI's only server channel: JSON-RPC over one WebSocket at /rpc,
 // reproducing the old REST+SSE behavior — snapshot via the session/subscribe
@@ -91,6 +91,9 @@ type AppMethod = Exclude<
 >
 
 export type AppRpcClient = {
+  subscribeToEngineSessionChanges(
+    listener: (sessionId: string | undefined) => void,
+  ): () => void
   subscribeToProviderChanges(listener: () => void): () => void
   subscribeToGoalChanges(
     listener: (notification: GoalChangedNotification | undefined) => void,
@@ -209,6 +212,9 @@ export function createAppRpcClient(options: {
     (activeSessionIds: readonly string[] | undefined) => void
   >()
   const queueChangeListeners = new Set<(sessionId: string) => void>()
+  const engineSessionListeners = new Set<
+    (sessionId: string | undefined) => void
+  >()
   const sideChatListeners = new Set<
     (snapshot: SideChatSnapshot | undefined) => void
   >()
@@ -299,6 +305,7 @@ export function createAppRpcClient(options: {
           for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
           for (const listener of sideChatListeners) listener(undefined)
+          for (const listener of engineSessionListeners) listener(undefined)
         }
         initializedOnce = true
         scheduleHeartbeat(ws)
@@ -441,6 +448,11 @@ export function createAppRpcClient(options: {
     if (message.method === sessionCompletedMethod) {
       const params = message.params as SessionCompletedNotification
       for (const listener of completionListeners) listener(params)
+      return
+    }
+    if (message.method === "engineSession/changed") {
+      const params = message.params as { sessionId: string }
+      for (const listener of engineSessionListeners) listener(params.sessionId)
       return
     }
     if (message.method === sideChatChangedMethod) {
@@ -628,6 +640,12 @@ export function createAppRpcClient(options: {
     subscribeToQueueChanges(listener) {
       queueChangeListeners.add(listener)
       return () => queueChangeListeners.delete(listener)
+    },
+    subscribeToEngineSessionChanges(listener) {
+      engineSessionListeners.add(listener)
+      return () => {
+        engineSessionListeners.delete(listener)
+      }
     },
     subscribeToSideChatChanges(listener) {
       sideChatListeners.add(listener)
