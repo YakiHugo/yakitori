@@ -9,6 +9,12 @@ import {
 
 export const MAX_QUEUED_INPUT_TEXT_CHARS = 1 << 20
 
+export class QueuedSessionArchivedError extends Error {
+  constructor() {
+    super("Restore this conversation before starting queued input.")
+  }
+}
+
 export class QueuedInputTooLargeError extends Error {
   constructor() {
     super(
@@ -20,6 +26,7 @@ export class QueuedInputTooLargeError extends Error {
 // The editable next-Turn queue follows the thread lifecycle. RPC handlers
 // validate requests and attachments; this service owns queue state and dispatch.
 export class QueuedItemService {
+  readonly #isArchived: ((sessionId: string) => Promise<boolean>) | undefined
   readonly #queue: InputQueue
   readonly #manager: ThreadManager
   readonly #notifyChanged: ((sessionId: string) => void) | undefined
@@ -35,12 +42,14 @@ export class QueuedItemService {
 
   constructor(input: {
     queue: InputQueue
+    isArchived?: (sessionId: string) => Promise<boolean>
     manager: ThreadManager
     notifyChanged?: (sessionId: string) => void
     onStarting?: (item: QueuedInput) => void
     onNotStarted?: (item: QueuedInput) => void
     reporter: OperationalFailureReporter
   }) {
+    this.#isArchived = input.isArchived
     this.#queue = input.queue
     this.#manager = input.manager
     this.#notifyChanged = input.notifyChanged
@@ -182,6 +191,8 @@ export class QueuedItemService {
     thread: AgentThread,
     item: QueuedInput,
   ): Promise<TurnInputSubmission> {
+    if (await this.#isArchived?.(thread.id))
+      throw new QueuedSessionArchivedError()
     this.#onStarting?.(item)
     let submission: TurnInputSubmission
     try {
@@ -217,6 +228,7 @@ export class QueuedItemService {
         return
       await this.start(thread, item)
     }).catch((error: unknown) => {
+      if (error instanceof QueuedSessionArchivedError) return
       reportOperationalFailure(this.#reporter, {
         component: "input-queue",
         operation: "dispatch",

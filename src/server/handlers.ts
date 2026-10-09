@@ -95,6 +95,7 @@ import {
 import {
   MAX_QUEUED_INPUT_TEXT_CHARS,
   QueuedInputTooLargeError,
+  QueuedSessionArchivedError,
   QueuedItemService,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
@@ -253,6 +254,8 @@ export function createThreadServerHandlers(
   const queueOptions = { ...options, inputQueue }
   const queuedItems = new QueuedItemService({
     queue: inputQueue,
+    isArchived: async (sessionId) =>
+      (await options.store.sessionPresentation(sessionId)).archived === true,
     manager: options.manager,
     ...(options.notifyQueueChanged === undefined
       ? {}
@@ -985,13 +988,20 @@ export function createThreadServerHandlers(
     async updateSidebar(input) {
       try {
         const change = parseSidebarChange(input)
-        if (
-          change.type === "session" &&
-          change.archived === true &&
-          options.manager.getThread(change.sessionId)?.snapshot()
-            .activeTurnId !== undefined
-        ) {
-          throw conflict("Wait for the active turn to finish before archiving.")
+        if (change.type === "session" && change.archived !== undefined) {
+          // Queue dispatch and archive transitions share admission ownership.
+          // Otherwise a queued start could race the idle check and run hidden.
+          return await queuedItems.withLock(change.sessionId, async () => {
+            if (
+              change.archived === true &&
+              options.manager.getThread(change.sessionId)?.snapshot()
+                .activeTurnId !== undefined
+            )
+              throw conflict(
+                "Wait for the active turn to finish before archiving.",
+              )
+            return ok(200, await options.store.updateSessionSidebar(change))
+          })
         }
         return ok(200, await options.store.updateSessionSidebar(change))
       } catch (error) {
@@ -1857,7 +1867,13 @@ export function createThreadServerHandlers(
           content: result.item.input.content,
         })
       } catch (error) {
-        return fail(error, reporter, "start-queued-input")
+        return fail(
+          error instanceof QueuedSessionArchivedError
+            ? conflict(error.message)
+            : error,
+          reporter,
+          "start-queued-input",
+        )
       }
     },
 
