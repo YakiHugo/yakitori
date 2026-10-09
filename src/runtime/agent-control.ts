@@ -90,10 +90,7 @@ export type BoundAgentControl = Readonly<{
     readonly target: string
     readonly message: string
   }): Promise<{ readonly agentId: string; readonly path: string }>
-  wait(
-    timeoutMs?: number,
-    signal?: AbortSignal,
-  ): Promise<readonly AgentUpdate[]>
+  wait(timeoutMs?: number, signal?: AbortSignal): Promise<AgentWaitResult>
   interrupt(target: string): Promise<{
     readonly agentId: string
     readonly path: string
@@ -115,6 +112,13 @@ export type AgentUpdate = Readonly<{
   path: string
   status: AgentStatus
 }>
+
+export type AgentWaitResult = Readonly<{
+  reason: "mailbox" | "status" | "timeout" | "background_error"
+  updates: readonly AgentUpdate[]
+}>
+
+type WaitWakeReason = AgentWaitResult["reason"] | "aborted"
 
 export type AgentControl = Readonly<{
   rolloutBudget: RolloutBudget
@@ -189,7 +193,7 @@ export function createAgentControl(input: {
   const executionSlots = new Map<string, Promise<void>>()
   const pendingFollowups = new Map<string, number>()
   const updates = new Map<string, AgentUpdate[]>()
-  const waiters = new Map<string, Set<() => void>>()
+  const waiters = new Map<string, Set<(reason: WaitWakeReason) => void>>()
   const runs = new Map<string, Promise<void>>()
   const tasks = new Map<string, AgentTask[]>()
   const knownDeliveryIds = new Set<string>()
@@ -404,7 +408,7 @@ export function createAgentControl(input: {
               : `agent_message:${actor.agentId}:${request.messageId}`,
           text: `<inter_agent_message from="${actor.path}">\n${request.message}\n</inter_agent_message>`,
         })
-        wakeWaiters(targetAgent.agentId)
+        wakeWaiters(targetAgent.agentId, "mailbox")
         return { agentId: targetAgent.agentId, path: targetAgent.path }
       },
       async followup(request) {
@@ -438,27 +442,41 @@ export function createAgentControl(input: {
         signal?.throwIfAborted()
         retryPendingDeliveries()
         const pending = drainUpdates(sessionId)
-        if (pending.length > 0 || timeoutMs <= 0) return pending
-        await new Promise<void>((resolve) => {
-          const listeners = waiters.get(sessionId) ?? new Set<() => void>()
-          let timer: ReturnType<typeof setTimeout> | undefined
-          const wake = () => {
-            if (timer !== undefined) clearTimeout(timer)
-            listeners.delete(wake)
-            if (listeners.size === 0) waiters.delete(sessionId)
-            signal?.removeEventListener("abort", wake)
-            resolve()
-          }
-          listeners.add(wake)
-          waiters.set(sessionId, listeners)
-          timer = setTimeout(wake, timeoutMs)
-          signal?.addEventListener("abort", wake, { once: true })
-          if (signal?.aborted) wake()
-        })
+        if (pending.length > 0) return { reason: "status", updates: pending }
+        if (timeoutMs <= 0) return { reason: "timeout", updates: [] }
+        const reason = await new Promise<AgentWaitResult["reason"]>(
+          (resolve, reject) => {
+            const listeners =
+              waiters.get(sessionId) ??
+              new Set<(reason: WaitWakeReason) => void>()
+            let timer: ReturnType<typeof setTimeout> | undefined
+            let settled = false
+            const wake = (reason: WaitWakeReason) => {
+              if (settled) return
+              settled = true
+              if (timer !== undefined) clearTimeout(timer)
+              listeners.delete(wake)
+              if (listeners.size === 0) waiters.delete(sessionId)
+              signal?.removeEventListener("abort", abort)
+              if (reason === "aborted") reject(signal?.reason)
+              else resolve(reason)
+            }
+            const abort = () => wake("aborted")
+            listeners.add(wake)
+            waiters.set(sessionId, listeners)
+            timer = setTimeout(() => wake("timeout"), timeoutMs)
+            signal?.addEventListener("abort", abort, { once: true })
+            if (signal?.aborted) abort()
+          },
+        )
         // Cancellation releases the tool's execution reservation without
         // consuming mailbox updates that belong to the next live Turn.
         signal?.throwIfAborted()
-        return drainUpdates(sessionId)
+        // A deadline that won the race must leave later updates for the next wait.
+        return {
+          reason,
+          updates: reason === "timeout" ? [] : drainUpdates(sessionId),
+        }
       },
       async interrupt(targetName) {
         await ensureReady()
@@ -585,7 +603,8 @@ export function createAgentControl(input: {
       runs.delete(agent.agentId)
       releaseIdleExecutionSlot(agent.path)
       if (retry) startWorkerIfNeeded(agent)
-      else wakeWaiters(agent.parentSessionId ?? agent.agentId)
+      else
+        wakeWaiters(agent.parentSessionId ?? agent.agentId, "background_error")
     }
     void worker.then(
       () => settle(true),
@@ -656,7 +675,6 @@ export function createAgentControl(input: {
         text: completionMessage(agent, task.outcome),
       })
       tasks.get(agent.agentId)?.shift()
-      wakeWaiters(agent.parentSessionId)
       pushUpdatesToAncestors(agent, outcomeStatus(task.outcome))
     }
   }
@@ -682,9 +700,9 @@ export function createAgentControl(input: {
     )
   }
 
-  function wakeWaiters(sessionId: string): void {
+  function wakeWaiters(sessionId: string, reason: WaitWakeReason): void {
     waiters.get(sessionId)?.forEach((wake) => {
-      wake()
+      wake(reason)
     })
   }
 
@@ -715,9 +733,7 @@ export function createAgentControl(input: {
       status,
     })
     updates.set(sessionId, queued)
-    waiters.get(sessionId)?.forEach((wake) => {
-      wake()
-    })
+    wakeWaiters(sessionId, "status")
   }
 
   function pushUpdatesToAncestors(
