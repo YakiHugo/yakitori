@@ -19,7 +19,7 @@ import {
   useRef,
   useState,
 } from "react"
-import type { ContextExcerpt } from "../conversation-context.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {

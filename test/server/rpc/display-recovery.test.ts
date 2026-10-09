@@ -4,10 +4,8 @@ import {
   type ExecutionViewState,
   reduceExecutionView,
 } from "../../../src/gui/execution-view.ts"
-import {
-  createEventEnvelope,
-  type StoredEventEnvelope,
-} from "../../../src/kernel/events.ts"
+import { createEventEnvelope } from "../../../src/kernel/events.ts"
+import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import {
   createCoalescingDeltaPublisher,
   type LiveSessionEvent,
@@ -28,7 +26,7 @@ import {
 
 it("restores an active response over RPC without replaying tools or duplicating the transcript", async () => {
   const sessionId = "session_1"
-  const events: StoredEventEnvelope[] = [
+  const events: AppSessionEventEnvelope[] = [
     makeTurnStarted(sessionId, 1, "turn_1"),
   ]
   const detail = () =>
@@ -75,7 +73,7 @@ it("restores an active response over RPC without replaying tools or duplicating 
       if (frame.method === "session/event")
         state = reduceExecutionView(state, {
           type: "durable",
-          event: (frame.params as { event: StoredEventEnvelope }).event,
+          event: (frame.params as { event: AppSessionEventEnvelope }).event,
         })
       if (frame.method === "session/replayComplete")
         state = reduceExecutionView(state, {

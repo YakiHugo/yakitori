@@ -16,13 +16,13 @@ import {
   useRef,
 } from "react"
 import { assetSourceKey } from "../../core/asset-types.ts"
-import type { InputDraft } from "../../core/user-input.ts"
 import type {
   ImageAttachment,
   ImageDetail,
   PdfAttachment,
   UserAttachment,
-} from "../../kernel/events.ts"
+} from "../../protocol/asset-types.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { sameInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"

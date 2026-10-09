@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react"
 import {
   GoalStatus,
   type GoalStatus as GoalStatusValue,
-} from "../../core/goal.ts"
+} from "../../protocol/goal.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
 

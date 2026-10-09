@@ -1,7 +1,8 @@
-import type {
-  SessionPermissionEvent,
-  SessionPermissionReason,
-} from "../core/session-io.ts"
+import type { RuntimePermissionEvent } from "../protocol/permission-events.ts"
+
+export type { RuntimePermissionEvent } from "../protocol/permission-events.ts"
+
+import type { SessionPermissionReason } from "../core/session-io.ts"
 
 export type RuntimePermissionReason = SessionPermissionReason
 
@@ -21,8 +22,6 @@ export type RuntimePermissionOutcome =
   | { readonly kind: "deny"; readonly reason?: RuntimePermissionReason }
   | { readonly kind: "timeout"; readonly reason: RuntimePermissionReason }
   | { readonly kind: "aborted"; readonly reason: RuntimePermissionReason }
-
-export type RuntimePermissionEvent = SessionPermissionEvent
 
 export type PermissionGate = {
   request(input: {

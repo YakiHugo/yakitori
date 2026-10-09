@@ -1,17 +1,28 @@
+import type {
+  AgentStatus,
+  SessionPermissionEvent,
+} from "../protocol/permissions.ts"
+
+export type {
+  AgentStatus,
+  SessionPermissionEvent,
+  SessionPermissionReason,
+} from "../protocol/permissions.ts"
+
+import type {
+  EventMetadata,
+  InputContent,
+  KernelError,
+  ModelSelection,
+  StartedExecutionItem,
+  TurnCompletion,
+} from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
+import { createRequestId } from "../kernel/ids.ts"
 import {
   fingerprintInputAdmission,
   fingerprintOperation,
 } from "../kernel/operation.ts"
-import type {
-  EventMetadata,
-  KernelError,
-  ModelSelection,
-  StartedExecutionItem,
-  InputContent,
-  TurnCompletion,
-} from "../kernel/events.ts"
-import { createRequestId } from "../kernel/ids.ts"
 import type { StoredRolloutItem } from "./rollout.ts"
 
 export const SessionStatus = {
@@ -23,18 +34,6 @@ export const SessionStatus = {
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus]
 
 export type SessionIdleCause = "completed" | "interrupted" | "failed"
-
-export type AgentStatus =
-  | "pending_init"
-  | "running"
-  | "interrupted"
-  | "shutdown"
-  | "not_found"
-  | Readonly<{
-      completed: string | null
-      reason?: NonNullable<TurnCompletion["reason"]>
-    }>
-  | { readonly errored: string }
 
 export type TurnInput = Readonly<{
   submissionId: string
@@ -76,33 +75,6 @@ export type TurnInputSubmission =
   | {
       readonly type: "not_submitted"
       readonly reason: NotSubmittedReason
-    }
-
-export type SessionPermissionReason = {
-  readonly kind: string
-  readonly message?: string
-}
-
-export type SessionPermissionEvent =
-  | {
-      readonly type: "permission.requested"
-      readonly permissionRequestId: string
-      readonly sessionId: string
-      readonly turnId: string
-      readonly toolCallId: string
-      readonly action: string
-      readonly subject?: string
-      readonly reason?: string
-      readonly createdAt: string
-    }
-  | {
-      readonly type: "permission.resolved"
-      readonly permissionRequestId: string
-      readonly sessionId: string
-      readonly turnId: string
-      readonly outcome: "allow" | "deny" | "timeout" | "aborted"
-      readonly reason?: SessionPermissionReason
-      readonly createdAt: string
     }
 
 export type TurnInputMode =

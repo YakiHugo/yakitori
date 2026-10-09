@@ -1,4 +1,4 @@
-import type { ContextSource } from "../core/input-context.ts"
+import type { ContextSource } from "../protocol/input-context.ts"
 
 export type {
   ContextExcerpt,

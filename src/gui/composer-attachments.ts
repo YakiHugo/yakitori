@@ -1,4 +1,4 @@
-import type { UserAttachment } from "../kernel/events.ts"
+import type { UserAttachment } from "../protocol/asset-types.ts"
 import { rolloutAssetUrl } from "./rollout-asset-url.ts"
 
 export async function appendPickedAttachments(

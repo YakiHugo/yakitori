@@ -1,28 +1,17 @@
 import { useMemo } from "react"
 import { create } from "zustand"
 import { assetSourceKey } from "../../core/asset-types.ts"
-import type { ThreadGoal } from "../../core/goal.ts"
 import type {
   SessionSidebar,
   SidebarChange,
 } from "../../core/session-sidebar.ts"
-import type { InputDraft } from "../../core/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
   inputContentText,
 } from "../../core/user-input.ts"
-import type { InputContent } from "../../kernel/events.ts"
-import {
-  COMPACT_DIRECTIVE,
-  isKernelEvent,
-  type ModelSelection,
-  type StoredEventEnvelope,
-  type UserAttachment,
-} from "../../kernel/events.ts"
+import { COMPACT_DIRECTIVE, isKernelEvent } from "../../kernel/events.ts"
 import { createRequestId } from "../../kernel/ids.ts"
-import type { LiveSessionEvent } from "../../runtime/live-events.ts"
-import type { QueuedInput } from "../../server/input-queue.ts"
 import type {
   ApiAdmitInputResponse,
   ApiProject,
@@ -35,8 +24,17 @@ import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
   ApiUserModelPreference,
-} from "../../server/protocol.ts"
-import type { ContextExcerpt } from "../conversation-context.ts"
+} from "../../protocol/application.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import type {
+  AppSessionEventEnvelope,
+  ModelSelection,
+} from "../../protocol/events.ts"
+import type { ThreadGoal } from "../../protocol/goal.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { LiveSessionEvent } from "../../protocol/live-events.ts"
+import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
+import type { QueuedInput } from "../../server/input-queue.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -3296,13 +3294,13 @@ export function useExecutionView(): ExecutionView {
 
 function applyDurableSessionDetail(
   session: ApiSessionDetail | undefined,
-  event: StoredEventEnvelope,
+  event: AppSessionEventEnvelope,
 ): ApiSessionDetail | undefined {
   if (
     session === undefined ||
     event.sessionId !== session.id ||
     event.seq <= session.seq ||
-    !isKernelEvent(event)
+    event.type === "session.cursor"
   ) {
     return session
   }

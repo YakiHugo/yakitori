@@ -2,8 +2,8 @@ import {
   createEventEnvelope,
   type EventEnvelope,
   type KernelEvent,
-  type StoredEventEnvelope,
 } from "../../../src/kernel/index.ts"
+import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import type { LiveSessionEvent } from "../../../src/runtime/live-events.ts"
 import {
   createSessionEventHub,
@@ -266,7 +266,7 @@ export function createFakeHandlers(
 // Reimplements the durable paging contract (after..through with nextAfter)
 // over a fixed event list.
 export function pagedEventsHandler(
-  events: readonly StoredEventEnvelope[],
+  events: readonly AppSessionEventEnvelope[],
 ): ServerHandlers["readSessionEvents"] {
   return async (input) => {
     const request = input as {

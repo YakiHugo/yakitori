@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react"
-import type { ApiSessionDetail } from "../../server/protocol.ts"
+import type { ApiSessionDetail } from "../../protocol/application.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import {

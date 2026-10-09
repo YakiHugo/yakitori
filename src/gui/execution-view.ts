@@ -1,23 +1,22 @@
-import type { ContextExcerpt } from "../core/input-context.ts"
-import type { InputDraft } from "../core/user-input.ts"
 import { inputContentText } from "../core/user-input.ts"
-import {
-  isKernelEvent,
-  type ModelToolContentBlock,
-  type RuntimeEventEnvelope,
-  type StoredEventEnvelope,
-  type TokenUsage,
-  type ToolExecutionItem,
-  type TurnMetrics,
-  type TurnOutcome,
-} from "../kernel/events.ts"
-import type { LiveSessionEvent } from "../runtime/live-events.ts"
-import type { ModelFailureKind } from "../runtime/model.ts"
 import type {
   ApiPendingInput,
   ApiPendingPermission,
   ApiSessionDetail,
-} from "../server/protocol.ts"
+} from "../protocol/application.ts"
+import type { ModelToolContentBlock } from "../protocol/conversation.ts"
+import type {
+  AppSessionEventEnvelope,
+  EventEnvelope,
+  TokenUsage,
+  ToolExecutionItem,
+  TurnMetrics,
+  TurnOutcome,
+} from "../protocol/events.ts"
+import type { ContextExcerpt } from "../protocol/input-context.ts"
+import type { LiveSessionEvent } from "../protocol/live-events.ts"
+import type { InputDraft } from "../protocol/user-input.ts"
+import type { ModelFailureKind } from "../runtime/model.ts"
 import { type CitationSource, citationSources } from "./citation-sources.ts"
 
 export type ExecutionEntry =
@@ -205,7 +204,7 @@ export type ExecutionViewAction =
   | { readonly type: "snapshot"; readonly session: ApiSessionDetail }
   | { readonly type: "replay_completed"; readonly session: ApiSessionDetail }
   | { readonly type: "stream_unavailable" }
-  | { readonly type: "durable"; readonly event: StoredEventEnvelope }
+  | { readonly type: "durable"; readonly event: AppSessionEventEnvelope }
   | { readonly type: "transient"; readonly event: LiveSessionEvent }
   | {
       readonly type: "permission_resolving"
@@ -308,7 +307,7 @@ export function reduceExecutionView(
     })
   }
   if (action.type === "transient") return applyTransient(state, action.event)
-  if (!isKernelEvent(action.event))
+  if (action.event.type === "session.cursor")
     return { ...state, lastSeq: action.event.seq }
   return applyDurable(state, action.event)
 }
@@ -701,7 +700,7 @@ function applyTransient(
 
 function applyDurable(
   state: ExecutionViewState,
-  event: RuntimeEventEnvelope,
+  event: EventEnvelope,
 ): ExecutionViewState {
   let next: ExecutionViewState = { ...state, lastSeq: event.seq }
   switch (event.type) {

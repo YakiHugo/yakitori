@@ -1,15 +1,8 @@
-import type { StoredRolloutItem } from "./rollout.ts"
+import type { SessionCacheExpiry } from "../protocol/session-cache-expiry.ts"
 
-export type SessionCacheExpiry = Readonly<{
-  provider: string
-  lastTurnCompletedAt: string
-  lastRequestStartedAt?: string
-  ttlDescription: string
-  /** Estimated from the start of the last model stream, before the network request. */
-  expiresAt?: string
-  /** "minimum" describes the OpenAI policy, not a guaranteed expiry timestamp. */
-  status: "estimated" | "minimum" | "unknown"
-}>
+export type { SessionCacheExpiry } from "../protocol/session-cache-expiry.ts"
+
+import type { StoredRolloutItem } from "./rollout.ts"
 
 /**
  * The last completed turn owns the cache policy: the Session's currently

@@ -256,7 +256,17 @@ export function createSessionSubscriptions(
           options.notify(input.connectionId, sessionEventMethod, {
             sessionId: input.sessionId,
             seq: event.seq,
-            event,
+            event: isKernelEvent(event)
+              ? event
+              : {
+                  id: event.id,
+                  sessionId: event.sessionId,
+                  seq: event.seq,
+                  version: event.version,
+                  createdAt: event.createdAt,
+                  type: "session.cursor",
+                  data: {},
+                },
           })
         }
         return

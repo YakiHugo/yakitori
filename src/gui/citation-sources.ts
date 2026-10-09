@@ -1,4 +1,5 @@
-import { isJsonObject, type ModelTextBlock } from "../kernel/events.ts"
+import { isJsonObject } from "../kernel/events.ts"
+import type { ModelTextBlock } from "../protocol/conversation.ts"
 
 export type CitationSource = Readonly<{
   id: string

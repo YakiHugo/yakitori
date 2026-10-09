@@ -12,9 +12,9 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { assetSourceKey } from "../../core/asset-types.ts"
-import type { ContextExcerpt } from "../../core/input-context.ts"
-import type { SessionCacheExpiry } from "../../core/session-cache-expiry.ts"
-import type { UserAttachment } from "../../kernel/events.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { SessionCacheExpiry } from "../../protocol/session-cache-expiry.ts"
 import type {
   GitPullRequestsResponse,
   GitStatusResponse,

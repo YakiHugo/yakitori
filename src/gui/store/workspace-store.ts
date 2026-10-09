@@ -1,6 +1,6 @@
 import { create } from "zustand"
-import type { InputDraft } from "../../core/user-input.ts"
-import type { ContextExcerpt } from "../conversation-context.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import { textInputDraft } from "../input-draft.ts"
 
 export type WorkspaceView =

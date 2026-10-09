@@ -2,7 +2,7 @@ import type {
   ModelUsage,
   ThreadUsageSummary,
   UsageTokenTotals,
-} from "../core/sqlite-thread-usage-projection.ts"
+} from "../protocol/usage.ts"
 
 export type UsageRange = 7 | 30 | 90 | 366 | "all"
 export const emptyUsage = {

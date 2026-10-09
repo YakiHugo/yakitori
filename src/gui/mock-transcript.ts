@@ -1,7 +1,7 @@
 // Dev-only preview: seeds a fabricated transcript so typography and cell
 // rendering can be reviewed without a provider. Enabled via ?mock=transcript
 // (main.tsx skips boot() in that mode). Not loaded in normal sessions.
-import type { ApiSessionDetail } from "../server/protocol.ts"
+import type { ApiSessionDetail } from "../protocol/application.ts"
 import type { ExecutionEntry, ExecutionViewState } from "./execution-view.ts"
 import { createExecutionViewState } from "./execution-view.ts"
 import { draftFromEditorParts, textInputDraft } from "./input-draft.ts"

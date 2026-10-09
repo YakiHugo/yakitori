@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import type { AgentSummary } from "../../runtime/agent-control.ts"
+import type { AgentSummary } from "../../protocol/agents.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 

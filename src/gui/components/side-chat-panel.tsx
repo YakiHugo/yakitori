@@ -1,12 +1,9 @@
 import { LoaderCircle, MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { InputDraft } from "../../core/user-input.ts"
 import { inputContent, inputContentAttachments } from "../../core/user-input.ts"
-import type {
-  ImageAttachment,
-  InputContent,
-  ModelSelection,
-} from "../../kernel/events.ts"
+import type { ImageAttachment } from "../../protocol/asset-types.ts"
+import type { ModelSelection } from "../../protocol/events.ts"
+import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import {
   attachmentUrl,

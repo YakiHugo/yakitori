@@ -13,11 +13,8 @@ import {
   sessionListKey,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import {
-  createEventEnvelope,
-  EventType,
-  type StoredEventEnvelope,
-} from "../../src/kernel/events.ts"
+import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import type { AppSessionEventEnvelope } from "../../src/protocol/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "./input-fixtures.ts"
@@ -260,7 +257,7 @@ function sessionDetail(
   }
 }
 
-function seedExecution(events: StoredEventEnvelope[]) {
+function seedExecution(events: AppSessionEventEnvelope[]) {
   return events.reduce(
     (current, event) =>
       reduceExecutionView(current, {

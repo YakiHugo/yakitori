@@ -4,7 +4,7 @@ import { createPortal } from "react-dom"
 import type {
   ContextSource,
   ResponseAnnotation,
-} from "../conversation-context.ts"
+} from "../../protocol/input-context.ts"
 
 const editEvent = "yakitori:edit-annotation"
 const highlightName = "yakitori-response-annotations"

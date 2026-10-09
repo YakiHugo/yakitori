@@ -1,3 +1,4 @@
+import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
 import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import {
   chatGPTMethods,
@@ -11,11 +12,7 @@ import type {
   SessionSidebar,
   SidebarChange,
 } from "../../core/session-sidebar.ts"
-import {
-  isYakitoriError,
-  type StoredEventEnvelope,
-  YakitoriErrorCode,
-} from "../../kernel/index.ts"
+import { isYakitoriError, YakitoriErrorCode } from "../../kernel/index.ts"
 import {
   projectChangedMethod,
   sidebarChangedMethod,
@@ -195,7 +192,7 @@ export type ConfigWriteParams = Readonly<{
 export type SessionEventNotification = Readonly<{
   sessionId: string
   seq: number
-  event: StoredEventEnvelope
+  event: AppSessionEventEnvelope
 }>
 
 // Live successful root Turns only. Never included in subscription replay.

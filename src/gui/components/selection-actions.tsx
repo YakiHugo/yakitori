@@ -5,7 +5,7 @@ import type {
   ContextExcerpt,
   ResponseAnnotation,
   SelectedTextAttachment,
-} from "../conversation-context.ts"
+} from "../../protocol/input-context.ts"
 import {
   type AnnotationDetails,
   AnnotationLayer,

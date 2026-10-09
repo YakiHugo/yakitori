@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react"
 import { useContext, useEffect, useRef, useState } from "react"
-import type { ApiProject } from "../../server/protocol.ts"
+import type { ApiProject } from "../../protocol/application.ts"
 import { cn } from "../lib/utils.ts"
 import { sessionListKey, useAppStore } from "../store/app-store.ts"
 import { AddProjectButton } from "./sidebar-add-project.tsx"

@@ -1,0 +1,411 @@
+import type { AgentSummary } from "./agents.ts"
+import type {
+  AppSessionEventEnvelope,
+  EventEnvelope,
+  EventMetadata,
+  ForkReason,
+  InputRole,
+  ModelSelection,
+  TokenUsage,
+} from "./events.ts"
+import type { GoalStatus, ThreadGoal } from "./goal.ts"
+import type { GitInfo } from "./session-metadata.ts"
+import type { InputContent } from "./user-input.ts"
+export const ApiErrorCode = {
+  Conflict: "conflict",
+  Forbidden: "forbidden",
+  InternalError: "internal_error",
+  InvalidCursor: "invalid_cursor",
+  InvalidInput: "invalid_input",
+  NotFound: "not_found",
+} as const
+
+export type ApiErrorCode = (typeof ApiErrorCode)[keyof typeof ApiErrorCode]
+
+export type ApiErrorResponse = {
+  readonly error: {
+    readonly code: ApiErrorCode
+    readonly message: string
+    readonly details?: EventMetadata
+  }
+}
+
+export type ApiCreateSessionRequest = {
+  readonly title?: string
+  readonly workingDirectory?: string
+  readonly projectId?: string
+  readonly mateId?: string
+  readonly mateRevisionId?: string
+  readonly parentSessionId?: string
+  readonly metadata?: EventMetadata
+}
+
+export type ApiCreateSessionResponse = {
+  readonly session: ApiSessionDetail
+  readonly event: EventEnvelope
+}
+
+export type ApiForkSessionRequest = {
+  readonly atInputId: string
+  readonly reason: ForkReason
+  readonly content?: InputContent
+  readonly modelSelection?: ModelSelection
+}
+
+export type ApiForkSessionResponse = {
+  readonly session: ApiSessionDetail
+  readonly historyEndSeqExclusive: number
+  readonly events: readonly AppSessionEventEnvelope[]
+}
+
+export type ApiListSessionsResponse = {
+  readonly sessions: readonly ApiSessionSummary[]
+  readonly nextCursor?: string
+}
+
+export type ApiListAgentsResponse = Readonly<{
+  agents: readonly AgentSummary[]
+}>
+
+export type ApiReadGoalResponse = Readonly<{ goal: ThreadGoal | null }>
+
+export type ApiSetGoalRequest = Readonly<{
+  sessionId: string
+  objective?: string
+  status?: GoalStatus
+  tokenBudget?: number | null
+  inputId?: string | null
+}>
+
+export type ApiSetGoalResponse = Readonly<{ goal: ThreadGoal }>
+
+export type ApiClearGoalResponse = Readonly<{ goal: null }>
+
+export type ApiSearchSessionsRequest = {
+  readonly archived?: boolean
+  readonly searchTerm: string
+  readonly limit?: number
+  readonly cursor?: string
+}
+
+export type ApiSearchSessionsResponse = Readonly<{
+  data: readonly Readonly<{
+    session: ApiSessionSummary
+    snippet: string
+  }>[]
+  nextCursor?: string
+  unavailableSessionCount?: number
+}>
+
+export type ApiSearchSessionOccurrencesRequest = {
+  readonly sessionId: string
+  readonly searchTerm: string
+  readonly limit?: number
+  readonly cursor?: string
+}
+
+export type ApiSearchSessionOccurrencesResponse = {
+  readonly data: readonly Readonly<{
+    turnId: string
+    itemId: string
+    snippet: string
+    snippetMatchRange: Readonly<{ start: number; end: number }>
+  }>[]
+  readonly nextCursor?: string
+}
+
+export type ApiReadSessionRequest = {
+  readonly sessionId: string
+}
+
+export type ApiReadSessionResponse = {
+  readonly session: ApiSessionDetail
+}
+
+export type ApiSkillSummary = {
+  readonly name: string
+  readonly description: string
+  readonly path: string
+  readonly scope: "user" | "repo"
+}
+
+export type ApiListSkillsResponse = {
+  readonly skills: readonly ApiSkillSummary[]
+}
+
+export type ApiDeleteSessionResponse = {
+  readonly sessionId: string
+}
+
+export type ApiReadUsageResponse = {
+  readonly usage: import("./usage.ts").ThreadUsageSummary
+}
+
+export type ApiListProjectsResponse = {
+  readonly projects: readonly ApiProject[]
+  readonly nextCursor?: string
+}
+
+// The C8-D2 Project entity. Timestamps are integer milliseconds, matching
+// Yakitori's other API conventions; Codex's app-server wire uses Unix seconds.
+export type ApiProject = {
+  readonly id: string
+  readonly name: string
+  readonly roots: readonly string[]
+  readonly metadata: Readonly<Record<string, string>>
+  readonly position: number
+  // Pinned projects sort ahead of all unpinned ones in project/list.
+  readonly pinned: boolean
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export type ApiReadProjectResponse = {
+  readonly project: ApiProject
+}
+
+export type ApiCreateProjectResponse = {
+  readonly project: ApiProject
+}
+
+export type ApiUpdateProjectResponse = {
+  readonly project: ApiProject
+}
+
+export type ApiProviderModel = {
+  readonly id: string
+  readonly effectiveContextWindowTokens?: number
+  // Optional: servers before the model-directory work omit it; the GUI falls
+  // back to the id.
+  readonly displayName?: string
+  readonly instructionProfileId: string
+  readonly effortStyle?: "none" | "levels"
+  readonly efforts?: readonly string[]
+  // Effort the model runs at when the Session pins none.
+  readonly defaultEffort?: string
+  readonly speeds?: readonly string[]
+  readonly inputModalities?: readonly ("image" | "text" | "video")[]
+  readonly imageDetailModes?: readonly ("high" | "original")[]
+}
+
+export type ApiRateLimits =
+  | Readonly<{
+      status: "unavailable"
+      reason?: "not_supported" | "temporarily_unavailable"
+    }>
+  | Readonly<{
+      status: "available"
+      buckets: readonly Readonly<{
+        name: string
+        usedPercent: number
+        resetsAt?: number
+      }>[]
+    }>
+
+export type ApiProviderSummary = Readonly<{
+  name: string
+  displayName?: string
+  catalogError?: string
+  availability?: "available" | "requires_login"
+  credentialKind?: "api_key" | "oauth"
+  rateLimits?: ApiRateLimits
+  defaultModel?: string
+  models: readonly ApiProviderModel[]
+}>
+
+export type ApiSubscriptionProvider = "codex" | "grok" | "kimi"
+
+export type ApiSubscriptionSummary = Readonly<{
+  provider: ApiSubscriptionProvider
+  displayName: string
+  availability: "available" | "requires_login"
+  credentialKind?: "api_key" | "oauth"
+  plan?: string
+  usage: ApiRateLimits
+}>
+
+export type ApiReadSubscriptionRequest = Readonly<{
+  provider: ApiSubscriptionProvider
+}>
+
+export type ApiReadSubscriptionResponse = Readonly<{
+  subscription: ApiSubscriptionSummary
+  fetchedAt: number
+}>
+
+export type ApiUserModelPreference = {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+  readonly speed?: string
+}
+
+export type ApiListProvidersResponse = {
+  readonly providers: readonly ApiProviderSummary[]
+  readonly defaultProvider: string
+  readonly defaultModel: string
+  readonly userPreference?: ApiUserModelPreference
+}
+
+export type ApiUpdateUserModelPreferenceResponse = {
+  readonly userPreference: ApiUserModelPreference
+}
+
+export type ApiServerDiagnostics = Readonly<{
+  process: Readonly<{
+    id: number
+    uptimeSeconds: number
+    residentMemoryBytes: number
+    heapUsedBytes: number
+  }>
+  gauges: Readonly<Record<string, number>>
+}>
+
+export type ApiAdmitInputRequest = {
+  readonly sessionId: string
+  readonly requestId: string
+  readonly content: InputContent
+  readonly modelSelection?: ModelSelection
+  readonly role?: InputRole
+  readonly parentInputId?: string
+  readonly metadata?: EventMetadata
+}
+
+export type ApiAdmitInputResponse = {
+  readonly content: InputContent
+  readonly requestId: string
+  // Direct admission acknowledges a routing decision; input.admitted confirms
+  // its rollout record. Queue admission acknowledges the separate queue write.
+  readonly turnId: string
+  readonly inputId: string
+}
+
+export type ApiSteerInputRequest = {
+  readonly sessionId: string
+  readonly requestId: string
+  readonly expectedTurnId: string
+  readonly content: InputContent
+  readonly modelSelection?: ModelSelection
+  readonly metadata?: EventMetadata
+}
+
+// Steering acceptance is ephemeral: the input becomes durable when the active
+// Turn records it at its next sampling point, so the response carries the
+// steered Turn id instead of a durable input event.
+export type ApiSteerInputResponse = {
+  readonly requestId: string
+  readonly turnId: string
+  // A promoted image belongs to the Session, so an uncommitted steer can be
+  // restored even after its original draft attachment has been released.
+  readonly content: InputContent
+}
+
+export type ApiCompactSessionResponse = {
+  readonly requestId: string
+  readonly turnId: string
+}
+
+export type ApiCancelInputRequest = {
+  readonly sessionId: string
+  readonly inputId: string
+  readonly reason?: string
+}
+
+export type ApiCancelInputResponse = {
+  readonly sessionId: string
+  readonly inputId: string
+}
+
+export type ApiCancelTurnRequest = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly reason?: string
+}
+
+export type ApiCancelTurnResponse = {
+  readonly sessionId: string
+  readonly turnId: string
+}
+
+export type ApiResolvePermissionRequest = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly permissionRequestId: string
+  readonly behavior: "allow" | "deny"
+  readonly reason?: {
+    readonly kind: string
+    readonly message?: string
+  }
+}
+
+export type ApiResolvePermissionResponse = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly permissionRequestId: string
+  readonly behavior: "allow" | "deny"
+}
+
+export type ApiReadSessionEventsResponse = {
+  readonly events: readonly AppSessionEventEnvelope[]
+  readonly nextAfter?: number
+}
+
+export type ApiSessionSummary = Readonly<{
+  archived?: boolean
+  sectionId?: string
+  sectionPosition?: number
+  navigationId?: string
+  id: string
+  conversationId: string
+  seq: number
+  createdAt: string
+  updatedAt: string
+  title?: string
+  goal?: ThreadGoal
+  // True while a Turn is running in this Session.
+  active?: boolean
+  workingDirectory?: string
+  gitInfo?: GitInfo
+  // Set when the Session belongs to a live Project; omitted for orphaned
+  // projectIds (orphan-on-delete, see ThreadMetadata.projectId).
+  projectId?: string
+  mateId?: string
+  mateRevisionId?: string
+  parentSessionId?: string
+  forkedFromInputId?: string
+  forkReason?: ForkReason
+  metadata?: EventMetadata
+}>
+
+export type ApiSessionDetail = ApiSessionSummary & {
+  readonly activeTurnId?: string
+  readonly currentModel?: ModelSelection
+  readonly usage?: TokenUsage
+  readonly cacheExpiry?: import("./session-cache-expiry.ts").SessionCacheExpiry
+  readonly pendingInputs: readonly ApiPendingInput[]
+  readonly pendingPermissions: readonly ApiPendingPermission[]
+  readonly counts: {
+    readonly inputs: number
+    readonly pendingInputs: number
+    readonly turns: number
+    readonly items: number
+    readonly permissions: number
+    readonly tools: number
+  }
+}
+
+export type ApiPendingInput = {
+  readonly id: string
+  readonly text: string
+  readonly admittedAt: string
+}
+
+export type ApiPendingPermission = {
+  readonly permissionRequestId: string
+  readonly turnId: string
+  readonly toolCallId: string
+  readonly action: string
+  readonly subject?: string
+  readonly reason?: string
+  readonly createdAt: string
+}

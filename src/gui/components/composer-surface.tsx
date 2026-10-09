@@ -30,19 +30,16 @@ import {
   useState,
 } from "react"
 import { assetSourceKey } from "../../core/asset-types.ts"
-import type { ContextExcerpt } from "../../core/input-context.ts"
-import type { InputDraft } from "../../core/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
   inputContentText,
 } from "../../core/user-input.ts"
-import {
-  COMPACT_DIRECTIVE,
-  GOAL_DIRECTIVE,
-  type UserAttachment,
-} from "../../kernel/events.ts"
-import type { ApiSkillSummary } from "../../server/protocol.ts"
+import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../kernel/events.ts"
+import type { ApiSkillSummary } from "../../protocol/application.ts"
+import type { UserAttachment } from "../../protocol/asset-types.ts"
+import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import type { InputDraft } from "../../protocol/user-input.ts"
 import {
   appendAttachmentFiles,
   appendPickedAttachments,
