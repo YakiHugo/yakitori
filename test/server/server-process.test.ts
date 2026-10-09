@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises"
+import { get } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -19,19 +20,26 @@ describe("runYakitoriServerProcess", () => {
     )
   })
 
-  it("binds on loopback, serves, and shuts down cleanly", async () => {
+  it.each([
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "[::1]",
+  ])("binds on %s, reports a usable URL, and shuts down cleanly", async (host) => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-server-"))
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-workspace-"))
     const exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation(() => undefined as never)
     let resolveListening: ((url: string) => void) | undefined
-    const listening = new Promise<string>((resolve) => {
+    let rejectListening: ((error: unknown) => void) | undefined
+    const listening = new Promise<string>((resolve, reject) => {
       resolveListening = resolve
+      rejectListening = reject
     })
     try {
       const run = runYakitoriServerProcess({
-        host: "127.0.0.1",
+        host,
         port: 0,
         application: {
           rootDir,
@@ -40,10 +48,22 @@ describe("runYakitoriServerProcess", () => {
         },
         onListening: (url) => resolveListening?.(url),
       })
+      void run.catch((error: unknown) => rejectListening?.(error))
       const url = await listening
-      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
-      const health = await fetch(`${url}/health`)
-      expect(health.status).toBe(200)
+      const parsed = new URL(url)
+      expect(["127.0.0.1", "[::1]"]).toContain(parsed.hostname)
+      expect(Number(parsed.port)).toBeGreaterThan(0)
+      // This request targets the test-owned loopback listener, never an HTTP proxy.
+      const status = await new Promise<number | undefined>(
+        (resolve, reject) => {
+          get(`${url}/health`, (response) => {
+            response.resume()
+            response.once("end", () => resolve(response.statusCode))
+            response.once("error", reject)
+          }).once("error", reject)
+        },
+      )
+      expect(status).toBe(200)
 
       process.emit("SIGINT")
       await run
