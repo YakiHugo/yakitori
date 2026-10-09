@@ -1602,6 +1602,58 @@ describe("JsonlThreadStore", () => {
     ).toEqual(["session_meta", "response_item", "turn_completed"])
   })
 
+  it("preserves a valid trailing record when newline repair cannot sync", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_tail_sync_failure"
+    await createPersistentThread(store, metadata(id))
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const entry = {
+      threadId: id,
+      rolloutId: id,
+      seq: 1,
+      createdAt: new Date().toISOString(),
+      item: response("turn_recovered", "complete recoverable input"),
+    }
+    await appendFile(path, JSON.stringify(entry))
+    const probe = await open(join(root, "probe-tail-sync"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>
+    }
+    const originalSync = prototype.sync
+    let failSync = true
+    prototype.sync = async function sync() {
+      if (failSync) {
+        failSync = false
+        throw new Error("newline repair sync failed")
+      }
+      await originalSync.call(this)
+    }
+    try {
+      await expect(store.resumeThread(id)).rejects.toThrow(
+        "newline repair sync failed",
+      )
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+    }
+    expect(
+      (await readFile(path, "utf8")).endsWith(`${JSON.stringify(entry)}\n`),
+    ).toBe(true)
+    const restored = await store.resumeThread(id)
+    expect(
+      restored?.rollout.flatMap(({ item }) =>
+        item.type === "response_item" ? [item.item.turnId] : [],
+      ),
+    ).toEqual(["turn_recovered"])
+    await store.shutdownThread(id)
+    expect(
+      (await store.readThread(id))?.rollout.filter(
+        ({ item }) => item.type === "response_item",
+      ),
+    ).toHaveLength(1)
+  })
+
   it("resolves multi-generation lineage using physical history positions", async () => {
     const { store } = await createStore()
     await createPersistentThread(store, metadata("thread_root"))

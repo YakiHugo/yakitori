@@ -1997,10 +1997,13 @@ async function repairTrailingJsonLine(path: string): Promise<void> {
       JSON.parse(trailing.toString("utf8")),
     )
     if (!isStoredRolloutItem(value)) throw new Error("invalid rollout item")
-    await appendFileNewline(path)
   } catch {
     await truncate(path, completeLength)
+    return
   }
+  // A filesystem failure does not make a valid trailing record corrupt.
+  // Preserve it and let resume retry rather than discarding its bytes.
+  await appendFileNewline(path)
 }
 
 async function reconcilePendingTail(
