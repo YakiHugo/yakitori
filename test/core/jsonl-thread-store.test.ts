@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import Anthropic from "@anthropic-ai/sdk"
 import { afterEach, describe, expect, it } from "vitest"
 import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
@@ -23,7 +24,13 @@ import type {
 } from "../../src/core/rollout.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
-import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import {
+  kernelErrorFromUnknown,
+  YakitoriErrorCode,
+} from "../../src/kernel/errors.ts"
+import { createAnthropicProvider } from "../../src/runtime/anthropic-provider.ts"
+import { ModelFailureError } from "../../src/runtime/errors.ts"
+import type { ModelStreamEvent } from "../../src/runtime/model.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
 const roots: string[] = []
@@ -861,6 +868,85 @@ describe("JsonlThreadStore", () => {
       branch: "feat/session-context",
       originUrl: "https://github.com/example/project.git",
     })
+    await reopened.shutdownThread(threadId)
+  })
+
+  it("reopens a provider rejection with its selected reason and no raw response payload", async () => {
+    const { root, store } = await createStore()
+    const threadId = "thread_provider_rejection"
+    const reason =
+      "messages.2: tool_use ids must have tool_result blocks in the next message: call_read"
+    const provider = createAnthropicProvider({
+      apiKey: "unused-test-key",
+      model: "kimi-test",
+      client: new Anthropic({
+        apiKey: "unused-test-key",
+        maxRetries: 0,
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              type: "error",
+              error: { type: "invalid_request_error", message: reason },
+              privatePayload: "must-not-persist",
+            }),
+            {
+              status: 400,
+              headers: {
+                "content-type": "application/json",
+                "request-id": "request_test",
+                "x-private-header": "must-not-persist",
+              },
+            },
+          ),
+      }),
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of provider({
+      target: {
+        provider: "kimi",
+        model: "kimi-test",
+        instructionProfileId: "anthropic",
+      },
+      system: [],
+      messages: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+      tools: [],
+      toolWireProtocol: "eager",
+    }))
+      events.push(event)
+    const event = events.find((event) => event.type === "failure")
+    if (event?.type !== "failure") throw new Error("Missing model failure")
+    const error = kernelErrorFromUnknown(
+      new ModelFailureError(event.failure, { cause: event.cause }),
+    )
+    await createPersistentThread(store, metadata(threadId))
+    await store.appendItems(threadId, [
+      {
+        type: "turn_completed",
+        turnId: "turn_failed",
+        outcome: "failed",
+        error,
+      },
+    ])
+    await store.shutdownThread(threadId)
+    const reopened = new JsonlThreadStore({ root })
+    const recovered = await reopened.resumeThread(threadId)
+    const completed = recovered?.rollout.at(-1)?.item
+    expect(completed).toMatchObject({
+      type: "turn_completed",
+      outcome: "failed",
+      error: {
+        message: expect.stringContaining(reason),
+        code: "model.invalid_request",
+        details: {
+          status: 400,
+          providerCode: "invalid_request_error",
+          providerRequestId: "request_test",
+          providerDetails: { providerMessage: reason },
+        },
+      },
+    })
+    expect(JSON.stringify(completed)).not.toContain("must-not-persist")
+    expect(JSON.stringify(completed)).not.toContain("unused-test-key")
     await reopened.shutdownThread(threadId)
   })
 

@@ -22,6 +22,7 @@ export function modelFailureFromUnknown(
     kind?: ModelFailureKind
     status?: number
     providerCode?: string
+    providerMessage?: string
     providerRequestId?: string
     retryAfterMs?: number
     serverShouldRetry?: boolean
@@ -42,7 +43,18 @@ export function modelFailureFromUnknown(
         ? "connection_failed"
         : "stream_disconnected"
       : "provider_error")
-  const message = stableFailureMessage(kind, input.fallbackMessage)
+  // Keep only an adapter-selected error reason, never the SDK's formatted
+  // Error.message, which can include an entire response body.
+  // Bound diagnostic text so a provider cannot inflate durable failure records.
+  const providerMessage = input.providerMessage?.trim().slice(0, 2_000)
+  const summary = stableFailureMessage(kind, input.fallbackMessage)
+  const context = [
+    ...(input.status === undefined ? [] : [`HTTP ${input.status}`]),
+    ...(input.providerCode === undefined ? [] : [input.providerCode]),
+  ].join(", ")
+  const message = providerMessage
+    ? `${summary}${context ? ` (${context})` : ""} ${providerMessage}`
+    : summary
   return {
     kind,
     stage: input.stage,
@@ -62,7 +74,14 @@ export function modelFailureFromUnknown(
     ...(input.serverShouldRetry === undefined
       ? {}
       : { serverShouldRetry: input.serverShouldRetry }),
-    ...(causeCode === undefined ? {} : { details: { causeCode } }),
+    ...(causeCode === undefined && !providerMessage
+      ? {}
+      : {
+          details: {
+            ...(causeCode === undefined ? {} : { causeCode }),
+            ...(providerMessage ? { providerMessage } : {}),
+          },
+        }),
   }
 }
 

@@ -551,12 +551,13 @@ export function toAnthropicMessages(
         type: "text" as const,
         text: block.text,
       }))
-      appendAnthropicUserContent(converted, content)
+      appendAnthropicContent(converted, "user", content)
       continue
     }
     if (message.role === "user") {
-      appendAnthropicUserContent(
+      appendAnthropicContent(
         converted,
+        "user",
         message.content.map((block) => {
           if (block.type === "text")
             return { type: "text" as const, text: block.text }
@@ -601,10 +602,9 @@ export function toAnthropicMessages(
         return converted === undefined ? [] : [converted]
       })
       if (content.length === 0) continue
-      converted.push({
-        role: "assistant",
-        content,
-      })
+      // Streamed output items split one response into several history messages.
+      // Compatible endpoints may not combine same-role turns like Anthropic does.
+      appendAnthropicContent(converted, "assistant", content)
       continue
     }
 
@@ -671,24 +671,25 @@ export function toAnthropicMessages(
               }),
       ...(message.isError ? { is_error: true } : {}),
     }
-    appendAnthropicUserContent(converted, [toolResult])
+    appendAnthropicContent(converted, "user", [toolResult])
   }
   return converted
 }
 
-function appendAnthropicUserContent(
+function appendAnthropicContent(
   messages: BetaMessageParam[],
+  role: BetaMessageParam["role"],
   content: BetaContentBlockParam[],
 ): void {
   const last = messages.at(-1)
-  if (last?.role === "user" && Array.isArray(last.content)) {
+  if (last?.role === role && Array.isArray(last.content)) {
     messages[messages.length - 1] = {
-      role: "user",
+      role,
       content: [...last.content, ...content],
     }
     return
   }
-  messages.push({ role: "user", content })
+  messages.push({ role, content })
 }
 
 export function toAnthropicTools(
@@ -1095,6 +1096,13 @@ function terminalFailure(
     error instanceof Anthropic.APIError && error.type !== null
       ? error.type
       : undefined
+  const providerMessage =
+    error instanceof Anthropic.APIError &&
+    isRecord(error.error) &&
+    isRecord(error.error.error) &&
+    typeof error.error.error.message === "string"
+      ? error.error.error.message
+      : undefined
   const kind =
     error instanceof AnthropicProtocolError
       ? "protocol_error"
@@ -1129,6 +1137,7 @@ function terminalFailure(
       fallbackMessage: "Anthropic request failed.",
       ...(status === undefined ? {} : { status }),
       ...(providerCode === undefined ? {} : { providerCode }),
+      ...(providerMessage === undefined ? {} : { providerMessage }),
       ...(providerRequestId === undefined ? {} : { providerRequestId }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
