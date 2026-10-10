@@ -56,7 +56,11 @@ export function toChatGPTPlanRequest(
               tools,
             },
           ],
-    parallel_tool_calls: true,
+    parallel_tool_calls: body.parallel_tool_calls ?? true,
+    ...(body.tool_choice === undefined
+      ? {}
+      : { tool_choice: body.tool_choice }),
+    ...(body.include === undefined ? {} : { include: body.include }),
     store: false,
     stream: true,
     ...(body.reasoning === undefined ? {} : { reasoning: body.reasoning }),

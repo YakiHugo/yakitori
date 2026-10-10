@@ -35,6 +35,21 @@ export async function resolveGrokAccessToken(
   return (await resolveStoredGrokCredentials(options)).accessToken
 }
 
+// Read credential and owner together so a concurrent CLI token rotation cannot
+// associate one account's token with another account's continuation history.
+export async function resolveGrokModelCredentials(
+  options: GrokCredentialsOptions = {},
+): Promise<Readonly<{ accessToken: string; ownerIdentity: string }>> {
+  const credentials = await resolveStoredGrokCredentials(options)
+  return {
+    accessToken: credentials.accessToken,
+    ownerIdentity:
+      credentials.userId === undefined
+        ? `token:${credentials.accessToken}`
+        : `account:${credentials.userId}`,
+  }
+}
+
 export async function resolveGrokCredentials(
   options: GrokCredentialsOptions = {},
 ): Promise<

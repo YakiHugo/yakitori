@@ -175,7 +175,7 @@ describe("OpenAI non-generating warmup", () => {
     )
     expect(generated.at(-1)).toMatchObject({
       type: "response",
-      response: { providerRequestId: "generated" },
+      response: { providerResponseId: "generated" },
     })
     expect(f.connections).toBe(1)
     expect(f.authHeaders).toEqual(["Bearer test-key"])
@@ -259,7 +259,7 @@ describe("OpenAI non-generating warmup", () => {
     const events = await collect(f.transport.stream(request()))
     expect(events.at(-1)).toMatchObject({
       type: "response",
-      response: { providerRequestId: "http" },
+      response: { providerResponseId: "http" },
     })
     expect(f.httpCalls).toBe(1)
     expect(f.requests).toHaveLength(2)

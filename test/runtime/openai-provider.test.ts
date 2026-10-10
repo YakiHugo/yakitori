@@ -1,3 +1,4 @@
+import { withSDKResponse } from "../support/sdk-response.ts"
 import OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
 import { describe, expect, it } from "vitest"
@@ -24,7 +25,7 @@ describe("OpenAI Responses provider", () => {
   ] as const)("accounts queued %s/%s usage before cancellation without publishing tools", async (type, status) => {
     const controller = new AbortController()
     const snapshots: unknown[] = []
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -49,7 +50,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -78,7 +79,7 @@ describe("OpenAI Responses provider", () => {
   })
   it("keeps terminal usage when its snapshot observer cancels the request", async () => {
     const controller = new AbortController()
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -107,7 +108,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -133,7 +134,7 @@ describe("OpenAI Responses provider", () => {
   it("does not overwrite accounted usage from contradictory terminal tail after abort", async () => {
     const controller = new AbortController()
     const snapshots: unknown[] = []
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -154,7 +155,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -186,7 +187,7 @@ describe("OpenAI Responses provider", () => {
     true,
   ])("retains terminal usage on cancellation before EOF (transport %s)", async (wrapped) => {
     const controller = new AbortController()
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -201,7 +202,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const provider = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -370,7 +371,7 @@ describe("OpenAI Responses provider", () => {
       requestFixture({ streamOutputItems: true }),
     ))
       events.push(event)
-    expect(events.slice(0, 2)).toEqual([
+    expect(events.slice(0, 2)).toMatchObject([
       {
         type: "output_item",
         itemId: "msg_intro",
@@ -443,7 +444,12 @@ describe("OpenAI Responses provider", () => {
     const events = []
     for await (const event of stream(
       requestFixture({
-        compaction: "remote_v2",
+        compaction: "codex_remote",
+        target: {
+          provider: "codex",
+          model: "gpt-request",
+          instructionProfileId: "codex",
+        },
         continuationScope: "account_one",
       }),
     ))
@@ -452,7 +458,7 @@ describe("OpenAI Responses provider", () => {
       {
         type: "response",
         response: {
-          providerRequestId: "response_1",
+          providerResponseId: "response_1",
           content: [
             {
               type: "compaction",
@@ -471,7 +477,7 @@ describe("OpenAI Responses provider", () => {
     const history = [
       { role: "assistant" as const, content: terminal.response.content },
     ]
-    expect(toOpenAIInput(history, true, "openai", "account_one")).toEqual([
+    expect(toOpenAIInput(history, true, "codex", "account_one")).toEqual([
       {
         type: "compaction",
         id: "cmp_stream",
@@ -820,7 +826,7 @@ describe("OpenAI Responses provider", () => {
       [toolSearch, unrelated],
       [toolSearch, current],
     ]) {
-      const client = {
+      const client = withSDKResponse({
         responses: {
           async create() {
             return (async function* () {
@@ -831,7 +837,7 @@ describe("OpenAI Responses provider", () => {
             })()
           },
         },
-      } as unknown as OpenAI
+      } as unknown as OpenAI)
       const stream = createOpenAIProvider({
         apiKey: "test",
         model: "gpt-test",
@@ -1073,7 +1079,7 @@ describe("OpenAI Responses provider", () => {
           usage: { input_tokens: 10, output_tokens: 4 },
         }),
       ),
-    ).toEqual({
+    ).toMatchObject({
       stopReason: ModelStopReason.ToolUse,
       content: [
         { type: "text", text: "hello" },
@@ -1095,7 +1101,7 @@ describe("OpenAI Responses provider", () => {
         outputTokens: 4,
         activeContextTokens: 14,
       },
-      providerRequestId: "response_1",
+      providerResponseId: "response_1",
     })
 
     expect(
@@ -1198,7 +1204,7 @@ describe("OpenAI Responses provider", () => {
       requestTools: ModelRequest["tools"] = tools,
     ) => {
       let body: Record<string, unknown> | undefined
-      const client = {
+      const client = withSDKResponse({
         responses: {
           async create(input: Record<string, unknown>) {
             body = input
@@ -1210,7 +1216,7 @@ describe("OpenAI Responses provider", () => {
             })()
           },
         },
-      } as unknown as OpenAI
+      } as unknown as OpenAI)
       const stream = createOpenAIProvider({
         apiKey: "test",
         model: "gpt-test",
@@ -1267,7 +1273,7 @@ describe("OpenAI Responses provider", () => {
 
   it("streams deltas and uses the request's pinned model", async () => {
     let body: unknown
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create(input: unknown) {
           body = input
@@ -1293,7 +1299,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-default",
@@ -1342,7 +1348,7 @@ describe("OpenAI Responses provider", () => {
   })
 
   it("streams public reasoning summary deltas", async () => {
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -1361,7 +1367,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-default",
@@ -1380,7 +1386,7 @@ describe("OpenAI Responses provider", () => {
 
   it("passes a pinned reasoning effort through to the request params", async () => {
     let body: unknown
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create(input: unknown) {
           body = input
@@ -1392,7 +1398,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-default",
@@ -1432,7 +1438,7 @@ describe("OpenAI Responses provider", () => {
     ] as const
     for (const entry of cases) {
       let body: unknown
-      const client = {
+      const client = withSDKResponse({
         responses: {
           async create(input: unknown) {
             body = input
@@ -1444,7 +1450,7 @@ describe("OpenAI Responses provider", () => {
             })()
           },
         },
-      } as unknown as OpenAI
+      } as unknown as OpenAI)
       const stream = createOpenAIProvider({
         apiKey: "test",
         model: "gpt-default",
@@ -1473,7 +1479,7 @@ describe("OpenAI Responses provider", () => {
 
   it("maps a pinned fast speed to the priority service tier", async () => {
     let body: unknown
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create(input: unknown) {
           body = input
@@ -1485,7 +1491,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-default",
@@ -1516,7 +1522,7 @@ describe("OpenAI Responses provider", () => {
   it("omits service_tier for standard or absent speed", async () => {
     for (const speed of ["standard", undefined]) {
       let body: unknown
-      const client = {
+      const client = withSDKResponse({
         responses: {
           async create(input: unknown) {
             body = input
@@ -1528,7 +1534,7 @@ describe("OpenAI Responses provider", () => {
             })()
           },
         },
-      } as unknown as OpenAI
+      } as unknown as OpenAI)
       const stream = createOpenAIProvider({
         apiKey: "test",
         model: "gpt-default",
@@ -1554,7 +1560,7 @@ describe("OpenAI Responses provider", () => {
 
   it("requests automatic reasoning summaries without pinning effort", async () => {
     let body: unknown
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create(input: unknown) {
           body = input
@@ -1566,7 +1572,7 @@ describe("OpenAI Responses provider", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-default",
@@ -1668,9 +1674,9 @@ describe("OpenAI provider error classification", () => {
 
   it("treats Grok Cloudflare origin TLS failures as terminal", async () => {
     const error = new OpenAI.APIError(525, undefined, undefined, new Headers())
-    const client = {
+    const client = withSDKResponse({
       responses: { create: async () => Promise.reject(error) },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "grok-test",
@@ -1738,8 +1744,10 @@ describe("OpenAI provider error classification", () => {
           provider: "openai",
           wireApi: "openai_responses",
           providerCode: "server_error",
-          providerRequestId: "response_1",
-          message: "The model provider encountered a temporary server error.",
+          providerResponseId: "response_1",
+          message:
+            "The model provider encountered a temporary server error. (server_error) upstream overloaded",
+          details: { providerMessage: "upstream overloaded" },
         },
       },
     ])
@@ -1762,8 +1770,9 @@ describe("OpenAI provider error classification", () => {
           provider: "openai",
           wireApi: "openai_responses",
           providerCode: "invalid_prompt",
-          providerRequestId: "response_1",
-          message: "OpenAI request failed.",
+          providerResponseId: "response_1",
+          message: "OpenAI request failed. (invalid_prompt) bad prompt",
+          details: { providerMessage: "bad prompt" },
         },
       },
     ])
@@ -1792,7 +1801,7 @@ describe("OpenAI provider error classification", () => {
   })
 
   it("marks a stream error event with a transient code as retryable", async () => {
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return (async function* () {
@@ -1806,7 +1815,7 @@ describe("OpenAI provider error classification", () => {
           })()
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -1825,7 +1834,9 @@ describe("OpenAI provider error classification", () => {
           provider: "openai",
           wireApi: "openai_responses",
           providerCode: "server_error",
-          message: "The model provider encountered a temporary server error.",
+          message:
+            "The model provider encountered a temporary server error. (server_error) stream failed",
+          details: { providerMessage: "stream failed" },
         },
       },
     ])
@@ -1836,7 +1847,7 @@ describe("OpenAI provider error classification", () => {
       code: "UND_ERR_SOCKET",
     })
     const error = new TypeError("terminated", { cause: socket })
-    const client = {
+    const client = withSDKResponse({
       responses: {
         async create() {
           return {
@@ -1846,7 +1857,7 @@ describe("OpenAI provider error classification", () => {
           }
         },
       },
-    } as unknown as OpenAI
+    } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
       model: "gpt-test",
@@ -1876,13 +1887,13 @@ describe("OpenAI provider error classification", () => {
 async function collectWithThrowingClient(
   error: unknown,
 ): Promise<ModelStreamEvent[]> {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         throw error
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const stream = createOpenAIProvider({
     apiKey: "test",
     model: "gpt-test",
@@ -1897,7 +1908,7 @@ async function collectWithThrowingClient(
 async function collectWithTerminalResponse(
   response: Response,
 ): Promise<ModelStreamEvent[]> {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         return (async function* () {
@@ -1905,7 +1916,7 @@ async function collectWithTerminalResponse(
         })()
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const stream = createOpenAIProvider({
     apiKey: "test",
     model: "gpt-test",

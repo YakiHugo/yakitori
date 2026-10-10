@@ -1230,6 +1230,7 @@ describe("Chat Completions provider", () => {
             "custom_1",
             "endpoint_1",
             flavor,
+            "configured-model",
           )
           expect(JSON.stringify(replay)).toContain("Inspect the tool output")
           if (flavor === "gemini")
@@ -1658,7 +1659,7 @@ describe("Chat Completions provider", () => {
         expect(
           (
             await collect(
-              provider(baseURL)(request({ compaction: "remote_v2" })),
+              provider(baseURL)(request({ compaction: "codex_remote" })),
             )
           ).at(-1),
         ).toMatchObject({

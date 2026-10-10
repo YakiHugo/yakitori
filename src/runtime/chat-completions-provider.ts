@@ -26,7 +26,19 @@ import {
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
+  providerErrorMessage,
 } from "./model-failure.ts"
+import { groupModelResponses } from "./model-history.ts"
+import {
+  modelNativeItems,
+  modelNativeResponseMetadata,
+  portableModelContent,
+  replayModelNativeItems,
+} from "./model-native.ts"
+import {
+  applyModelRequestControls,
+  ModelRequestControlsError,
+} from "./model-request-controls.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
@@ -48,6 +60,7 @@ type PendingToolCall = {
   id: string
   name: string
   arguments: string
+  kind: "function" | "custom"
   thoughtSignature?: string
 }
 
@@ -92,7 +105,7 @@ async function* streamChatCompletions(
   const usageFields = () => (usage === undefined ? {} : { usage })
   let providerRequestId: string | undefined
   try {
-    if (request.compaction === "remote_v2")
+    if (request.compaction !== undefined && request.compaction !== "local")
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
@@ -104,49 +117,108 @@ async function* streamChatCompletions(
       request.target.provider,
       request.continuationScope,
       options.flavor ?? "generic",
+      request.target.model || options.model,
     )
     const system = flattenModelSystem(request.system)
     if (system.length > 0) messages.unshift({ role: "system", content: system })
     const customFallbackKeys = new Map(
       request.tools.flatMap((tool) => {
         if (tool.kind !== "custom") return []
-        if (tool.customInputFallbackKey === undefined)
-          throw new ChatCompletionsProtocolError(
-            `Custom tool ${tool.name} requires a JSON input fallback.`,
-          )
+        if (tool.customInputFallbackKey === undefined) return []
         return [[tool.name, tool.customInputFallbackKey] as const]
       }),
     )
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
-        {
+        applyModelRequestControls(request, "openai_chat_completions", {
           model: request.target.model || options.model,
           messages,
           stream: true,
           stream_options: { include_usage: true },
+          ...(request.parallelToolCalls === undefined
+            ? {}
+            : { parallel_tool_calls: request.parallelToolCalls }),
+          ...(request.outputFormat === undefined
+            ? {}
+            : {
+                response_format: {
+                  type: "json_schema" as const,
+                  json_schema: {
+                    name: request.outputFormat.name,
+                    schema: request.outputFormat.schema,
+                    strict: request.outputFormat.strict ?? true,
+                  },
+                },
+              }),
           ...(request.maxOutputTokens === undefined
             ? {}
             : { max_tokens: request.maxOutputTokens }),
           ...(request.tools.length === 0
             ? {}
             : {
-                tools: request.tools.map((tool) => ({
-                  type: "function" as const,
-                  function: {
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: tool.inputSchema,
-                  },
-                })),
-                tool_choice: "auto" as const,
+                tools: request.tools.map((tool) =>
+                  tool.kind === "custom" &&
+                  tool.customInputFallbackKey === undefined
+                    ? {
+                        type: "custom" as const,
+                        custom: {
+                          name: tool.name,
+                          description: tool.description,
+                          ...(tool.inputFormat === undefined
+                            ? {}
+                            : {
+                                format: {
+                                  type: "grammar" as const,
+                                  grammar: {
+                                    syntax: tool.inputFormat.syntax,
+                                    definition: tool.inputFormat.definition,
+                                  },
+                                },
+                              }),
+                        },
+                      }
+                    : {
+                        type: "function" as const,
+                        function: {
+                          name: tool.name,
+                          description: tool.description,
+                          parameters: tool.inputSchema,
+                          ...(tool.strict === undefined
+                            ? {}
+                            : { strict: tool.strict }),
+                        },
+                      },
+                ),
+              }),
+          ...(request.tools.length === 0 && request.toolChoice === undefined
+            ? {}
+            : {
+                tool_choice:
+                  typeof request.toolChoice === "object"
+                    ? request.tools.some(
+                        (tool) =>
+                          tool.kind === "custom" &&
+                          tool.customInputFallbackKey === undefined &&
+                          typeof request.toolChoice === "object" &&
+                          tool.name === request.toolChoice.name,
+                      )
+                      ? {
+                          type: "custom" as const,
+                          custom: { name: request.toolChoice.name },
+                        }
+                      : {
+                          type: "function" as const,
+                          function: { name: request.toolChoice.name },
+                        }
+                    : (request.toolChoice ?? "auto"),
               }),
           // The configured model owns its supported effort values. Omit the
           // field entirely when that model has no explicit effort selection.
           ...(request.target.effort === undefined
             ? {}
             : { reasoning_effort: request.target.effort as ReasoningEffort }),
-        },
+        }),
         request.signal === undefined ? undefined : { signal: request.signal },
       )
       .withResponse()
@@ -155,8 +227,21 @@ async function* streamChatCompletions(
     let completionId: string | undefined
     let text = ""
     let reasoning = ""
+    let refusal = ""
+    let nativeText = ""
+    const nativeReasoning: Record<
+      string,
+      import("../kernel/index.ts").JsonValue
+    > = {}
+    const detailIndices = new Map<number, number>()
+    const reasoningDetails: Record<
+      string,
+      import("../kernel/index.ts").JsonValue
+    >[] = []
     const annotations: import("../kernel/index.ts").JsonValue[] = []
     let finishReason: string | undefined
+    let responseMetadata: Record<string, unknown> = {}
+    let choiceMetadata: Record<string, unknown> = {}
     const calls = new Map<number, PendingToolCall>()
     for await (const chunk of stream) {
       if (request.signal?.aborted) {
@@ -176,7 +261,11 @@ async function* streamChatCompletions(
         usage = fromChatUsage(chunk.usage)
         request.onUsageSnapshot?.(usage)
       }
+      const { choices: _choices, ...metadata } = chunk
+      responseMetadata = { ...responseMetadata, ...metadata }
       for (const choice of chunk.choices) {
+        const { delta: _delta, ...metadata } = choice
+        choiceMetadata = { ...choiceMetadata, ...metadata }
         if (choice.index !== 0 || finishReason !== undefined)
           throw new ChatCompletionsProtocolError(
             "Unexpected completion choice.",
@@ -200,17 +289,72 @@ async function* streamChatCompletions(
             )
           annotations.push(...delta.annotations)
         }
+        if (delta.reasoning_details !== undefined) {
+          if (
+            !Array.isArray(delta.reasoning_details) ||
+            !delta.reasoning_details.every(isJsonObject)
+          )
+            throw new ChatCompletionsProtocolError("Invalid reasoning details.")
+          for (const fragment of delta.reasoning_details) {
+            const providerIndex = fragment.index
+            if (
+              providerIndex !== undefined &&
+              (typeof providerIndex !== "number" ||
+                !Number.isInteger(providerIndex) ||
+                providerIndex < 0)
+            )
+              throw new ChatCompletionsProtocolError(
+                "Invalid reasoning detail index.",
+              )
+            const index =
+              typeof providerIndex === "number"
+                ? (detailIndices.get(providerIndex) ?? reasoningDetails.length)
+                : reasoningDetails.length
+            if (typeof providerIndex === "number")
+              detailIndices.set(providerIndex, index)
+            const previous = reasoningDetails[index] ?? {}
+            for (const [key, value] of Object.entries(fragment)) {
+              if (
+                ["text", "summary", "data", "signature"].includes(key) &&
+                typeof value === "string"
+              )
+                previous[key] =
+                  (typeof previous[key] === "string" ? previous[key] : "") +
+                  value
+              else {
+                if (
+                  ["type", "id", "format"].includes(key) &&
+                  previous[key] !== undefined &&
+                  previous[key] !== value
+                )
+                  throw new ChatCompletionsProtocolError(
+                    "Reasoning detail identity changed.",
+                  )
+                previous[key] = value
+              }
+            }
+            reasoningDetails[index] = previous
+          }
+        }
         for (const [field, type] of [
           ["content", "delta"],
           ["reasoning_content", "reasoning_delta"],
+          ["reasoning", "reasoning_delta"],
           ["refusal", "delta"],
         ] as const) {
           const fragment = delta[field]
           if (fragment === undefined || fragment === null) continue
           if (typeof fragment !== "string")
             throw new ChatCompletionsProtocolError(`Invalid ${field} delta.`)
-          if (type === "reasoning_delta") reasoning += fragment
-          else text += fragment
+          if (type === "reasoning_delta") {
+            reasoning += fragment
+            nativeReasoning[field] =
+              String(nativeReasoning[field] ?? "") + fragment
+          } else {
+            text += fragment
+            if (field === "refusal") refusal += fragment
+            else nativeText += fragment
+          }
           if (fragment.length > 0)
             yield {
               type,
@@ -231,7 +375,9 @@ async function* streamChatCompletions(
               typeof tool.index !== "number" ||
               !Number.isInteger(tool.index) ||
               tool.index < 0 ||
-              (tool.type !== undefined && tool.type !== "function")
+              (tool.type !== undefined &&
+                tool.type !== "function" &&
+                tool.type !== "custom")
             )
               throw new ChatCompletionsProtocolError(
                 "Invalid function call delta.",
@@ -240,7 +386,12 @@ async function* streamChatCompletions(
               id: "",
               name: "",
               arguments: "",
+              kind: tool.type === "custom" ? "custom" : "function",
             }
+            if (tool.type !== undefined && tool.type !== call.kind)
+              throw new ChatCompletionsProtocolError(
+                "Tool type changed mid-stream.",
+              )
             if (tool.id !== undefined) {
               if (
                 typeof tool.id !== "string" ||
@@ -250,6 +401,22 @@ async function* streamChatCompletions(
                   "Invalid function call ID.",
                 )
               call.id = tool.id
+            }
+            if (tool.custom !== undefined) {
+              if (call.kind !== "custom" || !isJsonObject(tool.custom))
+                throw new ChatCompletionsProtocolError("Invalid custom call.")
+              if (tool.custom.name !== undefined) {
+                if (typeof tool.custom.name !== "string")
+                  throw new ChatCompletionsProtocolError("Invalid custom name.")
+                call.name = tool.custom.name
+              }
+              if (tool.custom.input !== undefined) {
+                if (typeof tool.custom.input !== "string")
+                  throw new ChatCompletionsProtocolError(
+                    "Invalid custom input.",
+                  )
+                call.arguments += tool.custom.input
+              }
             }
             if (tool.function !== undefined) {
               if (!isJsonObject(tool.function))
@@ -334,7 +501,8 @@ async function* streamChatCompletions(
       ids.add(call.id)
       let input: unknown
       try {
-        input = JSON.parse(call.arguments)
+        input =
+          call.kind === "custom" ? call.arguments : JSON.parse(call.arguments)
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error
         if (finishReason !== "length")
@@ -347,7 +515,8 @@ async function* streamChatCompletions(
       }
       if (!isJsonValue(input))
         throw new ChatCompletionsProtocolError("Invalid function input.")
-      const fallbackKey = customFallbackKeys.get(call.name)
+      const fallbackKey =
+        call.kind === "custom" ? undefined : customFallbackKeys.get(call.name)
       if (fallbackKey !== undefined) {
         if (!isJsonObject(input) || typeof input[fallbackKey] !== "string")
           throw new ChatCompletionsProtocolError(
@@ -362,9 +531,11 @@ async function* streamChatCompletions(
         id: call.id,
         name: call.name,
         input,
-        ...(fallbackKey === undefined
-          ? {}
-          : { toolKind: "custom", customInputFallbackKey: fallbackKey }),
+        ...(call.kind === "custom"
+          ? { toolKind: "custom" as const }
+          : fallbackKey === undefined
+            ? {}
+            : { toolKind: "custom", customInputFallbackKey: fallbackKey }),
         ...(call.thoughtSignature === undefined
           ? {}
           : {
@@ -391,19 +562,84 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Invalid completion finish reason.",
       )
-    if (request.streamOutputItems && content.length > 0)
+    const native = modelNativeItems(request, "openai_chat_completions", [
+      {
+        role: "assistant",
+        content: nativeText.length === 0 ? null : nativeText,
+        ...(refusal.length === 0 ? {} : { refusal }),
+        ...nativeReasoning,
+        ...(reasoningDetails.length === 0
+          ? {}
+          : { reasoning_details: reasoningDetails }),
+        ...(annotations.length === 0 ? {} : { annotations }),
+        ...(hasCalls
+          ? {
+              tool_calls: [...calls]
+                .sort(([left], [right]) => left - right)
+                .flatMap(([, call]) =>
+                  ids.has(call.id) &&
+                  content.some(
+                    (block) =>
+                      block.type === "tool_call" && block.id === call.id,
+                  )
+                    ? [
+                        {
+                          id: call.id,
+                          ...(call.kind === "custom"
+                            ? {
+                                type: "custom",
+                                custom: {
+                                  name: call.name,
+                                  input: call.arguments,
+                                },
+                              }
+                            : {
+                                type: "function",
+                                function: {
+                                  name: call.name,
+                                  arguments: call.arguments,
+                                },
+                              }),
+                          ...(call.thoughtSignature === undefined
+                            ? {}
+                            : {
+                                extra_content: {
+                                  google: {
+                                    thought_signature: call.thoughtSignature,
+                                  },
+                                },
+                              }),
+                        },
+                      ]
+                    : [],
+                ),
+            }
+          : {}),
+      },
+    ])
+    if (request.streamOutputItems && (content.length > 0 || native.length > 0))
       yield {
         type: "output_item",
         itemId: `${completionId ?? "completion"}_0`,
         content,
+        native,
       }
-    const requestId = providerRequestId ?? completionId
+    const requestId = providerRequestId
     yield {
       type: "response",
       response: {
         stopReason,
         rawStopReason: finishReason,
         content,
+        native,
+        nativeMetadata: modelNativeResponseMetadata(
+          request,
+          "openai_chat_completions",
+          { ...responseMetadata, choices: [choiceMetadata] },
+        ),
+        ...(completionId === undefined
+          ? {}
+          : { providerResponseId: completionId }),
         ...(finishReason === "length" ? { lengthReason: "output" } : {}),
         ...(incompleteToolCalls ? { incompleteToolCalls: true } : {}),
         ...(usage === undefined ? {} : { usage }),
@@ -415,7 +651,10 @@ async function* streamChatCompletions(
       yield { type: "cancelled", ...usageFields() }
       return
     }
-    if (error instanceof AssetMediaError) {
+    if (
+      error instanceof AssetMediaError ||
+      error instanceof ModelRequestControlsError
+    ) {
       yield {
         type: "failure",
         failure: {
@@ -460,6 +699,7 @@ async function* streamChatCompletions(
         ...(typeof apiError?.code === "string"
           ? { providerCode: apiError.code }
           : {}),
+        providerMessage: providerErrorMessage(apiError?.error),
         ...(requestId === undefined ? {} : { providerRequestId: requestId }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
@@ -475,10 +715,11 @@ export function toChatCompletionsMessages(
   provider: string,
   continuationScope?: string,
   flavor: Flavor = "generic",
+  model?: string,
 ): ChatCompletionMessageParam[] {
   const result: ChatCompletionMessageParam[] = []
   let toolMedia: ChatCompletionContentPart[] = []
-  for (const message of messages) {
+  for (const message of groupModelResponses(messages)) {
     // Chat only accepts image and file parts on user messages. Keep this out of
     // durable history and after ALL adjacent results, never between a call and
     // its results (including parallel tools).
@@ -567,10 +808,25 @@ export function toChatCompletionsMessages(
         content: message.isError ? `[tool_error]\n${text}` : text,
       })
     } else {
+      const native = replayModelNativeItems(
+        message,
+        "openai_chat_completions",
+        provider,
+        continuationScope,
+        model,
+      )
+      if (native !== undefined) {
+        if (native.length !== 1 || native[0]?.role !== "assistant")
+          throw new ChatCompletionsProtocolError(
+            "Invalid native assistant message.",
+          )
+        result.push(native[0] as unknown as ChatCompletionAssistantMessageParam)
+        continue
+      }
       const toolCalls: ToolCall[] = []
       const reasoning: string[] = []
       let text = ""
-      for (const block of message.content) {
+      for (const block of portableModelContent(message)) {
         if (block.type === "compaction")
           throw new ChatCompletionsProtocolError(
             "Opaque provider compaction cannot be sent through Chat Completions.",
@@ -593,6 +849,21 @@ export function toChatCompletionsMessages(
                 continuationScope,
               )
             : undefined
+        if (
+          block.toolKind === "custom" &&
+          block.customInputFallbackKey === undefined
+        ) {
+          if (typeof block.input !== "string")
+            throw new ChatCompletionsProtocolError(
+              "Custom tool input must be text.",
+            )
+          toolCalls.push({
+            id: block.id,
+            type: "custom",
+            custom: { name: block.name, input: block.input },
+          })
+          continue
+        }
         toolCalls.push({
           id: block.id,
           type: "function",

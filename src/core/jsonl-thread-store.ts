@@ -329,7 +329,20 @@ export class JsonlThreadStore implements ThreadStore {
     }
     await this.#openWriter(threadId, true)
     try {
-      return await this.#readRequiredThread(threadId)
+      const thread = await this.#readRequiredThread(threadId)
+      if (
+        thread.rollout.some(
+          ({ item }) =>
+            item.type === "response_item" &&
+            item.item.item.role === "assistant" &&
+            typeof item.item.providerMetadata?.callIndex === "number" &&
+            item.item.item.response === undefined,
+        )
+      )
+        throw new Error(
+          "This Session uses the previous provider IR and cannot be resumed. Its saved history is unchanged; start a new Session.",
+        )
+      return thread
     } catch (error) {
       await this.discardThread(threadId)
       throw error
@@ -2355,6 +2368,73 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       typeof value.model === "string" &&
       value.model.length > 0 &&
       isTokenUsage(value.usage)
+    )
+  }
+  if (value.type === "model_attempt") {
+    const attempt = value.attempt
+    return (
+      hasOnlyKeys(value, ["type", "turnId", "attempt"]) &&
+      typeof value.turnId === "string" &&
+      isRecord(attempt) &&
+      hasOnlyKeys(attempt, [
+        "origin",
+        "wireApi",
+        "outcome",
+        "providerResponseId",
+        "providerRequestId",
+        "responseMetadata",
+        "stopReason",
+        "rawStopReason",
+        "lengthReason",
+        "incompleteToolCalls",
+        "usage",
+        "error",
+      ]) &&
+      isRecord(attempt.origin) &&
+      isModelMessage({
+        role: "assistant",
+        content: [],
+        response: attempt.origin,
+      }) &&
+      typeof attempt.wireApi === "string" &&
+      ["completed", "failed", "retry", "cancelled"].includes(
+        String(attempt.outcome),
+      ) &&
+      [
+        "providerResponseId",
+        "providerRequestId",
+        "stopReason",
+        "rawStopReason",
+      ].every(
+        (key) => attempt[key] === undefined || typeof attempt[key] === "string",
+      ) &&
+      (attempt.lengthReason === undefined ||
+        ["output", "context", "unknown"].includes(
+          String(attempt.lengthReason),
+        )) &&
+      (attempt.incompleteToolCalls === undefined ||
+        typeof attempt.incompleteToolCalls === "boolean") &&
+      (attempt.responseMetadata === undefined ||
+        isModelMessage({
+          role: "assistant",
+          content: [],
+          native: [attempt.responseMetadata],
+        })) &&
+      (attempt.usage === undefined ||
+        (isRecord(attempt.usage) &&
+          hasOnlyKeys(attempt.usage, [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadInputTokens",
+            "cacheWriteInputTokens",
+            "activeContextTokens",
+            "rolloutBudgetUnits",
+          ]) &&
+          Object.values(attempt.usage).every(
+            (value) =>
+              typeof value === "number" && Number.isFinite(value) && value >= 0,
+          ))) &&
+      (attempt.error === undefined || isRolloutError(attempt.error))
     )
   }
   if (value.type === "turn_usage") {

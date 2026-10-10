@@ -255,14 +255,18 @@ describe("Turn processor", () => {
     await expect
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "First second third." })
-    expect(provider.requests[1]?.messages).toContainEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "First " }],
-    })
-    expect(provider.requests[2]?.messages).toContainEqual({
-      role: "assistant",
-      content: [{ type: "text", text: "second " }],
-    })
+    expect(provider.requests[1]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "First " }],
+      }),
+    )
+    expect(provider.requests[2]?.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "second " }],
+      }),
+    )
     const reminders = provider.requests[2]?.messages.filter(
       (message) =>
         message.role === "developer" &&
@@ -460,6 +464,76 @@ describe("Turn processor", () => {
     expect(JSON.stringify(thread.snapshot().context.history)).toContain(
       "Preserved explanation",
     )
+  })
+
+  it.each([
+    {
+      behavior: "accepts reordered native JSON fields",
+      encryptedContent: "opaque",
+      status: { completed: "Done" },
+    },
+    {
+      behavior: "rejects changed committed native output",
+      encryptedContent: "changed",
+      status: {
+        errored: "Terminal native output disagrees with committed items.",
+      },
+    },
+  ])("$behavior", async ({ encryptedContent, status }) => {
+    const content = [{ type: "text" as const, text: "Done" }]
+    const owner = {
+      provider: "faux",
+      model: "test",
+      scope: "owner",
+      wireApi: "openai_responses" as const,
+    }
+    const committed = {
+      ...owner,
+      value: {
+        type: "reasoning",
+        id: "native_item",
+        summary: [],
+        encrypted_content: "opaque",
+      },
+    }
+    const runtime = await createRuntime(async function* () {
+      yield {
+        type: "output_item",
+        itemId: "native_item",
+        content,
+        native: [committed],
+      }
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content,
+          native: [
+            {
+              ...owner,
+              value: {
+                encrypted_content: encryptedContent,
+                summary: [],
+                id: "native_item",
+                type: "reasoning",
+              },
+            },
+          ],
+        },
+      }
+    })
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: inputFixture([{ type: "text", text: "Work." }]),
+    })
+    await expect.poll(() => thread.agentStatus).toEqual(status)
+    expect(
+      thread
+        .snapshot()
+        .context.history.flatMap(({ item }) =>
+          item.role === "assistant" ? (item.native ?? []) : [],
+        ),
+    ).toEqual([committed])
   })
 
   it("executes complete tools from a length-stopped response only once", async () => {
@@ -674,10 +748,10 @@ describe("Turn processor", () => {
     expect(modelCalls).toBe(1)
     expect(thread.snapshot().context.history).toContainEqual(
       expect.objectContaining({
-        item: {
+        item: expect.objectContaining({
           role: "assistant",
           content: [{ type: "text", text: "Cannot help with that." }],
-        },
+        }),
       }),
     )
     expect(
@@ -1201,6 +1275,11 @@ describe("Turn processor", () => {
     const summaryFinished = deferred<void>()
     const releaseTool = deferred<void>()
     const usageReported = deferred<void>()
+    cleanups.push(async () => {
+      releaseTool.resolve()
+      releaseSummary.resolve()
+      firstToolFinished.resolve()
+    })
     let normalCalls = 0
     let tools = 0
     let compactions = 0
@@ -1211,7 +1290,16 @@ describe("Turn processor", () => {
         expect(secondToolFinished).toBe(compactions > 1)
         expect(request.tools).toEqual([])
         if (compactions === 1)
-          expect(JSON.stringify(request.messages)).not.toContain("call_2")
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "assistant" &&
+                message.content.some(
+                  (block) =>
+                    block.type === "tool_call" && block.id === "call_2",
+                ),
+            ),
+          ).toBe(false)
         summaryReady.resolve()
         if (applied) await releaseSummary.promise
         yield {
@@ -1384,7 +1472,12 @@ describe("Turn processor", () => {
       expect(normalCalls).toBe(2)
       now = 1500
       releaseSummary.resolve()
-    } else releaseTool.resolve()
+    } else {
+      // Tool completion can cancel speculative compaction. Let the cancellation
+      // case account its usage first so ordinary cleanup cannot win this gate.
+      if (mode === "cancelled") await usageReported.promise
+      releaseTool.resolve()
+    }
     if (mode === "cancelled") {
       await usageReported.promise
       await thread.interrupt("cancel checkpoint")
@@ -2092,6 +2185,18 @@ describe("Turn processor", () => {
       outcome: "completed",
     })
     expect(completed).not.toHaveProperty("lastRequestStartedAt")
+    const attempts =
+      (await runtime.store.readThread(thread.id))?.rollout.flatMap(
+        ({ item }) => (item.type === "model_attempt" ? [item.attempt] : []),
+      ) ?? []
+    expect(attempts).toMatchObject([
+      { outcome: "retry", origin: { attempt: 1 } },
+      { outcome: "completed", origin: { attempt: 2 } },
+    ])
+    expect(attempts[0]?.origin.callId).toBe(attempts[1]?.origin.callId)
+    expect(attempts[0]?.origin.attemptId).not.toBe(
+      attempts[1]?.origin.attemptId,
+    )
   })
 
   it("reports an unexpected tool throw with its owning operation", async () => {
@@ -3506,80 +3611,82 @@ describe("Turn processor", () => {
     ).toBe(true)
   })
 
-  it.each(["waiting", "continuing"] as const)(
-    "accepts steering while a Stop hook is %s",
-    async (phase) => {
-      const entered = deferred<void>()
-      const release = deferred<void>()
-      const requests: ModelRequest[] = []
-      let stops = 0
-      const runtime = await createRuntime(
-        async function* (request) {
-          requests.push(request)
-          if (phase === "continuing" && requests.length === 2) {
-            entered.resolve()
-            await release.promise
-          }
-          yield responseEvent(`answer ${requests.length}`)
-        },
-        createToolRegistry([]),
-        {
-          hookRunner: {
-            async dispose() {},
-            async run(request) {
-              if (request.event !== HookEvent.Stop)
-                return { continue: true, additionalContext: [] }
-              stops += 1
-              if (stops === 1) {
-                if (phase === "waiting") {
-                  entered.resolve()
-                  await release.promise
-                }
-                return {
-                  continue: phase === "waiting",
-                  reason: "Verify the result before stopping.",
-                  additionalContext: [],
-                }
-              }
+  it.each([
+    "waiting",
+    "continuing",
+  ] as const)("accepts steering while a Stop hook is %s", async (phase) => {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const requests: ModelRequest[] = []
+    let stops = 0
+    const runtime = await createRuntime(
+      async function* (request) {
+        requests.push(request)
+        if (phase === "continuing" && requests.length === 2) {
+          entered.resolve()
+          await release.promise
+        }
+        yield responseEvent(`answer ${requests.length}`)
+      },
+      createToolRegistry([]),
+      {
+        hookRunner: {
+          async dispose() {},
+          async run(request) {
+            if (request.event !== HookEvent.Stop)
               return { continue: true, additionalContext: [] }
-            },
+            stops += 1
+            if (stops === 1) {
+              if (phase === "waiting") {
+                entered.resolve()
+                await release.promise
+              }
+              return {
+                continue: phase === "waiting",
+                reason: "Verify the result before stopping.",
+                additionalContext: [],
+              }
+            }
+            return { continue: true, additionalContext: [] }
           },
         },
-      )
-      const thread = await runtime.createThread()
-      const started = await thread.startIfIdle({
-        content: inputFixture([{ type: "text", text: "start" }]),
-      })
-      if (started.type !== "started") throw new Error("Turn did not start.")
-      try {
-        await entered.promise
-        await expect(
-          thread.steer(
-            {
-              content: inputFixture([
-                { type: "text", text: "Check the additional requirement" },
-              ]),
-            },
-            started.turnId,
-          ),
-        ).resolves.toMatchObject({ type: "steered" })
-      } finally {
-        release.resolve()
-      }
-      const expectedCalls = phase === "waiting" ? 2 : 3
-      await expect.poll(() => thread.agentStatus).toEqual({
+      },
+    )
+    const thread = await runtime.createThread()
+    const started = await thread.startIfIdle({
+      content: inputFixture([{ type: "text", text: "start" }]),
+    })
+    if (started.type !== "started") throw new Error("Turn did not start.")
+    try {
+      await entered.promise
+      await expect(
+        thread.steer(
+          {
+            content: inputFixture([
+              { type: "text", text: "Check the additional requirement" },
+            ]),
+          },
+          started.turnId,
+        ),
+      ).resolves.toMatchObject({ type: "steered" })
+    } finally {
+      release.resolve()
+    }
+    const expectedCalls = phase === "waiting" ? 2 : 3
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
         completed: `answer ${expectedCalls}`,
       })
-      expect(requests).toHaveLength(expectedCalls)
-      expect(JSON.stringify(requests.at(-1)?.messages)).toContain(
-        "Check the additional requirement",
-      )
-      const stored = await runtime.store.readThread(thread.id)
-      expect(
-        stored?.rollout.filter(({ item }) => item.type === "turn_started"),
-      ).toHaveLength(1)
-    },
-  )
+    expect(requests).toHaveLength(expectedCalls)
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain(
+      "Check the additional requirement",
+    )
+    const stored = await runtime.store.readThread(thread.id)
+    expect(
+      stored?.rollout.filter(({ item }) => item.type === "turn_started"),
+    ).toHaveLength(1)
+  })
 
   it("does not record steering rejected by its prompt hook", async () => {
     const entered = deferred<void>()

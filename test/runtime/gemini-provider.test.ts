@@ -455,7 +455,9 @@ describe("native Gemini provider", () => {
           failure: { kind: "rate_limited", status: 429 },
           usage: { inputTokens: 7 },
         })
-        expect(JSON.stringify(events)).not.toContain("private detail")
+        expect(events[0]).toMatchObject({
+          failure: { details: { providerMessage: "private detail" } },
+        })
       },
     )
   })

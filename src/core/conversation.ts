@@ -32,7 +32,7 @@ export type ModelCompactionBlock = Readonly<{
 }>
 export type ModelToolInputFormat = Readonly<{
   type: "grammar"
-  syntax: "lark"
+  syntax: "lark" | "regex"
   definition: string
 }>
 export type ModelToolDefinition = Readonly<{
@@ -43,6 +43,7 @@ export type ModelToolDefinition = Readonly<{
   inputFormat?: ModelToolInputFormat
   customInputFallbackKey?: string
   deferLoading?: boolean
+  strict?: boolean
 }>
 export type ModelToolCallBlock = Readonly<{
   type: "tool_call"
@@ -90,6 +91,32 @@ export type ModelDeveloperMessage = Readonly<{
 export type ModelAssistantMessage = Readonly<{
   role: "assistant"
   content: readonly ModelContentBlock[]
+  // Native output is the owner's replay source; content is the execution and
+  // display projection. Synthetic assistant messages need neither field.
+  native?: readonly ModelNativeItem[]
+  response?: ModelResponseOrigin
+}>
+
+export type ModelResponseOrigin = Readonly<{
+  callId: string
+  attemptId: string
+  attempt: number
+  provider: string
+  model: string
+}>
+
+// Multi-provider support requires native state beyond Codex's ResponseItem.
+// Each adapter validates and encodes only its own protocol and credential scope.
+export type ModelNativeItem = Readonly<{
+  provider: string
+  scope?: string
+  model: string
+  wireApi:
+    | "openai_responses"
+    | "openai_chat_completions"
+    | "anthropic_messages"
+    | "gemini_generate_content"
+  value: JsonObject
 }>
 export type FileObservation = Readonly<{
   path: string

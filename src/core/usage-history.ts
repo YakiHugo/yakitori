@@ -185,6 +185,7 @@ export async function readUsageHistory(
         } else if (
           ![
             "model_context",
+            "model_attempt",
             "response_item",
             "turn_started",
             "agent_status",

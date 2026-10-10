@@ -8,6 +8,8 @@ import type {
   JsonObject,
   KernelError,
   ModelMessage,
+  ModelNativeItem,
+  ModelResponseOrigin,
   ModelSelection,
   SessionConfigurationSnapshot,
   StartedExecutionItem,
@@ -83,7 +85,32 @@ export type ModelContextSettings = Readonly<{
   compactionHash?: string
 }>
 
+export type ModelAttemptRecord = Readonly<{
+  origin: ModelResponseOrigin
+  wireApi: string
+  outcome: "completed" | "failed" | "retry" | "cancelled"
+  providerResponseId?: string
+  providerRequestId?: string
+  responseMetadata?: ModelNativeItem
+  stopReason?: string
+  rawStopReason?: string
+  lengthReason?: "output" | "context" | "unknown"
+  incompleteToolCalls?: boolean
+  usage?: Readonly<
+    Partial<TokenUsage> & {
+      activeContextTokens?: number
+      rolloutBudgetUnits?: number
+    }
+  >
+  error?: KernelError
+}>
+
 export type RolloutItem =
+  | Readonly<{
+      type: "model_attempt"
+      turnId: string
+      attempt: ModelAttemptRecord
+    }>
   | { readonly type: "model_context"; readonly settings: ModelContextSettings }
   | { readonly type: "session_meta"; readonly metadata: ThreadMetadata }
   | { readonly type: "response_item"; readonly item: ResponseItemEnvelope }

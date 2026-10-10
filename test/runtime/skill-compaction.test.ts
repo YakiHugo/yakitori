@@ -17,7 +17,7 @@ import { inputFixture } from "../fixtures/user-input.ts"
 
 it.each([
   "local",
-  "remote_v2",
+  "codex_remote",
 ] as const)("%s compaction summarizes a loaded skill while preserving the user's request through reload", async (mode) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-skill-compaction-"))
   const skillDir = join(root, ".agents", "skills", "review")
@@ -51,7 +51,7 @@ it.each([
                     encryptedContent: "opaque",
                   },
                 ],
-          providerRequestId: "compacted_response",
+          providerResponseId: "compacted_response",
         },
       }
       return
@@ -72,7 +72,9 @@ it.each([
       info: {
         id: "faux",
         wireApi: "unknown",
-        capabilities: { remoteCompaction: mode === "remote_v2" },
+        capabilities: {
+          remoteCompaction: mode === "codex_remote" ? "codex_remote" : false,
+        },
         retry: { maxAttempts: 1 },
       },
       stream,

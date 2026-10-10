@@ -91,12 +91,12 @@ describe("pre-sampling model switches", () => {
     let samples = 0
     const stream: StreamFn = async function* (request) {
       requests.push(request)
-      if (request.compaction === "remote_v2") {
+      if (request.compaction === "codex_remote") {
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
-            providerRequestId: "native_response",
+            providerResponseId: "native_response",
             content: [
               {
                 type: "compaction",
@@ -141,7 +141,7 @@ describe("pre-sampling model switches", () => {
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "sample 2" })
     expect(
-      requests.filter((request) => request.compaction === "remote_v2"),
+      requests.filter((request) => request.compaction === "codex_remote"),
     ).toHaveLength(1)
     const provider = removed === "model" ? "work" : "other"
     harness.registry.replace({
@@ -488,7 +488,7 @@ describe("pre-sampling model switches", () => {
           response: {
             stopReason: ModelStopReason.EndTurn,
             content: [],
-            providerRequestId: "invalid_checkpoint",
+            providerResponseId: "invalid_checkpoint",
           },
         }
         return
@@ -556,7 +556,9 @@ async function setupConfigured(stream: StreamFn, remoteCompaction = false) {
         wireApi: remoteCompaction
           ? "openai_responses"
           : "openai_chat_completions",
-        capabilities: { remoteCompaction },
+        capabilities: {
+          remoteCompaction: remoteCompaction ? "codex_remote" : false,
+        },
         retry: { maxAttempts: 1 },
       },
       models: createConfiguredModelsManager({ provider: id, models }),
@@ -600,12 +602,12 @@ function recordingStream(requests: ModelRequest[], usage: number): StreamFn {
       }
       return
     }
-    if (request.compaction === "remote_v2") {
+    if (request.compaction === "codex_remote") {
       yield {
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
-          providerRequestId: "compaction_response",
+          providerResponseId: "compaction_response",
           content: [
             {
               type: "compaction",
@@ -645,7 +647,9 @@ async function setup(fixtures: Record<string, ModelFixture>, stream: StreamFn) {
             info: {
               id: provider,
               wireApi: "openai_responses",
-              capabilities: { remoteCompaction: provider === "codex" },
+              capabilities: {
+                remoteCompaction: provider === "codex" ? "codex_remote" : false,
+              },
               retry: { maxAttempts: 1 },
             },
             stream,

@@ -12,7 +12,9 @@ import type {
   ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
+  ModelNativeItem,
   ModelReasoningBlock,
+  ModelResponseOrigin,
   ModelTextBlock,
   ModelToolCallBlock,
   ModelToolContentBlock,
@@ -31,7 +33,9 @@ export type {
   ModelDocumentBlock,
   ModelImageBlock,
   ModelMessage,
+  ModelNativeItem,
   ModelReasoningBlock,
+  ModelResponseOrigin,
   ModelTextBlock,
   ModelToolCallBlock,
   ModelToolContentBlock,
@@ -47,6 +51,8 @@ export const ModelStopReason = {
   Length: "length",
   ToolUse: "tool_use",
   ContentFilter: "content_filter",
+  // Server tools paused their work; the harness resubmits native history.
+  PauseTurn: "pause_turn",
 } as const
 
 export type ModelStopReason =
@@ -92,7 +98,7 @@ export type ModelRequest = Readonly<{
   // After committed output, retry only from the consumer's updated history.
   rebuildMessagesAfterOutput?: () => Promise<readonly ModelMessage[]>
   // Request-only control; the resulting native item enters normal history.
-  compaction?: "local" | "remote_v2"
+  compaction?: "local" | "codex_remote" | "responses_compact"
   target: ModelTarget
   // Runtime-only fence for opaque provider continuation state. The provider
   // owner adds it immediately before transport serialization; Session target
@@ -104,6 +110,24 @@ export type ModelRequest = Readonly<{
   tools: readonly ModelToolDefinition[]
   toolWireProtocol: ToolWireProtocol
   maxOutputTokens?: number
+  toolChoice?: "auto" | "none" | "required" | Readonly<{ name: string }>
+  parallelToolCalls?: boolean
+  outputFormat?: Readonly<{
+    type: "json_schema"
+    name: string
+    schema: JsonObject
+    strict?: boolean
+  }>
+  // Provider-owned API controls (thinking, cache, hosted tools, response format,
+  // etc.) cannot be translated by guessing from an OpenAI-compatible URL.
+  // The adapter keeps the harness-owned input, model and streaming contract.
+  providerOptions?: Readonly<{
+    provider: string
+    wireApi: ModelNativeItem["wireApi"]
+    body: JsonObject
+    // Anthropic feature opt-ins are HTTP headers rather than body fields.
+    betas?: readonly string[]
+  }>
   // Runtime-only physical attempt context. Provider adapters may use it to
   // rebuild transport resources; it is never serialized onto the wire.
   attempt?: Readonly<{
@@ -163,26 +187,31 @@ export type ModelFailure = Readonly<{
   stage: ModelFailureStage
   provider: string
   wireApi: ModelWireApi
-  readonly message: string
-  readonly status?: number
-  readonly providerCode?: string
-  readonly providerRequestId?: string
-  readonly retryAfterMs?: number
-  readonly serverShouldRetry?: boolean
-  readonly attempt?: number
-  readonly maxAttempts?: number
-  readonly outputObserved?: boolean
-  readonly retryDecision?: "fail" | "retry"
-  readonly details?: JsonObject
+  message: string
+  status?: number
+  providerCode?: string
+  providerRequestId?: string
+  providerResponseId?: string
+  retryAfterMs?: number
+  serverShouldRetry?: boolean
+  attempt?: number
+  maxAttempts?: number
+  outputObserved?: boolean
+  retryDecision?: "fail" | "retry"
+  details?: JsonObject
 }>
 
 export type ModelResponse = Readonly<{
   stopReason: ModelStopReason
+  origin?: ModelResponseOrigin
   rawStopReason?: string
   lengthReason?: "output" | "context" | "unknown"
   // Tool calls in content are complete; an unusable tail is never executable.
   incompleteToolCalls?: boolean
   content: readonly ModelContentBlock[]
+  native?: readonly ModelNativeItem[]
+  nativeMetadata?: ModelNativeItem
+  providerResponseId?: string
   usage?: ModelUsage
   providerRequestId?: string
 }>
@@ -203,6 +232,7 @@ export type ModelStreamOutputItemEvent = Readonly<{
   type: "output_item"
   itemId: string
   content: readonly ModelContentBlock[]
+  native?: readonly ModelNativeItem[]
 }>
 
 export type ModelStreamResponseEvent = {

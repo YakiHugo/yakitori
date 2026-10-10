@@ -59,7 +59,12 @@ export function createConfiguredProvider(
       id,
       wireApi: configuration.wireApi,
       capabilities: {
-        remoteCompaction: false,
+        remoteCompaction:
+          knownPresetEndpoint &&
+          catalogProvider === "openai" &&
+          configuration.wireApi === "openai_responses"
+            ? "responses_compact"
+            : false,
         nativePdf:
           knownPresetEndpoint &&
           ((catalogProvider === "openai" &&
@@ -106,6 +111,23 @@ export function createConfiguredProvider(
             }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
+          if (
+            request.providerOptions !== undefined &&
+            request.providerOptions.provider !== request.target.provider
+          ) {
+            yield {
+              type: "failure",
+              failure: {
+                provider: id,
+                wireApi: configuration.wireApi,
+                stage: "request_build",
+                kind: "invalid_request",
+                message:
+                  "Provider request controls belong to another connection.",
+              },
+            }
+            return
+          }
           const model = (await models.listModels()).find(
             (entry) => entry.model === request.target.model,
           )
@@ -122,7 +144,15 @@ export function createConfiguredProvider(
               : { provider: catalogProvider }),
             ...(effort === undefined ? {} : { effort }),
           }
-          for await (const event of stream({ ...request, target })) {
+          const providerOptions =
+            request.providerOptions?.provider === request.target.provider
+              ? { ...request.providerOptions, provider: target.provider }
+              : request.providerOptions
+          for await (const event of stream({
+            ...request,
+            target,
+            ...(providerOptions === undefined ? {} : { providerOptions }),
+          })) {
             if (event.type === "response") dynamic?.result("ready")
             else if (event.type === "failure")
               dynamic?.result(

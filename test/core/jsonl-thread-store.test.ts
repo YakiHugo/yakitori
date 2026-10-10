@@ -42,6 +42,43 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("refuses to resume the previous provider IR while preserving readable history", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_previous_ir"
+    await createPersistentThread(store, metadata(id))
+    await store.appendItems(id, [
+      {
+        type: "response_item",
+        item: {
+          id: "old_answer",
+          turnId: "turn_old",
+          createdAt: new Date().toISOString(),
+          providerMetadata: { callIndex: 1 },
+          item: {
+            role: "assistant",
+            content: [{ type: "text", text: "Saved answer" }],
+          },
+        },
+      },
+    ])
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const original = await readFile(path)
+    const reopened = new JsonlThreadStore({ root })
+    await expect(reopened.resumeThread(id)).rejects.toThrow(
+      "previous provider IR",
+    )
+    expect(await readFile(path)).toEqual(original)
+    expect((await reopened.readThread(id))?.rollout).toContainEqual(
+      expect.objectContaining({
+        item: expect.objectContaining({
+          type: "response_item",
+          item: expect.objectContaining({ id: "old_answer" }),
+        }),
+      }),
+    )
+  })
+
   it("retains full tool results and rebuilds their captured history budget on resume", async () => {
     const { root, store } = await createStore()
     const id = "thread_tool_history"

@@ -14,6 +14,7 @@ import type {
 import { createInputId, createTurnId } from "../kernel/ids.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
+  ModelAttemptRecord,
   ModelContextSettings,
   ResponseItemEnvelope,
   RolloutItem,
@@ -65,6 +66,7 @@ export type TurnControl = {
 }
 
 export type TurnRuntime = {
+  recordModelAttempt(attempt: ModelAttemptRecord): Promise<void>
   recordInitialInput(): Promise<void>
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
@@ -1114,6 +1116,12 @@ export class Session {
           threadId: this.id,
           event: structuredClone(event),
         })
+      },
+      recordModelAttempt: async (attempt) => {
+        requireActive()
+        await this.#appendRollout([
+          { type: "model_attempt", turnId: active.input.submissionId, attempt },
+        ])
       },
       recordConversationItems: async (items) => {
         requireLease()

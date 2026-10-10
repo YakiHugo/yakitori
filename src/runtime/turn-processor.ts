@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
   TurnCompletion,
@@ -55,14 +56,17 @@ import {
 } from "./limits.ts"
 import {
   type ModelContentBlock,
+  type ModelNativeItem,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
   type ModelStreamEvent,
   type ModelToolCallBlock,
   type ModelUsage,
+  type ModelWireApi,
   type StreamFn,
 } from "./model.ts"
+import { createModelAttemptTracker } from "./model-attempt.ts"
 import {
   createCompactionReplacementHistory,
   retainCompactionUserMessages,
@@ -130,6 +134,9 @@ import {
 // can stream more tool effects. These are recovery safety bounds, not quotas.
 const MAX_LENGTH_CONTINUATIONS = 2
 const MAX_LENGTH_TOOL_STREAK = 5
+// Local safety boundary: server-tool pauses must not spin forever without a
+// user-visible completed answer. This is not an Anthropic product quota.
+const MAX_SERVER_TOOL_PAUSES = 8
 const LENGTH_CONTINUE_REMINDER =
   "Your previous answer was cut off by a generation limit. Continue exactly where it stopped, without repeating it. If a newer user message follows this reminder, answer that message instead."
 
@@ -624,6 +631,7 @@ async function executeTurnModelLoop(
   }
   const elapsed = () => Math.max(0, Date.now() - timing.startedAt)
   const usages: ModelUsage[] = []
+  let serverToolPauses = 0
   let modelCalls = 0
   let compactionModelCalls = 0
   let warmupStarted = false
@@ -905,6 +913,7 @@ async function executeTurnModelLoop(
           baseHistoryLength: beforeStep.context.history.length,
           stream,
           remoteCompaction,
+          wireApi,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
           assetUrl: input.options.assetUrl,
@@ -1051,6 +1060,7 @@ async function executeTurnModelLoop(
                   history: compactionHistory,
                   injectWorldState: modelCalls !== 0,
                   stream: sourceSession?.stream ?? stream,
+                  wireApi: sourceSession?.wireApi ?? wireApi,
                   remoteCompaction:
                     sourceSelection.provider === step.target.provider &&
                     (sourceSession?.remoteCompaction ?? false),
@@ -1096,6 +1106,7 @@ async function executeTurnModelLoop(
           injectWorldState: modelCalls !== 0,
           stream,
           remoteCompaction,
+          wireApi,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
           assetUrl: input.options.assetUrl,
@@ -1339,6 +1350,11 @@ async function executeTurnModelLoop(
       let firstTokenAt: number | undefined
       const executionStep = step
       const callIndex = modelCalls + 1
+      const attempt = createModelAttemptTracker(
+        input.runtime.recordModelAttempt,
+        executionStep.target,
+        wireApi,
+      )
       let scheduled = Promise.resolve()
       let drained = Promise.resolve()
       const dispatchedCallIds = new Set<string>()
@@ -1476,6 +1492,7 @@ async function executeTurnModelLoop(
         drained = outcome.then(() => {})
       }
       const committedContent: ModelContentBlock[] = []
+      const committedNative: ModelNativeItem[] = []
       const committedCallIds = new Set<string>()
       let committedBytes = 0
       let answerStartIndex = answerItemIds.length
@@ -1483,6 +1500,7 @@ async function executeTurnModelLoop(
         content: readonly ModelContentBlock[],
         itemId: string,
         providerRequestId?: string,
+        native?: readonly ModelNativeItem[],
       ) => {
         if (
           content.some(
@@ -1494,7 +1512,12 @@ async function executeTurnModelLoop(
           latency.firstUsefulOutputMs ??= elapsed()
         const item = envelope(
           input.input.submissionId,
-          { role: "assistant", content },
+          {
+            role: "assistant",
+            content,
+            response: attempt.origin,
+            ...(native === undefined ? {} : { native }),
+          },
           {
             provider: executionStep.target.provider,
             model: executionStep.target.model,
@@ -1522,9 +1545,12 @@ async function executeTurnModelLoop(
       const response = await consumeModelStream({
         request,
         stream,
-        async onOutputItem(content, itemId) {
+        attempt,
+        async onOutputItem(content, itemId, native) {
           throwIfAborted(input.signal)
-          committedBytes += utf8Bytes(JSON.stringify(content))
+          committedBytes +=
+            utf8Bytes(JSON.stringify(content)) +
+            (native === undefined ? 0 : utf8Bytes(JSON.stringify(native)))
           if (
             committedBytes >
             executionStep.executionPolicy.assistantResponseBytes
@@ -1539,8 +1565,9 @@ async function executeTurnModelLoop(
               throw new Error("Model repeated a committed tool call id.")
             committedCallIds.add(block.id)
           }
-          await recordOutput(content, itemId)
+          await recordOutput(content, itemId, undefined, native)
           committedContent.push(...content)
+          committedNative.push(...(native ?? []))
           startCalls(
             content.filter(
               (block): block is ModelToolCallBlock =>
@@ -1572,6 +1599,7 @@ async function executeTurnModelLoop(
               answerStartIndex,
             )
             committedContent.length = 0
+            committedNative.length = 0
             committedBytes = 0
             sampledContext = undefined
             responseItemId = `message_${globalThis.crypto.randomUUID()}`
@@ -1635,31 +1663,37 @@ async function executeTurnModelLoop(
         response.stopReason !== ModelStopReason.EndTurn &&
         response.stopReason !== ModelStopReason.ToolUse &&
         response.stopReason !== ModelStopReason.Length &&
-        response.stopReason !== ModelStopReason.ContentFilter
+        response.stopReason !== ModelStopReason.ContentFilter &&
+        response.stopReason !== ModelStopReason.PauseTurn
       ) {
         throw new Error("Model response has an unsupported stop reason.")
       }
-      if (
-        utf8Bytes(JSON.stringify(response.content)) >
-        step.executionPolicy.assistantResponseBytes
-      ) {
-        throw new Error(
-          "Assistant response exceeded the configured byte limit.",
-        )
-      }
       // Terminal output includes completed items; never record or execute them twice.
       if (
-        JSON.stringify(response.content.slice(0, committedContent.length)) !==
-        JSON.stringify(committedContent)
+        !isDeepStrictEqual(
+          response.content.slice(0, committedContent.length),
+          committedContent,
+        )
       ) {
         throw new Error("Terminal model output disagrees with committed items.")
       }
       const remaining = response.content.slice(committedContent.length)
-      if (remaining.length > 0)
+      const remainingNative = response.native?.slice(committedNative.length)
+      if (
+        !isDeepStrictEqual(
+          response.native?.slice(0, committedNative.length) ?? [],
+          committedNative,
+        )
+      )
+        throw new Error(
+          "Terminal native output disagrees with committed items.",
+        )
+      if (remaining.length > 0 || (remainingNative?.length ?? 0) > 0)
         await recordOutput(
           remaining,
           responseItemId,
           response.providerRequestId,
+          remainingNative,
         )
       // GUI shows the model's full usage sample. Streaming tools can interleave
       // unseen results in history: budget calibration instead anchors input
@@ -1776,6 +1810,8 @@ async function executeTurnModelLoop(
                 signal,
               }),
               stream,
+              recordModelAttempt: input.runtime.recordModelAttempt,
+              ...(wireApi === undefined ? {} : { wireApi }),
               threadId: metadata.id,
               turnId: input.input.submissionId,
               assistantResponseBytes:
@@ -1918,6 +1954,19 @@ async function executeTurnModelLoop(
           (latency.warmupOverlapMs ?? 0) +
           Math.max(0, Math.min(toolsDrainedAt, warmupEndedAt) - warmupStartedAt)
 
+      if (response.stopReason === ModelStopReason.PauseTurn) {
+        if (response.native === undefined || response.native.length === 0)
+          throw new Error(
+            "A server tool pause requires native continuation history.",
+          )
+        serverToolPauses += 1
+        if (serverToolPauses > MAX_SERVER_TOOL_PAUSES)
+          throw new Error(
+            "Server tools repeatedly paused without completing the answer.",
+          )
+        continue
+      }
+      serverToolPauses = 0
       if (calls.length > 0) {
         // Stop before another request can start early streamed tools. Both
         // streamed and terminal-only providers execute the same bounded streak.
@@ -2056,14 +2105,27 @@ async function consumeModelStream(input: {
   readonly onOutputItem?: (
     content: readonly ModelContentBlock[],
     itemId: string,
+    native?: readonly ModelNativeItem[],
   ) => Promise<void>
+  readonly attempt?: ReturnType<typeof createModelAttemptTracker>
+  readonly recordModelAttempt?: TurnRuntime["recordModelAttempt"]
+  readonly wireApi?: ModelWireApi | undefined
   readonly onFirstToken?: () => void
-  readonly onRetry?: (committedOutput: boolean) => void
+  readonly onRetry?: (committedOutput: boolean, nextAttempt: number) => void
   readonly onUsage: (usage: ModelUsage) => void | Promise<void>
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
 }): Promise<ModelResponse> {
+  const attempt =
+    input.attempt ??
+    (input.recordModelAttempt === undefined
+      ? undefined
+      : createModelAttemptTracker(
+          input.recordModelAttempt,
+          input.request.target,
+          input.wireApi,
+        ))
   const iterator = input.stream(input.request)[Symbol.asyncIterator]()
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
@@ -2087,7 +2149,9 @@ async function consumeModelStream(input: {
       if (event.type === "retry") {
         const discardedResponseItemIds = [...provisionalItems]
         provisionalItems.clear()
-        input.onRetry?.(event.committedOutput === true)
+        await attempt?.end(event)
+        attempt?.retry(event.nextAttempt)
+        input.onRetry?.(event.committedOutput === true, event.nextAttempt)
         streamedBytes.assistant = 0
         streamedBytes.reasoning = 0
         trailingHighSurrogate.assistant = ""
@@ -2122,11 +2186,13 @@ async function consumeModelStream(input: {
         continue
       }
       if (event.type === "cancelled") {
+        await attempt?.end(event)
         if (event.usage !== undefined) await input.onUsage(event.usage)
         if (input.request.signal?.aborted) throw abortError()
         throw new Error("Model provider cancelled without caller cancellation.")
       }
       if (event.type === "failure") {
+        await attempt?.end(event)
         if (event.usage !== undefined) await input.onUsage(event.usage)
         reportOperationalFailure(input.onOperationalFailure, {
           operation: "model-request",
@@ -2140,12 +2206,12 @@ async function consumeModelStream(input: {
         const itemId = displayItemId(event.itemId)
         if (itemId === undefined)
           throw new Error("Committed output requires a display item id.")
-        await input.onOutputItem(event.content, itemId)
+        await input.onOutputItem(event.content, itemId, event.native)
         provisionalItems.delete(itemId)
         continue
       }
       if (event.type !== "response") {
-        if (input.request.compaction === "remote_v2") continue
+        if (input.request.compaction === "codex_remote") continue
         input.onFirstToken?.()
         const kind =
           event.type === "reasoning_delta" ? "reasoning" : "assistant"
@@ -2189,7 +2255,30 @@ async function consumeModelStream(input: {
       if (event.response.usage !== undefined)
         await input.onUsage(event.response.usage)
     }
+    if (terminal === undefined)
+      throw new Error("Model stream ended without a terminal response.")
+    const metadataBytes =
+      terminal.nativeMetadata === undefined
+        ? 0
+        : utf8Bytes(JSON.stringify(terminal.nativeMetadata))
+    // Compaction has its own summary/window admission. In particular, an
+    // encrypted checkpoint can represent existing context larger than a new
+    // assistant answer. Its envelope still obeys the diagnostic safety bound.
+    if (
+      metadataBytes > input.assistantResponseBytes ||
+      (input.request.compaction === undefined &&
+        utf8Bytes(JSON.stringify(terminal.content)) +
+          (terminal.native === undefined
+            ? 0
+            : utf8Bytes(JSON.stringify(terminal.native))) +
+          metadataBytes >
+          input.assistantResponseBytes)
+    ) {
+      throw new Error("Assistant response exceeded the configured byte limit.")
+    }
+    await attempt?.end({ type: "response", response: terminal })
   } catch (error) {
+    await attempt?.fail(error, input.request.signal?.aborted === true)
     if (input.request.signal?.aborted) {
       throw abortError()
     }
@@ -2210,7 +2299,10 @@ async function consumeModelStream(input: {
   if (terminal === undefined) {
     throw new Error("Model stream ended without a terminal response.")
   }
-  return terminal
+  return {
+    ...terminal,
+    ...(attempt === undefined ? {} : { origin: attempt.origin }),
+  }
 }
 
 function assessModelRequest(input: {
@@ -2266,7 +2358,8 @@ function assessModelRequest(input: {
 async function compactLiveHistory(
   input: Readonly<{
     trigger?: "manual" | "auto"
-    remoteCompaction?: boolean
+    wireApi?: ModelWireApi | undefined
+    remoteCompaction?: ModelClientSession["remoteCompaction"]
     fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
     injectWorldState?: boolean
     runtime: TurnRuntime
@@ -2342,6 +2435,8 @@ async function compactLiveHistory(
       const response = await consumeModelStream({
         request,
         stream: compactionStream,
+        recordModelAttempt: input.runtime.recordModelAttempt,
+        wireApi: input.wireApi,
         threadId: input.runtime.snapshot().metadata.id,
         turnId: input.turnId,
         assistantResponseBytes:
@@ -2383,7 +2478,7 @@ async function compactLiveHistory(
       )
       if (
         input.remoteCompaction &&
-        (nativeItems.length !== 1 || response.providerRequestId === undefined)
+        (nativeItems.length !== 1 || response.providerResponseId === undefined)
       ) {
         throw new Error(
           "Remote compaction requires exactly one native compaction item and a completed response id.",
@@ -2405,6 +2500,8 @@ async function compactLiveHistory(
       return {
         summary,
         native: input.remoteCompaction ? nativeItems[0] : undefined,
+        nativeItems: response.native,
+        origin: response.origin,
         ...(usage === undefined ? {} : { usage }),
       }
     }
@@ -2425,7 +2522,7 @@ async function compactLiveHistory(
         result = await compact(
           input.remoteCompaction
             ? {
-                compaction: "remote_v2",
+                compaction: input.remoteCompaction,
                 assets: {
                   read: (source, signal) =>
                     readAssetSource(source, input.rolloutAssets, signal),
@@ -2517,26 +2614,36 @@ async function compactLiveHistory(
         ? {}
         : { worldStateFragments: fullWorldState.fragments }),
     }).map((message) => envelope(input.turnId, message))
-    const retained = input.remoteCompaction
-      ? retainRemoteCompactionMessages(input.history)
-      : retainCompactionUserMessages(input.history)
-    // Keep the checkpoint last and inject current context before the last
-    // real user message, matching Codex's inline compaction placement.
+    const retained =
+      input.remoteCompaction === "responses_compact"
+        ? []
+        : input.remoteCompaction
+          ? retainRemoteCompactionMessages(input.history)
+          : retainCompactionUserMessages(input.history)
+    // Codex keeps its checkpoint last. The public compact API instead supplies
+    // an entire canonical window, followed by fresh harness context.
     const summaryItem =
       result.native === undefined
         ? generated.at(-1)
         : envelope(input.turnId, {
             role: "assistant",
             content: [result.native],
+            ...(result.nativeItems === undefined
+              ? {}
+              : { native: result.nativeItems }),
+            ...(result.origin === undefined ? {} : { response: result.origin }),
           })
     if (summaryItem === undefined)
       throw new Error("Missing compaction checkpoint.")
-    const replacement = [
-      ...retained.slice(0, -1),
-      ...generated.slice(0, -1),
-      ...retained.slice(-1),
-      summaryItem,
-    ]
+    const replacement =
+      input.remoteCompaction === "responses_compact"
+        ? [summaryItem, ...generated.slice(0, -1)]
+        : [
+            ...retained.slice(0, -1),
+            ...generated.slice(0, -1),
+            ...retained.slice(-1),
+            summaryItem,
+          ]
     await input.runtime.replaceConversationHistory({
       replacement,
       summary: result.summary,

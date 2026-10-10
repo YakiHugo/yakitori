@@ -140,7 +140,7 @@ describe("Responses warmup admission boundaries", () => {
     vi.useRealTimers()
     expect((await collect(turn.stream(request))).at(-1)).toMatchObject({
       type: "response",
-      response: { providerRequestId: "http" },
+      response: { providerResponseId: "http" },
     })
     expect(f.httpRequests[0]).toMatchObject({
       input: [{ role: "user", content: "prefix" }],
@@ -153,7 +153,7 @@ describe("Responses warmup admission boundaries", () => {
       (await collect(f.createTurn().warmup?.(request))).at(-1),
     ).toMatchObject({
       type: "response",
-      response: { providerRequestId: "warm" },
+      response: { providerResponseId: "warm" },
     })
     expect(constructorState.calls).toBe(2)
     expect(f.wsRequests).toHaveLength(1)
@@ -168,7 +168,7 @@ describe("Responses warmup admission boundaries", () => {
     expect(await collect(turn.warmup?.(request))).toMatchObject([
       {
         type: "response",
-        response: { providerRequestId: "warm", content: [] },
+        response: { providerResponseId: "warm", content: [] },
       },
     ])
     expect(
@@ -185,7 +185,7 @@ describe("Responses warmup admission boundaries", () => {
       ).at(-1),
     ).toMatchObject({
       type: "response",
-      response: { providerRequestId: "generated" },
+      response: { providerResponseId: "generated" },
     })
     expect(f.httpRequests).toHaveLength(0)
     expect(f.wsRequests[1]).toMatchObject({

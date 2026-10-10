@@ -14,7 +14,7 @@ import {
 } from "./model-request.ts"
 
 export type ModelProviderCapabilities = Readonly<{
-  remoteCompaction: boolean
+  remoteCompaction: false | "codex_remote" | "responses_compact"
   // Opt in only for an endpoint whose native PDF support is known.
   nativePdf?: boolean
 }>
@@ -31,7 +31,7 @@ export type ModelClientSession = {
   // Captured with this Turn's transport and capabilities, including after reload.
   readonly models: ModelsManager
   readonly wireApi?: ModelWireApi
-  readonly remoteCompaction?: boolean
+  readonly remoteCompaction?: ModelProviderCapabilities["remoteCompaction"]
   readonly nativePdf?: boolean
   readonly stream: StreamFn
   // Optional, non-generating request preparation. Caller accounts its usage.
@@ -56,13 +56,13 @@ export type ModelProvider = {
 
 export type ModelAttemptContext = NonNullable<ModelRequest["attempt"]>
 
-// Stable opaque identity for continuation blobs that are only valid for one
-// provider endpoint and credential. The high-entropy credential is never
-// stored; only its domain-separated digest enters durable metadata.
+// Stable opaque identity for continuation blobs valid for one endpoint and
+// credential or authenticated account. Only the domain-separated digest enters
+// durable metadata; callers capture owner identity with the matching credential.
 export function createProviderContinuationScope(
   provider: string,
   baseURL: string,
-  credential: string,
+  ownerIdentity: string,
 ): string {
   return `${provider}:${createHash("sha256")
     .update("yakitori-provider-continuation-v1\0")
@@ -70,7 +70,7 @@ export function createProviderContinuationScope(
     .update("\0")
     .update(baseURL)
     .update("\0")
-    .update(credential)
+    .update(ownerIdentity)
     .digest("hex")}`
 }
 
@@ -166,14 +166,17 @@ export function createModelProvider(
         stream(request) {
           requireTargetProvider(input.info.id, request.target)
           if (
-            request.compaction === "remote_v2" &&
-            !input.info.capabilities.remoteCompaction
+            (request.compaction === "codex_remote" ||
+              request.compaction === "responses_compact") &&
+            input.info.capabilities.remoteCompaction !== request.compaction
           ) {
             throw new Error(
               `Provider ${input.info.id} does not support remote compaction.`,
             )
           }
-          return (request.compaction === "remote_v2" ? remoteStream : stream)({
+          return (
+            request.compaction === "codex_remote" ? remoteStream : stream
+          )({
             ...request,
             continuationScope,
           })

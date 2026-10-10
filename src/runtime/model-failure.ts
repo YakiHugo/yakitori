@@ -12,6 +12,21 @@ const disconnectedCodes = new Set([
   "UND_ERR_SOCKET",
 ])
 
+// Inspect only a structured provider payload. SDK Error.message can contain
+// headers or the whole response body and is not a durable diagnostic source.
+export function providerErrorMessage(payload: unknown): string | undefined {
+  if (typeof payload !== "object" || payload === null) return undefined
+  const error =
+    "error" in payload &&
+    typeof payload.error === "object" &&
+    payload.error !== null
+      ? payload.error
+      : payload
+  return "message" in error && typeof error.message === "string"
+    ? error.message
+    : undefined
+}
+
 export function modelFailureFromUnknown(
   error: unknown,
   input: Readonly<{
@@ -22,8 +37,9 @@ export function modelFailureFromUnknown(
     kind?: ModelFailureKind
     status?: number
     providerCode?: string
-    providerMessage?: string
+    providerMessage?: string | undefined
     providerRequestId?: string
+    providerResponseId?: string
     retryAfterMs?: number
     serverShouldRetry?: boolean
   }>,
@@ -68,6 +84,9 @@ export function modelFailureFromUnknown(
     ...(input.providerRequestId === undefined
       ? {}
       : { providerRequestId: input.providerRequestId }),
+    ...(input.providerResponseId === undefined
+      ? {}
+      : { providerResponseId: input.providerResponseId }),
     ...(input.retryAfterMs === undefined
       ? {}
       : { retryAfterMs: input.retryAfterMs }),

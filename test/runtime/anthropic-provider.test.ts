@@ -1,3 +1,4 @@
+import { withSDKResponse } from "../support/sdk-response.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
@@ -20,7 +21,7 @@ describe("anthropic provider conversion", () => {
     true,
   ])("retains the latest cumulative usage on cancellation (transport %s)", async (wrapped) => {
     const controller = new AbortController()
-    const client = {
+    const client = withSDKResponse({
       messages: {
         async create() {
           return (async function* () {
@@ -47,7 +48,7 @@ describe("anthropic provider conversion", () => {
           })()
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const provider = createAnthropicProvider({
       apiKey: "test",
       model: "claude-test",
@@ -584,7 +585,7 @@ describe("anthropic provider conversion", () => {
     ]
     const capture = async (provider: string) => {
       let body: Record<string, unknown> | undefined
-      const client = {
+      const client = withSDKResponse({
         messages: {
           create(input: Record<string, unknown>) {
             body = input
@@ -595,7 +596,7 @@ describe("anthropic provider conversion", () => {
             })
           },
         },
-      } as unknown as Anthropic
+      } as unknown as Anthropic)
       const stream = createAnthropicProvider({
         apiKey: "test",
         model: "claude-test",
@@ -861,7 +862,7 @@ describe("anthropic provider conversion", () => {
         outputTokens: 4,
         activeContextTokens: 14,
       },
-      providerRequestId: "msg_1",
+      providerResponseId: "msg_1",
     })
 
     expect(
@@ -1041,7 +1042,7 @@ describe("anthropic provider conversion", () => {
 
   it("requests and streams summarized adaptive thinking", async () => {
     let body: Record<string, unknown> | undefined
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>) {
           body = input
@@ -1081,7 +1082,7 @@ describe("anthropic provider conversion", () => {
           })()
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "claude-sonnet-4-6",
@@ -1114,7 +1115,7 @@ describe("anthropic provider conversion", () => {
 
   it("places cache breakpoints after tools, stable system prefixes, and dynamic history", async () => {
     let body: Record<string, unknown> | undefined
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>) {
           body = input
@@ -1125,7 +1126,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "claude-test",
@@ -1200,7 +1201,7 @@ describe("anthropic provider conversion", () => {
 
   it("moves the dynamic breakpoint through a tool loop", async () => {
     let body: Record<string, unknown> | undefined
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>) {
           body = input
@@ -1211,7 +1212,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "claude-test",
@@ -1283,7 +1284,7 @@ describe("anthropic provider conversion", () => {
   it("adds output_config and the effort beta header for official anthropic", async () => {
     let body: Record<string, unknown> | undefined
     let options: Record<string, unknown> | undefined
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts: Record<string, unknown>) {
           body = input
@@ -1295,7 +1296,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "claude-test",
@@ -1317,7 +1318,7 @@ describe("anthropic provider conversion", () => {
   it("omits output_config and the beta header without an effort", async () => {
     let body: Record<string, unknown> | undefined
     let options: unknown = "not-passed"
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts?: unknown) {
           body = input
@@ -1329,7 +1330,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "claude-test",
@@ -1346,7 +1347,7 @@ describe("anthropic provider conversion", () => {
   it("sends the effort beta for the kimi coding endpoint", async () => {
     let body: Record<string, unknown> | undefined
     let options: Record<string, unknown> | undefined
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts: Record<string, unknown>) {
           body = input
@@ -1358,7 +1359,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "kimi-for-coding",
@@ -1387,7 +1388,7 @@ describe("anthropic provider conversion", () => {
   it("omits output_config and the beta header for kimi without an effort", async () => {
     let body: Record<string, unknown> | undefined
     let options: unknown = "not-passed"
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts?: unknown) {
           body = input
@@ -1399,7 +1400,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "kimi-for-coding",
@@ -1416,7 +1417,7 @@ describe("anthropic provider conversion", () => {
   it("maps effort off to thinking.disabled without the beta header", async () => {
     let body: Record<string, unknown> | undefined
     let options: unknown = "not-passed"
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts?: unknown) {
           body = input
@@ -1428,7 +1429,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "kimi-for-coding",
@@ -1446,7 +1447,7 @@ describe("anthropic provider conversion", () => {
   it("sends nothing for effort on (the endpoint default)", async () => {
     let body: Record<string, unknown> | undefined
     let options: unknown = "not-passed"
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts?: unknown) {
           body = input
@@ -1458,7 +1459,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "kimi-for-coding",
@@ -1475,7 +1476,7 @@ describe("anthropic provider conversion", () => {
   it("omits the effort beta for compatible-but-not-official providers", async () => {
     let body: Record<string, unknown> | undefined
     let options: unknown = "not-passed"
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create(input: Record<string, unknown>, opts?: unknown) {
           body = input
@@ -1487,7 +1488,7 @@ describe("anthropic provider conversion", () => {
           })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const stream = createAnthropicProvider({
       apiKey: "test",
       model: "other-model",
@@ -1710,7 +1711,7 @@ describe("anthropic PDF request size", () => {
     [undefined, undefined, true],
   ] as const)("scopes the limit to the actual direct endpoint (%s, fallback %s)", async (clientBaseURL, baseURL, guarded) => {
     let createCalls = 0
-    const client = {
+    const client = withSDKResponse({
       ...(clientBaseURL === undefined ? {} : { baseURL: clientBaseURL }),
       messages: {
         create() {
@@ -1718,7 +1719,7 @@ describe("anthropic PDF request size", () => {
           return anthropicRawMessage({ stop_reason: "end_turn", content: [] })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const events = await collect(
       {
         ...request,
@@ -1736,7 +1737,7 @@ describe("anthropic PDF request size", () => {
     "image",
   ] as const)("preserves oversized %s-only requests", async (type) => {
     let createCalls = 0
-    const client = {
+    const client = withSDKResponse({
       baseURL: "https://api.anthropic.com",
       messages: {
         create() {
@@ -1744,7 +1745,7 @@ describe("anthropic PDF request size", () => {
           return anthropicRawMessage({ stop_reason: "end_turn", content: [] })
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
     const data = "A".repeat(32_000_000)
     const events = await collect(
       {
@@ -1917,7 +1918,7 @@ describe("anthropic provider error classification", () => {
       new Headers(),
       "overloaded_error",
     )
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create() {
           return (async function* () {
@@ -1939,7 +1940,7 @@ describe("anthropic provider error classification", () => {
           })()
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
 
     const events = await collectWithClient(client)
 
@@ -1953,6 +1954,7 @@ describe("anthropic provider error classification", () => {
           provider: "anthropic",
           wireApi: "anthropic_messages",
           providerCode: "overloaded_error",
+          providerResponseId: "msg_error",
           message: "The model provider encountered a temporary server error.",
         },
         cause: error,
@@ -1965,7 +1967,7 @@ describe("anthropic provider error classification", () => {
       code: "UND_ERR_SOCKET",
     })
     const error = new TypeError("terminated", { cause: socket })
-    const client = {
+    const client = withSDKResponse({
       messages: {
         create() {
           return {
@@ -1975,7 +1977,7 @@ describe("anthropic provider error classification", () => {
           }
         },
       },
-    } as unknown as Anthropic
+    } as unknown as Anthropic)
 
     const events = await collectWithClient(client)
 
@@ -1999,13 +2001,13 @@ describe("anthropic provider error classification", () => {
 async function collectWithThrowingClient(
   error: unknown,
 ): Promise<ModelStreamEvent[]> {
-  const client = {
+  const client = withSDKResponse({
     messages: {
       create() {
         throw error
       },
     },
-  } as unknown as Anthropic
+  } as unknown as Anthropic)
   return collectWithClient(client)
 }
 

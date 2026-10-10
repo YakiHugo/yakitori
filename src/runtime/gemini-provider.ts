@@ -21,7 +21,19 @@ import {
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
+  providerErrorMessage,
 } from "./model-failure.ts"
+import { groupModelResponses } from "./model-history.ts"
+import {
+  modelNativeItems,
+  modelNativeResponseMetadata,
+  portableModelContent,
+  replayModelNativeItems,
+} from "./model-native.ts"
+import {
+  applyModelRequestControls,
+  ModelRequestControlsError,
+} from "./model-request-controls.ts"
 import {
   GEMINI_INLINE_REQUEST_MAX_BYTES,
   supportsGeminiToolPdf,
@@ -63,11 +75,13 @@ async function* streamGemini(
     return
   }
   let stage: ModelFailureStage = "request_build"
+  let errorPayload: unknown
   let usage: ModelUsage | undefined
   let response: Response | undefined
   let providerRequestId: string | undefined
+  let providerResponseId: string | undefined
   try {
-    if (request.compaction === "remote_v2")
+    if (request.compaction !== undefined && request.compaction !== "local")
       throw new GeminiProtocolError(
         "Gemini does not support remote compaction.",
       )
@@ -106,26 +120,54 @@ async function* streamGemini(
       `${options.baseURL.replace(/\/$/, "")}/models/${modelId}:streamGenerateContent`,
     )
     url.searchParams.set("alt", "sse")
-    const body = JSON.stringify({
-      contents,
-      ...(system === ""
-        ? {}
-        : { systemInstruction: { parts: [{ text: system }] } }),
-      generationConfig,
-      ...(request.tools.length === 0
-        ? {}
-        : {
-            tools: [
-              {
-                functionDeclarations: request.tools.map((tool) => ({
-                  name: tool.name,
-                  description: tool.description,
-                  parametersJsonSchema: tool.inputSchema,
-                })),
+    if (request.parallelToolCalls === false)
+      throw new ModelRequestControlsError(
+        "GenerateContent cannot guarantee serial function calls.",
+      )
+    if (request.outputFormat !== undefined) {
+      generationConfig.responseMimeType = "application/json"
+      generationConfig.responseJsonSchema = request.outputFormat.schema
+    }
+    const body = JSON.stringify(
+      applyModelRequestControls(request, "gemini_generate_content", {
+        contents,
+        ...(request.toolChoice === undefined
+          ? {}
+          : {
+              toolConfig: {
+                functionCallingConfig:
+                  typeof request.toolChoice === "object"
+                    ? {
+                        mode: "ANY",
+                        allowedFunctionNames: [request.toolChoice.name],
+                      }
+                    : {
+                        mode:
+                          request.toolChoice === "required"
+                            ? "ANY"
+                            : request.toolChoice.toUpperCase(),
+                      },
               },
-            ],
-          }),
-    })
+            }),
+        ...(system === ""
+          ? {}
+          : { systemInstruction: { parts: [{ text: system }] } }),
+        generationConfig,
+        ...(request.tools.length === 0
+          ? {}
+          : {
+              tools: [
+                {
+                  functionDeclarations: request.tools.map((tool) => ({
+                    name: tool.name,
+                    description: tool.description,
+                    parametersJsonSchema: tool.inputSchema,
+                  })),
+                },
+              ],
+            }),
+      }),
+    )
     // Check the complete serialized UTF-8 request, including text, tools and
     // base64 expansion. Per-document raw limits alone do not bound this body.
     if (
@@ -152,7 +194,7 @@ async function* streamGemini(
     stage = "response_headers"
     providerRequestId = response.headers.get("x-request-id") ?? undefined
     if (!response.ok) {
-      await response.body?.cancel()
+      errorPayload = await readGeminiError(response)
       throw new Error("Gemini HTTP request failed.")
     }
     if (
@@ -165,6 +207,9 @@ async function* streamGemini(
       throw new GeminiProtocolError("Gemini did not return an SSE body.")
     stage = "response_body"
     const content: ModelContentBlock[] = []
+    const nativeParts: JsonObject[] = []
+    let responseMetadata: JsonObject = {}
+    let candidateMetadata: JsonObject = {}
     const ids = new Set<string>()
     const itemId = `gemini_${randomUUID()}`
     let finishReason: string | undefined
@@ -191,18 +236,24 @@ async function* streamGemini(
             stage: "model_event",
             fallbackMessage: "Gemini returned a stream error.",
             kind: failureKindForStatus(status),
+            providerMessage: providerErrorMessage(error),
+            ...(isJsonObject(error) && typeof error.status === "string"
+              ? { providerCode: error.status }
+              : {}),
             ...(status === undefined ? {} : { status }),
           }),
           ...(usage === undefined ? {} : { usage }),
         }
         return
       }
+      const { candidates: _candidates, ...metadata } = payload
+      responseMetadata = { ...responseMetadata, ...metadata }
       if (payload.usageMetadata !== undefined) {
         usage = geminiUsage(payload.usageMetadata)
         request.onUsageSnapshot?.(usage)
       }
       if (typeof payload.responseId === "string")
-        providerRequestId ??= payload.responseId
+        providerResponseId ??= payload.responseId
       if (
         isJsonObject(payload.promptFeedback) &&
         typeof payload.promptFeedback.blockReason === "string"
@@ -220,6 +271,8 @@ async function* streamGemini(
           finishReason !== undefined
         )
           throw new GeminiProtocolError("Unexpected Gemini candidate.")
+        const { content: _content, ...metadata } = candidate
+        candidateMetadata = { ...candidateMetadata, ...metadata }
         if (candidate.content !== undefined) {
           if (
             !isJsonObject(candidate.content) ||
@@ -235,19 +288,13 @@ async function* streamGemini(
                 typeof part.thoughtSignature !== "string") ||
               (part.thought !== undefined &&
                 typeof part.thought !== "boolean") ||
-              [
-                "inlineData",
-                "fileData",
-                "functionResponse",
-                "executableCode",
-                "codeExecutionResult",
-                "toolCall",
-                "toolResponse",
-              ].some((key) => part[key] !== undefined)
+              part.inlineData !== undefined ||
+              part.fileData !== undefined
             )
               throw new GeminiProtocolError(
                 "Invalid or unsupported Gemini part.",
               )
+            nativeParts.push(part)
             const metadata = {
               gemini: {
                 provider: request.target.provider,
@@ -312,6 +359,13 @@ async function* streamGemini(
                   : { toolKind: "custom", customInputFallbackKey: key }),
                 providerMetadata: metadata,
               })
+            } else if (
+              typeof part.thoughtSignature === "string" ||
+              isJsonObject(part.executableCode) ||
+              isJsonObject(part.codeExecutionResult) ||
+              isJsonObject(part.toolCall) ||
+              isJsonObject(part.toolResponse)
+            ) {
             } else {
               // Audio/video, generated images, and built-in tools need explicit
               // canonical support; do not silently report a successful response.
@@ -368,14 +422,31 @@ async function* streamGemini(
         : completed.some((block) => block.type === "tool_call")
           ? ModelStopReason.ToolUse
           : ModelStopReason.EndTurn
-    if (request.streamOutputItems && completed.length > 0)
-      yield { type: "output_item", itemId, content: completed }
+    const native = modelNativeItems(
+      request,
+      "gemini_generate_content",
+      incompleteToolCalls
+        ? nativeParts.filter((part) => part.functionCall === undefined)
+        : nativeParts,
+    )
+    if (
+      request.streamOutputItems &&
+      (completed.length > 0 || native.length > 0)
+    )
+      yield { type: "output_item", itemId, content: completed, native }
     yield {
       type: "response",
       response: {
         stopReason,
         rawStopReason: finishReason,
         content: completed,
+        native,
+        nativeMetadata: modelNativeResponseMetadata(
+          request,
+          "gemini_generate_content",
+          { ...responseMetadata, candidates: [candidateMetadata] },
+        ),
+        ...(providerResponseId === undefined ? {} : { providerResponseId }),
         ...(finishReason === "MAX_TOKENS" ? { lengthReason: "output" } : {}),
         ...(incompleteToolCalls ? { incompleteToolCalls: true } : {}),
         ...(usage === undefined ? {} : { usage }),
@@ -389,6 +460,7 @@ async function* streamGemini(
     }
     if (
       error instanceof GeminiInlineRequestSizeError ||
+      error instanceof ModelRequestControlsError ||
       error instanceof AssetMediaError
     ) {
       yield {
@@ -425,12 +497,48 @@ async function* streamGemini(
                   ? "connection_failed"
                   : "stream_disconnected",
         ...(status === undefined ? {} : { status }),
+        providerMessage: providerErrorMessage(errorPayload),
+        ...(isJsonObject(errorPayload) &&
+        isJsonObject(errorPayload.error) &&
+        typeof errorPayload.error.status === "string"
+          ? { providerCode: errorPayload.error.status }
+          : {}),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         ...(providerRequestId === undefined ? {} : { providerRequestId }),
+        ...(providerResponseId === undefined ? {} : { providerResponseId }),
       }),
       ...(usage === undefined ? {} : { usage }),
       cause: error,
     }
+  }
+}
+
+async function readGeminiError(response: Response): Promise<unknown> {
+  const reader = response.body?.getReader()
+  if (reader === undefined) return undefined
+  const chunks: Uint8Array[] = []
+  let bytes = 0
+  try {
+    for (;;) {
+      const next = await reader.read()
+      if (next.done) break
+      bytes += next.value.byteLength
+      // Implementation safety boundary: error bodies are diagnostic payloads,
+      // not generated output. Bound allocation before parsing untrusted JSON.
+      if (bytes > 64 * 1024) {
+        await reader.cancel()
+        return undefined
+      }
+      chunks.push(next.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"))
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined
+    throw error
   }
 }
 
@@ -448,7 +556,7 @@ export function toGeminiContents(
   const nativeToolImages = /^(?:models\/)?gemini-3(?:[.-]|$)/.test(model ?? "")
   const nativeToolPdfs = supportsGeminiToolPdf(model ?? "")
   let toolResultIndex = 0
-  for (const message of messages) {
+  for (const message of groupModelResponses(messages)) {
     if (message.role === "tool") {
       const call = calls.get(message.toolCallId)
       if (call === undefined)
@@ -536,7 +644,15 @@ export function toGeminiContents(
       else contents.push({ role: "user", parts })
     } else if (message.role === "assistant") {
       const parts: JsonObject[] = []
-      for (const block of message.content) {
+      const native = replayModelNativeItems(
+        message,
+        "gemini_generate_content",
+        provider,
+        scope,
+        model,
+      )
+      let nativeCallIndex = 0
+      for (const block of portableModelContent(message)) {
         if (block.type === "compaction")
           throw new GeminiProtocolError(
             "Opaque compaction cannot be sent to Gemini.",
@@ -563,7 +679,11 @@ export function toGeminiContents(
             throw new GeminiProtocolError(
               "Gemini function input must be an object.",
             )
-          const nativeCall = owned?.functionCall
+          const nativeCall = (
+            native?.filter((part) => part.functionCall !== undefined)[
+              nativeCallIndex++
+            ] ?? owned
+          )?.functionCall
           calls.set(block.id, {
             name: block.name,
             ...(isJsonObject(nativeCall) && typeof nativeCall.id === "string"
@@ -581,7 +701,8 @@ export function toGeminiContents(
         } else if (owned !== undefined) parts.push(owned)
         else if (block.type === "text") parts.push({ text: block.text })
       }
-      if (parts.length > 0) contents.push({ role: "model", parts })
+      const replay = native ?? parts
+      if (replay.length > 0) contents.push({ role: "model", parts: replay })
     } else {
       const parts: JsonObject[] = message.content.map((block) => {
         if (block.type === "text") return { text: block.text }

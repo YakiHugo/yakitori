@@ -169,7 +169,7 @@ describe("model request runtime", () => {
 
   it.each([
     "local",
-    "remote_v2",
+    "codex_remote",
   ] as const)("retries a truncated %s compaction using the original request and output budget", async (compaction) => {
     const request: ModelRequest = {
       ...requestFixture(),

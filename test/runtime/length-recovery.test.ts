@@ -463,10 +463,12 @@ describe("bounded length recovery", () => {
           })
         yield { type: "cancelled" }
       } else {
-        expect(request.messages).toContainEqual({
-          role: "assistant",
-          content: [{ type: "text", text: "Saved partial text" }],
-        })
+        expect(request.messages).toContainEqual(
+          expect.objectContaining({
+            role: "assistant",
+            content: [{ type: "text", text: "Saved partial text" }],
+          }),
+        )
         yield response("Resumed.")
       }
     })

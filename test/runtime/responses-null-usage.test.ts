@@ -54,13 +54,14 @@ describe("Responses nullable usage", () => {
     const events = await collect(
       stream({ ...request, onUsageSnapshot: (usage) => snapshots.push(usage) }),
     )
-    expect(events).toEqual([
+    expect(events).toMatchObject([
       {
         type: "response",
         response: {
           stopReason: "end_turn",
           content: [],
-          providerRequestId: "response_completed",
+          providerResponseId: "response_completed",
+          native: [],
         },
       },
     ])
@@ -100,7 +101,7 @@ describe("Responses nullable usage", () => {
         failure: {
           kind: "rate_limited",
           providerCode: "rate_limit_exceeded",
-          providerRequestId: "response_failed",
+          providerResponseId: "response_failed",
         },
       },
     ])
@@ -128,7 +129,7 @@ describe("Responses nullable usage", () => {
       failure: {
         kind: "rate_limited",
         providerCode: "rate_limit_exceeded",
-        providerRequestId: "response_failed",
+        providerResponseId: "response_failed",
       },
     })
     expect(events.at(-1)).toMatchObject({

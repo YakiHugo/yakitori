@@ -175,7 +175,9 @@ describe("provider output completeness", () => {
       ]),
       request("anthropic"),
     )
-    expect(events.filter((event) => event.type === "output_item")).toEqual([])
+    expect(
+      events.filter((event) => event.type === "output_item"),
+    ).toMatchObject([])
     expect(events.at(-1)).toMatchObject({
       type: "response",
       response: {
@@ -306,7 +308,6 @@ describe("provider output completeness", () => {
 
   it.each([
     null,
-    "pause_turn",
     "unknown",
   ])("fails an unsupported Anthropic terminal reason explicitly (%s)", async (reason) => {
     const events = await collect(
@@ -505,7 +506,9 @@ describe("provider output completeness", () => {
       ]),
       request("codex"),
     )
-    expect(events.filter((event) => event.type === "output_item")).toEqual([
+    expect(
+      events.filter((event) => event.type === "output_item"),
+    ).toMatchObject([
       {
         type: "output_item",
         itemId: "item_done",
