@@ -506,10 +506,12 @@ describe("temporary side conversations", () => {
         provider: "faux",
         model: "second-model",
       })
-      expect(requests[1]?.messages).toContainEqual({
-        role: "assistant",
-        content: [{ type: "text", text: "answer 1" }],
-      })
+      expect(requests[1]?.messages).toContainEqual(
+        expect.objectContaining({
+          role: "assistant",
+          content: [{ type: "text", text: "answer 1" }],
+        }),
+      )
       expect(requests[1]?.messages).toContainEqual({
         role: "user",
         content: [{ type: "text", text: "Follow-up" }],

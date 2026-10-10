@@ -14,7 +14,6 @@ import {
   resolve,
   sep,
 } from "node:path"
-import { Agent as UndiciAgent } from "undici"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
@@ -56,11 +55,11 @@ import {
   createCodexProvider,
   createDefaultTools,
   createDiscoveringModelsManager,
+  createGrokProvider,
   createFileModelsCacheStore,
   createHookRunner,
   createMcpConnectionManager,
   createModelProvider,
-  createOpenAIProvider,
   createOpenAITurnTransport,
   createPermissionGate,
   createProviderContinuationScope,
@@ -70,7 +69,6 @@ import {
   createUserShellEnv,
   discoverCodexModels,
   discoverOpenAiCompatibleModels,
-  GROK_API_BASE_URL,
   type McpConnectionManager,
   type ModelProvider,
   ModelStopReason,
@@ -82,7 +80,6 @@ import {
   resolveCodexAccessToken,
   resolveCodexAccountIdentity,
   resolveGrokAccessToken,
-  resolveGrokAccountIdentity,
   resolveModel,
   type ShellEnvironmentPolicy,
   type StreamFn,
@@ -1903,7 +1900,7 @@ async function registerCodexLogin(
       info: {
         id: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: true, nativePdf: false },
+        capabilities: { remoteCompaction: "codex_remote", nativePdf: false },
       },
       createTurnStream: () => createCodexProvider({ credentialsPath }),
       models: createDiscoveringModelsManager({
@@ -2116,86 +2113,6 @@ async function listAllMateIds(mateKernel: MateKernel): Promise<string[]> {
     if (page.nextCursor === undefined) return mateIds
     cursor = page.nextCursor
   }
-}
-
-function createGrokProvider(modelsCacheDir: string): ModelProvider {
-  // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
-  // tokens expire, so resolve per model call rather than freezing one token at
-  // application startup. The same lazy stream supports primary and switched
-  // Grok Turns.
-  return createModelProvider({
-    info: {
-      id: "grok",
-      wireApi: "openai_responses",
-      capabilities: { remoteCompaction: false, nativePdf: false },
-    },
-    createAttemptStream: (attempt) => {
-      const forceHttp1 =
-        attempt.number > 1 &&
-        attempt.previousFailure !== undefined &&
-        attempt.previousFailure.kind !== "rate_limited"
-      const dispatcher = forceHttp1
-        ? new UndiciAgent({ allowH2: false })
-        : undefined
-      return async function* (request) {
-        try {
-          let apiKey: string
-          try {
-            apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
-          } catch (cause) {
-            yield {
-              type: "failure",
-              failure: {
-                kind: "authentication",
-                stage: "request_build",
-                provider: "grok",
-                wireApi: "openai_responses",
-                providerCode: "grok_login_unavailable",
-                message:
-                  "Grok login is unavailable. Run `grok` and log in again, or set XAI_API_KEY, then retry.",
-              },
-              cause,
-            }
-            return
-          }
-          yield* createOpenAIProvider({
-            apiKey,
-            model: request.target.model,
-            baseURL: GROK_API_BASE_URL,
-            ...(dispatcher === undefined
-              ? {}
-              : { fetchOptions: { dispatcher } }),
-          })({
-            ...request,
-            continuationScope: createProviderContinuationScope(
-              "grok",
-              GROK_API_BASE_URL,
-              apiKey,
-            ),
-          })
-        } finally {
-          await dispatcher?.close()
-        }
-      }
-    },
-    models: createDiscoveringModelsManager({
-      provider: "grok",
-      identity: () => resolveGrokAccountIdentity(),
-      async discover() {
-        const accessToken =
-          process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
-        return discoverOpenAiCompatibleModels({
-          provider: "grok",
-          baseUrl: GROK_API_BASE_URL,
-          accessToken,
-        })
-      },
-      cacheStore: createFileModelsCacheStore({
-        provider: "grok",
-        directory: modelsCacheDir,
-      }),
-    }),
-  })
 }
 
 function createFauxScenarioStream(scenario: string): StreamFn {

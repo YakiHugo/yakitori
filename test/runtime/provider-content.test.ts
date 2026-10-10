@@ -1,3 +1,4 @@
+import { withSDKResponse } from "../support/sdk-response.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -134,7 +135,7 @@ it("retains refusal provenance without turning it into a tool or losing visible 
 })
 
 it("retains streamed OpenAI annotations when the terminal output is omitted", async () => {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         return (async function* () {
@@ -169,7 +170,7 @@ it("retains streamed OpenAI annotations when the terminal output is omitted", as
         })()
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const events = await collect(
     createOpenAIProvider({ apiKey: "fake", model: "model", client })(
       request("openai"),
@@ -195,7 +196,7 @@ it("retains streamed OpenAI annotations when the terminal output is omitted", as
 })
 
 it("accumulates Anthropic citation deltas and preserves source metadata through durable replay", async () => {
-  const client = {
+  const client = withSDKResponse({
     messages: {
       async create() {
         return (async function* () {
@@ -228,7 +229,7 @@ it("accumulates Anthropic citation deltas and preserves source metadata through 
         })()
       },
     },
-  } as unknown as Anthropic
+  } as unknown as Anthropic)
   const events = await collect(
     createAnthropicProvider({ apiKey: "fake", model: "model", client })(
       request("anthropic"),
@@ -330,7 +331,7 @@ it.each([
   "response.reasoning_text.delta",
   "response.reasoning_text.done",
 ])("rejects unsupported semantic stream event %s even when terminal output is empty", async (type) => {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         return (async function* () {
@@ -339,7 +340,7 @@ it.each([
         })()
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const events = await collect(
     createOpenAIProvider({ apiKey: "fake", model: "model", client })(
       request("openai"),
@@ -357,7 +358,7 @@ it.each([
   "response.content_part.added",
   "response.content_part.done",
 ])("rejects unsupported parts from %s before an empty terminal success", async (type) => {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         return (async function* () {
@@ -372,7 +373,7 @@ it.each([
         })()
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const events = await collect(
     createOpenAIProvider({ apiKey: "fake", model: "model", client })(
       request("openai"),
@@ -386,8 +387,8 @@ it.each([
   ])
 })
 
-it("rejects native reasoning content instead of silently replacing it with an empty summary", () => {
-  expect(() =>
+it("retains native reasoning content independently of its display summary", () => {
+  expect(
     fromOpenAIResponse(
       response([
         {
@@ -398,11 +399,19 @@ it("rejects native reasoning content instead of silently replacing it with an em
         },
       ]),
     ),
-  ).toThrow("Unsupported OpenAI native reasoning content")
+  ).toMatchObject({
+    native: [
+      {
+        value: {
+          content: [{ type: "reasoning_text", text: "Meaningful reasoning" }],
+        },
+      },
+    ],
+  })
 })
 
 it("fails an unsupported completed output item before publishing following tool calls", async () => {
-  const client = {
+  const client = withSDKResponse({
     responses: {
       async create() {
         return (async function* () {
@@ -427,7 +436,7 @@ it("fails an unsupported completed output item before publishing following tool 
         })()
       },
     },
-  } as unknown as OpenAI
+  } as unknown as OpenAI)
   const events = await collect(
     createOpenAIProvider({ apiKey: "fake", model: "model", client })(
       request("openai"),

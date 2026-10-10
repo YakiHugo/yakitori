@@ -249,7 +249,7 @@ describe("kernel facts", () => {
       expect(isTurnCompletion(invalid)).toBe(false)
   })
 
-  it("enforces the durable custom-tool fallback invariant", () => {
+  it("validates native custom tools and optional JSON fallbacks", () => {
     const assistantMessage = (block: unknown) =>
       isModelMessage({ role: "assistant", content: [block] })
 
@@ -271,7 +271,7 @@ describe("kernel facts", () => {
         input: "1 + 1",
         toolKind: "custom",
       }),
-    ).toBe(false)
+    ).toBe(true)
     expect(
       assistantMessage({
         type: "tool_call",
@@ -315,7 +315,7 @@ describe("kernel facts", () => {
         ...customDefinition,
         customInputFallbackKey: undefined,
       }),
-    ).toBe(false)
+    ).toBe(true)
     expect(
       message({
         ...customDefinition,

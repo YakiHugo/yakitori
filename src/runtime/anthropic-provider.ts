@@ -36,6 +36,17 @@ import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
+import { groupModelResponses } from "./model-history.ts"
+import {
+  modelNativeItems,
+  modelNativeResponseMetadata,
+  portableModelContent,
+  replayModelNativeItems,
+} from "./model-native.ts"
+import {
+  applyModelRequestControls,
+  ModelRequestControlsError,
+} from "./model-request-controls.ts"
 import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
@@ -123,6 +134,7 @@ async function* streamAnthropic(
   }
 
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
+  let providerRequestId: string | undefined
   let failureStage: "connect" | "response_body" = "connect"
   const customFallbackKeys = new Map(
     request.tools.flatMap((tool) =>
@@ -137,6 +149,15 @@ async function* streamAnthropic(
     const explicitPromptCaching =
       request.target.provider === "anthropic" ||
       request.target.provider === "kimi"
+    if (
+      request.tools.some(
+        (tool) =>
+          tool.kind === "custom" && tool.customInputFallbackKey === undefined,
+      )
+    )
+      throw new ModelRequestControlsError(
+        "Messages custom tools require a JSON input fallback.",
+      )
     const tools = toAnthropicTools(
       request.tools,
       explicitPromptCaching,
@@ -171,7 +192,7 @@ async function* streamAnthropic(
               upload(document, bytes, request.signal),
           },
     )
-    const body: import("@anthropic-ai/sdk/resources/beta/messages/messages").MessageCreateParamsStreaming =
+    let body: import("@anthropic-ai/sdk/resources/beta/messages/messages").MessageCreateParamsStreaming =
       {
         stream: true,
         model: request.target.model || defaultModel,
@@ -186,8 +207,27 @@ async function* streamAnthropic(
           request.target.provider,
           request.continuationScope,
           media.uploadedFiles,
+          request.target.model || defaultModel,
         ),
         ...(tools === undefined ? {} : { tools }),
+        ...(request.toolChoice === undefined &&
+        request.parallelToolCalls === undefined
+          ? {}
+          : {
+              tool_choice: {
+                ...(typeof request.toolChoice === "object"
+                  ? { type: "tool" as const, name: request.toolChoice.name }
+                  : {
+                      type:
+                        request.toolChoice === "required"
+                          ? ("any" as const)
+                          : (request.toolChoice ?? ("auto" as const)),
+                    }),
+                ...(request.parallelToolCalls === undefined
+                  ? {}
+                  : { disable_parallel_tool_use: !request.parallelToolCalls }),
+              },
+            }),
         ...(request.cacheKey === undefined
           ? {}
           : { metadata: { user_id: request.cacheKey } }),
@@ -200,6 +240,12 @@ async function* streamAnthropic(
               },
             }),
       }
+    if (request.outputFormat !== undefined)
+      body.output_config = {
+        ...body.output_config,
+        format: { type: "json_schema", schema: request.outputFormat.schema },
+      }
+    body = applyModelRequestControls(request, "anthropic_messages", body)
     // Only PDFs sent to the direct API use Anthropic's documented whole-body
     // limit. Compatible endpoints own their limits, regardless of provider ID.
     if (
@@ -232,13 +278,17 @@ async function* streamAnthropic(
         return
       }
     }
-    stream =
-      media.uploadedFiles.size > 0
-        ? await client.beta.messages.create(
+    const pendingRequest =
+      media.uploadedFiles.size > 0 ||
+      request.providerOptions?.betas !== undefined
+        ? client.beta.messages.create(
             {
               ...body,
               betas: [
-                "files-api-2025-04-14",
+                ...(media.uploadedFiles.size > 0
+                  ? ["files-api-2025-04-14"]
+                  : []),
+                ...(request.providerOptions?.betas ?? []),
                 ...(effortLevel === undefined ? [] : ["effort-2025-11-24"]),
               ],
             },
@@ -246,7 +296,7 @@ async function* streamAnthropic(
               ? undefined
               : { signal: request.signal },
           )
-        : await client.messages.create(
+        : client.messages.create(
             body as MessageCreateParamsStreaming,
             request.signal === undefined && effortLevel === undefined
               ? undefined
@@ -259,13 +309,22 @@ async function* streamAnthropic(
                     : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
                 },
           )
+    const wireResponse = await pendingRequest.withResponse()
+    stream = wireResponse.data
+    providerRequestId =
+      wireResponse.response.headers.get("request-id") ??
+      wireResponse.response.headers.get("x-request-id") ??
+      undefined
     failureStage = "response_body"
   } catch (error) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
     }
-    if (error instanceof AssetMediaError) {
+    if (
+      error instanceof AssetMediaError ||
+      error instanceof ModelRequestControlsError
+    ) {
       yield {
         type: "failure",
         failure: {
@@ -300,6 +359,7 @@ async function* streamAnthropic(
         usage: NonNullable<Parameters<typeof fromAnthropicMessage>[0]["usage"]>
       }
     | undefined
+  let nativeMetadata: Record<string, unknown> = {}
   let observedUsage: ModelResponse["usage"]
   const usageFields = () =>
     observedUsage === undefined ? {} : { usage: observedUsage }
@@ -318,6 +378,8 @@ async function* streamAnthropic(
       if (event.type === "message_start") {
         if (message !== undefined)
           throw new AnthropicProtocolError("Anthropic repeated message_start.")
+        const { content: _content, ...metadata } = event.message
+        nativeMetadata = metadata
         message = {
           id: event.message.id,
           stop_reason: event.message.stop_reason,
@@ -396,7 +458,10 @@ async function* streamAnthropic(
           // Signature events carry the full value, matching SDK accumulation.
           pending.block.signature = event.delta.signature
         } else if (event.delta.type === "input_json_delta") {
-          if (pending.block.type !== "tool_use")
+          if (
+            pending.block.type !== "tool_use" &&
+            pending.block.type !== "server_tool_use"
+          )
             throw new AnthropicProtocolError(
               "Anthropic tool delta has a non-tool block.",
             )
@@ -416,7 +481,11 @@ async function* streamAnthropic(
             "Anthropic stopped an unknown or closed block.",
           )
         pending.completed = true
-        if (pending.block.type === "tool_use" && pending.inputStarted) {
+        if (
+          (pending.block.type === "tool_use" ||
+            pending.block.type === "server_tool_use") &&
+          pending.inputStarted
+        ) {
           try {
             pending.block.input = JSON.parse(pending.input)
           } catch (error) {
@@ -437,8 +506,14 @@ async function* streamAnthropic(
             if (completed?.content === undefined) break
             const itemId = `${message.id}_block_${nextOutputIndex}`
             nextOutputIndex += 1
-            if (completed.content.length > 0)
-              yield { type: "output_item", itemId, content: completed.content }
+            yield {
+              type: "output_item",
+              itemId,
+              content: completed.content,
+              native: modelNativeItems(request, "anthropic_messages", [
+                completed.block,
+              ]),
+            }
           }
         }
         continue
@@ -460,6 +535,11 @@ async function* streamAnthropic(
                 cache_creation_input_tokens:
                   event.usage.cache_creation_input_tokens,
               }),
+        }
+        nativeMetadata = {
+          ...nativeMetadata,
+          ...event.delta,
+          usage: message.usage,
         }
         observedUsage = fromAnthropicUsage(message.usage)
         request.onUsageSnapshot?.(observedUsage)
@@ -499,6 +579,16 @@ async function* streamAnthropic(
           )
         terminalResponse = {
           ...response,
+          ...(providerRequestId === undefined ? {} : { providerRequestId }),
+          native: modelNativeItems(request, "anthropic_messages", content),
+          nativeMetadata: modelNativeResponseMetadata(
+            request,
+            "anthropic_messages",
+            nativeMetadata,
+          ),
+          ...(message.id === undefined
+            ? {}
+            : { providerResponseId: message.id }),
           ...(incompleteToolCalls ? { incompleteToolCalls: true } : {}),
         }
       }
@@ -527,6 +617,8 @@ async function* streamAnthropic(
           : error,
         request.target.provider,
         failureStage,
+        providerRequestId,
+        message?.id,
       ),
       ...usageFields(),
     }
@@ -543,9 +635,10 @@ export function toAnthropicMessages(
     import("./model.ts").ModelDocumentBlock,
     string
   > = new Map(),
+  model?: string,
 ): BetaMessageParam[] {
   const converted: BetaMessageParam[] = []
-  for (const message of messages) {
+  for (const message of groupModelResponses(messages)) {
     if (message.role === "developer") {
       const content = message.content.map((block) => ({
         type: "text" as const,
@@ -593,14 +686,24 @@ export function toAnthropicMessages(
       continue
     }
     if (message.role === "assistant") {
-      const content = message.content.flatMap((block) => {
-        const converted = toAnthropicAssistantBlock(
-          block,
-          provider,
-          continuationScope,
-        )
-        return converted === undefined ? [] : [converted]
-      })
+      const native = replayModelNativeItems(
+        message,
+        "anthropic_messages",
+        provider,
+        continuationScope,
+        model,
+      )
+      const content =
+        native === undefined
+          ? portableModelContent(message).flatMap((block) => {
+              const converted = toAnthropicAssistantBlock(
+                block,
+                provider,
+                continuationScope,
+              )
+              return converted === undefined ? [] : [converted]
+            })
+          : native.map((block) => block as unknown as BetaContentBlockParam)
       if (content.length === 0) continue
       // Streamed output items split one response into several history messages.
       // Compatible endpoints may not combine same-role turns like Anthropic does.
@@ -710,6 +813,7 @@ export function toAnthropicTools(
   return tools.map((tool, index) => ({
     name: tool.name,
     description: tool.description,
+    ...(tool.strict === undefined ? {} : { strict: tool.strict }),
     input_schema: tool.inputSchema as Tool["input_schema"],
     ...(nativeDeferredLoading && tool.deferLoading === true
       ? { defer_loading: true }
@@ -747,6 +851,7 @@ function toAnthropicRequestMessages(
     import("./model.ts").ModelDocumentBlock,
     string
   > = new Map(),
+  model?: string,
 ): BetaMessageParam[] {
   const dynamic = toAnthropicMessages(
     messages,
@@ -755,6 +860,7 @@ function toAnthropicRequestMessages(
     provider,
     continuationScope,
     uploadedFiles,
+    model,
   )
   if (cacheBreakpoint) markLastModelContentBlockCacheable(dynamic)
   return dynamic
@@ -905,6 +1011,11 @@ export function fromAnthropicMessage(
       })
       continue
     }
+    if (
+      typeof block.type === "string" &&
+      (block.type === "server_tool_use" || block.type.endsWith("_tool_result"))
+    )
+      continue
     throw new AnthropicProtocolError(
       `Unsupported Anthropic content type: ${String(block.type)}.`,
     )
@@ -928,7 +1039,7 @@ export function fromAnthropicMessage(
     ...(message.usage === undefined
       ? {}
       : { usage: fromAnthropicUsage(message.usage) }),
-    ...(message.id === undefined ? {} : { providerRequestId: message.id }),
+    ...(message.id === undefined ? {} : { providerResponseId: message.id }),
   }
 }
 
@@ -1069,6 +1180,7 @@ function mapStopReason(
     stopReason === "model_context_window_exceeded"
   )
     return ModelStopReason.Length
+  if (stopReason === "pause_turn") return ModelStopReason.PauseTurn
   if (stopReason === "refusal") return ModelStopReason.ContentFilter
   if (stopReason === "tool_use") return ModelStopReason.ToolUse
   if (stopReason === "end_turn" || stopReason === "stop_sequence") {
@@ -1087,6 +1199,8 @@ function terminalFailure(
   error: unknown,
   provider: string,
   stage: "connect" | "response_body",
+  requestId?: string,
+  responseId?: string,
 ): ModelStreamFailureEvent {
   const status =
     error instanceof Anthropic.APIError && typeof error.status === "number"
@@ -1126,7 +1240,7 @@ function terminalFailure(
   const providerRequestId =
     error instanceof Anthropic.APIError && typeof error.requestID === "string"
       ? error.requestID
-      : undefined
+      : requestId
   return {
     type: "failure",
     failure: modelFailureFromUnknown(error, {
@@ -1139,6 +1253,7 @@ function terminalFailure(
       ...(providerCode === undefined ? {} : { providerCode }),
       ...(providerMessage === undefined ? {} : { providerMessage }),
       ...(providerRequestId === undefined ? {} : { providerRequestId }),
+      ...(responseId === undefined ? {} : { providerResponseId: responseId }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
     }),

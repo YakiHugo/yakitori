@@ -21,6 +21,9 @@ export class ModelFailureError extends KernelErrorException {
           ...(failure.providerRequestId === undefined
             ? {}
             : { providerRequestId: failure.providerRequestId }),
+          ...(failure.providerResponseId === undefined
+            ? {}
+            : { providerResponseId: failure.providerResponseId }),
           ...(failure.retryAfterMs === undefined
             ? {}
             : { retryAfterMs: failure.retryAfterMs }),

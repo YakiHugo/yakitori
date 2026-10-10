@@ -33,7 +33,19 @@ import { resolveModelWireEffort } from "./model-catalog.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
+  providerErrorMessage,
 } from "./model-failure.ts"
+import {
+  modelNativeItems,
+  modelNativeResponseMetadata,
+  portableModelContent,
+  replayModelNativeItems,
+} from "./model-native.ts"
+import {
+  applyModelRequestControls,
+  ModelRequestControlsError,
+  openAIToolChoice,
+} from "./model-request-controls.ts"
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
@@ -161,6 +173,7 @@ async function* streamOpenAI(
     return
   }
 
+  let providerRequestId: string | undefined
   let failureStage: "connect" | "response_body" = "connect"
   let terminalUsage: ModelResponse["usage"]
   let terminalEvent:
@@ -183,6 +196,86 @@ async function* streamOpenAI(
               upload(document, bytes, request.signal),
           },
     )
+    if (request.compaction === "responses_compact") {
+      if (requestProfile !== undefined || request.target.provider === "codex")
+        throw new ModelRequestControlsError(
+          "Public Responses compaction requires an API-key endpoint.",
+        )
+      const { data: compacted, response: compactResponse } =
+        await client.responses
+          .compact(
+            applyModelRequestControls(request, "openai_responses", {
+              model: request.target.model || defaultModel,
+              instructions: flattenModelSystem(request.system),
+              input: toOpenAIInput(
+                media.messages,
+                nativeDeferredLoading,
+                request.target.provider,
+                request.continuationScope,
+                media.uploadedFiles,
+                request.target.model || defaultModel,
+              ),
+              ...(request.cacheKey === undefined
+                ? {}
+                : { prompt_cache_key: request.cacheKey }),
+            }),
+            request.signal === undefined
+              ? undefined
+              : { signal: request.signal },
+          )
+          .withResponse()
+      providerRequestId =
+        compactResponse.headers.get("x-request-id") ?? undefined
+      onResponseHeaders?.(compactResponse.headers)
+      // /responses/compact returns the entire canonical window, including
+      // retained user/tool items. Project only its opaque checkpoint; replay
+      // the unpruned native window as the next input.
+      const checkpoint = compacted.output.filter(
+        (item) => item.type === "compaction",
+      )
+      if (checkpoint.length !== 1)
+        throw new OpenAIProtocolError(
+          "Responses compaction returned no unique checkpoint.",
+        )
+      const result = fromOpenAIResponse(
+        {
+          ...compacted,
+          model: request.target.model,
+          status: "completed",
+          output: checkpoint,
+        } as unknown as Response,
+        customFallbackKeys,
+        request.target.provider,
+        request.continuationScope,
+        request.target.model,
+      )
+      const { output: _compactedOutput, ...compactMetadata } = compacted
+      yield {
+        type: "response",
+        response: {
+          ...result,
+          nativeMetadata: modelNativeResponseMetadata(
+            request,
+            "openai_responses",
+            compactMetadata,
+          ),
+          ...(providerRequestId === undefined ? {} : { providerRequestId }),
+          native: modelNativeItems(
+            request,
+            "openai_responses",
+            compacted.output,
+          ),
+        },
+      }
+      return
+    }
+    if (
+      request.compaction === "codex_remote" &&
+      request.target.provider !== "codex"
+    )
+      throw new ModelRequestControlsError(
+        "compaction_trigger belongs to the Codex backend, not the public Responses API.",
+      )
     const effort = resolveModelWireEffort(request.target)
     let body: ResponseCreateParamsStreaming = {
       model: request.target.model || defaultModel,
@@ -194,13 +287,33 @@ async function* streamOpenAI(
           request.target.provider,
           request.continuationScope,
           media.uploadedFiles,
+          request.target.model || defaultModel,
         ),
-        ...(request.compaction === "remote_v2"
+        ...(request.compaction === "codex_remote"
           ? [{ type: "compaction_trigger" as const }]
           : []),
       ],
       tools: toOpenAITools(request.tools, nativeDeferredLoading),
-      parallel_tool_calls: true,
+      parallel_tool_calls: request.parallelToolCalls ?? true,
+      ...(request.toolChoice === undefined
+        ? {}
+        : {
+            tool_choice: openAIToolChoice(request) as NonNullable<
+              ResponseCreateParamsStreaming["tool_choice"]
+            >,
+          }),
+      ...(request.outputFormat === undefined
+        ? {}
+        : {
+            text: {
+              format: {
+                type: "json_schema" as const,
+                name: request.outputFormat.name,
+                schema: request.outputFormat.schema,
+                strict: request.outputFormat.strict ?? true,
+              },
+            },
+          }),
       // The Codex subscription endpoint rejects max_output_tokens. Its
       // ResponsesApiRequest omits this API-only output control.
       ...(request.target.provider === "codex" ||
@@ -209,6 +322,9 @@ async function* streamOpenAI(
         : { max_output_tokens: request.maxOutputTokens }),
       store: false,
       stream: true,
+      ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+        ? { include: ["reasoning.encrypted_content" as const] }
+        : {}),
       ...(request.cacheKey === undefined
         ? {}
         : { prompt_cache_key: request.cacheKey }),
@@ -231,7 +347,27 @@ async function* streamOpenAI(
         ? { service_tier: "priority" as const }
         : {}),
     }
-    if (requestProfile === "chatgpt-plan") body = toChatGPTPlanRequest(body)
+    body = applyModelRequestControls(request, "openai_responses", body)
+    if (requestProfile === "chatgpt-plan") {
+      const allowed = new Set([
+        "reasoning",
+        "prompt_cache_key",
+        "service_tier",
+        "include",
+        "parallel_tool_calls",
+        "tool_choice",
+      ])
+      if (
+        request.outputFormat !== undefined ||
+        Object.keys(request.providerOptions?.body ?? {}).some(
+          (key) => !allowed.has(key),
+        )
+      )
+        throw new ModelRequestControlsError(
+          "The ChatGPT plan request profile does not support these API-key-only request controls.",
+        )
+      body = toChatGPTPlanRequest(body)
+    }
     const warmed = warmup
       ? transport?.warmup(body, request.signal, request.continuationScope)
       : transport?.take(body, request.signal, request.continuationScope)
@@ -243,12 +379,10 @@ async function* streamOpenAI(
           body,
           request.signal === undefined ? undefined : { signal: request.signal },
         )
-        return onResponseHeaders === undefined
-          ? await pending
-          : await pending.withResponse().then(({ data, response }) => {
-              onResponseHeaders(response.headers)
-              return data
-            })
+        const { data, response } = await pending.withResponse()
+        providerRequestId = response.headers.get("x-request-id") ?? undefined
+        onResponseHeaders?.(response.headers)
+        return data
       })())
     if (stream === undefined)
       throw new OpenAIProtocolError("OpenAI returned no response stream.")
@@ -431,12 +565,12 @@ async function* streamOpenAI(
             )
             if (result.incompleteToolCalls) break
             nextOutputIndex += 1
-            if (result.content.length > 0)
-              yield {
-                type: "output_item",
-                itemId: item.id ?? `output_${nextOutputIndex - 1}`,
-                content: result.content,
-              }
+            yield {
+              type: "output_item",
+              itemId: item.id ?? `output_${nextOutputIndex - 1}`,
+              content: result.content,
+              native: modelNativeItems(request, "openai_responses", [item]),
+            }
           }
         }
         continue
@@ -584,6 +718,8 @@ async function* streamOpenAI(
             stage: "model_event",
             kind: failureKindForProviderCode(providerCode),
             providerCode,
+            providerMessage: event.message,
+            ...(providerRequestId === undefined ? {} : { providerRequestId }),
             fallbackMessage: "OpenAI request failed.",
           }),
         }
@@ -610,13 +746,30 @@ async function* streamOpenAI(
       }
       return
     }
-    if (terminalEvent !== undefined) yield terminalEvent
+    if (terminalEvent !== undefined) {
+      if (providerRequestId !== undefined) {
+        if (terminalEvent.type === "response")
+          terminalEvent = {
+            ...terminalEvent,
+            response: { ...terminalEvent.response, providerRequestId },
+          }
+        else
+          terminalEvent = {
+            ...terminalEvent,
+            failure: { ...terminalEvent.failure, providerRequestId },
+          }
+      }
+      yield terminalEvent
+    }
   } catch (error) {
     if (request.signal?.aborted) {
       yield abortedResponse(terminalUsage)
       return
     }
-    if (error instanceof AssetMediaError) {
+    if (
+      error instanceof AssetMediaError ||
+      error instanceof ModelRequestControlsError
+    ) {
       yield {
         type: "failure",
         failure: {
@@ -639,6 +792,10 @@ async function* streamOpenAI(
           : error,
         request.target.provider,
         failureStage,
+        providerRequestId,
+        terminalEvent?.type === "response"
+          ? terminalEvent.response.providerResponseId
+          : terminalEvent?.failure.providerResponseId,
       ),
       ...(terminalUsage === undefined ? {} : { usage: terminalUsage }),
     }
@@ -684,6 +841,7 @@ export function toOpenAIInput(
     import("./model.ts").ModelDocumentBlock,
     string
   > = new Map(),
+  model?: string,
 ): ResponseInput {
   const input: ResponseInput = []
   const customCallIds = new Set<string>()
@@ -801,7 +959,44 @@ export function toOpenAIInput(
       if (text.length > 0) input.push({ role: "assistant", content: text })
       text = ""
     }
-    for (const block of message.content) {
+    const native = replayModelNativeItems(
+      message,
+      "openai_responses",
+      provider,
+      continuationScope,
+      model,
+    )
+    if (native !== undefined) {
+      for (const item of native) {
+        if (typeof item.type !== "string")
+          throw new OpenAIProtocolError("Native Responses item has no type.")
+        if (
+          (item.type === "function_call" ||
+            item.type === "custom_tool_call" ||
+            (item.type === "tool_search_call" &&
+              item.execution === "client")) &&
+          item.status !== undefined &&
+          item.status !== "completed"
+        )
+          continue
+        if (item.type === "function_call") {
+          try {
+            JSON.parse(String(item.arguments))
+          } catch (error) {
+            if (!(error instanceof SyntaxError)) throw error
+            continue
+          }
+        }
+        if (
+          item.type === "custom_tool_call" &&
+          typeof item.call_id === "string"
+        )
+          customCallIds.add(item.call_id)
+        input.push(item as unknown as ResponseInput[number])
+      }
+      continue
+    }
+    for (const block of portableModelContent(message)) {
       if (block.type === "compaction") {
         flushText()
         if (block.provider !== provider || block.scope !== continuationScope) {
@@ -944,7 +1139,7 @@ function toOpenAITool(
       name: tool.name,
       description: tool.description,
       parameters: tool.inputSchema,
-      strict: false,
+      strict: tool.strict ?? false,
       ...(deferLoading ? { defer_loading: true } : {}),
     },
   ]
@@ -1026,8 +1221,29 @@ export function fromOpenAIResponse(
     : result.content.some((block) => block.type === "tool_call")
       ? ModelStopReason.ToolUse
       : ModelStopReason.EndTurn
+  const { output: _output, ...metadata } = response
   return {
     ...responseResult(response, stopReason, result.content, provider),
+    nativeMetadata: modelNativeResponseMetadata(
+      {
+        target: { provider, model, instructionProfileId: "native" },
+        ...(continuationScope === undefined ? {} : { continuationScope }),
+      },
+      "openai_responses",
+      metadata,
+    ),
+    native: modelNativeItems(
+      {
+        target: {
+          provider,
+          model: model ?? "",
+          instructionProfileId: "native",
+        },
+        ...(continuationScope === undefined ? {} : { continuationScope }),
+      },
+      "openai_responses",
+      response.output,
+    ),
     ...(rawStopReason === undefined
       ? refused
         ? { rawStopReason: "refusal" }
@@ -1095,10 +1311,6 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "reasoning") {
-      if ((item.content?.length ?? 0) > 0)
-        throw new OpenAIProtocolError(
-          "Unsupported OpenAI native reasoning content; summary reasoning remains supported.",
-        )
       const text = item.summary.map((summary) => summary.text).join("\n\n")
       content.push({
         type: "reasoning",
@@ -1120,6 +1332,10 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "message") {
+      if (item.role !== "assistant")
+        throw new OpenAIProtocolError(
+          "Responses output message has a non-assistant role.",
+        )
       const preserveParts =
         item.phase != null ||
         item.content.some(
@@ -1192,6 +1408,7 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "tool_search_call") {
+      if (item.execution === "server") continue
       if (
         item.execution !== "client" ||
         item.call_id === null ||
@@ -1210,6 +1427,21 @@ function fromOpenAIOutput(
       })
       continue
     }
+    // Hosted tools execute at the provider. Their native items are replayed,
+    // but never grant authority to run a local harness tool.
+    if (
+      [
+        "web_search_call",
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "tool_search_output",
+      ].includes(item.type)
+    )
+      continue
     if (item.type !== "function_call")
       throw new OpenAIProtocolError(
         `Unsupported OpenAI output type: ${item.type}.`,
@@ -1330,7 +1562,7 @@ function responseResult(
                 }),
           },
         }),
-    providerRequestId: response.id,
+    providerResponseId: response.id,
   }
 }
 
@@ -1358,7 +1590,8 @@ function responseFailure(
       stage: "model_event",
       kind: failureKindForProviderCode(providerCode),
       providerCode,
-      providerRequestId: response.id,
+      providerResponseId: response.id,
+      providerMessage: response.error?.message,
       fallbackMessage: "OpenAI request failed.",
     }),
     ...(response.usage == null
@@ -1394,6 +1627,8 @@ function terminalFailure(
   error: unknown,
   provider: string,
   stage: "connect" | "response_body",
+  requestId?: string,
+  responseId?: string,
 ): ModelStreamFailureEvent {
   const status =
     error instanceof OpenAI.APIError && typeof error.status === "number"
@@ -1429,7 +1664,7 @@ function terminalFailure(
   const providerRequestId =
     error instanceof OpenAI.APIError && typeof error.requestID === "string"
       ? error.requestID
-      : undefined
+      : requestId
   return {
     type: "failure",
     failure: modelFailureFromUnknown(error, {
@@ -1440,7 +1675,12 @@ function terminalFailure(
       fallbackMessage: "OpenAI request failed.",
       ...(status === undefined ? {} : { status }),
       ...(providerCode === undefined ? {} : { providerCode }),
+      providerMessage:
+        error instanceof OpenAI.APIError
+          ? providerErrorMessage(error.error)
+          : undefined,
       ...(providerRequestId === undefined ? {} : { providerRequestId }),
+      ...(responseId === undefined ? {} : { providerResponseId: responseId }),
       ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
     }),

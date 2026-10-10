@@ -137,7 +137,9 @@ export type {
   ModelHistoryContext,
   ModelImageBlock,
   ModelMessage,
+  ModelNativeItem,
   ModelReasoningBlock,
+  ModelResponseOrigin,
   ModelTextBlock,
   ModelToolCallBlock,
   ModelToolContentBlock,
@@ -820,9 +822,13 @@ export function isModelMessage(value: unknown): value is ModelMessage {
   }
   if (value.role === "assistant") {
     return (
-      onlyKeys(value, ["role", "content"]) &&
+      onlyKeys(value, ["role", "content", "native", "response"]) &&
       Array.isArray(value.content) &&
-      value.content.every(isModelContentBlock)
+      value.content.every(isModelContentBlock) &&
+      (value.native === undefined ||
+        (Array.isArray(value.native) &&
+          value.native.every(isModelNativeItem))) &&
+      (value.response === undefined || isModelResponseOrigin(value.response))
     )
   }
   if (value.role !== "user" && value.role !== "developer") return false
@@ -844,6 +850,37 @@ export function isModelMessage(value: unknown): value is ModelMessage {
             (isModelDocumentBlock(block) && block.data === undefined))),
     ) &&
     (value.context === undefined || isModelHistoryContext(value.context))
+  )
+}
+
+function isModelResponseOrigin(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["callId", "attemptId", "attempt", "provider", "model"]) &&
+    [value.callId, value.attemptId, value.provider, value.model].every(
+      (field) => typeof field === "string" && field.length > 0,
+    ) &&
+    typeof value.attempt === "number" &&
+    isPositiveInteger(value.attempt)
+  )
+}
+
+function isModelNativeItem(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["provider", "scope", "model", "wireApi", "value"]) &&
+    [value.provider, value.model].every(
+      (field) => typeof field === "string" && field.length > 0,
+    ) &&
+    (value.scope === undefined ||
+      (typeof value.scope === "string" && value.scope.length > 0)) &&
+    [
+      "openai_responses",
+      "openai_chat_completions",
+      "anthropic_messages",
+      "gemini_generate_content",
+    ].includes(String(value.wireApi)) &&
+    isJsonObject(value.value)
   )
 }
 
@@ -951,9 +988,11 @@ function isModelContentBlock(value: unknown): boolean {
       isJsonObject(value.providerMetadata)) &&
     (value.toolKind === "custom"
       ? isString(value.input) &&
-        isString(value.customInputFallbackKey) &&
-        value.customInputFallbackKey.trim().length > 0 &&
-        value.customInputFallbackKey === value.customInputFallbackKey.trim()
+        (value.customInputFallbackKey === undefined ||
+          (isString(value.customInputFallbackKey) &&
+            value.customInputFallbackKey.trim().length > 0 &&
+            value.customInputFallbackKey ===
+              value.customInputFallbackKey.trim()))
       : (value.toolKind === undefined ||
           value.toolKind === "function" ||
           value.toolKind === "tool_search") &&
@@ -972,17 +1011,22 @@ function isModelToolDefinition(value: unknown): boolean {
       "inputFormat",
       "customInputFallbackKey",
       "deferLoading",
+      "strict",
     ]) &&
     isString(value.name) &&
     isString(value.description) &&
     isJsonObject(value.inputSchema) &&
+    (value.strict === undefined || typeof value.strict === "boolean") &&
     (value.deferLoading === undefined ||
       typeof value.deferLoading === "boolean") &&
     (value.kind === "custom"
-      ? isModelToolInputFormat(value.inputFormat) &&
-        isString(value.customInputFallbackKey) &&
-        value.customInputFallbackKey.trim().length > 0 &&
-        value.customInputFallbackKey === value.customInputFallbackKey.trim()
+      ? (value.inputFormat === undefined ||
+          isModelToolInputFormat(value.inputFormat)) &&
+        (value.customInputFallbackKey === undefined ||
+          (isString(value.customInputFallbackKey) &&
+            value.customInputFallbackKey.trim().length > 0 &&
+            value.customInputFallbackKey ===
+              value.customInputFallbackKey.trim()))
       : (value.kind === undefined ||
           value.kind === "function" ||
           value.kind === "tool_search") &&
@@ -996,7 +1040,7 @@ function isModelToolInputFormat(value: unknown): boolean {
     isRecord(value) &&
     onlyKeys(value, ["type", "syntax", "definition"]) &&
     value.type === "grammar" &&
-    value.syntax === "lark" &&
+    (value.syntax === "lark" || value.syntax === "regex") &&
     isString(value.definition)
   )
 }

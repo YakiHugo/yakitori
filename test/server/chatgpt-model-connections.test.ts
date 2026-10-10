@@ -229,7 +229,7 @@ describe("ChatGPT model connections", () => {
       expect(oldTurn.remoteCompaction).toBe(false)
       expect(oldTurn.nativePdf).toBe(false)
       expect(() =>
-        oldTurn.stream({ ...request, compaction: "remote_v2" }),
+        oldTurn.stream({ ...request, compaction: "codex_remote" }),
       ).toThrow("does not support remote compaction")
       expect(calls).toHaveLength(3)
     } finally {

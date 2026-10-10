@@ -47,7 +47,7 @@ describe("provider-native compaction history", () => {
       info: {
         id: "codex",
         wireApi: "openai_responses",
-        capabilities: { remoteCompaction: true },
+        capabilities: { remoteCompaction: "codex_remote" },
         retry: { maxAttempts: 10, sleep: async () => {} },
       },
       stream: async function* () {
@@ -81,7 +81,7 @@ describe("provider-native compaction history", () => {
     const events = []
     try {
       for await (const event of session.stream({
-        compaction: "remote_v2",
+        compaction: "codex_remote",
         target: {
           provider: "codex",
           model: "gpt-5.6-sol",
@@ -124,7 +124,7 @@ describe("provider-native compaction history", () => {
           response: {
             stopReason: ModelStopReason.EndTurn,
             content: [{ ...checkpoint, encryptedContent: "x".repeat(400_000) }],
-            providerRequestId: "resp_big",
+            providerResponseId: "resp_big",
           },
         }
         return
@@ -164,14 +164,14 @@ describe("provider-native compaction history", () => {
     let normalCalls = 0
     const stream: StreamFn = async function* (request) {
       requests.push(request)
-      if (request.compaction === "remote_v2") {
+      if (request.compaction === "codex_remote") {
         expect(request.target.provider).toBe("codex")
         yield {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
             content: [checkpoint],
-            providerRequestId: "resp_compact",
+            providerResponseId: "resp_compact",
             usage: { inputTokens: 59_000, outputTokens: 20 },
           },
         }
@@ -239,7 +239,10 @@ describe("provider-native compaction history", () => {
       summary: "",
       replacement: expect.arrayContaining([
         expect.objectContaining({
-          item: { role: "assistant", content: [checkpoint] },
+          item: expect.objectContaining({
+            role: "assistant",
+            content: [checkpoint],
+          }),
         }),
       ]),
     })
@@ -283,7 +286,7 @@ describe("provider-native compaction history", () => {
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "done 4" })
     expect(
-      requests.filter((request) => request.compaction === "remote_v2"),
+      requests.filter((request) => request.compaction === "codex_remote"),
     ).toHaveLength(1)
     expect(
       requests.filter((request) => request.compaction === "local"),
@@ -331,7 +334,7 @@ describe("provider-native compaction history", () => {
               : failure === "duplicate"
                 ? [checkpoint, checkpoint]
                 : [checkpoint],
-          providerRequestId: "resp_failed",
+          providerResponseId: "resp_failed",
         },
       }
     }
@@ -383,7 +386,9 @@ async function setup(stream: StreamFn) {
           info: {
             id,
             wireApi: id === "codex" ? "openai_responses" : "anthropic_messages",
-            capabilities: { remoteCompaction: id === "codex" },
+            capabilities: {
+              remoteCompaction: id === "codex" ? "codex_remote" : false,
+            },
             retry: { maxAttempts: 1 },
           },
           stream,
