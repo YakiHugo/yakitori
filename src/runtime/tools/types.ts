@@ -7,6 +7,7 @@ import type {
 } from "../../kernel/index.ts"
 import type { BoundAgentControl } from "../agent-control.ts"
 import type { ModelToolInputFormat } from "../model.ts"
+import type { BoundThreadCollaboration } from "../thread-collaboration.ts"
 import type { ToolName } from "./tool-name.ts"
 import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
@@ -40,6 +41,7 @@ export type ToolExecutionContext = Readonly<{
   signal?: AbortSignal
   visibleFileObservations?: VisibleFileObservations
   agentControl?: BoundAgentControl
+  threadCollaboration?: BoundThreadCollaboration
   documentReading?: Readonly<{ nativePdf: boolean; images: boolean }>
 }>
 
