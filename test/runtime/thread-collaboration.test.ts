@@ -66,6 +66,149 @@ async function fixture(script: readonly FauxScriptedResponse[]) {
 }
 
 describe("independent session collaboration", () => {
+  it("reads selected excerpts and structured tool errors and discovery results without omitting their semantics", async () => {
+    const f = await fixture([])
+    try {
+      const selected = {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: "Review this" }],
+        contextAttachments: [
+          {
+            id: "selection",
+            kind: "selection" as const,
+            text: "Important selected paragraph",
+            source: {
+              kind: "message" as const,
+              label: "Source",
+              sessionId: "source",
+              messageId: "original",
+            },
+          },
+        ],
+      }
+      const toolResult = {
+        role: "tool" as const,
+        toolCallId: "discovery",
+        content: [{ type: "text" as const, text: "tool error" }],
+        isError: true,
+        toolSearch: {
+          tools: [
+            {
+              name: "discovered",
+              description: "Found tool",
+              inputSchema: { type: "object" },
+            },
+          ],
+        },
+      }
+      await f.store.appendItems(
+        f.target.id,
+        [selected, toolResult].map((item, index) => ({
+          type: "response_item" as const,
+          item: {
+            id: `semantic_${index}`,
+            turnId: "semantic_turn",
+            createdAt: "2026-10-11T00:00:00Z",
+            item,
+          },
+        })),
+      )
+      await f.store.flushThread(f.target.id)
+      const page = await f.service
+        .bind(f.source.id)
+        .read({ threadId: f.target.id, turnId: "semantic_turn" })
+      if (!("items" in page)) throw new Error("Expected transcript")
+      expect(page.truncated).toBe(false)
+      expect(page.items.map((item) => JSON.parse(item.text))).toEqual([
+        selected,
+        toolResult,
+      ])
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it("treats a fork as a new recipient while preserving readable source history", async () => {
+    const f = await fixture([
+      { content: [{ type: "text", text: "source result" }] },
+      { content: [{ type: "text", text: "later user turn" }] },
+      { content: [{ type: "text", text: "new fork result" }] },
+    ])
+    try {
+      const control = f.service.bind(f.source.id)
+      const request = {
+        threadId: f.target.id,
+        requestId: "same_id",
+        message: "work",
+      }
+      const sent = await control.send(request)
+      await control.wait([sent], 5_000)
+      const later = await f.target.startIfIdle({
+        content: createUserInput("fork before this"),
+      })
+      if (later.type !== "started") throw new Error("Expected later turn")
+      await expect.poll(() => f.target.status).toBe("idle")
+      const fork = await f.manager.forkThread({
+        sourceThreadId: f.target.id,
+        beforeTurnId: later.turnId,
+      })
+      expect(
+        await control.wait([{ ...sent, threadId: fork.thread.id }], 0),
+      ).toMatchObject({ results: [{ status: "not_found" }] })
+      const history = await control.read({
+        threadId: fork.thread.id,
+        turnId: sent.turnId,
+      })
+      if (!("items" in history)) throw new Error("Expected transcript")
+      expect(history.items.length).toBeGreaterThan(0)
+      expect(
+        history.items.every((item) => item.originThreadId === f.target.id),
+      ).toBe(true)
+      expect(JSON.stringify(history)).toContain("source result")
+      const newSent = await control.send({
+        ...request,
+        threadId: fork.thread.id,
+      })
+      expect(newSent.delivery).toBe("started")
+      expect(newSent.turnId).not.toBe(sent.turnId)
+      expect(await control.wait([newSent], 5_000)).toMatchObject({
+        results: [{ status: "completed", consumed: true }],
+      })
+      expect(f.provider.callCount).toBe(3)
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it("preserves a refusal result instead of presenting turn completion as task success", async () => {
+    const f = await fixture([
+      {
+        stopReason: "content_filter",
+        content: [{ type: "text", text: "Cannot perform this request." }],
+      },
+    ])
+    try {
+      const control = f.service.bind(f.source.id)
+      const sent = await control.send({
+        threadId: f.target.id,
+        requestId: "refused",
+        message: "work",
+      })
+      expect(await control.wait([sent], 5_000)).toMatchObject({
+        results: [
+          {
+            status: "completed",
+            consumed: true,
+            completionReason: "refused",
+            answerItemIds: [expect.any(String)],
+          },
+        ],
+      })
+    } finally {
+      await f.cleanup()
+    }
+  })
+
   it("rechecks a stale history read when the target finishes during that read", async () => {
     const entered = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>()

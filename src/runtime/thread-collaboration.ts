@@ -28,6 +28,7 @@ export type ThreadRequestResult = ThreadRequest &
       | "not_found"
     consumed: boolean
     answerItemIds?: readonly string[]
+    completionReason?: "truncated" | "refused"
     error?: string
   }>
 export type ThreadCollaboration = ReturnType<typeof createThreadCollaboration>
@@ -77,7 +78,7 @@ export function createThreadCollaboration(input: {
           if (
             typeof targetAgent === "object" &&
             targetAgent !== null &&
-            !Array.isArray(targetAgent) &&
+            "kind" in targetAgent &&
             targetAgent.kind === "subagent"
           )
             throw new ThreadCollaborationError(
@@ -91,7 +92,11 @@ export function createThreadCollaboration(input: {
               `Thread ${request.threadId} was not found in this service's store.`,
             )
           const admitted = await target.startOrSteer({
-            submissionId: submissionId(sourceThreadId, request.requestId),
+            submissionId: submissionId(
+              sourceThreadId,
+              request.threadId,
+              request.requestId,
+            ),
             content: createUserInput(request.message),
             provenance: { sourceThreadId, sourceRequestId: request.requestId },
           })
@@ -203,8 +208,12 @@ export function createThreadCollaboration(input: {
     },
   }
 }
-function submissionId(sourceThreadId: string, requestId: string) {
-  return `thread-message:${JSON.stringify([sourceThreadId, requestId])}`
+function submissionId(
+  sourceThreadId: string,
+  targetThreadId: string,
+  requestId: string,
+) {
+  return `thread-message:${JSON.stringify([sourceThreadId, targetThreadId, requestId])}`
 }
 function requestResult(
   stored: StoredThread | undefined,
@@ -214,9 +223,10 @@ function requestResult(
 ): ThreadRequestResult {
   if (stored === undefined)
     return { ...request, status: "not_found", consumed: false }
-  const id = submissionId(sourceThreadId, request.requestId)
+  const id = submissionId(sourceThreadId, request.threadId, request.requestId)
   const admission = stored.rollout.find(
-    ({ item }) =>
+    ({ item, threadId }) =>
+      threadId === request.threadId &&
       item.type === "thread_message_admitted" &&
       item.submissionId === id &&
       item.sourceThreadId === sourceThreadId &&
@@ -226,14 +236,17 @@ function requestResult(
   if (admission === undefined)
     return { ...request, status: "not_found", consumed: false }
   const consumed = stored.rollout.some(
-    ({ item }) =>
+    ({ item, threadId }) =>
+      threadId === request.threadId &&
       item.type === "thread_message_consumed" &&
       item.submissionId === id &&
       item.targetTurnId === request.turnId,
   )
   const terminal = stored.rollout.find(
-    ({ item }) =>
-      item.type === "turn_completed" && item.turnId === request.turnId,
+    ({ item, threadId }) =>
+      threadId === request.threadId &&
+      item.type === "turn_completed" &&
+      item.turnId === request.turnId,
   )?.item
   if (terminal?.type === "turn_completed") {
     if (!consumed)
@@ -247,6 +260,9 @@ function requestResult(
             ? "failed"
             : "interrupted",
       consumed,
+      ...(terminal.completion?.reason === undefined
+        ? {}
+        : { completionReason: terminal.completion.reason }),
       answerItemIds:
         terminal.completion?.answerItemIds ??
         stored.rollout

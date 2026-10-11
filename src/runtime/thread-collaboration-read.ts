@@ -188,6 +188,9 @@ function readTranscriptPage(
     (position !== undefined && position.anchor !== anchor)
   )
     throw invalidCursor()
+  const origins = new Map(
+    records.map(({ record, envelope }) => [envelope.id, record.threadId]),
+  )
   const targetTurns = new Map(
     stored.rollout.flatMap(({ item }) =>
       item.type === "thread_message_admitted"
@@ -216,6 +219,7 @@ function readTranscriptPage(
     throw invalidCursor()
   const items: Array<{
     itemId: string
+    originThreadId: string
     turnId: string
     role: string
     text: string
@@ -235,6 +239,7 @@ function readTranscriptPage(
     const chunk = text.slice(offset, end)
     items.push({
       itemId: envelope.id,
+      originThreadId: origins.get(envelope.id) ?? stored.metadata.id,
       turnId: targetTurns.get(envelope.id) ?? envelope.turnId,
       role: envelope.item.role,
       text: chunk,
@@ -268,14 +273,24 @@ function readTranscriptPage(
 }
 function transcriptText(envelope: ResponseItemEnvelope): string {
   const item = envelope.item
-  // Opaque native replay blobs are transport state, not model-visible transcript.
+  // Keep semantic model fields (selected excerpts, errors and discovered
+  // tools), excluding opaque provider replay and execution-only file grants.
+  const visible =
+    item.role === "assistant"
+      ? { role: item.role, content: item.content }
+      : item.role === "tool"
+        ? {
+            role: item.role,
+            toolCallId: item.toolCallId,
+            content: item.content,
+            ...(item.isError === undefined ? {} : { isError: item.isError }),
+            ...(item.toolSearch === undefined
+              ? {}
+              : { toolSearch: item.toolSearch }),
+          }
+        : item
   return JSON.stringify({
-    role: item.role,
-    content: item.content,
-    ...(item.role === "tool" ? { toolCallId: item.toolCallId } : {}),
-    ...("context" in item && item.context !== undefined
-      ? { context: item.context }
-      : {}),
+    ...visible,
     ...(envelope.submissionMetadata?.metadata === undefined
       ? {}
       : { metadata: envelope.submissionMetadata.metadata }),

@@ -213,6 +213,7 @@ export class Session {
       restoredFingerprint?: string
       inputItemId: string
       turnId: string
+      threadId: string
     }>
   >()
   readonly #threadMessages = new Map<string, AcceptedThreadMessage>()
@@ -268,6 +269,7 @@ export class Session {
         this.#rememberRecordedSteer(
           record.item.item,
           recordedTurnId ?? record.item.item.turnId,
+          record.threadId,
         )
       if (record.item.type === "turn_started") {
         const recorded = recordedInputs.get(record.item.inputItemId)
@@ -276,6 +278,7 @@ export class Session {
             ? undefined
             : recordedInputFingerprint(recorded, record.item.requestFingerprint)
         this.#submittedInputs.set(record.item.turnId, {
+          threadId: record.threadId,
           fingerprint: record.item.requestFingerprint,
           ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
           inputItemId: record.item.inputItemId,
@@ -284,7 +287,10 @@ export class Session {
       }
     }
     // Explicit receipts retain the target Turn even for unconsumed steering.
-    for (const { item } of input.stored.rollout) {
+    for (const { threadId, item } of input.stored.rollout) {
+      // Forked conversation history retains its original recipient. Those
+      // receipts never establish an admission in this independent actor.
+      if (threadId !== this.id) continue
       if (item.type === "thread_message_admitted") {
         this.#threadMessages.set(item.submissionId, {
           admission: item,
@@ -293,6 +299,7 @@ export class Session {
           consumed: false,
         })
         this.#submittedInputs.set(item.submissionId, {
+          threadId,
           fingerprint: item.requestFingerprint,
           inputItemId: item.inputItemId,
           turnId: item.targetTurnId,
@@ -458,7 +465,11 @@ export class Session {
     }
   }
 
-  #rememberRecordedSteer(item: ResponseItemEnvelope, turnId: string): void {
+  #rememberRecordedSteer(
+    item: ResponseItemEnvelope,
+    turnId: string,
+    threadId = this.id,
+  ): void {
     if (
       !item.id.startsWith("message_") ||
       item.item.role !== "user" ||
@@ -476,6 +487,7 @@ export class Session {
             item.submissionMetadata.requestFingerprint,
           )
     this.#submittedInputs.set(item.turnId, {
+      threadId,
       fingerprint: item.submissionMetadata?.requestFingerprint,
       ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
       inputItemId: item.id,
@@ -488,7 +500,11 @@ export class Session {
     mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
   ): Promise<TurnInputSubmission> {
     const fingerprint = fingerprintTurnInput(input)
-    const submitted = this.#submittedInputs.get(input.submissionId)
+    const recorded = this.#submittedInputs.get(input.submissionId)
+    const submitted =
+      input.provenance !== undefined && recorded?.threadId !== this.id
+        ? undefined
+        : recorded
     if (submitted !== undefined) {
       if (
         submitted.fingerprint !== fingerprint &&
@@ -497,11 +513,29 @@ export class Session {
       ) {
         return notSubmitted(Reason.RequestConflict)
       }
-      const message = this.#threadMessages.get(input.submissionId)
-      if (message !== undefined && !message.durable)
-        await this.#withContextMutation(() =>
-          this.#persistThreadMessage(message),
+      let message = this.#threadMessages.get(input.submissionId)
+      if (input.provenance !== undefined && message === undefined) {
+        // A crash can preserve turn_started before its external-message receipt.
+        // The matching source-sensitive fingerprint proves this original start;
+        // repair the receipt with its recorded identity, without executing it.
+        if (
+          submitted.turnId !== input.submissionId ||
+          submitted.fingerprint !== fingerprint
         )
+          return notSubmitted(Reason.RequestConflict)
+        message = this.#acceptThreadMessage(
+          input,
+          submitted.turnId,
+          "started",
+          submitted.inputItemId,
+        )
+      }
+      if (message !== undefined && !message.durable) {
+        const accepted = message
+        await this.#withContextMutation(() =>
+          this.#persistThreadMessage(accepted),
+        )
+      }
       return {
         type: "replayed",
         turnId: submitted.turnId,
@@ -628,6 +662,7 @@ export class Session {
     }
     this.#pendingTurnStart = pending
     this.#submittedInputs.set(input.submissionId, {
+      threadId: this.id,
       fingerprint: requestFingerprint,
       inputItemId: inputItem.id,
       turnId: input.submissionId,
@@ -699,6 +734,7 @@ export class Session {
         const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
         const start = rollout.find(
           (entry) =>
+            entry.threadId === this.id &&
             entry.item.type === "turn_started" &&
             entry.item.turnId === input.submissionId &&
             entry.item.inputItemId === pending.inputItem.id,
@@ -706,11 +742,13 @@ export class Session {
         if (start !== undefined) {
           const inputRecord = rollout.find(
             (entry) =>
+              entry.threadId === this.id &&
               entry.item.type === "response_item" &&
               entry.item.item.id === pending.inputItem.id,
           )
           const contextRecord = rollout.find(
             (entry) =>
+              entry.threadId === this.id &&
               entry.item.type === "turn_context" &&
               entry.item.context.turnId === input.submissionId,
           )
@@ -723,11 +761,13 @@ export class Session {
         } else {
           const inputPresent = rollout.some(
             (entry) =>
+              entry.threadId === this.id &&
               entry.item.type === "response_item" &&
               entry.item.item.id === pending.inputItem.id,
           )
           const contextPresent = rollout.some(
             (entry) =>
+              entry.threadId === this.id &&
               entry.item.type === "turn_context" &&
               entry.item.context.turnId === input.submissionId,
           )
@@ -1525,10 +1565,11 @@ export class Session {
     input: TurnInput,
     targetTurnId: string,
     delivery: "started" | "steered",
+    inputItemId?: string,
   ): AcceptedThreadMessage {
     if (input.provenance === undefined)
       throw new Error("Thread message has no source.")
-    const envelope = buildInputItem(input)
+    const envelope = buildInputItem(input, inputItemId)
     const admission: ThreadMessageAdmission = {
       type: "thread_message_admitted",
       ...input.provenance,
@@ -1547,6 +1588,7 @@ export class Session {
     }
     this.#threadMessages.set(input.submissionId, accepted)
     this.#submittedInputs.set(input.submissionId, {
+      threadId: this.id,
       fingerprint: admission.requestFingerprint,
       inputItemId: envelope.id,
       turnId: targetTurnId,
@@ -1564,7 +1606,8 @@ export class Session {
           await this.#store.flushThread(this.id)
           const stored = await this.#store.readThread(this.id)
           const existing = stored?.rollout.find(
-            ({ item }) =>
+            ({ threadId, item }) =>
+              threadId === this.id &&
               item.type === "thread_message_admitted" &&
               item.submissionId === accepted.admission.submissionId,
           )
@@ -1775,10 +1818,13 @@ function answerText(
   return text.length === 0 ? null : text
 }
 
-function buildInputItem(input: TurnInput): ResponseItemEnvelope {
+function buildInputItem(
+  input: TurnInput,
+  id = createInputId(),
+): ResponseItemEnvelope {
   const submissionMetadata = turnInputSubmissionMetadata(input)
   return {
-    id: createInputId(),
+    id,
     turnId: input.submissionId,
     createdAt: new Date().toISOString(),
     item: inputContentToModelMessage(

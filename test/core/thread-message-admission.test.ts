@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { AgentThread } from "../../src/core/agent-thread.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
   TurnProcessor,
@@ -247,6 +248,214 @@ describe("thread message admission", () => {
       expect(
         items.some((item) => item.type === "thread_message_consumed"),
       ).toBe(false)
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
+  it("repairs a missing idle receipt from its persisted start after reopening JSONL", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-message-recovery-"))
+    class FailingReceiptStore extends JsonlThreadStore {
+      override appendItems(threadId: string, items: readonly RolloutItem[]) {
+        if (items.some((item) => item.type === "thread_message_admitted"))
+          return Promise.reject(
+            new Error("Receipt append failed before buffering"),
+          )
+        return super.appendItems(threadId, items)
+      }
+    }
+    const store = new FailingReceiptStore({ root })
+    const manager = createManager(store)
+    const external = message("missing_receipt", "Recover the original identity")
+    try {
+      const thread = await manager.createThread()
+      // Materialize the target so the next start survives independently of its
+      // receipt. Reject before appendItems can retain that receipt in a buffer.
+      await thread.startIfIdle({
+        submissionId: "warmup",
+        content: createUserInput("Work"),
+      })
+      await terminal(thread)
+      await expect(thread.startOrSteer(external)).rejects.toThrow(
+        "before buffering",
+      )
+      await manager.shutdown()
+      const before = await store.readThread(thread.id)
+      const start = before?.rollout.find(
+        ({ item }) =>
+          item.type === "turn_started" && item.turnId === external.submissionId,
+      )?.item
+      if (start?.type !== "turn_started")
+        throw new Error("Missing persisted start")
+      expect(
+        before?.rollout.some(
+          ({ item }) => item.type === "thread_message_admitted",
+        ),
+      ).toBe(false)
+      const resumedStore = new JsonlThreadStore({ root })
+      let executions = 0
+      const resumed = createManager(resumedStore, async () => {
+        executions += 1
+      })
+      try {
+        const restored = await resumed.resumeThread(thread.id)
+        if (restored === undefined) throw new Error("Missing restored thread")
+        expect(
+          await restored.startOrSteer({
+            ...external,
+            content: createUserInput("Changed"),
+          }),
+        ).toEqual({ type: "not_submitted", reason: "request_conflict" })
+        expect(
+          await restored.startOrSteer({
+            ...external,
+            provenance: {
+              sourceThreadId: "different_source",
+              sourceRequestId: "missing_receipt",
+            },
+          }),
+        ).toEqual({ type: "not_submitted", reason: "request_conflict" })
+        expect(await restored.startOrSteer(external)).toEqual({
+          type: "replayed",
+          turnId: external.submissionId,
+          inputItemId: start.inputItemId,
+        })
+        expect(executions).toBe(0)
+        const items =
+          (await resumedStore.readThread(thread.id))?.rollout.map(
+            ({ item }) => item,
+          ) ?? []
+        expect(
+          items.filter((item) => item.type === "thread_message_admitted"),
+        ).toEqual([
+          expect.objectContaining({
+            sourceThreadId: "source_thread",
+            sourceRequestId: "missing_receipt",
+            targetTurnId: external.submissionId,
+            inputItemId: start.inputItemId,
+            delivery: "started",
+          }),
+        ])
+        expect(
+          items.filter((item) => item.type === "turn_started"),
+        ).toHaveLength(2)
+        expect(
+          items.some((item) => item.type === "thread_message_consumed"),
+        ).toBe(false)
+        expect(restored.snapshot().activeTurnId).toBeUndefined()
+      } finally {
+        await resumed.shutdown()
+      }
+      const reopened = createManager(new JsonlThreadStore({ root }))
+      try {
+        const restored = await reopened.resumeThread(thread.id)
+        expect(await restored?.startOrSteer(external)).toEqual({
+          type: "replayed",
+          turnId: external.submissionId,
+          inputItemId: start.inputItemId,
+        })
+      } finally {
+        await reopened.shutdown()
+      }
+    } finally {
+      await manager.shutdown()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    false,
+    true,
+  ])("admits inherited external requests independently in a fork (missing original receipt: %s)", async (missingReceipt) => {
+    class FailingReceiptStore extends MemoryThreadStore {
+      failReceipt = missingReceipt
+      override appendItems(threadId: string, items: readonly RolloutItem[]) {
+        if (
+          this.failReceipt &&
+          items.some((item) => item.type === "thread_message_admitted")
+        ) {
+          this.failReceipt = false
+          return Promise.reject(new Error("Receipt rejected before buffering"))
+        }
+        return super.appendItems(threadId, items)
+      }
+    }
+    const store = new FailingReceiptStore()
+    const executions: string[] = []
+    const manager = createManager(store, async (runtime, input) => {
+      if (input.provenance !== undefined)
+        executions.push(runtime.snapshot().metadata.id)
+    })
+    try {
+      const parent = await manager.createThread()
+      const external = message(
+        "inherited",
+        "This recipient must handle its own request",
+      )
+      if (missingReceipt) {
+        await expect(parent.startOrSteer(external)).rejects.toThrow(
+          "before buffering",
+        )
+      } else {
+        expect(await parent.startOrSteer(external)).toMatchObject({
+          type: "started",
+        })
+        await terminal(parent)
+      }
+      await parent.startIfIdle({
+        submissionId: "fork_cut",
+        content: createUserInput("Fork here"),
+      })
+      await terminal(parent)
+      const { thread: fork } = await manager.forkThread({
+        sourceThreadId: parent.id,
+        beforeTurnId: "fork_cut",
+      })
+      expect(
+        (await store.readThread(fork.id))?.rollout.some(
+          ({ threadId, item }) =>
+            threadId === parent.id &&
+            item.type === "turn_started" &&
+            item.turnId === external.submissionId,
+        ),
+      ).toBe(true)
+      if (!missingReceipt) {
+        // Recovery of a local start must not bind its context to an ancestor
+        // Turn that happens to have the same caller-supplied input identity.
+        store.failNextAppend = true
+      }
+      const result = await fork.startOrSteer(external)
+      expect(result).toMatchObject({
+        type: "started",
+        turnId: external.submissionId,
+      })
+      await terminal(fork)
+      expect(executions).toEqual(
+        missingReceipt ? [fork.id] : [parent.id, fork.id],
+      )
+      const records = (await store.readThread(fork.id))?.rollout ?? []
+      expect(
+        records.filter(
+          ({ threadId, item }) =>
+            threadId === fork.id && item.type === "thread_message_admitted",
+        ),
+      ).toHaveLength(1)
+      expect(
+        records.filter(
+          ({ threadId, item }) =>
+            threadId === fork.id && item.type === "thread_message_consumed",
+        ),
+      ).toHaveLength(1)
+      expect(
+        records.filter(
+          ({ threadId, item }) =>
+            threadId === fork.id && item.type === "turn_started",
+        ),
+      ).toHaveLength(1)
+      expect(await fork.startOrSteer(external)).toMatchObject({
+        type: "replayed",
+        turnId: external.submissionId,
+      })
     } finally {
       await manager.shutdown()
     }

@@ -160,7 +160,7 @@ export function createThreadCollaborationTools(): readonly RuntimeTool[] {
     ),
     tool(
       "wait_threads",
-      "Track requests previously accepted by send_message_to_thread, including after restart. Returns when any specified request reaches a terminal status, on timeout, or when this wait is cancelled. The exact recipient turn is tracked, so later user turns cannot change its result. completed requires both message consumption and successful turn completion. interrupted, failed, delivery_incomplete and not_found are not success. Read answerItemIds with read_thread for full results. Cancelling this wait does not cancel recipient work.",
+      "Track requests previously accepted by send_message_to_thread, including after restart. Returns when any specified request reaches a terminal status, on timeout, or when this wait is cancelled. The exact recipient turn is tracked, so later user turns cannot change its result. completed requires both message consumption and terminal turn completion; completionReason preserves refused or truncated answers and does not imply the requested work succeeded. interrupted, failed, delivery_incomplete and not_found are not success. Read answerItemIds with read_thread for full results. Cancelling this wait does not cancel recipient work.",
       {
         requests: {
           type: "array",
