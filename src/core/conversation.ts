@@ -61,6 +61,11 @@ export type ModelContentBlock =
   | ModelToolCallBlock
 export type ModelHistoryContext =
   | Readonly<{
+      type: "thread_message"
+      sourceThreadId: string
+      sourceRequestId: string
+    }>
+  | Readonly<{
       type: "skill_invocation"
       inputId: string
     }>

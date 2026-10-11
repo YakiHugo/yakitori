@@ -191,6 +191,7 @@ export type ModelTransportPolicy = ModelRequestPolicy &
 
 export type SessionConfigurationSnapshot = {
   readonly schemaVersion: 5
+  readonly collaborationToolsVersion?: 2
   readonly workspaceRoot: string
   readonly promptCacheKey: string
   readonly defaultTarget: ModelSelection
@@ -1066,6 +1067,14 @@ function isModelImageBlock(value: unknown): boolean {
 }
 
 function isModelHistoryContext(value: unknown): boolean {
+  if (isRecord(value) && value.type === "thread_message")
+    return (
+      onlyKeys(value, ["type", "sourceThreadId", "sourceRequestId"]) &&
+      isString(value.sourceThreadId) &&
+      value.sourceThreadId.trim().length > 0 &&
+      isString(value.sourceRequestId) &&
+      value.sourceRequestId.trim().length > 0
+    )
   if (isRecord(value) && value.type === "goal")
     return onlyKeys(value, ["type", "goalId"]) && isStorageKey(value.goalId)
   if (isRecord(value) && value.type === "skill_invocation")
@@ -1086,6 +1095,7 @@ export function isSessionConfigurationSnapshot(
   if (
     !onlyKeys(value, [
       "schemaVersion",
+      "collaborationToolsVersion",
       "workspaceRoot",
       "promptCacheKey",
       "defaultTarget",
@@ -1099,6 +1109,8 @@ export function isSessionConfigurationSnapshot(
       "modelTransport",
     ]) ||
     value.schemaVersion !== 5 ||
+    (value.collaborationToolsVersion !== undefined &&
+      value.collaborationToolsVersion !== 2) ||
     !isString(value.workspaceRoot) ||
     !isString(value.promptCacheKey) ||
     value.promptCacheKey.trim().length === 0 ||

@@ -20,6 +20,7 @@ import type {
   RolloutItem,
   StoredThread,
   ThreadMetadata,
+  ThreadMessageAdmission,
   TurnContextItem,
 } from "./rollout.ts"
 import {
@@ -68,6 +69,7 @@ export type TurnControl = {
 export type TurnRuntime = {
   recordModelAttempt(attempt: ModelAttemptRecord): Promise<void>
   recordInitialInput(): Promise<void>
+  recordThreadMessageInput(input: TurnInput): Promise<void>
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): Promise<void>
@@ -180,6 +182,15 @@ type AcceptedAgentMessage = {
   append?: RolloutAppend
 }
 
+type AcceptedThreadMessage = {
+  readonly admission: ThreadMessageAdmission
+  readonly envelope: ResponseItemEnvelope
+  durable: boolean
+  consumed: boolean
+  appendAttempted?: boolean
+  append?: RolloutAppend
+}
+
 type PendingTurnStart = {
   readonly input: TurnInput
   readonly context: TurnContextItem
@@ -204,6 +215,7 @@ export class Session {
       turnId: string
     }>
   >()
+  readonly #threadMessages = new Map<string, AcceptedThreadMessage>()
   #pendingTurnStart: PendingTurnStart | undefined
   // Resolves when the pending Turn's recording has either launched or failed,
   // so barrier operations (fork) can wait out the recording instead of
@@ -269,6 +281,25 @@ export class Session {
           inputItemId: record.item.inputItemId,
           turnId: record.item.turnId,
         })
+      }
+    }
+    // Explicit receipts retain the target Turn even for unconsumed steering.
+    for (const { item } of input.stored.rollout) {
+      if (item.type === "thread_message_admitted") {
+        this.#threadMessages.set(item.submissionId, {
+          admission: item,
+          envelope: { ...buildInputItem(item.input), id: item.inputItemId },
+          durable: true,
+          consumed: false,
+        })
+        this.#submittedInputs.set(item.submissionId, {
+          fingerprint: item.requestFingerprint,
+          inputItemId: item.inputItemId,
+          turnId: item.targetTurnId,
+        })
+      } else if (item.type === "thread_message_consumed") {
+        const accepted = this.#threadMessages.get(item.submissionId)
+        if (accepted !== undefined) accepted.consumed = true
       }
     }
     this.#store = input.store
@@ -466,6 +497,11 @@ export class Session {
       ) {
         return notSubmitted(Reason.RequestConflict)
       }
+      const message = this.#threadMessages.get(input.submissionId)
+      if (message !== undefined && !message.durable)
+        await this.#withContextMutation(() =>
+          this.#persistThreadMessage(message),
+        )
       return {
         type: "replayed",
         turnId: submitted.turnId,
@@ -478,10 +514,22 @@ export class Session {
         ? this.#startTurn(input)
         : notSubmitted(Reason.NotIdle)
     }
-    if (active === undefined || !active.acceptingSteering) {
-      return notSubmitted(Reason.NoActiveTurn)
+    if (active === undefined) {
+      return mode.type === "start_or_steer"
+        ? this.#startTurn(input)
+        : notSubmitted(Reason.NoActiveTurn)
     }
-    if (active.input.submissionId !== mode.expectedTurnId) {
+    if (!active.acceptingSteering || active.finishing) {
+      return notSubmitted(
+        mode.type === "start_or_steer"
+          ? Reason.TurnFinishing
+          : Reason.NoActiveTurn,
+      )
+    }
+    if (
+      mode.type === "steer" &&
+      active.input.submissionId !== mode.expectedTurnId
+    ) {
       return notSubmitted(Reason.TurnMismatch)
     }
     const previousSteering = active.steeringFingerprints.get(input.submissionId)
@@ -503,7 +551,21 @@ export class Session {
     if (input.modelSelection !== undefined && configuration === undefined) {
       throw new Error("Turn processor does not support steering settings.")
     }
+    let receipt: Promise<void> | undefined
+    if (input.provenance !== undefined) {
+      const accepted = this.#acceptThreadMessage(
+        input,
+        active.input.submissionId,
+        "steered",
+      )
+      // Queue the durable receipt before the processor can consume the input.
+      // Cancellation may leave it unconsumed; that state is explicit in storage.
+      receipt = this.#withContextMutation(() =>
+        this.#persistThreadMessage(accepted),
+      )
+    }
     active.steering.push(input)
+    await receipt
     if (configuration === undefined) return
     const selection = input.modelSelection
     if (selection === undefined) {
@@ -542,7 +604,11 @@ export class Session {
       throw new Error("Turn processor prepared a mismatched Turn id.")
     }
     this.#configuration = structuredClone(context.configuration)
-    const inputItem = buildInputItem(input)
+    const inputItem =
+      input.provenance === undefined
+        ? buildInputItem(input)
+        : this.#acceptThreadMessage(input, input.submissionId, "started")
+            .envelope
     const requestFingerprint = fingerprintTurnInput(input)
     const items: readonly RolloutItem[] = [
       {
@@ -591,10 +657,12 @@ export class Session {
     this.#setStatus(SessionStatus.Active)
     this.#setAgentStatus("running")
     this.#events.send({ type: "turn.started", threadId: this.id, input })
+    let launchError: unknown
     const launch = (async () => {
       try {
         await this.#persistAndLaunchTurn(pending, active, aborted.promise)
       } catch (error) {
+        launchError = error
         await this.#failPendingTurn(pending, active, error)
       }
     })().catch((error: unknown) => {
@@ -604,6 +672,10 @@ export class Session {
       if (this.#pendingTurnReady === ready) this.#pendingTurnReady = undefined
     })
     this.#pendingTurnReady = ready
+    if (input.provenance !== undefined) {
+      await ready
+      if (launchError !== undefined) throw launchError
+    }
     return {
       type: "started",
       turnId: input.submissionId,
@@ -677,6 +749,12 @@ export class Session {
       threadId: this.id,
       ...pending.append,
     })
+
+    const threadMessage = this.#threadMessages.get(input.submissionId)
+    if (threadMessage !== undefined)
+      await this.#withContextMutation(() =>
+        this.#persistThreadMessage(threadMessage),
+      )
 
     let taskHandle: TurnTask
     try {
@@ -919,6 +997,11 @@ export class Session {
       recordInitialInput: async () => {
         requireLease()
         if (active.inputRecorded) return
+        if (active.input.provenance !== undefined) {
+          await this.#recordThreadMessageInput(active, active.input)
+          active.inputRecorded = true
+          return
+        }
         await this.#withContextMutation(async () => {
           requireLease()
           if (active.inputRecorded) return
@@ -973,6 +1056,8 @@ export class Session {
           })
         })
       },
+      recordThreadMessageInput: (input) =>
+        this.#recordThreadMessageInput(active, input),
       recordModelContext: async (settings) => {
         requireLease()
         await this.#appendRollout([{ type: "model_context", settings }])
@@ -1436,6 +1521,131 @@ export class Session {
     })
   }
 
+  #acceptThreadMessage(
+    input: TurnInput,
+    targetTurnId: string,
+    delivery: "started" | "steered",
+  ): AcceptedThreadMessage {
+    if (input.provenance === undefined)
+      throw new Error("Thread message has no source.")
+    const envelope = buildInputItem(input)
+    const admission: ThreadMessageAdmission = {
+      type: "thread_message_admitted",
+      ...input.provenance,
+      submissionId: input.submissionId,
+      targetTurnId,
+      inputItemId: envelope.id,
+      requestFingerprint: fingerprintTurnInput(input),
+      input,
+      delivery,
+    }
+    const accepted: AcceptedThreadMessage = {
+      admission,
+      envelope,
+      durable: false,
+      consumed: false,
+    }
+    this.#threadMessages.set(input.submissionId, accepted)
+    this.#submittedInputs.set(input.submissionId, {
+      fingerprint: admission.requestFingerprint,
+      inputItemId: envelope.id,
+      turnId: targetTurnId,
+    })
+    return accepted
+  }
+
+  async #persistThreadMessage(accepted: AcceptedThreadMessage): Promise<void> {
+    if (accepted.durable) return
+    try {
+      if (accepted.append === undefined) {
+        if (accepted.appendAttempted) {
+          // A previous attempt may already be buffered. Drain and inspect
+          // before retrying an uncertain write, never on the ordinary path.
+          await this.#store.flushThread(this.id)
+          const stored = await this.#store.readThread(this.id)
+          const existing = stored?.rollout.find(
+            ({ item }) =>
+              item.type === "thread_message_admitted" &&
+              item.submissionId === accepted.admission.submissionId,
+          )
+          if (existing !== undefined) {
+            if (
+              existing.item.type !== "thread_message_admitted" ||
+              existing.item.requestFingerprint !==
+                accepted.admission.requestFingerprint ||
+              existing.item.targetTurnId !== accepted.admission.targetTurnId
+            )
+              throw new Error("Conflicting durable thread message receipt.")
+            accepted.append = {
+              throughSeq: existing.seq + 1,
+              records: [existing],
+            }
+          }
+        }
+        if (accepted.append === undefined) {
+          accepted.appendAttempted = true
+          accepted.append = await this.#store.appendItems(this.id, [
+            accepted.admission,
+          ])
+        }
+      }
+      await this.#store.persistThread(this.id, PersistContext.TurnStart)
+      await this.#store.flushThread(this.id)
+      accepted.durable = true
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        ...accepted.append,
+      })
+    } catch (error) {
+      this.#reportPersistenceError(error)
+      throw error
+    }
+  }
+
+  async #recordThreadMessageInput(
+    active: ActiveTurn,
+    input: TurnInput,
+  ): Promise<void> {
+    await this.#withContextMutation(async () => {
+      if (
+        this.#activeTurn !== active ||
+        active.finishing ||
+        active.abort.signal.aborted
+      )
+        throw new Error("Turn is no longer active.")
+      const accepted = this.#threadMessages.get(input.submissionId)
+      if (
+        accepted === undefined ||
+        !accepted.durable ||
+        accepted.admission.targetTurnId !== active.input.submissionId ||
+        accepted.admission.requestFingerprint !== fingerprintTurnInput(input)
+      )
+        throw new Error("Thread message has no matching durable admission.")
+      if (accepted.consumed) return
+      const admission = accepted.admission
+      const append = await this.#store.appendItems(this.id, [
+        { type: "response_item", item: accepted.envelope },
+        {
+          type: "thread_message_consumed",
+          sourceThreadId: admission.sourceThreadId,
+          sourceRequestId: admission.sourceRequestId,
+          submissionId: admission.submissionId,
+          targetTurnId: admission.targetTurnId,
+          inputItemId: admission.inputItemId,
+        },
+      ])
+      await this.#store.flushThread(this.id)
+      accepted.consumed = true
+      this.#contextManager.record([accepted.envelope])
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        ...append,
+      })
+    })
+  }
+
   #withContextMutation<T>(run: () => Promise<T>): Promise<T> {
     const result = this.#contextMutationTail.then(run)
     this.#contextMutationTail = result.then(
@@ -1571,7 +1781,11 @@ function buildInputItem(input: TurnInput): ResponseItemEnvelope {
     id: createInputId(),
     turnId: input.submissionId,
     createdAt: new Date().toISOString(),
-    item: inputContentToModelMessage(input.content, input.goalId),
+    item: inputContentToModelMessage(
+      input.content,
+      input.goalId,
+      input.provenance,
+    ),
     ...submissionMetadata,
   }
 }
@@ -1582,6 +1796,9 @@ function turnInputSubmissionMetadata(
   return {
     submissionMetadata: {
       content: input.content,
+      ...(input.provenance === undefined
+        ? {}
+        : { provenance: input.provenance }),
       ...(input.modelSelection === undefined
         ? {}
         : { modelSelection: input.modelSelection }),

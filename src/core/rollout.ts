@@ -1,3 +1,7 @@
+import type {
+  ThreadMessageProvenance,
+  TurnInput,
+} from "../protocol/input-queue.ts"
 import type { GitInfo } from "../protocol/session-metadata.ts"
 
 export type { GitInfo } from "../protocol/session-metadata.ts"
@@ -67,6 +71,7 @@ export type ResponseItemEnvelope = Readonly<{
     content?: InputContent
     modelSelection?: ModelSelection
     parentInputId?: string
+    provenance?: ThreadMessageProvenance
     metadata?: EventMetadata
     // Admission identity belongs to the host, never model-visible content.
     requestFingerprint?: string
@@ -105,7 +110,30 @@ export type ModelAttemptRecord = Readonly<{
   error?: KernelError
 }>
 
+export type ThreadMessageAdmission = Readonly<{
+  type: "thread_message_admitted"
+  sourceThreadId: string
+  sourceRequestId: string
+  submissionId: string
+  targetTurnId: string
+  inputItemId: string
+  requestFingerprint: string
+  input: TurnInput
+  delivery: "started" | "steered"
+}>
+
+export type ThreadMessageConsumption = Readonly<{
+  type: "thread_message_consumed"
+  sourceThreadId: string
+  sourceRequestId: string
+  submissionId: string
+  targetTurnId: string
+  inputItemId: string
+}>
+
 export type RolloutItem =
+  | ThreadMessageAdmission
+  | ThreadMessageConsumption
   | Readonly<{
       type: "model_attempt"
       turnId: string

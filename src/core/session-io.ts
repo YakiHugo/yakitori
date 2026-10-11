@@ -1,4 +1,7 @@
-import type { TurnInput } from "../protocol/input-queue.ts"
+import {
+  isThreadMessageProvenance,
+  type TurnInput,
+} from "../protocol/input-queue.ts"
 
 export type { TurnInput } from "../protocol/input-queue.ts"
 
@@ -45,6 +48,7 @@ export const NotSubmittedReason = {
   NotIdle: "not_idle",
   TurnMismatch: "turn_mismatch",
   RequestConflict: "request_conflict",
+  TurnFinishing: "turn_finishing",
 } as const
 
 export type NotSubmittedReason =
@@ -69,6 +73,7 @@ export type TurnInputSubmission =
 
 export type TurnInputMode =
   | { readonly type: "start_if_idle" }
+  | { readonly type: "start_or_steer" }
   | { readonly type: "steer"; readonly expectedTurnId: string }
 
 type TurnInputReply = {
@@ -241,6 +246,10 @@ export class SessionIo {
     return this.#submitTurnInput(input, { type: "start_if_idle" })
   }
 
+  startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
+    return this.#submitTurnInput(input, { type: "start_or_steer" })
+  }
+
   compact(requestId: string): Promise<TurnInputSubmission> {
     this.#requireOpen()
     return new Promise((resolve, reject) => {
@@ -325,10 +334,25 @@ export class SessionIo {
     mode: TurnInputMode,
   ): Promise<TurnInputSubmission> {
     this.#requireOpen()
+    input = structuredClone(input)
+    if (
+      input.provenance !== undefined &&
+      (!isThreadMessageProvenance(input.provenance) ||
+        input.goalId !== undefined ||
+        input.manualCompact === true ||
+        input.content.attachments.length > 0 ||
+        (input.content.references?.length ?? 0) > 0)
+    )
+      throw new TypeError(
+        "Thread messages require a valid source and text-only external content.",
+      )
     const turnInput: TurnInput = {
       submissionId: input.submissionId ?? createRequestId(),
       content: input.content,
       ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
+      ...(input.provenance === undefined
+        ? {}
+        : { provenance: structuredClone(input.provenance) }),
       ...(input.modelSelection === undefined
         ? {}
         : { modelSelection: input.modelSelection }),
@@ -457,7 +481,11 @@ export class BoundedQueue<T> {
 
 export function fingerprintTurnInput(input: TurnInput): string {
   const fingerprint = fingerprintInputAdmission({
-    role: input.goalId === undefined ? InputRole.User : InputRole.Runtime,
+    role:
+      input.goalId === undefined && input.provenance === undefined
+        ? InputRole.User
+        : InputRole.Runtime,
+    ...(input.provenance === undefined ? {} : { provenance: input.provenance }),
     content: input.content,
     ...(input.modelSelection === undefined
       ? {}
