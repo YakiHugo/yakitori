@@ -130,7 +130,7 @@ function createFollowupTaskTool(): RuntimeTool {
   return {
     toolName: plainToolName("followup_task"),
     description:
-      "Send a follow-up task to a non-root agent. If it is idle, this starts a new turn; if it is running, the task is queued for the next turn boundary.",
+      "Send a follow-up task to a non-root agent. If it is idle, this starts a new turn; if it is running, the task is delivered at a safe sampling boundary in that turn. A finishing turn queues the task for the next turn.",
     approvalRequirement: noToolApprovalRequired,
     effect: "opaque",
     describeExecution: collaborationExecution("follow_up"),
@@ -144,7 +144,12 @@ function createFollowupTaskTool(): RuntimeTool {
       const parsed = parseTargetMessage(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        const receiver = await control.value.followup(parsed.value)
+        const receiver = await control.value.followup({
+          ...parsed.value,
+          ...(context.toolCallId === undefined
+            ? {}
+            : { messageId: context.toolCallId }),
+        })
         return success(
           { accepted: true, ...receiver },
           "Follow-up task accepted.",

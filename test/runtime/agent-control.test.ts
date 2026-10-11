@@ -136,7 +136,7 @@ describe("agent control", () => {
       expect(harness.deliveredMessages).toHaveLength(1)
       expect(vi.getTimerCount()).toBe(0)
       await expect(root.wait(0)).resolves.toEqual({
-        reason: "timeout",
+        reason: "mailbox",
         updates: [],
       })
     } finally {
@@ -171,6 +171,275 @@ describe("agent control", () => {
         status: { completed: "findings" },
       },
     ])
+  })
+
+  it("retains mailbox activity that arrived before subscribing without starting an idle agent", async () => {
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "worker",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "done" })
+    await root.wait(1_000)
+    await root.sendMessage({ target: child.agentId, message: "for later" })
+    const recipient = harness.control.bind(child.agentId, TARGET)
+    await expect(recipient.wait(0)).resolves.toEqual({
+      reason: "mailbox",
+      updates: [],
+    })
+    await expect(recipient.wait(0)).resolves.toEqual({
+      reason: "timeout",
+      updates: [],
+    })
+    expect(harness.runRequests).toHaveLength(1)
+    expect((await root.list())[0]?.status).toEqual({ completed: "done" })
+  })
+
+  it("steers a running child once per follow-up id instead of scheduling another turn", async () => {
+    const steering: Parameters<AgentControlAdapter["steerChild"]>[0][] = []
+    const harness = createHarness({
+      steerChild: async (request) => {
+        steering.push(request)
+        return true
+      },
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "worker",
+      message: "first",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    const request = {
+      target: child.agentId,
+      message: "continue now",
+      messageId: "call_1",
+    }
+    await Promise.all([root.followup(request), root.followup(request)])
+    expect(steering).toEqual([
+      {
+        sessionId: child.agentId,
+        messageId: "agent_followup:root_session:call_1",
+        message:
+          '<inter_agent_message from="/root" type="new_task">\ncontinue now\n</inter_agent_message>',
+      },
+    ])
+    expect(harness.runRequests).toHaveLength(1)
+    await expect(
+      root.followup({ ...request, message: "different" }),
+    ).rejects.toMatchObject({ code: "agent_message_conflict" })
+    await expect(
+      harness.control.bind(child.agentId, TARGET).wait(0),
+    ).resolves.toEqual({ reason: "mailbox", updates: [] })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "all done" })
+    await root.wait(1_000)
+    expect(harness.runRequests).toHaveLength(1)
+  })
+
+  it("resolves siblings within one tree and filters whole path segments", async () => {
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    const first = await root.spawn({
+      taskName: "work",
+      message: "first",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    const sibling = await root.spawn({
+      taskName: "worker",
+      message: "second",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    const nested = await harness.control.bind(first.agentId, TARGET).spawn({
+      taskName: "nested",
+      message: "third",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    const child = harness.control.bind(first.agentId, TARGET)
+    await child.sendMessage({ target: "/root/worker", message: "sibling" })
+    await child.sendMessage({ target: sibling.agentId, message: "by id" })
+    await child.sendMessage({ target: "nested", message: "relative" })
+    await expect(
+      child.sendMessage({ target: "unrelated_session", message: "outside" }),
+    ).rejects.toMatchObject({ code: "agent_not_found" })
+    expect(harness.deliveredMessages.map(({ sessionId }) => sessionId)).toEqual(
+      [sibling.agentId, sibling.agentId, nested.agentId],
+    )
+    expect((await root.list("/root/work")).map(({ path }) => path)).toEqual([
+      first.path,
+      nested.path,
+    ])
+    await expect(
+      child.followup({ target: "/root", message: "root" }),
+    ).rejects.toMatchObject({ code: "invalid_agent_target" })
+    await expect(child.interrupt(first.agentId)).rejects.toMatchObject({
+      code: "invalid_agent_target",
+    })
+    await expect(child.interrupt("/root")).rejects.toMatchObject({
+      code: "invalid_agent_target",
+    })
+  })
+
+  it("wakes waiters on close and rejects old bound actors after path reuse", async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    try {
+      const first = await root.spawn({
+        taskName: "worker",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      harness.runs
+        .get(first.agentId)?.[0]
+        ?.resolve({ type: "completed", text: "done" })
+      await root.wait(1_000)
+      const old = harness.control.bind(first.agentId, TARGET)
+      const waiting = old.wait(100_000)
+      await vi.advanceTimersByTimeAsync(0)
+      await harness.control.closeAgent(first.agentId)
+      await expect(waiting).resolves.toEqual({ reason: "closed", updates: [] })
+      expect(vi.getTimerCount()).toBe(0)
+      harness.control.releaseClosedPath(first.path)
+      const replacement = await root.spawn({
+        taskName: "worker",
+        message: "new",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      expect(replacement.agentId).not.toBe(first.agentId)
+      await expect(
+        old.sendMessage({ target: "/root/worker", message: "stale" }),
+      ).rejects.toMatchObject({ code: "agent_closed" })
+      await expect(
+        old.followup({ target: "/root/worker", message: "stale" }),
+      ).rejects.toMatchObject({ code: "agent_closed" })
+      await expect(old.wait(0)).rejects.toMatchObject({ code: "agent_closed" })
+      expect(
+        harness.deliveredMessages.some(({ text }) => text.includes("stale")),
+      ).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("fences a message loading its target when closing begins", async () => {
+    const loading = deferred<void>()
+    const release = deferred<void>()
+    const harness = createHarness({
+      ensureLoaded: async () => {
+        loading.resolve()
+        await release.promise
+      },
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "worker",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "done" })
+    await root.wait(1_000)
+    const sending = root.sendMessage({
+      target: child.agentId,
+      message: "too late",
+    })
+    await loading.promise
+    const closing = harness.control.closeAgent(child.agentId)
+    await Promise.resolve()
+    release.resolve()
+    await expect(sending).rejects.toMatchObject({ code: "agent_closed" })
+    await expect(closing).resolves.toEqual([child.agentId])
+    expect(
+      harness.deliveredMessages.some(({ text }) => text.includes("too late")),
+    ).toBe(false)
+  })
+
+  it("restores the complete topology before delivering descendant results", async () => {
+    const harness = createHarness()
+    const child = {
+      agentId: "restored_child",
+      rootSessionId: "root_session",
+      parentSessionId: "root_session",
+      taskName: "child",
+      path: "/root/child",
+      agentType: "general" as const,
+      depth: 1,
+    }
+    const nested = {
+      agentId: "restored_nested",
+      rootSessionId: "root_session",
+      parentSessionId: child.agentId,
+      taskName: "nested",
+      path: "/root/child/nested",
+      agentType: "general" as const,
+      depth: 2,
+      pendingCompletion: {
+        messageId: "recovered_result",
+        outcome: { type: "completed" as const, text: "recovered" },
+      },
+    }
+    const control = createAgentControl({
+      rootSessionId: "root_session",
+      adapter: harness.adapter,
+      restoreAgents: async () => [nested, child],
+    })
+    const root = control.bind("root_session", TARGET)
+    await root.list()
+    await expect(root.wait(1_000)).resolves.toMatchObject({
+      reason: "status",
+      updates: [
+        { agentId: nested.agentId, status: { completed: "recovered" } },
+      ],
+    })
+    expect(harness.deliveredMessages).toMatchObject([
+      { sessionId: child.agentId, messageId: "recovered_result" },
+    ])
+    expect(harness.runRequests).toHaveLength(0)
+    await control.close()
+  })
+
+  it("rejects a restored parent outside the tree before delivering or executing work", async () => {
+    const harness = createHarness()
+    const control = createAgentControl({
+      rootSessionId: "root_session",
+      adapter: harness.adapter,
+      restoreAgents: async () => [
+        {
+          agentId: "restored_child",
+          rootSessionId: "root_session",
+          parentSessionId: "unrelated_session",
+          taskName: "child",
+          path: "/root/child",
+          agentType: "general",
+          depth: 1,
+          pendingCompletion: {
+            messageId: "recovered_result",
+            outcome: { type: "completed", text: "private result" },
+          },
+        },
+      ],
+    })
+    const root = control.bind("root_session", TARGET)
+    await expect(root.list()).rejects.toMatchObject({ code: "agent_not_found" })
+    await expect(
+      root.sendMessage({ target: "restored_child", message: "no" }),
+    ).rejects.toMatchObject({ code: "agent_not_found" })
+    expect(harness.deliveredMessages).toHaveLength(0)
+    expect(harness.runRequests).toHaveLength(0)
   })
 
   it("spawns in the background and reports completion through wait and mailbox", async () => {
@@ -363,9 +632,14 @@ describe("agent control", () => {
       message: "second",
     })
 
-    expect(harness.runRequests.map((request) => request.message)).toEqual([
-      "first",
-    ])
+    expect(
+      harness.runRequests.map((request) =>
+        request.message.replace(
+          /^<inter_agent_message[^>]*>\n|\n<\/inter_agent_message>$/g,
+          "",
+        ),
+      ),
+    ).toEqual(["first"])
     harness.runs.get(child.agentId)?.[0]?.resolve({
       type: "completed",
       text: "first result",
@@ -373,10 +647,14 @@ describe("agent control", () => {
     await followup
     await Promise.resolve()
     await Promise.resolve()
-    expect(harness.runRequests.map((request) => request.message)).toEqual([
-      "first",
-      "second",
-    ])
+    expect(
+      harness.runRequests.map((request) =>
+        request.message.replace(
+          /^<inter_agent_message[^>]*>\n|\n<\/inter_agent_message>$/g,
+          "",
+        ),
+      ),
+    ).toEqual(["first", "second"])
     await expect(
       root.wait(1_000).then((result) => result.updates),
     ).resolves.toEqual([
@@ -490,7 +768,7 @@ describe("agent control", () => {
     await root.wait(1_000)
     await expect
       .poll(() => harness.runRequests.at(-1)?.message)
-      .toBe("queued after current")
+      .toContain("queued after current")
     harness.runs
       .get(active.agentId)?.[2]
       ?.resolve({ type: "completed", text: "queued done" })
@@ -545,10 +823,14 @@ describe("agent control", () => {
     expect((await root.wait(1_000)).updates).toMatchObject([
       { agentId: child.agentId, status: { completed: "done" } },
     ])
-    expect(harness.runRequests.map((request) => request.message)).toEqual([
-      "work",
-      "next work",
-    ])
+    expect(
+      harness.runRequests.map((request) =>
+        request.message.replace(
+          /^<inter_agent_message[^>]*>\n|\n<\/inter_agent_message>$/g,
+          "",
+        ),
+      ),
+    ).toEqual(["work", "next work"])
   })
 
   it("keeps the accepted follow-up reservation through failed completion delivery", async () => {
@@ -581,7 +863,7 @@ describe("agent control", () => {
     ])
     await expect
       .poll(() => harness.runRequests.at(-1)?.message)
-      .toBe("accepted second")
+      .toContain("accepted second")
     harness.runs
       .get(child.agentId)?.[1]
       ?.resolve({ type: "completed", text: "second done" })
@@ -594,11 +876,14 @@ describe("agent control", () => {
         forkTurns: "none",
       }),
     ).resolves.toMatchObject({ path: "/root/other" })
-    expect(harness.runRequests.map((request) => request.message)).toEqual([
-      "first",
-      "accepted second",
-      "fits now",
-    ])
+    expect(
+      harness.runRequests.map((request) =>
+        request.message.replace(
+          /^<inter_agent_message[^>]*>\n|\n<\/inter_agent_message>$/g,
+          "",
+        ),
+      ),
+    ).toEqual(["first", "accepted second", "fits now"])
   })
 
   it("releases execution capacity after a child launch becomes a terminal failure", async () => {
@@ -615,10 +900,14 @@ describe("agent control", () => {
       { status: { errored: "launch failed" } },
     ])
     await root.followup({ target: child.agentId, message: "retry" })
-    expect(harness.runRequests.map((request) => request.message)).toEqual([
-      "first",
-      "retry",
-    ])
+    expect(
+      harness.runRequests.map((request) =>
+        request.message.replace(
+          /^<inter_agent_message[^>]*>\n|\n<\/inter_agent_message>$/g,
+          "",
+        ),
+      ),
+    ).toEqual(["first", "retry"])
   })
 
   it("releases a failed child creation reservation and allows reusing its task name", async () => {
@@ -865,6 +1154,7 @@ function createHarness(
   input: {
     readonly maxDepth?: number
     readonly maxConcurrentAgents?: number
+    readonly steerChild?: AgentControlAdapter["steerChild"]
     readonly ensureLoaded?: () => Promise<void>
     readonly onRunResolved?: () => void
     readonly createStarted?: ReturnType<typeof deferred<void>>
@@ -951,6 +1241,7 @@ function createHarness(
         return outcome
       })
     },
+    steerChild: input.steerChild ?? (async () => false),
     async ensureLoaded() {
       await input.ensureLoaded?.()
     },

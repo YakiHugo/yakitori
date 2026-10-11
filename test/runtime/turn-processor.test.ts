@@ -5339,6 +5339,9 @@ function rootOnlyAgentControl(
       async runChild() {
         throw new Error("unused")
       },
+      async steerChild() {
+        return false
+      },
       async ensureLoaded() {},
       async getStatus() {
         return "running"
