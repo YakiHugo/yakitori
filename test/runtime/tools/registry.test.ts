@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { isModelMessage } from "../../../src/kernel/events.ts"
 import {
   canonicalToolName,
+  createDefaultTools,
   createToolRegistry,
   plainToolName,
 } from "../../../src/runtime/tools/registry.ts"
@@ -12,6 +13,37 @@ import type {
 } from "../../../src/runtime/tools/types.ts"
 
 describe("finalized tool router", () => {
+  it("enables current collaboration tools by default and honors a host opt-out", () => {
+    const collaborationTools = [
+      "spawn_agent",
+      "send_message",
+      "followup_task",
+      "wait_agent",
+      "interrupt_agent",
+      "list_agents",
+      "list_threads",
+      "read_thread",
+      "send_message_to_thread",
+      "wait_threads",
+    ]
+    const defaults = createToolRegistry()
+    const router = finalize(defaults, new Set(defaults.trustedToolNames()))
+    expect(router.definitions.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(collaborationTools),
+    )
+
+    const restricted = createToolRegistry(
+      createDefaultTools({ includeMultiAgent: false }),
+    )
+    const restrictedRouter = finalize(
+      restricted,
+      new Set(defaults.trustedToolNames()),
+    )
+    for (const name of collaborationTools) {
+      expect(restrictedRouter.get(name)).toBeUndefined()
+    }
+  })
+
   it("advertises and dispatches the same enabled tool set", async () => {
     const registry = createToolRegistry([tool("read_file"), tool("grep")])
     const router = finalize(registry, new Set(["grep"]))
@@ -641,6 +673,10 @@ describe("finalized tool router", () => {
       wait_agent: "none",
       interrupt_agent: "none",
       list_agents: "none",
+      list_threads: "none",
+      read_thread: "none",
+      send_message_to_thread: "none",
+      wait_threads: "none",
     })
 
     expect(

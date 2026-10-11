@@ -1,3 +1,4 @@
+import type { ThreadMessageProvenance } from "../protocol/input-queue.ts"
 import { createHash } from "node:crypto"
 import type {
   EventMetadata,
@@ -18,9 +19,11 @@ export function fingerprintInputAdmission(data: {
   readonly modelSelection?: ModelSelection | undefined
   readonly parentInputId?: string | undefined
   readonly metadata?: EventMetadata | undefined
+  readonly provenance?: ThreadMessageProvenance | undefined
 }): string {
   return fingerprintOperation({
     role: data.role,
+    ...(data.provenance === undefined ? {} : { provenance: data.provenance }),
     content: data.content,
     ...(data.modelSelection === undefined
       ? {}

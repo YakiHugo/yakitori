@@ -1087,6 +1087,144 @@ describe("application composition", () => {
     })
   })
 
+  it("exposes current collaboration by default and sends between independent Sessions without changing the recipient model", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      let targetId = ""
+      let deliveredRequest: ModelRequest | undefined
+      let sideRequest: ModelRequest | undefined
+      const currentTools = [
+        "list_threads",
+        "read_thread",
+        "send_message_to_thread",
+        "wait_threads",
+      ]
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          const externalMessage = request.messages.find(
+            (message) =>
+              message.role === "developer" &&
+              message.context?.type === "thread_message",
+          )
+          if (externalMessage !== undefined) {
+            deliveredRequest = request
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [{ type: "text", text: "external task handled" }],
+              },
+            }
+            return
+          }
+          const text = request.messages
+            .filter((message) => message.role === "user")
+            .flatMap((message) => message.content)
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("\n")
+          if (text.includes("side probe")) sideRequest = request
+          const send =
+            text.includes("send the request") &&
+            !request.messages.some((message) => message.role === "tool")
+          if (send)
+            expect(request.tools.map(({ name }) => name)).toEqual(
+              expect.arrayContaining(currentTools),
+            )
+          yield {
+            type: "response",
+            response: send
+              ? {
+                  stopReason: ModelStopReason.ToolUse,
+                  content: [
+                    {
+                      type: "tool_call",
+                      id: "tool_external_request",
+                      name: "send_message_to_thread",
+                      input: {
+                        thread_id: targetId,
+                        message: "inspect this independently",
+                      },
+                    },
+                  ],
+                }
+              : {
+                  stopReason: ModelStopReason.EndTurn,
+                  content: [{ type: "text", text: "ready" }],
+                },
+          }
+        },
+      })
+      try {
+        const target = await application.handlers.createSession()
+        expectOk(target)
+        targetId = target.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: targetId,
+            requestId: "target_first_input",
+            modelSelection: { provider: "faux", model: "recipient-model" },
+            content: inputFixture([{ type: "text", text: "prepare target" }]),
+          }),
+        )
+        await waitForThreadIdle(application, targetId)
+        await application.threadManager.closeThread(targetId)
+
+        const source = await application.handlers.createSession()
+        expectOk(source)
+        const sourceId = source.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: sourceId,
+            requestId: "source_first_input",
+            modelSelection: { provider: "faux", model: "sender-model" },
+            content: inputFixture([{ type: "text", text: "send the request" }]),
+          }),
+        )
+        await waitForThreadIdle(application, sourceId)
+        await vi.waitFor(() => {
+          expect(
+            application.threadManager.getThread(targetId)?.agentStatus,
+          ).toEqual({ completed: "external task handled" })
+        })
+        expect(deliveredRequest?.target.model).toBe("recipient-model")
+        expect(deliveredRequest?.messages).toContainEqual(
+          expect.objectContaining({
+            role: "developer",
+            context: {
+              type: "thread_message",
+              sourceThreadId: sourceId,
+              sourceRequestId: "tool_external_request",
+            },
+          }),
+        )
+        const stored = await application.threadStore.readThread(targetId)
+        expect(stored?.metadata.conversationId).toBe(targetId)
+        expect(stored?.metadata.parentThreadId).toBeUndefined()
+        expect(stored?.metadata.metadata?.agent).toBeUndefined()
+
+        const side = await application.sideChats.create({})
+        await application.sideChats.send({
+          sideChatId: side.id,
+          requestId: "side_probe_input",
+          content: inputFixture([{ type: "text", text: "side probe" }]),
+        })
+        await vi.waitFor(() => {
+          expect(
+            application.sideChats.read(side.id).activeTurnId,
+          ).toBeUndefined()
+          expect(sideRequest).toBeDefined()
+        })
+        for (const name of [...currentTools, "spawn_agent", "send_message"])
+          expect(sideRequest?.tools.map((tool) => tool.name)).not.toContain(
+            name,
+          )
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it("runs spawn_agent through a real child Thread", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       let notificationRequest: ModelRequest | undefined

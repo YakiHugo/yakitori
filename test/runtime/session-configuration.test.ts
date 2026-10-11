@@ -19,6 +19,128 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  const previousDefaultTools = [
+    "read_file",
+    "view_image",
+    "read_document",
+    "grep",
+    "glob",
+    "edit_file",
+    "write_file",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "web_fetch",
+    "web_search",
+    "request_user_input_async",
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+  ]
+  const threadTools = [
+    "list_threads",
+    "read_thread",
+    "send_message_to_thread",
+    "wait_threads",
+  ]
+
+  it.each(
+    [
+      previousDefaultTools,
+      [
+        ...previousDefaultTools,
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "configure_model_sources",
+      ],
+      [
+        ...previousDefaultTools.filter(
+          (name) => name !== "request_user_input_async",
+        ),
+        "get_goal",
+        "create_goal",
+        "update_goal",
+        "configure_model_sources",
+      ],
+    ].map((enabledTools) => ({ enabledTools })),
+  )("adds current collaboration defaults to a complete historical default list with $enabledTools.length tools", ({
+    enabledTools,
+  }) => {
+    const { collaborationToolsVersion: _version, ...legacy } =
+      SessionConfiguration.create({
+        selection: { provider: "faux", model: "scripted" },
+        workspaceRoot: "/workspace",
+        promptCacheKey: "historical-session",
+        enabledTools,
+        approvalPolicy: "always_approve",
+        baseInstructions: "Persisted custom instructions remain authoritative.",
+      }).snapshot
+    const before = structuredClone(legacy)
+    const restored = SessionConfiguration.restore(legacy)
+
+    expect(restored.snapshot).toEqual({
+      ...legacy,
+      collaborationToolsVersion: 2,
+      enabledTools: [...enabledTools, ...threadTools],
+    })
+    expect(legacy).toEqual(before)
+    expect(SessionConfiguration.restore(restored.snapshot).snapshot).toEqual(
+      restored.snapshot,
+    )
+  })
+
+  it.each(
+    [
+      [],
+      ["read_file"],
+      [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+      ],
+      previousDefaultTools.filter((name) => name !== "web_search"),
+      [...previousDefaultTools, "custom_tool"],
+      [...previousDefaultTools, "list_threads"],
+    ].map((enabledTools) => ({ enabledTools })),
+  )("preserves an unknown or restricted historical allowlist with $enabledTools.length tools", ({
+    enabledTools,
+  }) => {
+    const { collaborationToolsVersion: _version, ...legacy } =
+      SessionConfiguration.create({
+        selection: { provider: "faux", model: "scripted" },
+        workspaceRoot: "/workspace",
+        promptCacheKey: "restricted-session",
+        enabledTools,
+        approvalPolicy: "always_approve",
+      }).snapshot
+
+    expect(SessionConfiguration.restore(legacy).snapshot.enabledTools).toEqual(
+      enabledTools,
+    )
+  })
+
+  it("keeps an explicit current allowlist authoritative even when it matches the old defaults", () => {
+    const created = SessionConfiguration.create({
+      selection: { provider: "faux", model: "scripted" },
+      workspaceRoot: "/workspace",
+      promptCacheKey: "explicit-session",
+      enabledTools: previousDefaultTools,
+      approvalPolicy: "always_approve",
+    })
+
+    expect(created.snapshot.collaborationToolsVersion).toBe(2)
+    expect(
+      SessionConfiguration.restore(created.snapshot).snapshot.enabledTools,
+    ).toEqual(previousDefaultTools)
+  })
+
   it.each([
     { model: "claude-sonnet-4-6", window: 1_000_000, outputCap: 128_000 },
     { model: "claude-opus-4-6", window: 1_000_000, outputCap: 128_000 },

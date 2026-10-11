@@ -111,6 +111,7 @@ export class SessionConfiguration {
     validateAutoCompactTokenLimit(input.modelAutoCompactTokenLimit)
     return new SessionConfiguration({
       schemaVersion: 5,
+      collaborationToolsVersion: 2,
       workspaceRoot: input.workspaceRoot,
       promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
@@ -156,12 +157,13 @@ export class SessionConfiguration {
     validateAutoCompactTokenLimit(snapshot.modelAutoCompactTokenLimit)
     return new SessionConfiguration({
       ...snapshot,
+      collaborationToolsVersion: 2,
       defaultTarget: { ...snapshot.defaultTarget },
       baseInstructions: {
         ...snapshot.baseInstructions,
         provenance: { ...snapshot.baseInstructions.provenance },
       },
-      enabledTools: [...snapshot.enabledTools],
+      enabledTools: restoreCollaborationTools(snapshot),
       executionPolicyDefaults,
     })
   }
@@ -236,6 +238,68 @@ export class SessionConfiguration {
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
   }
+}
+
+function restoreCollaborationTools(
+  snapshot: SessionConfigurationSnapshot,
+): string[] {
+  const enabledTools = [...snapshot.enabledTools]
+  if (snapshot.collaborationToolsVersion !== undefined) return enabledTools
+  // Match the complete pre-thread-collaboration defaults, not merely the six
+  // agent tools: a custom allowlist may intentionally include only those six.
+  // These historical lists must not track future registry additions.
+  const runtimeDefaults = [
+    "read_file",
+    "view_image",
+    "read_document",
+    "grep",
+    "glob",
+    "edit_file",
+    "write_file",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "web_fetch",
+    "web_search",
+    "request_user_input_async",
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+  ]
+  const applicationDefaults = [
+    ...runtimeDefaults,
+    "get_goal",
+    "create_goal",
+    "update_goal",
+    "configure_model_sources",
+  ]
+  const previousDefaults = [
+    runtimeDefaults,
+    applicationDefaults,
+    applicationDefaults.filter((name) => name !== "request_user_input_async"),
+  ]
+  // Upgrade once without rewriting history. Restricted or unknown old lists
+  // and explicit current overrides remain authoritative.
+  if (
+    previousDefaults.some(
+      (defaults) =>
+        enabledTools.length === defaults.length &&
+        defaults.every((name) => enabledTools.includes(name)),
+    )
+  ) {
+    for (const name of [
+      "list_threads",
+      "read_thread",
+      "send_message_to_thread",
+      "wait_threads",
+    ]) {
+      if (!enabledTools.includes(name)) enabledTools.push(name)
+    }
+  }
+  return enabledTools
 }
 
 export function resolveModelRequestPolicy(

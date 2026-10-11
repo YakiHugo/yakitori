@@ -26,6 +26,7 @@ import {
   isTurnCompletion,
   isTurnMetrics,
 } from "../kernel/events.ts"
+import { isThreadMessageProvenance } from "../protocol/input-queue.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import { ContextManager } from "./context-manager.ts"
 import type {
@@ -2333,6 +2334,63 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         typeof value.settings.compactionHash === "string")
     )
   }
+  if (
+    value.type === "thread_message_admitted" ||
+    value.type === "thread_message_consumed"
+  ) {
+    const base = [
+      "type",
+      "sourceThreadId",
+      "sourceRequestId",
+      "submissionId",
+      "targetTurnId",
+      "inputItemId",
+    ]
+    if (
+      ![
+        value.sourceThreadId,
+        value.sourceRequestId,
+        value.submissionId,
+        value.targetTurnId,
+        value.inputItemId,
+      ].every((id) => typeof id === "string" && id.trim().length > 0)
+    )
+      return false
+    if (value.type === "thread_message_consumed")
+      return hasOnlyKeys(value, base)
+    return (
+      hasOnlyKeys(value, [
+        ...base,
+        "requestFingerprint",
+        "input",
+        "delivery",
+      ]) &&
+      typeof value.requestFingerprint === "string" &&
+      /^[a-f0-9]{64}$/.test(value.requestFingerprint) &&
+      (value.delivery === "started" || value.delivery === "steered") &&
+      isRecord(value.input) &&
+      hasOnlyKeys(value.input, [
+        "submissionId",
+        "content",
+        "provenance",
+        "modelSelection",
+        "metadata",
+        "parentInputId",
+      ]) &&
+      value.input.submissionId === value.submissionId &&
+      isThreadMessageProvenance(value.input.provenance) &&
+      value.input.provenance.sourceThreadId === value.sourceThreadId &&
+      value.input.provenance.sourceRequestId === value.sourceRequestId &&
+      isInputContent(value.input.content) &&
+      value.input.content.attachments.length === 0 &&
+      (value.input.content.references?.length ?? 0) === 0 &&
+      (value.input.modelSelection === undefined ||
+        isModelSelection(value.input.modelSelection)) &&
+      (value.input.metadata === undefined ||
+        isJsonObject(value.input.metadata)) &&
+      optionalString(value.input.parentInputId)
+    )
+  }
   if (value.type === "turn_started") {
     return (
       hasOnlyKeys(value, [
@@ -2609,7 +2667,10 @@ function isSubmissionMetadata(value: unknown): boolean {
       "metadata",
       "queuedDispatch",
       "requestFingerprint",
+      "provenance",
     ]) &&
+    (value.provenance === undefined ||
+      isThreadMessageProvenance(value.provenance)) &&
     (value.content === undefined || isInputContent(value.content)) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&

@@ -35,6 +35,10 @@ export class AgentThread {
     return this.#session.io.startIfIdle(input)
   }
 
+  startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
+    return this.#session.io.startOrSteer(input)
+  }
+
   compact(requestId: string): Promise<TurnInputSubmission> {
     return this.#session.io.compact(requestId)
   }

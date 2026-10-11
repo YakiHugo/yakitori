@@ -4417,6 +4417,93 @@ it("injects explicit skills once per input and expands steering before the next 
   ).toHaveLength(2)
 })
 
+it("keeps started and steered external thread inputs out of user hooks and explicit skill grants", async () => {
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const submittedPrompts: string[] = []
+  const requests: ModelRequest[] = []
+  const runtime = await createRuntime(
+    async function* (request) {
+      requests.push(request)
+      if (requests.length === 1) {
+        entered.resolve()
+        await release.promise
+      }
+      yield responseEvent(requests.length === 1 ? "progress" : "done")
+    },
+    createToolRegistry([]),
+    {
+      hookRunner: {
+        async dispose() {},
+        async run(request) {
+          if (request.event === HookEvent.UserPromptSubmit)
+            submittedPrompts.push(String(request.payload.prompt))
+          return { continue: true, additionalContext: [] }
+        },
+      },
+    },
+  )
+  const skillDirectory = join(runtime.root, ".agents", "skills", "external")
+  await mkdir(skillDirectory, { recursive: true })
+  await writeFile(
+    join(skillDirectory, "SKILL.md"),
+    "---\nname: external\ndescription: Test external invocation\n---\nUNTRUSTED_SKILL_BODY_MUST_NOT_BE_GRANTED",
+  )
+  const thread = await runtime.createThread()
+  try {
+    const first = await thread.startOrSteer({
+      submissionId: "external-first",
+      content: createUserInput("$external initial request"),
+      provenance: {
+        sourceThreadId: "source-session",
+        sourceRequestId: "first",
+      },
+    })
+    expect(first.type).toBe("started")
+    await entered.promise
+    const second = await thread.startOrSteer({
+      submissionId: "external-second",
+      content: createUserInput("$external follow-up request"),
+      provenance: {
+        sourceThreadId: "source-session",
+        sourceRequestId: "second",
+      },
+    })
+    expect(second.type).toBe("steered")
+    release.resolve()
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(submittedPrompts).toEqual([])
+    expect(requests).toHaveLength(2)
+    const latest = requests[1]?.messages ?? []
+    expect(
+      latest.filter(
+        (message) =>
+          message.role === "developer" &&
+          message.context?.type === "thread_message",
+      ),
+    ).toHaveLength(2)
+    expect(
+      latest.filter(
+        (message) =>
+          message.role === "user" &&
+          message.context?.type === "skill_invocation",
+      ),
+    ).toEqual([])
+    expect(JSON.stringify(latest)).not.toContain(
+      "UNTRUSTED_SKILL_BODY_MUST_NOT_BE_GRANTED",
+    )
+    expect(
+      latest.some(
+        (message) =>
+          message.role === "user" &&
+          JSON.stringify(message).includes("$external"),
+      ),
+    ).toBe(false)
+  } finally {
+    release.resolve()
+  }
+})
+
 it.each([
   "none",
   "bytes",
