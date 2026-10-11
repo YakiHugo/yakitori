@@ -87,6 +87,7 @@ export function createThreadReader(input: {
       const result = await input.store.listThreads({
         view: "sessions",
         archived,
+        limit,
         ...(cursor === undefined ? {} : { cursor }),
       })
       return {

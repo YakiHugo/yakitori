@@ -66,6 +66,51 @@ async function fixture(script: readonly FauxScriptedResponse[]) {
 }
 
 describe("independent session collaboration", () => {
+  it("honors list limits and prevents independent sends from bypassing subagent ownership", async () => {
+    const f = await fixture([])
+    try {
+      const control = f.service.bind(f.source.id)
+      const first = await control.list({ limit: 1 })
+      expect(first.threads).toHaveLength(1)
+      expect(first.truncated).toBe(true)
+      if (first.nextCursor === undefined)
+        throw new Error("Expected list cursor")
+      const second = await control.list({ limit: 1, cursor: first.nextCursor })
+      expect(second.threads).toHaveLength(1)
+      expect(second.threads[0]?.threadId).not.toBe(first.threads[0]?.threadId)
+      expect(second.truncated).toBe(false)
+      const child = await f.manager.createThread({
+        parentThreadId: f.target.id,
+        conversationId: f.target.id,
+        metadata: {
+          agent: {
+            version: 1,
+            kind: "subagent",
+            rootThreadId: f.target.id,
+            parentThreadId: f.target.id,
+            taskName: "child",
+            path: "/root/child",
+            agentType: "general",
+            depth: 1,
+          },
+        },
+      })
+      await f.store.persistThread(child.id, PersistContext.TurnStart)
+      await f.manager.closeThread(child.id)
+      await expect(
+        control.send({
+          threadId: child.id,
+          requestId: "bypass",
+          message: "Do work",
+        }),
+      ).rejects.toMatchObject({ code: "target_is_subagent" })
+      expect(f.manager.getThread(child.id)).toBeUndefined()
+      expect(f.provider.callCount).toBe(0)
+    } finally {
+      await f.cleanup()
+    }
+  })
+
   it("starts an unrelated root, tracks its exact result and replays durably after restart", async () => {
     const f = await fixture([
       { content: [{ type: "text", text: "independent result" }] },

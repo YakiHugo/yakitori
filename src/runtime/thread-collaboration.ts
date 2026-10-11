@@ -72,6 +72,18 @@ export function createThreadCollaboration(input: {
               "source_not_found",
               "The source thread no longer exists.",
             )
+          const storedTarget = await input.store.readThread(request.threadId)
+          const targetAgent = storedTarget?.metadata.metadata?.agent
+          if (
+            typeof targetAgent === "object" &&
+            targetAgent !== null &&
+            !Array.isArray(targetAgent) &&
+            targetAgent.kind === "subagent"
+          )
+            throw new ThreadCollaborationError(
+              "target_is_subagent",
+              "This target belongs to a subagent tree. Use its owning agent controller instead of independent-session messaging.",
+            )
           const target = await manager.resumeThread(request.threadId)
           if (target === undefined)
             throw new ThreadCollaborationError(
