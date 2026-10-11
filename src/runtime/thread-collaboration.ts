@@ -160,13 +160,18 @@ export function createThreadCollaboration(input: {
               const observed = generation
               const results = await Promise.all(
                 requests.map(async (request) => {
+                  // Observe liveness before the history read. A Turn can finish
+                  // while storage is resolving; a stale read must stay running
+                  // until the status notification forces a fresh terminal read.
+                  const activeTurnId = manager
+                    .getThread(request.threadId)
+                    ?.snapshot().activeTurnId
                   const stored = await input.store.readThread(request.threadId)
                   return requestResult(
                     stored,
                     request,
                     sourceThreadId,
-                    manager.getThread(request.threadId)?.snapshot()
-                      .activeTurnId,
+                    activeTurnId,
                   )
                 }),
               )

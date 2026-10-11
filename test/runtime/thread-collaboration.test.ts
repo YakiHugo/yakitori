@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
@@ -66,6 +66,52 @@ async function fixture(script: readonly FauxScriptedResponse[]) {
 }
 
 describe("independent session collaboration", () => {
+  it("rechecks a stale history read when the target finishes during that read", async () => {
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>()
+    const f = await fixture([
+      {
+        assertRequest: async () => {
+          entered.resolve()
+          await release.promise
+        },
+        content: [{ type: "text", text: "finished during read" }],
+      },
+    ])
+    const readEntered = Promise.withResolvers<void>(),
+      releaseRead = Promise.withResolvers<void>()
+    try {
+      const control = f.service.bind(f.source.id)
+      const sent = await control.send({
+        threadId: f.target.id,
+        requestId: "stale",
+        message: "work",
+      })
+      await entered.promise
+      const originalRead = f.store.readThread.bind(f.store)
+      vi.spyOn(f.store, "readThread").mockImplementationOnce(async (id) => {
+        const stale = await originalRead(id)
+        readEntered.resolve()
+        await releaseRead.promise
+        return stale
+      })
+      const waiting = control.wait([sent], 5_000)
+      await readEntered.promise
+      release.resolve()
+      await expect.poll(() => f.target.status).toBe("idle")
+      releaseRead.resolve()
+      expect(await waiting).toMatchObject({
+        reason: "completed",
+        results: [{ status: "completed", consumed: true }],
+      })
+    } finally {
+      release.resolve()
+      releaseRead.resolve()
+      vi.restoreAllMocks()
+      await f.cleanup()
+    }
+  })
+
   it("honors list limits and prevents independent sends from bypassing subagent ownership", async () => {
     const f = await fixture([])
     try {
