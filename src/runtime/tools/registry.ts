@@ -10,6 +10,7 @@ import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
+import { createThreadCollaborationTools } from "./thread-collaboration.ts"
 import { canonicalToolName, plainToolName, type ToolName } from "./tool-name.ts"
 import {
   createToolSearchIndex,
@@ -824,7 +825,9 @@ export function createDefaultTools(
     ...(input.goalService === undefined
       ? []
       : createGoalTools(input.goalService)),
-    ...(input.includeMultiAgent === false ? [] : createMultiAgentTools()),
+    ...(input.includeMultiAgent === false
+      ? []
+      : [...createMultiAgentTools(), ...createThreadCollaborationTools()]),
   ]
 }
 

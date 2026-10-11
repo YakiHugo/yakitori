@@ -101,6 +101,7 @@ import {
   renderSkillsCatalog,
   type SkillConfiguration,
 } from "./skills.ts"
+import type { BoundThreadCollaboration } from "./thread-collaboration.ts"
 import {
   createToolExecutionGate,
   type ToolExecutionGate,
@@ -188,6 +189,7 @@ export type TurnProcessorOptions = {
   readonly rolloutAssets?: RolloutAssets
   readonly onOperationalFailure?: TurnProcessorOperationalFailureReporter
   readonly agentControl?: AgentControl
+  readonly threadCollaboration?: BoundThreadCollaboration
   readonly hookRunner?: HookRunner
   readonly sessionHookContext?: Readonly<{
     sessionId: string
@@ -539,7 +541,7 @@ async function executeTurn(input: {
       if (initialInputHandled) return true
       initialInputHandled = true
       const promptHook =
-        input.input.goalId === undefined
+        input.input.goalId === undefined && input.input.provenance === undefined
           ? await input.options.hookRunner?.run({
               event: HookEvent.UserPromptSubmit,
               payload: {
@@ -1178,7 +1180,11 @@ async function executeTurnModelLoop(
         continuationReminderNeeded = false
       }
       for (const submitted of pendingSkillInputs.splice(0)) {
-        if (submitted.goalId !== undefined) continue
+        if (
+          submitted.goalId !== undefined ||
+          submitted.provenance !== undefined
+        )
+          continue
         const alreadyLoaded = input.runtime
           .snapshot()
           .context.history.some(
@@ -1414,6 +1420,9 @@ async function executeTurnModelLoop(
                       executionStep.target,
                     ),
                   }),
+              ...(input.options.threadCollaboration === undefined
+                ? {}
+                : { threadCollaboration: input.options.threadCollaboration }),
             })
             toolCalls += calls.length
             for await (const { call, item, result } of results) {
@@ -2739,6 +2748,7 @@ type ToolExecutionScope = {
     | TurnProcessorOperationalFailureReporter
     | undefined
   readonly agentControl?: BoundAgentControl
+  readonly threadCollaboration?: BoundThreadCollaboration
   readonly hookRunner?: HookRunner
 }
 
@@ -3081,6 +3091,9 @@ async function executePreparedTool(
           ...(input.agentControl === undefined
             ? {}
             : { agentControl: input.agentControl }),
+          ...(input.threadCollaboration === undefined
+            ? {}
+            : { threadCollaboration: input.threadCollaboration }),
         },
       )
       const postHook = await input.hookRunner?.run({
@@ -3212,7 +3225,7 @@ async function recordSteering(
   const metadata = input.runtime.snapshot().metadata
   for (const item of steering) {
     const hook =
-      item.goalId === undefined
+      item.goalId === undefined && item.provenance === undefined
         ? await input.options.hookRunner?.run({
             event: HookEvent.UserPromptSubmit,
             payload: {
@@ -3225,9 +3238,12 @@ async function recordSteering(
           })
         : undefined
     if (hook?.continue !== false) {
-      await input.runtime.recordConversationItems([
-        inputEnvelope(item, item.submissionId),
-      ])
+      if (item.provenance !== undefined)
+        await input.runtime.recordThreadMessageInput(item)
+      else
+        await input.runtime.recordConversationItems([
+          inputEnvelope(item, item.submissionId),
+        ])
       accepted.push(item)
     }
     await recordHookContext(

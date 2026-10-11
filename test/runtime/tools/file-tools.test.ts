@@ -908,6 +908,10 @@ describe("bounded file tools", () => {
       "wait_agent",
       "interrupt_agent",
       "list_agents",
+      "list_threads",
+      "read_thread",
+      "send_message_to_thread",
+      "wait_threads",
     ])
     expect(
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema,

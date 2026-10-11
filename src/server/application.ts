@@ -87,6 +87,7 @@ import {
 } from "../runtime/index.ts"
 import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
 import { createSkillsLoader } from "../runtime/skills.ts"
+import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import {
@@ -788,6 +789,10 @@ export async function createYakitoriApplication(
     })
     goals = goalRuntime
     let threadManager: ThreadManager
+    const threadCollaboration = createThreadCollaboration({
+      getThreadManager: () => threadManager,
+      store: threadStore,
+    })
     const agentRuntime = createAgentRuntime({
       graphStore: agentGraphStore,
       getThreadManager: () => threadManager,
@@ -1024,6 +1029,9 @@ export async function createYakitoriApplication(
                 agentControl: agentRuntime.registerThread(
                   stored,
                   sessionConfiguration.rolloutBudget,
+                ),
+                threadCollaboration: threadCollaboration.bind(
+                  stored.metadata.id,
                 ),
               }),
           rolloutAssets,
