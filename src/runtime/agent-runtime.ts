@@ -130,8 +130,15 @@ export function createAgentRuntime(input: {
         request.sessionId,
       )
       const submission = await thread.startIfIdle({
+        ...(request.messageId === undefined
+          ? {}
+          : { submissionId: request.messageId }),
         content: createUserInput(request.message),
-        modelSelection: toModelSelection(request.target),
+        // Follow-ups keep the recipient's configured model and use the same
+        // fingerprint whether accepted as steering or as a fresh Turn.
+        ...(request.messageId === undefined
+          ? { modelSelection: toModelSelection(request.target) }
+          : {}),
       })
       if (submission.type !== "started" && submission.type !== "replayed") {
         const reason =
@@ -143,6 +150,31 @@ export function createAgentRuntime(input: {
         )
       }
       return outcomeFromStatus(await waitForFinalStatus(thread))
+    },
+
+    async steerChild(request) {
+      const thread = await requireThread(
+        input.getThreadManager(),
+        request.sessionId,
+      )
+      // Session checks persisted receipts before the active-Turn lease, so an
+      // idle recipient can acknowledge a replay without launching it again.
+      const turnId = thread.snapshot().activeTurnId ?? request.messageId
+      const submission = await thread.steer(
+        {
+          submissionId: request.messageId,
+          content: createUserInput(request.message),
+        },
+        turnId,
+      )
+      if (submission.type === "not_submitted") {
+        if (submission.reason === "request_conflict")
+          throw new Error(
+            "Agent follow-up conflicts with a previous submission.",
+          )
+        return false
+      }
+      return true
     },
 
     async ensureLoaded(sessionId) {

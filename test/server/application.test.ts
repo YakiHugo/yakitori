@@ -934,7 +934,9 @@ describe("application composition", () => {
               message.role === "user" &&
               message.content.some(
                 (block) =>
-                  block.type === "text" && block.text === "resume child",
+                  block.type === "text" &&
+                  block.text ===
+                    '<inter_agent_message from="/root" type="new_task">\nresume child\n</inter_agent_message>',
               ),
           )
           if (child) {

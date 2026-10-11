@@ -10,7 +10,10 @@ import type { AgentControl } from "../../src/runtime/agent-control.ts"
 import { createAgentRuntime } from "../../src/runtime/agent-runtime.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createMultiAgentTools } from "../../src/runtime/tools/multi-agent.ts"
-import { canonicalToolName } from "../../src/runtime/tools/tool-name.ts"
+import {
+  canonicalToolName,
+  plainToolName,
+} from "../../src/runtime/tools/tool-name.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
@@ -107,6 +110,156 @@ describe("agent runtime", () => {
       })
     } finally {
       childCompletion.resolve()
+      await runtime.close()
+      await manager.shutdown()
+    }
+  })
+
+  it("delivers a running follow-up after the pending tool without reentering the turn", async () => {
+    const store = new MemoryThreadStore()
+    const graph = memoryGraphStore()
+    const controls = new Map<string, AgentControl>()
+    const toolEntered = deferred<void>()
+    const releaseTool = deferred<void>()
+    const provider = createFauxProvider([
+      {
+        stopReason: "tool_use",
+        content: [{ type: "tool_call", id: "held", name: "hold", input: {} }],
+      },
+      { content: [{ type: "text", text: "handled together" }] },
+      { content: [{ type: "text", text: "next task done" }] },
+    ])
+    let manager: ThreadManager
+    const runtime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => manager,
+    })
+    manager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        const control = runtime.registerThread(stored)
+        controls.set(stored.metadata.id, control)
+        return createTurnProcessor({
+          stream: provider.stream,
+          agentControl: control,
+          loadProjectInstructions: async () => undefined,
+          toolRegistry: createToolRegistry([
+            {
+              toolName: plainToolName("hold"),
+              description: "Hold the tool boundary for the test.",
+              inputSchema: { type: "object" },
+              effect: "observe",
+              approvalRequirement: { kind: "none" },
+              async execute() {
+                toolEntered.resolve()
+                await releaseTool.promise
+                return { ok: true, content: "released", output: "released" }
+              },
+            },
+          ]),
+        })
+      },
+    })
+    try {
+      const root = await manager.createThread({
+        workingDirectory: process.cwd(),
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      const control = controls.get(root.id)
+      if (control === undefined) throw new Error("missing root control")
+      const parent = control.bind(root.id, TARGET)
+      const child = await parent.spawn({
+        taskName: "worker",
+        message: "first",
+        agentType: "general",
+        forkTurns: "none",
+        model: "recipient_model",
+      })
+      await expect.poll(() => provider.callCount).toBe(1)
+      await toolEntered.promise
+      const turnId = manager.getThread(child.agentId)?.snapshot().activeTurnId
+      const followup = {
+        target: child.agentId,
+        message: "also verify this",
+        messageId: "during_tool",
+      }
+      await Promise.all([parent.followup(followup), parent.followup(followup)])
+      expect(provider.callCount).toBe(1)
+      expect(manager.getThread(child.agentId)?.snapshot().activeTurnId).toBe(
+        turnId,
+      )
+      releaseTool.resolve()
+      await expect(parent.wait(1_000)).resolves.toMatchObject({
+        reason: "status",
+        updates: [{ status: { completed: "handled together" } }],
+      })
+      const request = provider.requests[1]
+      expect(request?.target.model).toBe("recipient_model")
+      const incoming = request?.messages.filter(
+        (message) =>
+          message.role === "user" &&
+          message.content.some(
+            (block) =>
+              block.type === "text" && block.text.includes("also verify this"),
+          ),
+      )
+      expect(incoming).toHaveLength(1)
+      expect(incoming?.[0]).toMatchObject({
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining('from="/root" type="new_task"'),
+          },
+        ],
+      })
+      expect(request?.messages).toContainEqual(
+        expect.objectContaining({ role: "tool", toolCallId: "held" }),
+      )
+      expect(
+        (await store.readThread(child.agentId))?.rollout.filter(
+          ({ item }) => item.type === "turn_started",
+        ),
+      ).toHaveLength(1)
+
+      await manager.closeThread(child.agentId)
+      await parent.sendMessage({
+        target: child.agentId,
+        message: "mail for later",
+        messageId: "queued",
+      })
+      expect(provider.callCount).toBe(2)
+      expect(manager.getThread(child.agentId)?.agentStatus).toEqual({
+        completed: "handled together",
+      })
+      await control
+        .bind(root.id, { provider: "faux", model: "different_caller" })
+        .followup({
+          target: child.agentId,
+          message: "next task",
+          messageId: "idle_turn",
+        })
+      await expect(parent.wait(1_000)).resolves.toMatchObject({
+        reason: "status",
+        updates: [{ status: { completed: "next task done" } }],
+      })
+      expect(provider.requests[2]?.target.model).toBe("recipient_model")
+      expect(JSON.stringify(provider.requests[2]?.messages)).toContain(
+        "mail for later",
+      )
+      expect(
+        (await store.readThread(child.agentId))?.rollout.filter(
+          ({ item }) => item.type === "turn_started",
+        ),
+      ).toHaveLength(2)
+      await parent.followup({
+        target: child.agentId,
+        message: "next task",
+        messageId: "idle_turn",
+      })
+      expect(provider.callCount).toBe(3)
+    } finally {
+      releaseTool.resolve()
       await runtime.close()
       await manager.shutdown()
     }

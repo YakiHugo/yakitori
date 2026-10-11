@@ -9,6 +9,19 @@ import { RolloutBudget, type RolloutBudgetConfig } from "./rollout-budget.ts"
 
 export type AgentType = "general" | "explore"
 export type ForkTurns = "none" | "all" | number
+export const MessageDeliveryMode = {
+  QueueOnly: "queue_only",
+  TriggerTurn: "trigger_turn",
+} as const
+export type MessageDeliveryMode =
+  (typeof MessageDeliveryMode)[keyof typeof MessageDeliveryMode]
+
+type AgentMessageRequest = Readonly<{
+  target: string
+  message: string
+  messageId?: string
+}>
+type AgentMessageReceipt = Readonly<{ agentId: string; path: string }>
 export type AgentModelTarget = Readonly<{
   provider: string
   model: string
@@ -54,7 +67,15 @@ export type AgentControlAdapter = Readonly<{
     readonly sessionId: string
     readonly message: string
     readonly target: AgentModelTarget
+    readonly messageId?: string
   }): Promise<AgentRunOutcome>
+  // The Session decides atomically whether this Turn still accepts steering.
+  // False leaves the message unaccepted so the controller can queue a new Turn.
+  steerChild(input: {
+    readonly sessionId: string
+    readonly messageId: string
+    readonly message: string
+  }): Promise<boolean>
   ensureLoaded(sessionId: string): Promise<void>
   getStatus(sessionId: string): Promise<AgentStatus>
   failChild(sessionId: string, message: string): Promise<AgentStatus>
@@ -85,15 +106,8 @@ export type BoundAgentControl = Readonly<{
     readonly taskName: string
     readonly path: string
   }>
-  sendMessage(input: {
-    readonly target: string
-    readonly message: string
-    readonly messageId?: string
-  }): Promise<{ readonly agentId: string; readonly path: string }>
-  followup(input: {
-    readonly target: string
-    readonly message: string
-  }): Promise<{ readonly agentId: string; readonly path: string }>
+  sendMessage(input: AgentMessageRequest): Promise<AgentMessageReceipt>
+  followup(input: AgentMessageRequest): Promise<AgentMessageReceipt>
   wait(timeoutMs?: number, signal?: AbortSignal): Promise<AgentWaitResult>
   interrupt(target: string): Promise<{
     readonly agentId: string
@@ -110,7 +124,7 @@ export type AgentUpdate = Readonly<{
 }>
 
 export type AgentWaitResult = Readonly<{
-  reason: "mailbox" | "status" | "timeout" | "background_error"
+  reason: "mailbox" | "status" | "timeout" | "background_error" | "closed"
   updates: readonly AgentUpdate[]
 }>
 
@@ -152,6 +166,7 @@ type AgentRecord = {
 }
 
 type AgentTask = {
+  messageId?: string
   message: string
   target: AgentModelTarget
   deliveryId?: string
@@ -189,6 +204,17 @@ export function createAgentControl(input: {
   const executionSlots = new Map<string, Promise<void>>()
   const pendingFollowups = new Map<string, number>()
   const updates = new Map<string, AgentUpdate[]>()
+  // A notification is consumed by a successful wait, not by subscribing. The
+  // actual message remains in Session history independently of this wake bit.
+  const mailboxUpdates = new Set<string>()
+  const acceptedFollowups = new Map<
+    string,
+    { fingerprint: string; receipt: Promise<AgentMessageReceipt> }
+  >()
+  const inFlightMessages = new Set<{
+    paths: readonly string[]
+    completion: Promise<void>
+  }>()
   const waiters = new Map<string, Set<(reason: WaitWakeReason) => void>>()
   const runs = new Map<string, Promise<void>>()
   const tasks = new Map<string, AgentTask[]>()
@@ -224,6 +250,28 @@ export function createAgentControl(input: {
       )
     }
     const { pendingCompletion, ...record } = registration
+    if (
+      record.agentId === input.rootSessionId ||
+      record.agentId === record.parentSessionId ||
+      record.taskName !== requireTaskName(record.taskName) ||
+      !/^\/root(?:\/[a-z0-9_]+)+$/.test(record.path) ||
+      record.path.split("/").length - 2 !== record.depth ||
+      !record.path.endsWith(`/${record.taskName}`)
+    )
+      throw new Error(`Agent ${record.agentId} has invalid tree metadata.`)
+    const parent = agents.get(record.parentSessionId)
+    if (
+      parent !== undefined &&
+      record.path !== `${parent.path}/${record.taskName}`
+    )
+      throw new Error(`Agent ${record.agentId} has a conflicting parent path.`)
+    for (const child of agents.values()) {
+      if (
+        child.parentSessionId === record.agentId &&
+        child.path !== `${record.path}/${child.taskName}`
+      )
+        throw new Error(`Agent ${child.agentId} has a conflicting parent path.`)
+    }
     const existing = agents.get(record.agentId)
     if (existing !== undefined) {
       if (JSON.stringify(existing) !== JSON.stringify(record)) {
@@ -277,6 +325,8 @@ export function createAgentControl(input: {
     agents.delete(agentId)
     paths.delete(pathKey(agent.rootSessionId, agent.path))
     updates.delete(agentId)
+    mailboxUpdates.delete(agentId)
+    wakeWaiters(agentId, "closed")
     tasks.delete(agentId)
     releaseIdleExecutionSlot(agent.path)
   }
@@ -284,9 +334,23 @@ export function createAgentControl(input: {
   function ensureReady(): Promise<void> {
     if (input.restoreAgents === undefined) return Promise.resolve()
     if (restorePromise === undefined) {
-      const restoring = input
-        .restoreAgents()
-        .then((registrations) => registrations.forEach(registerAgent))
+      const restoring = input.restoreAgents().then((registrations) => {
+        const ordered = [...registrations].sort(
+          (left, right) => left.depth - right.depth,
+        )
+        for (const registration of ordered) {
+          const { pendingCompletion: _completion, ...record } = registration
+          registerAgent(record)
+        }
+        for (const agent of agents.values()) requireLinkedAgent(agent)
+        for (const registration of ordered) {
+          if (registration.pendingCompletion !== undefined)
+            enqueueRestoredCompletion(
+              requireAgent(registration.agentId),
+              registration.pendingCompletion,
+            )
+        }
+      })
       const retryable = restoring.catch((error) => {
         if (restorePromise === retryable) restorePromise = undefined
         throw error
@@ -304,7 +368,7 @@ export function createAgentControl(input: {
     return {
       async spawn(request) {
         await ensureReady()
-        requireOpenPath(actor.path)
+        requireLiveActor(actor)
         if (actor.depth >= maxDepth) {
           throw new AgentControlError(
             "agent_depth_limit_reached",
@@ -392,53 +456,20 @@ export function createAgentControl(input: {
           releaseIdleExecutionSlot(path)
         }
       },
-      async sendMessage(request) {
-        await ensureReady()
-        const targetAgent = resolveTarget(actor, request.target)
-        await input.adapter.ensureLoaded(targetAgent.agentId)
-        await input.adapter.deliverMessage({
-          sessionId: targetAgent.agentId,
-          messageId:
-            request.messageId === undefined
-              ? createAgentMessageId()
-              : `agent_message:${actor.agentId}:${request.messageId}`,
-          text: `<inter_agent_message from="${actor.path}">\n${request.message}\n</inter_agent_message>`,
-        })
-        wakeWaiters(targetAgent.agentId, "mailbox")
-        return { agentId: targetAgent.agentId, path: targetAgent.path }
-      },
-      async followup(request) {
-        await ensureReady()
-        const targetAgent = resolveTarget(actor, request.target)
-        if (targetAgent.depth === 0) {
-          throw new AgentControlError(
-            "invalid_agent_target",
-            "The root agent cannot receive a follow-up task.",
-          )
-        }
-        await input.adapter.ensureLoaded(targetAgent.agentId)
-        pendingFollowups.set(
-          targetAgent.path,
-          (pendingFollowups.get(targetAgent.path) ?? 0) + 1,
-        )
-        try {
-          await reserveExecutionSlot(targetAgent.path)
-          start(targetAgent, request.message, target)
-          return { agentId: targetAgent.agentId, path: targetAgent.path }
-        } finally {
-          const remaining = (pendingFollowups.get(targetAgent.path) ?? 1) - 1
-          if (remaining === 0) pendingFollowups.delete(targetAgent.path)
-          else pendingFollowups.set(targetAgent.path, remaining)
-          releaseIdleExecutionSlot(targetAgent.path)
-        }
-      },
+      sendMessage: (request) =>
+        send(actor, target, request, MessageDeliveryMode.QueueOnly),
+      followup: (request) =>
+        send(actor, target, request, MessageDeliveryMode.TriggerTurn),
       async wait(timeoutMs = 30_000, signal) {
         signal?.throwIfAborted()
         await ensureReady()
         signal?.throwIfAborted()
+        requireLiveActor(actor)
         retryPendingDeliveries()
         const pending = drainUpdates(sessionId)
+        const hasMail = mailboxUpdates.delete(sessionId)
         if (pending.length > 0) return { reason: "status", updates: pending }
+        if (hasMail) return { reason: "mailbox", updates: [] }
         if (timeoutMs <= 0) return { reason: "timeout", updates: [] }
         const reason = await new Promise<AgentWaitResult["reason"]>(
           (resolve, reject) => {
@@ -469,6 +500,7 @@ export function createAgentControl(input: {
         // consuming mailbox updates that belong to the next live Turn.
         signal?.throwIfAborted()
         // A deadline that won the race must leave later updates for the next wait.
+        if (reason !== "timeout") mailboxUpdates.delete(sessionId)
         return {
           reason,
           updates: reason === "timeout" ? [] : drainUpdates(sessionId),
@@ -476,9 +508,19 @@ export function createAgentControl(input: {
       },
       async interrupt(targetName) {
         await ensureReady()
+        requireLiveActor(actor)
         const targetAgent = resolveTarget(actor, targetName)
+        if (targetAgent.depth === 0 || targetAgent === actor)
+          throw new AgentControlError(
+            "invalid_agent_target",
+            "An agent cannot interrupt itself or the root.",
+          )
         await input.adapter.ensureLoaded(targetAgent.agentId)
+        requireLiveActor(actor)
+        requireLiveActor(targetAgent)
         const previous = await input.adapter.getStatus(targetAgent.agentId)
+        requireLiveActor(actor)
+        requireLiveActor(targetAgent)
         if (isRunning(previous)) {
           await input.adapter.interruptChild(targetAgent.agentId)
         }
@@ -497,7 +539,9 @@ export function createAgentControl(input: {
             (candidate) =>
               candidate.rootSessionId === actor.rootSessionId &&
               candidate.agentId !== actor.rootSessionId &&
-              (prefix === undefined || candidate.path.startsWith(prefix)),
+              (prefix === undefined ||
+                candidate.path === prefix ||
+                candidate.path.startsWith(`${prefix}/`)),
           )
           .sort((left, right) => left.path.localeCompare(right.path))
         return Promise.all(
@@ -507,6 +551,128 @@ export function createAgentControl(input: {
         )
       },
     }
+  }
+
+  async function send(
+    actor: AgentRecord,
+    target: AgentModelTarget,
+    request: AgentMessageRequest,
+    mode: MessageDeliveryMode,
+  ): Promise<AgentMessageReceipt> {
+    await ensureReady()
+    requireLiveActor(actor)
+    const recipient = resolveTarget(actor, request.target)
+    if (mode === MessageDeliveryMode.TriggerTurn && recipient.depth === 0)
+      throw new AgentControlError(
+        "invalid_agent_target",
+        "The root agent cannot receive a follow-up task.",
+      )
+    const messageId =
+      request.messageId === undefined
+        ? createAgentMessageId()
+        : `${mode === MessageDeliveryMode.QueueOnly ? "agent_message" : "agent_followup"}:${actor.agentId}:${request.messageId}`
+    const fingerprint = JSON.stringify([recipient.agentId, request.message])
+    if (mode === MessageDeliveryMode.TriggerTurn) {
+      const accepted = acceptedFollowups.get(messageId)
+      if (accepted !== undefined) {
+        if (accepted.fingerprint !== fingerprint)
+          throw new AgentControlError(
+            "agent_message_conflict",
+            "A follow-up id cannot be reused for different content or recipients.",
+          )
+        return accepted.receipt
+      }
+    }
+    const operation = (async () => {
+      await input.adapter.ensureLoaded(recipient.agentId)
+      requireLiveActor(actor)
+      requireLiveActor(recipient)
+      const text = `<inter_agent_message from="${actor.path}"${mode === MessageDeliveryMode.TriggerTurn ? ' type="new_task"' : ""}>\n${request.message}\n</inter_agent_message>`
+      if (mode === MessageDeliveryMode.QueueOnly) {
+        await input.adapter.deliverMessage({
+          sessionId: recipient.agentId,
+          messageId,
+          text,
+        })
+        mailboxUpdates.add(recipient.agentId)
+        wakeWaiters(recipient.agentId, "mailbox")
+      } else {
+        pendingFollowups.set(
+          recipient.path,
+          (pendingFollowups.get(recipient.path) ?? 0) + 1,
+        )
+        try {
+          if (
+            await input.adapter.steerChild({
+              sessionId: recipient.agentId,
+              messageId,
+              message: text,
+            })
+          ) {
+            mailboxUpdates.add(recipient.agentId)
+            wakeWaiters(recipient.agentId, "mailbox")
+          } else {
+            // Steering and durable replays do not create another execution.
+            // Reserve only when a new Turn will actually be queued.
+            await reserveExecutionSlot(recipient.path)
+            requireLiveActor(actor)
+            requireLiveActor(recipient)
+            start(recipient, text, target, messageId)
+          }
+        } finally {
+          const remaining = (pendingFollowups.get(recipient.path) ?? 1) - 1
+          if (remaining === 0) pendingFollowups.delete(recipient.path)
+          else pendingFollowups.set(recipient.path, remaining)
+          releaseIdleExecutionSlot(recipient.path)
+        }
+      }
+      return { agentId: recipient.agentId, path: recipient.path }
+    })()
+    const pending = {
+      paths: [actor.path, recipient.path],
+      completion: operation.then(
+        () => undefined,
+        () => undefined,
+      ),
+    }
+    inFlightMessages.add(pending)
+    if (mode === MessageDeliveryMode.TriggerTurn)
+      acceptedFollowups.set(messageId, { fingerprint, receipt: operation })
+    try {
+      return await operation
+    } catch (error) {
+      acceptedFollowups.delete(messageId)
+      throw error
+    } finally {
+      inFlightMessages.delete(pending)
+    }
+  }
+
+  function requireLinkedAgent(agent: AgentRecord): void {
+    let current = agent
+    while (current.parentSessionId !== undefined) {
+      const parent = requireAgent(current.parentSessionId)
+      if (
+        current.path !== `${parent.path}/${current.taskName}` ||
+        current.depth !== parent.depth + 1
+      )
+        throw new Error(
+          `Agent ${current.agentId} has invalid parent membership.`,
+        )
+      current = parent
+    }
+    if (current !== root)
+      throw new Error(`Agent ${agent.agentId} is outside this tree.`)
+  }
+
+  function requireLiveActor(agent: AgentRecord): void {
+    if (agents.get(agent.agentId) !== agent)
+      throw new AgentControlError(
+        "agent_closed",
+        `Agent ${agent.path} is no longer registered.`,
+      )
+    requireOpenPath(agent.path)
+    requireLinkedAgent(agent)
   }
 
   function reserveExecutionSlot(path: string): Promise<void> {
@@ -573,10 +739,12 @@ export function createAgentControl(input: {
     agent: AgentRecord,
     message: string,
     target: AgentModelTarget,
+    messageId?: string,
   ): void {
     requireOpenPath(agent.path)
     const queued = tasks.get(agent.agentId) ?? []
     queued.push({
+      ...(messageId === undefined ? {} : { messageId }),
       message,
       target,
     })
@@ -636,6 +804,9 @@ export function createAgentControl(input: {
             sessionId: agent.agentId,
             message: task.message,
             target: task.target,
+            ...(task.messageId === undefined
+              ? {}
+              : { messageId: task.messageId }),
           })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
@@ -665,6 +836,7 @@ export function createAgentControl(input: {
       if (agent.parentSessionId === undefined) {
         throw new Error(`Agent ${agent.agentId} has no parent.`)
       }
+      requireLinkedAgent(agent)
       await input.adapter.deliverMessage({
         sessionId: agent.parentSessionId,
         messageId: task.deliveryId,
@@ -685,11 +857,17 @@ export function createAgentControl(input: {
 
   function resolveTarget(actor: AgentRecord, target: string): AgentRecord {
     const byId = agents.get(target)
-    if (byId?.rootSessionId === actor.rootSessionId) return byId
+    if (byId?.rootSessionId === actor.rootSessionId) {
+      requireLiveActor(byId)
+      return byId
+    }
     const path = target.startsWith("/") ? target : `${actor.path}/${target}`
     const id = paths.get(pathKey(actor.rootSessionId, path))
     const resolved = id === undefined ? undefined : agents.get(id)
-    if (resolved !== undefined) return resolved
+    if (resolved !== undefined) {
+      requireLiveActor(resolved)
+      return resolved
+    }
     throw new AgentControlError(
       "agent_not_found",
       `Agent target ${target} was not found in ${actor.path}'s tree.`,
@@ -775,6 +953,23 @@ export function createAgentControl(input: {
       await ensureReady()
       const target = requireAgent(agentId)
       closingPaths.add(target.path)
+      for (const agent of agents.values()) {
+        if (
+          agent.path === target.path ||
+          agent.path.startsWith(`${target.path}/`)
+        )
+          wakeWaiters(agent.agentId, "closed")
+      }
+      await Promise.all(
+        Array.from(inFlightMessages)
+          .filter((pending) =>
+            pending.paths.some(
+              (path) =>
+                path === target.path || path.startsWith(`${target.path}/`),
+            ),
+          )
+          .map((pending) => pending.completion),
+      )
       for (;;) {
         const pending = Array.from(inFlightSpawns)
           .filter(
