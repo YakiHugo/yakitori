@@ -80,6 +80,7 @@ export class YakitoriEngineAdapter implements EngineAdapter {
     const thread = await this.#thread(binding)
     const submitted = await thread.startIfIdle({
       submissionId: input.requestId,
+      ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
       content: input.content ?? {
         kind: "input",
         text: input.text,

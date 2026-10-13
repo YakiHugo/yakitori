@@ -154,3 +154,34 @@ export function attachmentInputDraft(
     ),
   )
 }
+
+// Remove only the exact recovery prefix. Later edits keep their own draft;
+// attachment indices and editor offsets move with the remaining text.
+export function removeInputDraftPrefix(
+  draft: InputDraft,
+  prefix: InputDraft,
+): InputDraft {
+  if (sameInputDraft(draft, prefix)) return textInputDraft("")
+  if (!draft.text.startsWith(`${prefix.text}\n`)) return draft
+  const boundary = prefix.text.length
+  const initial = {
+    ...draft,
+    text: draft.text.slice(0, boundary),
+    elements: draft.elements.filter((element) => element.endOffset <= boundary),
+    attachments: draft.attachments.slice(0, prefix.attachments.length),
+  }
+  if (!sameInputDraft(initial, prefix)) return draft
+  const shift = boundary + 1
+  return {
+    ...draft,
+    text: draft.text.slice(shift),
+    attachments: draft.attachments.slice(prefix.attachments.length),
+    elements: draft.elements
+      .filter((element) => element.startOffset >= shift)
+      .map((element) => ({
+        startOffset: element.startOffset - shift,
+        endOffset: element.endOffset - shift,
+        attachmentIndex: element.attachmentIndex - prefix.attachments.length,
+      })),
+  }
+}

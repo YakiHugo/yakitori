@@ -1,3 +1,4 @@
+import { signalProcessGroup } from "../process-signal.ts"
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomInt } from "node:crypto"
 import { closeSync, fsyncSync, openSync, writeSync } from "node:fs"
@@ -410,6 +411,9 @@ export function createUnifiedExecProcessManager(
           entry,
           clamp(input.yieldTimeMs, MIN_YIELD_MS, MAX_YIELD_MS),
         )
+        // A cancelled foreground interaction retains ownership until actual
+        // process exit. Yielding a session id transfers it to this manager.
+        if (input.signal?.aborted) await entry.exit
         return observe(
           entry,
           Date.now() - startedAt,
@@ -517,13 +521,13 @@ function launchPipe(
       pid: child.pid ?? -1,
       write(chars) {
         if (chars === "\u0003") {
-          signalProcess(child, "SIGINT")
+          signalProcessGroup(child, "SIGINT")
         } else {
           throw new Error("stdin is closed for plain-pipe sessions.")
         }
       },
       terminate(signal) {
-        signalProcess(child, signal)
+        signalProcessGroup(child, signal)
       },
     },
     exit,
@@ -593,18 +597,6 @@ function observeChildExit(
       }),
     )
   })
-}
-
-function signalProcess(child: ChildProcess, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform !== "win32" && child.pid !== undefined) {
-      process.kill(-child.pid, signal)
-    } else {
-      child.kill(signal)
-    }
-  } catch {
-    // The process group already exited.
-  }
 }
 
 async function waitForExitOrYield(

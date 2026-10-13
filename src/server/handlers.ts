@@ -200,7 +200,10 @@ export type ServerHandlers = {
   forkSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiForkSessionResponse>>
-  admitInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  admitInput(
+    input: unknown,
+    purpose?: "question_answer",
+  ): Promise<ApplicationResult<ApiAdmitInputResponse>>
   queueInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
   listQueuedInputs(
     input: unknown,
@@ -1584,7 +1587,7 @@ export function createThreadServerHandlers(
       }
     },
 
-    async admitInput(input) {
+    async admitInput(input, purpose) {
       try {
         const request = requireAdmitInputRequest(
           input,
@@ -1601,6 +1604,7 @@ export function createThreadServerHandlers(
         return await admitTurnInput(request, async (_thread, content) => {
           const submitted = await sessions.send(request.sessionId, {
             requestId: request.requestId,
+            ...(purpose === undefined ? {} : { purpose }),
             text: inputContentText(content),
             content,
             ...(request.modelSelection === undefined

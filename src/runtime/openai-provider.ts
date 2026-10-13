@@ -138,8 +138,18 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
             )) as StreamFn,
         }),
     async close() {
-      transport?.close()
-      await upload?.close()
+      const results = await Promise.allSettled([
+        transport?.close(),
+        upload?.close(),
+      ])
+      const errors = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      )
+      if (errors.length > 0)
+        throw new AggregateError(
+          errors,
+          "Failed to close OpenAI Turn resources.",
+        )
     },
   }
 }

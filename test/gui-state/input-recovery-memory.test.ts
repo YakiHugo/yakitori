@@ -31,32 +31,27 @@ const annotation = {
 }
 
 describe("input recovery memory", () => {
-  it("reuses a request id for equivalent complete submission content", () => {
-    const memory = createInputRecoveryMemory(requestIds("request_first"))
-    const submission = {
-      ...draft,
-      content: inputFixture(
-        inputParts("Continue the task", [attachment]),
-        { references: [annotation] }.references,
-      ) satisfies InputContent,
-      modelSelection: { provider: "codex", model: "gpt-5", effort: "high" },
-    }
-    const first = memory.reserveAdmission(submission)
-    expect(memory.reserveAdmission(structuredClone(submission))).toEqual(first)
-    expect(
-      memory.reserveAdmission({
-        ...submission,
-        modelSelection: { effort: "high", model: "gpt-5", provider: "codex" },
-      }),
-    ).toEqual(first)
+  it("gives each explicit send a new ID while retaining unconfirmed input for history reconciliation", () => {
+    const memory = createInputRecoveryMemory(
+      requestIds("request_first", "request_second"),
+    )
+    const first = memory.reserveAdmission(draft)
+    memory.markAdmissionRestored(first)
+    const second = memory.reserveAdmission(draft)
+    expect(second.requestId).toBe("request_second")
     expect(
       memory.listAdmissionsForSession(draft.apiBase, draft.sessionId),
-    ).toEqual([first])
+    ).toEqual([{ ...first, restored: true }, second])
   })
 
   it("isolates API endpoints and sessions and normalizes equivalent URLs", () => {
     const memory = createInputRecoveryMemory(
-      requestIds("request_first", "request_api", "request_session"),
+      requestIds(
+        "request_first",
+        "request_equivalent",
+        "request_api",
+        "request_session",
+      ),
     )
     const first = memory.reserveAdmission({
       ...draft,
@@ -64,7 +59,7 @@ describe("input recovery memory", () => {
     })
     expect(
       memory.reserveAdmission({ ...draft, apiBase: "http://localhost/api/" }),
-    ).toEqual(first)
+    ).toMatchObject({ apiBase: first.apiBase, requestId: "request_equivalent" })
     const otherApi = memory.reserveAdmission(draft)
     const otherSession = memory.reserveAdmission({
       ...draft,
@@ -195,6 +190,7 @@ describe("input recovery memory", () => {
       ) satisfies InputContent,
       modelSelection: { provider: "codex", model: "gpt-5" },
       requestId: "request_first",
+      restored: false,
     })
     if (!recovered) throw new Error("Missing recovered input")
     const recoveredImage = draftToEditorParts(recovered.content)[1]
@@ -208,17 +204,17 @@ describe("input recovery memory", () => {
     ).toMatchObject(inputParts("Continue the task", [attachment]))
   })
 
-  it("removes only the matching admission and ignores old acknowledgements", () => {
+  it("acknowledges only the corresponding ID and retains later explicit sends", () => {
     const memory = createInputRecoveryMemory(
       requestIds("request_first", "request_new"),
     )
     const first = memory.reserveAdmission(draft)
-    memory.acknowledgeAdmission({ ...first, requestId: "request_stale" })
-    expect(memory.reserveAdmission(draft)).toEqual(first)
-    memory.acknowledgeAdmission(first)
     const newer = memory.reserveAdmission(draft)
     memory.acknowledgeAdmission(first)
-    expect(memory.reserveAdmission(draft)).toEqual(newer)
+    memory.acknowledgeAdmission(first)
+    expect(
+      memory.listAdmissionsForSession(draft.apiBase, draft.sessionId),
+    ).toEqual([newer])
     memory.acknowledgeAdmission(newer)
     expect(memory.listAdmissionsForApiBase(draft.apiBase)).toEqual([])
   })

@@ -1,9 +1,10 @@
-import {
-  isThreadMessageProvenance,
-  type TurnInput,
-} from "../protocol/input-queue.ts"
+import type { TurnInput } from "../protocol/input-queue.ts"
 
-export type { TurnInput } from "../protocol/input-queue.ts"
+export type {
+  TurnInput,
+  InputSource,
+  InputPurpose,
+} from "../protocol/input-queue.ts"
 
 import type {
   AgentStatus,
@@ -22,7 +23,6 @@ import type {
   TurnCompletion,
 } from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
-import { createRequestId } from "../kernel/ids.ts"
 import {
   fingerprintInputAdmission,
   fingerprintOperation,
@@ -55,71 +55,71 @@ export type NotSubmittedReason =
   (typeof NotSubmittedReason)[keyof typeof NotSubmittedReason]
 
 export type TurnInputSubmission =
-  | {
-      readonly type: "started"
-      readonly turnId: string
-      readonly inputItemId: string
-    }
-  | { readonly type: "steered"; readonly turnId: string }
-  | {
-      readonly type: "replayed"
-      readonly turnId: string
-      readonly inputItemId: string
-    }
-  | {
-      readonly type: "not_submitted"
-      readonly reason: NotSubmittedReason
-    }
+  | Readonly<{
+      type: "started"
+      turnId: string
+      inputItemId: string
+    }>
+  | Readonly<{ type: "steered"; turnId: string }>
+  | Readonly<{
+      type: "replayed"
+      turnId: string
+      inputItemId: string
+    }>
+  | Readonly<{
+      type: "not_submitted"
+      reason: NotSubmittedReason
+    }>
 
 export type TurnInputMode =
   | { readonly type: "start_if_idle" }
   | { readonly type: "start_or_steer" }
   | { readonly type: "steer"; readonly expectedTurnId: string }
 
-type TurnInputReply = {
-  readonly resolve: (submission: TurnInputSubmission) => void
-  readonly reject: (error: unknown) => void
-}
+type TurnInputReply = Readonly<{
+  resolve: (submission: TurnInputSubmission) => void
+  reject: (error: unknown) => void
+}>
 
 export type SessionOp =
-  | {
-      readonly type: "turn_input"
-      readonly input: TurnInput
-      readonly mode: TurnInputMode
-      readonly reply: TurnInputReply
-    }
-  | {
-      readonly type: "compact"
-      readonly requestId: string
-      readonly reply: TurnInputReply
-    }
-  | {
-      readonly type: "interrupt"
-      readonly reason?: string
-      readonly expectedTurnId?: string
-      readonly reply?: {
+  | Readonly<{
+      type: "turn_input"
+      input: TurnInput
+      mode: TurnInputMode
+      reply: TurnInputReply
+    }>
+  | Readonly<{
+      type: "compact"
+      requestId: string
+      reply: TurnInputReply
+    }>
+  | Readonly<{
+      type: "interrupt"
+      reason?: string
+      expectedTurnId?: string
+      reply?: {
         readonly resolve: (interrupted: boolean) => void
         readonly reject: (error: unknown) => void
       }
-    }
-  | {
-      readonly type: "fail_agent"
-      readonly message: string
-      readonly reply: {
+    }>
+  | Readonly<{
+      type: "fail_agent"
+      message: string
+      reply: {
         readonly resolve: (status: AgentStatus) => void
         readonly reject: (error: unknown) => void
       }
-    }
-  | {
-      readonly type: "agent_message"
-      readonly messageId: string
-      readonly text: string
-      readonly reply: {
+    }>
+  | Readonly<{
+      type: "agent_message"
+      messageId: string
+      text: string
+      reply: {
         readonly resolve: () => void
         readonly reject: (error: unknown) => void
       }
-    }
-  | { readonly type: "shutdown" }
+    }>
+  | Readonly<{ type: "shutdown" }>
 
 export type SessionEvent =
   | Readonly<{
@@ -128,251 +128,112 @@ export type SessionEvent =
       throughSeq: number
       records: readonly StoredRolloutItem[]
     }>
-  | {
-      readonly type: "model.stream"
-      readonly threadId: string
-      readonly turnId: string
-      readonly itemId: string
-      readonly kind: "assistant" | "reasoning"
-      readonly delta: string
-    }
-  | {
-      readonly type: "item.started"
-      readonly threadId: string
-      readonly turnId: string
-      readonly item: StartedExecutionItem
-    }
-  | {
-      readonly type: "permission"
-      readonly threadId: string
-      readonly event: SessionPermissionEvent
-    }
-  | {
-      readonly type: "turn.started"
-      readonly threadId: string
-      readonly input: TurnInput
-    }
-  | {
-      readonly type: "turn.completed"
-      readonly threadId: string
-      readonly input: TurnInput
-      readonly completion?: TurnCompletion
-    }
-  | {
-      readonly type: "turn.interrupted"
-      readonly threadId: string
-      readonly input: TurnInput
-      readonly reason?: string
-    }
+  | Readonly<{
+      type: "model.stream"
+      threadId: string
+      turnId: string
+      itemId: string
+      kind: "assistant" | "reasoning"
+      delta: string
+    }>
+  | Readonly<{
+      type: "item.started"
+      threadId: string
+      turnId: string
+      item: StartedExecutionItem
+    }>
+  | Readonly<{
+      type: "permission"
+      threadId: string
+      event: SessionPermissionEvent
+    }>
+  | Readonly<{
+      type: "turn.started"
+      threadId: string
+      input: TurnInput
+    }>
+  | Readonly<{
+      type: "turn.completed"
+      threadId: string
+      input: TurnInput
+      completion?: TurnCompletion
+    }>
+  | Readonly<{
+      type: "turn.interrupted"
+      threadId: string
+      input: TurnInput
+      reason?: string
+    }>
   | Readonly<{
       type: "turn.failed"
       threadId: string
       input: TurnInput
       error: KernelError
     }>
-  | {
-      readonly type: "session.error"
-      readonly threadId: string
-      readonly operation: "turn_input" | "interrupt" | "persistence"
-      readonly message: string
-    }
-  | {
-      readonly type: "runtime.warning"
-      readonly threadId: string
-      readonly turnId: string
-      readonly message: string
-      readonly code?: string
-      readonly details?: import("../kernel/index.ts").EventMetadata
-    }
+  | Readonly<{
+      type: "session.error"
+      threadId: string
+      operation: "turn_input" | "interrupt" | "persistence"
+      message: string
+    }>
+  | Readonly<{
+      type: "runtime.warning"
+      threadId: string
+      turnId: string
+      message: string
+      code?: string
+      details?: import("../kernel/index.ts").EventMetadata
+    }>
 
-export class SessionIo {
-  readonly #send: (operation: SessionOp) => Promise<void>
-  readonly #events: AsyncQueue<SessionEvent>
-  readonly #beforeShutdown: () => void
-  readonly #readStatus: () => SessionStatus
-  readonly #subscribeStatus: (
-    listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
-  ) => () => void
-  readonly #readAgentStatus: () => AgentStatus
-  readonly #subscribeAgentStatus: (
-    listener: (status: AgentStatus) => void,
-  ) => () => void
-  readonly termination: Promise<void>
-  #accepting = true
-
-  constructor(input: {
-    send: (operation: SessionOp) => Promise<void>
-    beforeShutdown: () => void
-    events: AsyncQueue<SessionEvent>
-    readStatus: () => SessionStatus
-    subscribeStatus: (
-      listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
-    ) => () => void
-    readAgentStatus: () => AgentStatus
-    subscribeAgentStatus: (
-      listener: (status: AgentStatus) => void,
-    ) => () => void
-    termination: Promise<void>
-  }) {
-    this.#send = input.send
-    this.#beforeShutdown = input.beforeShutdown
-    this.#events = input.events
-    this.#readStatus = input.readStatus
-    this.#subscribeStatus = input.subscribeStatus
-    this.#readAgentStatus = input.readAgentStatus
-    this.#subscribeAgentStatus = input.subscribeAgentStatus
-    this.termination = input.termination
-  }
-
-  get status(): SessionStatus {
-    return this.#readStatus()
-  }
-
+export type SessionEndpoints = Readonly<{
+  send(operation: Exclude<SessionOp, { type: "shutdown" }>): Promise<void>
+  events: SessionEventReceiver
+  readStatus(): SessionStatus
   subscribeStatus(
     listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
-  ): () => void {
-    return this.#subscribeStatus(listener)
-  }
+  ): () => void
+  readAgentStatus(): AgentStatus
+  subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void
+  shutdown(): Promise<void>
+  termination: Promise<void>
+}>
 
-  get agentStatus(): AgentStatus {
-    return this.#readAgentStatus()
-  }
+export type SessionEventReceiver = Readonly<{
+  receive(): Promise<SessionEvent | undefined>
+  transfer(): SessionEventReceiver
+}>
 
-  subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void {
-    return this.#subscribeAgentStatus(listener)
-  }
-
-  startIfIdle(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#submitTurnInput(input, { type: "start_if_idle" })
-  }
-
-  startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#submitTurnInput(input, { type: "start_or_steer" })
-  }
-
-  compact(requestId: string): Promise<TurnInputSubmission> {
-    this.#requireOpen()
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "compact",
-        requestId,
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  steer(
-    input: SubmitTurnInput,
-    expectedTurnId: string,
-  ): Promise<TurnInputSubmission> {
-    return this.#submitTurnInput(input, { type: "steer", expectedTurnId })
-  }
-
-  async interrupt(reason?: string): Promise<void> {
-    this.#requireOpen()
-    await this.#send({
-      type: "interrupt",
-      ...(reason === undefined ? {} : { reason }),
-    })
-  }
-
-  async interruptTurn(
-    expectedTurnId: string,
-    reason?: string,
-  ): Promise<boolean> {
-    this.#requireOpen()
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "interrupt",
-        expectedTurnId,
-        ...(reason === undefined ? {} : { reason }),
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  async failAgent(message: string): Promise<AgentStatus> {
-    this.#requireOpen()
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "fail_agent",
-        message,
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  async deliverAgentMessage(messageId: string, text: string): Promise<void> {
-    this.#requireOpen()
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "agent_message",
-        messageId,
-        text,
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  async shutdownAndWait(): Promise<void> {
-    if (!this.#accepting) {
-      await this.termination
-      return
-    }
-    this.#accepting = false
-    this.#beforeShutdown()
-    await this.#send({ type: "shutdown" })
-    await this.termination
-  }
-
-  nextEvent(): Promise<SessionEvent | undefined> {
-    return this.#events.receive()
-  }
-
-  async #submitTurnInput(
-    input: SubmitTurnInput,
-    mode: TurnInputMode,
-  ): Promise<TurnInputSubmission> {
-    this.#requireOpen()
-    input = structuredClone(input)
-    if (
-      input.provenance !== undefined &&
-      (!isThreadMessageProvenance(input.provenance) ||
-        input.goalId !== undefined ||
-        input.manualCompact === true ||
-        input.content.attachments.length > 0 ||
-        (input.content.references?.length ?? 0) > 0)
-    )
-      throw new TypeError(
-        "Thread messages require a valid source and text-only external content.",
-      )
-    const turnInput: TurnInput = {
-      submissionId: input.submissionId ?? createRequestId(),
-      content: input.content,
-      ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
-      ...(input.provenance === undefined
-        ? {}
-        : { provenance: structuredClone(input.provenance) }),
-      ...(input.modelSelection === undefined
-        ? {}
-        : { modelSelection: input.modelSelection }),
-      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-      ...(input.parentInputId === undefined
-        ? {}
-        : { parentInputId: input.parentInputId }),
-    }
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "turn_input",
-        input: turnInput,
-        mode,
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  #requireOpen(): void {
-    if (!this.#accepting) throw new Error("Session is shutting down.")
+// A transfer revokes the old endpoint, including aliases to it. Filters and
+// delegates own the transferred receiver; the queue is never a broadcast.
+export function createSessionEventReceiver(
+  receive: () => Promise<SessionEvent | undefined>,
+): SessionEventReceiver {
+  let owned = true
+  let reading = false
+  return {
+    receive() {
+      if (!owned)
+        return Promise.reject(
+          new Error("Session event receiver was transferred."),
+        )
+      if (reading)
+        return Promise.reject(
+          new Error("Session event receiver already has a pending read."),
+        )
+      reading = true
+      return receive().finally(() => {
+        reading = false
+      })
+    },
+    transfer() {
+      if (!owned) throw new Error("Session event receiver was transferred.")
+      if (reading)
+        throw new Error(
+          "Cannot transfer a Session event receiver with a pending read.",
+        )
+      owned = false
+      return createSessionEventReceiver(receive)
+    },
   }
 }
 
@@ -417,11 +278,13 @@ export class BoundedQueue<T> {
   readonly #capacity: number
   readonly #items: T[] = []
   readonly #receivers: Array<(value: T | undefined) => void> = []
-  readonly #senders: Array<{
-    readonly value: T
-    readonly resolve: () => void
-    readonly reject: (error: Error) => void
-  }> = []
+  readonly #senders: Array<
+    Readonly<{
+      value: T
+      resolve: () => void
+      reject: (error: Error) => void
+    }>
+  > = []
   #closed = false
 
   constructor(capacity: number) {

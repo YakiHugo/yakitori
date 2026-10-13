@@ -1,11 +1,13 @@
+import {
+  bindExecution,
+  type TestTurnRuntime,
+} from "../support/session-execution.ts"
 import { describe, expect, it } from "vitest"
 import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
-  TurnProcessor,
-  TurnRuntime,
-  TurnTask,
-} from "../../src/core/session.ts"
+  SessionTaskRunner,
+} from "../../src/core/session-task.ts"
 import { SessionStatus, type TurnInput } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createUserInput, inputContentText } from "../../src/core/user-input.ts"
@@ -42,6 +44,7 @@ describe("live Session actor", () => {
         file: { rolloutId: thread.id, path: "image.png" },
       }
       const steer: TurnInput = {
+        source: "agent",
         submissionId: "steer_ordered",
         content: inputFixture([
           { type: "text", text: "before" },
@@ -116,7 +119,7 @@ describe("live Session actor", () => {
             },
           }))
           expect(
-            await runtime.replaceConversationHistory({
+            await runtime.checkpointHistory({
               replacement: [],
               summary: "must not commit",
               baseHistoryLength: prefix.length,
@@ -129,13 +132,13 @@ describe("live Session actor", () => {
           ])
           expect(
             await Promise.all([
-              runtime.replaceConversationHistory({
+              runtime.checkpointHistory({
                 replacement: [],
                 summary: "checkpoint",
                 baseHistoryLength: prefix.length,
                 expectedPrefix: prefix,
               }),
-              runtime.replaceConversationHistory({
+              runtime.checkpointHistory({
                 replacement: [],
                 summary: "competing checkpoint",
                 baseHistoryLength: prefix.length,
@@ -145,7 +148,7 @@ describe("live Session actor", () => {
           ).toEqual([true, false])
           expect(runtime.snapshot().context.history).toEqual([appended])
           expect(
-            await runtime.replaceConversationHistory({
+            await runtime.checkpointHistory({
               replacement: prefix,
               summary: "stale checkpoint",
               baseHistoryLength: prefix.length,
@@ -180,20 +183,25 @@ describe("live Session actor", () => {
     const beginUsage = deferred<void>()
     const flushStarted = deferred<void>()
     const releaseFlush = deferred<void>()
-    let savedRuntime: TurnRuntime | undefined
+    let savedRuntime: TestTurnRuntime | undefined
     let usageAcknowledged = false
     const manager = createManager(
       {
-        async run(runtime) {
+        async run(runtime, _input, control) {
           savedRuntime = runtime
           entered.resolve()
           await beginUsage.promise
-          await runtime.recordUsage({
+          await runtime.checkpointUsage({
             inputTokens: 1_000_000,
             outputTokens: 1_000,
           })
           usageAcknowledged = true
-          await new Promise(() => {})
+          if (!control.signal.aborted)
+            await new Promise<void>((resolve) =>
+              control.signal.addEventListener("abort", () => resolve(), {
+                once: true,
+              }),
+            )
         },
       },
       store,
@@ -237,11 +245,11 @@ describe("live Session actor", () => {
         },
       ])
       await expect(
-        savedRuntime?.recordUsage({
+        savedRuntime?.checkpointUsage({
           inputTokens: 2_000_000,
           outputTokens: 2_000,
         }),
-      ).rejects.toThrow("Turn is no longer active")
+      ).rejects.toThrow("Turn execution is no longer active")
     } finally {
       releaseFlush.resolve()
       await manager.shutdown()
@@ -250,7 +258,7 @@ describe("live Session actor", () => {
 
   it("drains an admitted tool result queued behind usage before interruption completes", async () => {
     const store = new MemoryThreadStore()
-    const entered = deferred<TurnRuntime>()
+    const entered = deferred<TestTurnRuntime>()
     const flushStarted = deferred<void>()
     const releaseFlush = deferred<void>()
     const hardAborted = deferred<void>()
@@ -258,7 +266,7 @@ describe("live Session actor", () => {
       {
         async run(runtime) {
           entered.resolve(runtime)
-          await new Promise(() => {})
+          await hardAborted.promise
         },
         abort() {
           hardAborted.resolve()
@@ -275,7 +283,7 @@ describe("live Session actor", () => {
       const runtime = await entered.promise
       store.flushStarted = () => flushStarted.resolve()
       store.flushBarrier = releaseFlush.promise
-      const usage = runtime.recordUsage({ inputTokens: 5, outputTokens: 2 })
+      const usage = runtime.checkpointUsage({ inputTokens: 5, outputTokens: 2 })
       await flushStarted.promise
       const response = {
         id: "result_drained",
@@ -344,7 +352,10 @@ describe("live Session actor", () => {
         withPreparation({
           async run(runtime) {
             store.failNextFlush = true
-            await runtime.recordUsage({ inputTokens: 100, outputTokens: 20 })
+            await runtime.checkpointUsage({
+              inputTokens: 100,
+              outputTokens: 20,
+            })
             proceeded = true
           },
         }),
@@ -764,6 +775,7 @@ describe("live Session actor", () => {
     )
     const thread = await manager.createThread()
     const input = {
+      source: "agent" as const,
       submissionId: "turn_idempotent",
       content: inputFixture([{ type: "text" as const, text: "once" }]),
     }
@@ -792,6 +804,7 @@ describe("live Session actor", () => {
     expect(await thread.interruptTurn("turn_idempotent", "cancelled")).toBe(
       true,
     )
+    mayFinish.resolve()
     await nextEventOfType(thread, "turn.interrupted")
     await manager.shutdown()
 
@@ -811,11 +824,8 @@ describe("live Session actor", () => {
     const manager = new ThreadManager({
       store,
       createTurnProcessor: () => ({
-        prepare() {
+        createTask() {
           throw new Error("configuration unavailable")
-        },
-        start() {
-          throw new Error("unreachable")
         },
       }),
     })
@@ -888,7 +898,7 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("force-settles an interrupted Turn whose processor ignores abort", async () => {
+  it("retains execution ownership until an uncooperative task actually stops", async () => {
     let lateWrite: Promise<void> | undefined
     let lateToolWrite: Promise<void> | undefined
     let abortCalls = 0
@@ -934,18 +944,22 @@ describe("live Session actor", () => {
     await running.promise
 
     await thread.interrupt("forced")
-    await nextEventOfType(thread, "turn.interrupted")
-
-    expect(thread.status).toBe(SessionStatus.Idle)
-    expect(abortCalls).toBe(1)
+    await expect.poll(() => abortCalls).toBe(1)
+    expect(thread.status).toBe(SessionStatus.Active)
+    expect(
+      await thread.startIfIdle({ content: createUserInput("next") }),
+    ).toEqual({ type: "not_submitted", reason: "not_idle" })
+    // Cancellation cannot detach the running task or prove its effects stopped.
     never.resolve()
-    await Promise.resolve()
+    await nextEventOfType(thread, "turn.interrupted")
+    expect(thread.status).toBe(SessionStatus.Idle)
     await expect(lateWrite).rejects.toThrow("no longer active")
-    await expect(lateToolWrite).rejects.toThrow("no longer active")
+    // Tool results may drain during stopping, before the single terminal event.
+    await expect(lateToolWrite).resolves.toBeUndefined()
     await manager.shutdown()
   })
 
-  it("releases the active Turn even when hard abort throws", async () => {
+  it("keeps a cleanup failure observable without releasing execution ownership", async () => {
     const never = deferred<void>()
     const running = deferred<void>()
     const manager = createManager({
@@ -969,13 +983,17 @@ describe("live Session actor", () => {
       operation: "interrupt",
       message: "kill failed",
     })
-    expect(await nextEventOfType(thread, "turn.interrupted")).toMatchObject({
-      reason: "forced",
-    })
-    expect(thread.status).toBe(SessionStatus.Idle)
-
     never.resolve()
-    await manager.shutdown()
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
+        errored: "Task resource cleanup failed; the Session remains occupied.",
+      })
+    expect(thread.status).toBe(SessionStatus.Active)
+    expect(
+      await thread.startIfIdle({ content: createUserInput("next") }),
+    ).toEqual({ type: "not_submitted", reason: "not_idle" })
+    await expect(manager.shutdown()).rejects.toThrow("kill failed")
   })
 
   it("acknowledges at routing, then records the input and TurnStart fence before sampling", async () => {
@@ -1212,9 +1230,9 @@ describe("live Session actor", () => {
         })
         return {
           ...processor,
-          prepare(snapshot, input) {
+          createTask(snapshot, input) {
             preparations += 1
-            return processor.prepare(snapshot, input)
+            return processor.createTask(snapshot, input)
           },
         }
       },
@@ -1238,12 +1256,10 @@ describe("live Session actor", () => {
     expect(starts).toBe(1)
     expect(thread.status).toBe(SessionStatus.Idle)
 
-    // The dedupe entry survives: the same submission replays instead of
-    // duplicating, while a different input starts a fresh Turn.
+    // Human sends never replay a previous request; an explicit resend uses a new ID.
     expect(await thread.startIfIdle(input)).toEqual({
-      type: "replayed",
-      turnId: input.submissionId,
-      inputItemId: expect.any(String),
+      type: "not_submitted",
+      reason: "request_conflict",
     })
     expect(
       await thread.startIfIdle({
@@ -1280,9 +1296,9 @@ describe("live Session actor", () => {
         })
         return {
           ...processor,
-          prepare(snapshot, input) {
+          createTask(snapshot, input) {
             preparations += 1
-            return processor.prepare(snapshot, input)
+            return processor.createTask(snapshot, input)
           },
         }
       },
@@ -1698,7 +1714,7 @@ describe("live Session actor", () => {
             assistant("progress", "Earlier progress."),
             assistant("answer_first", "Con"),
           ])
-          await runtime.replaceConversationHistory({
+          await runtime.checkpointHistory({
             replacement: [],
             summary: "Compacted context.",
             baseHistoryLength: runtime.snapshot().context.history.length,
@@ -1808,7 +1824,7 @@ describe("live Session actor", () => {
           const snapshot = runtime.snapshot()
           snapshotTaken.resolve()
           await releaseCompaction.promise
-          await runtime.replaceConversationHistory({
+          await runtime.checkpointHistory({
             replacement: [],
             summary: "checkpoint",
             baseHistoryLength: snapshot.context.history.length,
@@ -1882,21 +1898,21 @@ function subagentInput(rootThreadId: string, taskName: string) {
 
 type TestProcessor = {
   run(
-    runtime: TurnRuntime,
+    runtime: TestTurnRuntime,
     input: TurnInput,
     control: TurnControl,
     // biome-ignore lint/suspicious/noConfusingVoidType: Test processors may complete synchronously without metadata.
-  ): TurnTask["completion"] | void
+  ): Promise<import("../../src/core/session.ts").TurnCompletion | void> | void
   abort?(): void
   dispose?(): void | Promise<void>
 }
 
-function withPreparation(processor: TestProcessor): TurnProcessor {
+function withPreparation(processor: TestProcessor): SessionTaskRunner {
   return {
     dispose: () => processor.dispose?.(),
-    prepare(_snapshot, input) {
+    createTask(_snapshot, input) {
       const selection = { provider: "faux", model: "scripted" }
-      return {
+      const context = {
         turnId: input.submissionId,
         selection,
         configuration: SessionConfiguration.create({
@@ -1907,19 +1923,26 @@ function withPreparation(processor: TestProcessor): TurnProcessor {
           promptCacheKey: input.submissionId,
         }).snapshot,
       }
-    },
-    start(runtime, input, _context, control) {
-      let completion: TurnTask["completion"]
-      try {
-        completion = runtime
-          .recordInitialInput()
-          .then(() => processor.run(runtime, input, control))
-      } catch (error) {
-        completion = Promise.reject(error)
-      }
       return {
-        completion,
-        abort: () => processor.abort?.(),
+        kind: input.manualCompact === true ? "compact" : "regular",
+        async run(session, execution) {
+          await session.beginExecution(execution, context)
+          await session.recordInitialInput(execution)
+          const completion = await processor.run(
+            bindExecution(session, execution),
+            input,
+            {
+              signal: execution.signal,
+              takeSteering: () => session.takeSteering(execution),
+              takeSteeringOrComplete: () =>
+                session.takeSteeringOrComplete(execution),
+            },
+          )
+          return completion ?? undefined
+        },
+        async abort() {
+          processor.abort?.()
+        },
       }
     },
   }

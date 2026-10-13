@@ -10,7 +10,8 @@ export type AdmissionDraft = Readonly<{
   supersedesRequestId?: string
 }>
 
-export type PendingAdmission = AdmissionDraft & Readonly<{ requestId: string }>
+export type PendingAdmission = AdmissionDraft &
+  Readonly<{ requestId: string; restored: boolean }>
 
 export type StoredSteer = Readonly<{
   requestId: string
@@ -22,6 +23,7 @@ export type StoredSteer = Readonly<{
 export type InputRecoveryMemory = {
   reserveAdmission(draft: AdmissionDraft): PendingAdmission
   acknowledgeAdmission(admission: PendingAdmission): void
+  markAdmissionRestored(admission: PendingAdmission): void
   readAdmissionByRequestId(
     apiBase: string,
     sessionId: string,
@@ -92,18 +94,21 @@ export function createInputRecoveryMemory(
         ...draft,
         apiBase: normalizeApiBase(draft.apiBase),
       })
-      const key = admissionIdentity(snapshot)
-      let admission = admissions.get(key)
-      if (admission === undefined) {
-        admission = { ...snapshot, requestId: generateRequestId() }
-        admissions.set(key, admission)
+      const admission = {
+        ...snapshot,
+        requestId: generateRequestId(),
+        restored: false,
       }
+      admissions.set(admission.requestId, admission)
       return structuredClone(admission)
     },
     acknowledgeAdmission(admission: PendingAdmission): void {
-      const key = admissionIdentity(admission)
-      if (admissions.get(key)?.requestId === admission.requestId)
-        admissions.delete(key)
+      admissions.delete(admission.requestId)
+    },
+    markAdmissionRestored(admission: PendingAdmission): void {
+      const current = admissions.get(admission.requestId)
+      if (current)
+        admissions.set(current.requestId, { ...current, restored: true })
     },
     readAdmissionByRequestId(
       apiBase: string,
@@ -138,27 +143,5 @@ function normalizeApiBase(value: string): string {
   return url.toString()
 }
 
-// Identity includes the full submission, including the model and any replaced
-// first-input request. Empty optional attachment lists mean the same command.
-function admissionIdentity(draft: AdmissionDraft): string {
-  return JSON.stringify(
-    [
-      draft.apiBase,
-      draft.sessionId,
-      {
-        ...draft.content,
-        references: draft.content.references ?? [],
-      },
-      draft.modelSelection ?? null,
-      draft.supersedesRequestId ?? null,
-    ],
-    (_key, value: unknown) =>
-      typeof value === "object" && value !== null && !Array.isArray(value)
-        ? Object.fromEntries(
-            Object.entries(value).sort(([left], [right]) =>
-              left.localeCompare(right),
-            ),
-          )
-        : value,
-  )
-}
+export const UNCONFIRMED_INPUT_NOTICE =
+  "Sending status is unconfirmed. This input has not been resent."

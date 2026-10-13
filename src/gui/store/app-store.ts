@@ -13,8 +13,6 @@ import type {
   ApiSubscriptionSummary,
   ApiUserModelPreference,
 } from "../../protocol/application.ts"
-import type { UserAttachment } from "../../protocol/asset-types.ts"
-import { assetSourceKey } from "../../protocol/asset-types.ts"
 import { COMPACT_DIRECTIVE } from "../../protocol/directives.ts"
 import {
   isInputAdmittedEvent,
@@ -31,11 +29,7 @@ import type { LiveSessionEvent } from "../../protocol/live-events.ts"
 import { createRequestId } from "../../protocol/request-id.ts"
 import type { SessionSidebar, SidebarChange } from "../../protocol/sidebar.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
-import {
-  inputContent,
-  inputContentAttachments,
-  inputContentText,
-} from "../../protocol/user-input.ts"
+import { inputContent, inputContentText } from "../../protocol/user-input.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -47,12 +41,14 @@ import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import {
   hasInputDraft,
   joinInputDrafts,
+  removeInputDraftPrefix,
   sameInputDraft,
   textInputDraft,
   trimInputDraft,
 } from "../input-draft.ts"
 import {
   inputRecoveryMemory,
+  UNCONFIRMED_INPUT_NOTICE,
   type PendingAdmission,
   type StoredSteer,
 } from "../input-recovery-memory.ts"
@@ -385,6 +381,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const projectPinRevisions: Record<string, number> = {}
   const confirmedProjectPins: Record<string, boolean> = {}
   const pendingProjectPins: Record<string, number> = {}
+  const recoveredDrafts = new Map<
+    string,
+    SessionDraft & { confirmed?: readonly InputContent[] }
+  >()
   const inFlightAdmissions = new Set<string>()
   const rejectedAdmissions = new Set<string>()
   const inFlightSteerRequests = new Set<string>()
@@ -605,37 +605,108 @@ export const useAppStore = create<AppStore>()((set, get) => {
   ) => {
     if (!original.attachments.length) return
     inputAttachmentOwnership.promote(get().apiBase, original, accepted)
-    set((state) => ({
-      promptDraft:
-        state.promptDraft === undefined
-          ? undefined
-          : inputAttachmentOwnership.resolveDraft(
-              state.apiBase,
-              state.promptDraft,
+    set((state) => {
+      const resolveDraft = (
+        sessionId: string | undefined,
+        draft: SessionDraft,
+      ): SessionDraft => {
+        const next = {
+          ...draft,
+          content:
+            draft.content === undefined
+              ? undefined
+              : inputAttachmentOwnership.resolveDraft(
+                  state.apiBase,
+                  draft.content,
+                ),
+        }
+        if (sessionId !== undefined) {
+          const key = `${state.apiBase}\0${sessionId}`
+          const recovered = recoveredDrafts.get(key)
+          if (
+            recovered?.content === draft.content &&
+            recovered?.excerpts === draft.excerpts
+          )
+            recoveredDrafts.set(key, { ...recovered, ...next })
+        }
+        return next
+      }
+      return {
+        promptDraft: resolveDraft(state.selection.sessionId, {
+          content: state.promptDraft,
+          excerpts: state.promptExcerpts,
+        }).content,
+        newSessionPrompt:
+          state.newSessionPrompt === undefined
+            ? undefined
+            : inputAttachmentOwnership.resolveDraft(
+                state.apiBase,
+                state.newSessionPrompt,
+              ),
+        sessionDrafts: Object.fromEntries(
+          Object.entries(state.sessionDrafts).map(([id, draft]) => [
+            id,
+            resolveDraft(id, draft),
+          ]),
+        ),
+      }
+    })
+  }
+
+  const reconcileRecoveredInput = (
+    sessionId: string,
+    content: InputContent,
+  ): void => {
+    set((state) => {
+      const selected = state.selection.sessionId === sessionId
+      const draft = selected
+        ? { content: state.promptDraft, excerpts: state.promptExcerpts }
+        : state.sessionDrafts[sessionId]
+      if (draft?.content === undefined) return state
+      const key = `${state.apiBase}\0${sessionId}`
+      const recovered = recoveredDrafts.get(key)
+      // Even identical text can be a later human draft. Only retire the draft
+      // instance restored by recovery, including its references.
+      if (
+        recovered?.content !== draft.content ||
+        recovered.excerpts !== draft.excerpts
+      )
+        return state
+      let remaining = draft.content
+      let excerpts = draft.excerpts
+      let confirmed = [...(recovered.confirmed ?? []), content]
+      for (;;) {
+        const match = confirmed.find(
+          (candidate) =>
+            removeInputDraftPrefix(
+              remaining,
+              inputAttachmentOwnership.resolveDraft(state.apiBase, candidate),
+            ) !== remaining,
+        )
+        if (match === undefined) break
+        remaining = removeInputDraftPrefix(
+          remaining,
+          inputAttachmentOwnership.resolveDraft(state.apiBase, match),
+        )
+        excerpts = excerpts.filter(
+          (excerpt) =>
+            !(match.references ?? []).some(
+              (original) => original.id === excerpt.id,
             ),
-      newSessionPrompt:
-        state.newSessionPrompt === undefined
-          ? undefined
-          : inputAttachmentOwnership.resolveDraft(
-              state.apiBase,
-              state.newSessionPrompt,
-            ),
-      sessionDrafts: Object.fromEntries(
-        Object.entries(state.sessionDrafts).map(([id, draft]) => [
-          id,
-          {
-            ...draft,
-            content:
-              draft.content === undefined
-                ? undefined
-                : inputAttachmentOwnership.resolveDraft(
-                    state.apiBase,
-                    draft.content,
-                  ),
-          },
-        ]),
-      ),
-    }))
+        )
+        confirmed = confirmed.filter((candidate) => candidate !== match)
+      }
+      const next = {
+        content: hasInputDraft(remaining) ? remaining : undefined,
+        excerpts,
+        confirmed,
+      }
+      recoveredDrafts.set(key, next)
+      if (remaining === draft.content) return state
+      return selected
+        ? { promptDraft: next.content, promptExcerpts: next.excerpts }
+        : { sessionDrafts: { ...state.sessionDrafts, [sessionId]: next } }
+    })
   }
 
   const restoreUncommittedSteers = (
@@ -703,8 +774,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...draft.excerpts,
         ],
       }
+      const key = `${state.apiBase}\0${sessionId}`
+      const previous = recoveredDrafts.get(key)
+      recoveredDrafts.set(key, {
+        ...restored,
+        confirmed:
+          previous?.content === draft.content &&
+          previous?.excerpts === draft.excerpts
+            ? (previous.confirmed ?? [])
+            : [],
+      })
       return selected
         ? {
+            message: UNCONFIRMED_INPUT_NOTICE,
             pendingSteers,
             restoredSteerRequestIds,
             promptDraft: restored.content,
@@ -729,8 +811,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       requestId,
     )
     if (admission === undefined) return
+    if (get().selection.sessionId === sessionId)
+      set({ message: UNCONFIRMED_INPUT_NOTICE })
+    if (admission.restored) return
     if (inFlightAdmissions.has(requestId)) rejectedAdmissions.add(requestId)
-    inputRecoveryMemory.acknowledgeAdmission(admission)
+    inputRecoveryMemory.markAdmissionRestored(admission)
     set((state) => {
       const selected = state.selection.sessionId === sessionId
       const draft: SessionDraft = selected
@@ -761,6 +846,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...draft.excerpts,
         ],
       }
+      const key = `${state.apiBase}\0${sessionId}`
+      const previous = recoveredDrafts.get(key)
+      recoveredDrafts.set(key, {
+        ...restored,
+        confirmed:
+          previous?.content === draft.content &&
+          previous?.excerpts === draft.excerpts
+            ? (previous.confirmed ?? [])
+            : [],
+      })
       return selected
         ? {
             promptDraft: restored.content,
@@ -772,25 +867,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
     })
   }
 
-  const retireRestoredSteers = (sessionId: string): void => {
-    const ids = inputRecoveryMemory
-      .readSteers(get().apiBase, sessionId)
-      .flatMap((steer) =>
-        steer.restored && get().restoredSteerRequestIds[steer.requestId]
-          ? [steer.requestId]
-          : [],
-      )
-    if (ids.length === 0) return
-    inputRecoveryMemory.updateSteers(get().apiBase, sessionId, (steers) =>
-      steers.filter((steer) => !ids.includes(steer.requestId)),
-    )
-    set((state) => ({
-      restoredSteerRequestIds: Object.fromEntries(
-        Object.entries(state.restoredSteerRequestIds).filter(
-          ([requestId]) => !ids.includes(requestId),
-        ),
-      ),
-    }))
+  const syncInputRecoveryNotice = (sessionId: string): void => {
+    if (get().selection.sessionId !== sessionId) return
+    const unresolved =
+      inputRecoveryMemory
+        .listAdmissionsForSession(get().apiBase, sessionId)
+        .some((input) => input.restored) ||
+      inputRecoveryMemory
+        .readSteers(get().apiBase, sessionId)
+        .some((input) => input.restored)
+    if (unresolved) set({ message: UNCONFIRMED_INPUT_NOTICE })
+    else {
+      recoveredDrafts.delete(`${get().apiBase}\0${sessionId}`)
+      if (get().message === UNCONFIRMED_INPUT_NOTICE)
+        set({ message: undefined })
+    }
   }
 
   const closeStream = (): void => {
@@ -931,6 +1022,35 @@ export const useAppStore = create<AppStore>()((set, get) => {
             } else {
               restoreUncommittedSteers(selection.sessionId)
             }
+            const confirmedSteers = inputRecoveryMemory
+              .readSteers(get().apiBase, selection.sessionId)
+              .filter(
+                (steer) => get().execution.admittedRequestIds[steer.requestId],
+              )
+            for (const steer of confirmedSteers) {
+              if (steer.restored)
+                reconcileRecoveredInput(selection.sessionId, steer.content)
+            }
+            inputRecoveryMemory.updateSteers(
+              get().apiBase,
+              selection.sessionId,
+              (steers) =>
+                steers.filter(
+                  (steer) =>
+                    !get().execution.admittedRequestIds[steer.requestId],
+                ),
+            )
+            set((state) => ({
+              pendingSteers: {
+                ...state.pendingSteers,
+                [selection.sessionId]: (
+                  state.pendingSteers[selection.sessionId] ?? []
+                ).filter(
+                  (steer) =>
+                    !state.execution.admittedRequestIds[steer.requestId],
+                ),
+              },
+            }))
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -975,6 +1095,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   execution.admittedRequestIds[admission.requestId] ||
                   queuedRequestIds.has(admission.requestId)
                 ) {
+                  if (admission.restored)
+                    reconcileRecoveredInput(
+                      selection.sessionId,
+                      admission.content,
+                    )
                   inputRecoveryMemory.acknowledgeAdmission(admission)
                 } else if (
                   recoverableRequests.has(admission.requestId) &&
@@ -989,6 +1114,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   )
                 }
               }
+              syncInputRecoveryNotice(selection.sessionId)
             })()
           },
           onEvent: (event) => {
@@ -1015,6 +1141,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
               const original = admission?.content ?? steer?.content
               if (original !== undefined)
                 recordPromotedContent(original, event.data.content)
+              if (admission?.restored)
+                reconcileRecoveredInput(selection.sessionId, admission.content)
+              if (steer?.restored)
+                reconcileRecoveredInput(selection.sessionId, steer.content)
               if (admission !== undefined)
                 inputRecoveryMemory.acknowledgeAdmission(admission)
               inputRecoveryMemory.updateSteers(
@@ -1025,6 +1155,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                     (steer) => steer.requestId !== event.data.requestId,
                   ),
               )
+              syncInputRecoveryNotice(selection.sessionId)
               set((state) => ({
                 pendingSteers: {
                   ...state.pendingSteers,
@@ -2164,7 +2295,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         { ...(excerpts.length ? { references: excerpts } : {}) }.references,
       )
       const text = inputContentText(content)
-      const attachments = inputContentAttachments(content)
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       let queuedModelSelection: ModelSelection | undefined
       let queuedForCreation = false
@@ -2197,16 +2327,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
         // first sends still use the explicit create action when needed.
         let sessionId: string | undefined
         try {
-          firstInputAdmission =
-            state.recoveredAdmission ??
-            inputRecoveryMemory.reserveAdmission({
-              apiBase: state.apiBase,
-              sessionId: firstInputDraftSessionId,
-              content,
-              ...(queuedModelSelection === undefined
-                ? {}
-                : { modelSelection: queuedModelSelection }),
-            })
+          firstInputAdmission = inputRecoveryMemory.reserveAdmission({
+            apiBase: state.apiBase,
+            sessionId: firstInputDraftSessionId,
+            ...(state.recoveredAdmission === undefined
+              ? {}
+              : { supersedesRequestId: state.recoveredAdmission.requestId }),
+            content,
+            ...(queuedModelSelection === undefined
+              ? {}
+              : { modelSelection: queuedModelSelection }),
+          })
+          if (state.recoveredAdmission?.sessionId === firstInputDraftSessionId)
+            inputRecoveryMemory.acknowledgeAdmission(state.recoveredAdmission)
           if (state.promptDraft === undefined) set({ promptDraft: parts })
           const creation = pendingCreation ?? get().createSession()
           sessionId = await creation
@@ -2263,6 +2396,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 },
               )
               reserved = true
+              set((state) => ({
+                pendingSteers: {
+                  ...state.pendingSteers,
+                  [selection.sessionId]: inputRecoveryMemory
+                    .readSteers(state.apiBase, selection.sessionId)
+                    .filter((steer) => !steer.restored),
+                },
+              }))
               const response = await getAppRpcClient(get().apiBase).request(
                 "session/input/steer",
                 {
@@ -2282,22 +2423,31 @@ export const useAppStore = create<AppStore>()((set, get) => {
             } catch (error) {
               inFlightSteerRequests.delete(requestId)
               committedSteerRequests.delete(requestId)
-              if (reserved)
+              if (
+                error instanceof ApiRequestError &&
+                error.code === "conflict"
+              ) {
                 inputRecoveryMemory.updateSteers(
                   get().apiBase,
                   selection.sessionId,
                   (steers) =>
                     steers.filter((steer) => steer.requestId !== requestId),
                 )
-              if (
-                error instanceof ApiRequestError &&
-                error.code === "conflict"
-              ) {
+                set((state) => ({
+                  pendingSteers: {
+                    ...state.pendingSteers,
+                    [selection.sessionId]: (
+                      state.pendingSteers[selection.sessionId] ?? []
+                    ).filter((steer) => steer.requestId !== requestId),
+                  },
+                }))
                 rejected = true
                 queueAdmission = true
                 return
               }
-              throw error
+              if (reserved)
+                restoreUncommittedSteers(selection.sessionId, activeTurnId)
+              throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
             }
             // Acceptance is ephemeral until input.admitted commits. Keep ownership
             // across navigation and reconnect so an interrupted Turn can restore it.
@@ -2357,46 +2507,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 },
               }))
             }
-            if (alreadyRestored && acceptedContent !== undefined) {
-              const acceptedAttachments =
-                inputContentAttachments(acceptedContent)
-              const replaceParts = (current: InputDraft): InputDraft => ({
-                ...current,
-                attachments: current.attachments.map((attachment) => {
-                  const index = attachments.findIndex((original) =>
-                    sameAttachments([original], [attachment]),
-                  )
-                  return acceptedAttachments[index] ?? attachment
-                }),
-              })
-              set((state) =>
-                state.selection.sessionId === selection.sessionId
-                  ? {
-                      promptDraft: replaceParts(
-                        state.promptDraft ?? textInputDraft(""),
-                      ),
-                    }
-                  : {
-                      sessionDrafts: {
-                        ...state.sessionDrafts,
-                        [selection.sessionId]: {
-                          ...(state.sessionDrafts[selection.sessionId] ?? {
-                            content: undefined,
-                            excerpts: [],
-                          }),
-                          content: replaceParts(
-                            state.sessionDrafts[selection.sessionId]?.content ??
-                              textInputDraft(""),
-                          ),
-                        },
-                      },
-                    },
-              )
-            }
+            if (alreadyRestored) return
 
-            if (!alreadyRestored) retireRestoredSteers(selection.sessionId)
             if (!isCurrentSelection(selection)) {
-              if (alreadyRestored) return
               set((state) => {
                 if (state.selection.sessionId === selection.sessionId) {
                   const clear = sameResolvedDraft(
@@ -2442,7 +2555,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ),
             }))
             if (
-              !alreadyRestored &&
               sameResolvedDraft(
                 trimInputDraft(get().promptDraft ?? textInputDraft("")),
                 parts,
@@ -2531,7 +2643,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
               : { modelSelection: admittedModelSelection }),
             ...(firstInputAdmission === undefined
               ? {}
-              : { supersedesRequestId: firstInputAdmission.requestId }),
+              : {
+                  supersedesRequestId:
+                    firstInputAdmission.supersedesRequestId ??
+                    firstInputAdmission.requestId,
+                }),
           })
           inFlightAdmissions.add(pendingAdmission.requestId)
           let response: ApiAdmitInputResponse
@@ -2541,7 +2657,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               set({ recoveredAdmission: undefined })
             }
             if (!isCurrentSelection(selection)) return
-            // Equivalent retries retain the original payload's nested key order.
+            // Every explicit send is a new input; old IDs remain for history checks.
             response = await getAppRpcClient(get().apiBase).request(
               queueAdmission ? "session/input/queue" : "session/input",
               {
@@ -2553,6 +2669,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   : { modelSelection: pendingAdmission.modelSelection }),
               },
             )
+          } catch (error) {
+            if (
+              !(error instanceof ApiRequestError) ||
+              error.code === undefined
+            ) {
+              restoreUncommittedAdmission(
+                selection.sessionId,
+                pendingAdmission.requestId,
+              )
+              throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
+            }
+            throw error
           } finally {
             inFlightAdmissions.delete(pendingAdmission.requestId)
           }
@@ -2561,7 +2689,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
           recordPromotedContent(pendingAdmission.content, response.content)
           if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
-          retireRestoredSteers(selection.sessionId)
           // Queue storage has committed before its response. Direct starts
           // still wait for input.admitted from the rollout stream.
           if (
@@ -2678,8 +2805,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           )
           if (admission === undefined) continue
           recordPromotedContent(admission.content, item.input.content)
+          if (admission.restored)
+            reconcileRecoveredInput(selection.sessionId, admission.content)
           inputRecoveryMemory.acknowledgeAdmission(admission)
         }
+        syncInputRecoveryNotice(selection.sessionId)
       } catch (error) {
         if (isCurrentSelection(selection) && revision === queueReadRevision)
           set({ message: errorMessage(error, "Could not load queued inputs.") })
@@ -3457,30 +3587,6 @@ function takeSessionDraft(
     promptDraft: draft?.content,
     promptExcerpts: draft?.excerpts ?? [],
   }
-}
-
-function sameAttachments(
-  left: readonly UserAttachment[],
-  right: readonly UserAttachment[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((attachment, index) => {
-      const other = right[index]
-      return (
-        other !== undefined &&
-        attachment.name === other.name &&
-        attachment.mediaType === right[index]?.mediaType &&
-        attachment.sizeBytes === right[index]?.sizeBytes &&
-        ("detail" in attachment ? attachment.detail : undefined) ===
-          ("detail" in (right[index] ?? {})
-            ? (right[index] as { detail?: string }).detail
-            : undefined) &&
-        right[index] !== undefined &&
-        assetSourceKey(attachment.file) === assetSourceKey(other.file)
-      )
-    })
-  )
 }
 
 function sameModelSelection(

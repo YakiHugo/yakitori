@@ -1,9 +1,10 @@
+import { bindExecution, testTurnContext } from "../support/session-execution.ts"
 import { describe, expect, it } from "vitest"
 import type {
   AgentGraphStore,
   ThreadSpawnEdge,
 } from "../../src/core/agent-graph-store.ts"
-import type { TurnProcessor } from "../../src/core/session.ts"
+import type { SessionTaskRunner } from "../../src/core/session-task.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import type { AgentControl } from "../../src/runtime/agent-control.ts"
@@ -39,10 +40,19 @@ describe("agent runtime", () => {
         controls.set(stored.metadata.id, runtime.registerThread(stored))
         return {
           ...immediateProcessor(),
-          start() {
+          createTask(snapshot, input) {
             return {
-              completion: childCompletion.promise,
-              abort() {
+              kind: "regular",
+              async run(session, execution) {
+                await session.beginExecution(
+                  execution,
+                  testTurnContext(snapshot, input),
+                )
+                await session.recordInitialInput(execution)
+                await childCompletion.promise
+                return undefined
+              },
+              async abort() {
                 childCompletion.resolve()
               },
             }
@@ -501,26 +511,46 @@ describe("agent runtime", () => {
         controls.set(stored.metadata.id, runtime.registerThread(stored))
         return {
           ...immediateProcessor(),
-          start(turnRuntime, input) {
+          createTask(snapshot, input) {
+            const context = testTurnContext(snapshot, input)
+            let stop: (() => void) | undefined
             return {
-              completion: (async () => {
-                await turnRuntime.recordInitialInput()
-                const answer = (id: string, text: string) => ({
-                  id,
-                  turnId: input.submissionId,
-                  createdAt: "2026-10-02T00:00:00.000Z",
-                  item: {
-                    role: "assistant" as const,
-                    content: [{ type: "text" as const, text }],
-                  },
-                })
-                await turnRuntime.recordConversationItems([
-                  answer("answer_one", "Con"),
-                  answer("answer_two", "tinuation."),
-                ])
-                return { reason, answerItemIds: ["answer_one", "answer_two"] }
-              })(),
-              abort() {},
+              kind: input.manualCompact === true ? "compact" : "regular",
+              async run(session, execution) {
+                await session.beginExecution(execution, context)
+                const turnRuntime = bindExecution(session, execution)
+
+                const task = (() => {
+                  return {
+                    completion: (async () => {
+                      await turnRuntime.recordInitialInput()
+                      const answer = (id: string, text: string) => ({
+                        id,
+                        turnId: input.submissionId,
+                        createdAt: "2026-10-02T00:00:00.000Z",
+                        item: {
+                          role: "assistant" as const,
+                          content: [{ type: "text" as const, text }],
+                        },
+                      })
+                      await turnRuntime.recordConversationItems([
+                        answer("answer_one", "Con"),
+                        answer("answer_two", "tinuation."),
+                      ])
+                      return {
+                        reason,
+                        answerItemIds: ["answer_one", "answer_two"],
+                      }
+                    })(),
+                    abort() {},
+                  }
+                })()
+                stop = task.abort
+                return (await task.completion) ?? undefined
+              },
+              async abort() {
+                stop?.()
+              },
             }
           },
         }
@@ -983,23 +1013,38 @@ async function notificationCount(
   )
 }
 
-function immediateProcessor(): TurnProcessor {
+function immediateProcessor(): SessionTaskRunner {
   return {
-    prepare(_snapshot, input) {
-      return {
-        turnId: input.submissionId,
-        selection: TARGET,
-        configuration: SessionConfiguration.create({
+    createTask(snapshot, input) {
+      const context = ((_snapshot, input) => {
+        return {
+          turnId: input.submissionId,
           selection: TARGET,
-          workspaceRoot: "/workspace",
-          enabledTools: [],
-          approvalPolicy: "always_approve",
-          promptCacheKey: input.submissionId,
-        }).snapshot,
+          configuration: SessionConfiguration.create({
+            selection: TARGET,
+            workspaceRoot: "/workspace",
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: input.submissionId,
+          }).snapshot,
+        }
+      })(snapshot, input)
+      let stop: (() => void) | undefined
+      return {
+        kind: input.manualCompact === true ? "compact" : "regular",
+        async run(session, execution) {
+          await session.beginExecution(execution, context)
+
+          const task = (() => {
+            return { completion: Promise.resolve(), abort() {} }
+          })()
+          stop = task.abort
+          return (await task.completion) ?? undefined
+        },
+        async abort() {
+          stop?.()
+        },
       }
-    },
-    start() {
-      return { completion: Promise.resolve(), abort() {} }
     },
   }
 }

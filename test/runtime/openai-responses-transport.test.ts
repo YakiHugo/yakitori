@@ -1,6 +1,7 @@
 import { once } from "node:events"
 import { createServer } from "node:http"
 import OpenAI from "openai"
+import { ResponsesWS } from "openai/resources/responses/ws"
 import type { Response } from "openai/resources/responses/responses"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { WebSocketServer, type WebSocket } from "ws"
@@ -329,4 +330,37 @@ describe("OpenAI non-generating warmup", () => {
     await collect(f.transport.warmup(request()))
     expect(f.requests).toHaveLength(1)
   })
+})
+
+it("joins the owned warmup socket's actual close before resolving Turn transport cleanup", async () => {
+  let peer: WebSocket | undefined
+  let local: WebSocket | undefined
+  const close = ResponsesWS.prototype.close
+  vi.spyOn(ResponsesWS.prototype, "close").mockImplementation(function (
+    this: ResponsesWS,
+    props,
+  ) {
+    local = this.socket.platformSocket
+    close.call(this, props)
+  })
+  const f = await fixture((socket, body) => {
+    peer = socket
+    socket.send(
+      JSON.stringify({
+        type: "response.completed",
+        response: response(body.generate === false ? "warm" : "generated"),
+      }),
+    )
+  })
+  await collect(f.transport.warmup(request()))
+  if (peer === undefined) throw new Error("Missing warmup socket")
+  peer.pause()
+  try {
+    await f.transport.close()
+    // With the peer paused, merely requesting the graceful handshake leaves
+    // the actual client socket in CLOSING. Task cleanup must join CLOSED.
+    expect(local?.readyState).toBe(3)
+  } finally {
+    peer.resume()
+  }
 })

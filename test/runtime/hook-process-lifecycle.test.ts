@@ -188,9 +188,12 @@ describe.skipIf(process.platform === "win32")(
           `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
           2_147_483_648,
         )
-        vi.useFakeTimers({
-          toFake: ["setTimeout", "clearTimeout", "performance"],
-        })
+        // Only the multi-week deadline needs a virtual clock. Abort uses real
+        // time so the OS can reap the child before process-group escalation.
+        if (termination === "deadline")
+          vi.useFakeTimers({
+            toFake: ["setTimeout", "clearTimeout", "performance"],
+          })
         try {
           let settled = false
           const run = runner
@@ -205,18 +208,16 @@ describe.skipIf(process.platform === "win32")(
               settled = true
             })
           await waitForFile(ready)
-          await vi.advanceTimersByTimeAsync(
-            termination === "abort" ? 100 : 2_147_483_647,
-          )
+          if (termination === "deadline")
+            await vi.advanceTimersByTimeAsync(2_147_483_647)
           expect(settled).toBe(false)
           if (termination === "abort") {
             controller.abort()
-            await vi.advanceTimersByTimeAsync(1000)
           } else await vi.advanceTimersByTimeAsync(1)
           const error = await run
           if (termination === "abort") expect(error.name).toBe("AbortError")
           else expect(error.message).toContain("timed out after 2147483648ms")
-          expect(vi.getTimerCount()).toBe(0)
+          if (termination === "deadline") expect(vi.getTimerCount()).toBe(0)
         } finally {
           vi.useRealTimers()
           controller.abort()

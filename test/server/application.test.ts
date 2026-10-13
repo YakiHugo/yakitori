@@ -397,7 +397,11 @@ describe("application composition", () => {
           frames.filter((frame) => frame.method === "session/completed"),
         ).toEqual([])
 
-        expectOk(await application.handlers.admitInput(input))
+        expectError(
+          await application.handlers.admitInput(input),
+          409,
+          ApiErrorCode.Conflict,
+        )
         await waitForThreadIdle(application, sessionId)
         expect(
           frames.filter((frame) => frame.method === "session/completed"),
@@ -3050,7 +3054,7 @@ describe("application composition", () => {
     })
   })
 
-  it("replays idempotent admission with its durable host attributes", async () => {
+  it("rejects a repeated human request while retaining its durable host attributes", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "once" }] },
@@ -3076,9 +3080,7 @@ describe("application composition", () => {
         expectOk(admitted)
         await waitForThreadIdle(application, created.value.session.id)
         const replayed = await application.handlers.admitInput(input)
-        expectOk(replayed)
-        expect(replayed.ok).toBe(true)
-        expect(replayed.value).toEqual(admitted.value)
+        expectError(replayed, 409, ApiErrorCode.Conflict)
 
         const conflicting = await application.handlers.admitInput({
           ...input,

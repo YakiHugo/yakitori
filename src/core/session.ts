@@ -1,4 +1,13 @@
-import { inputContentToModelMessage } from "../core/user-input.ts"
+import {
+  TaskCleanupError,
+  type ExecutionContext,
+  type SessionTask,
+  type SessionTaskRunner,
+  type SessionTaskHandle,
+  type TaskOutcome,
+  type TaskSettlement,
+  type TurnControl,
+} from "./session-task.ts"
 import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import type {
   CompletedExecutionItem,
@@ -8,7 +17,6 @@ import type {
   StartedExecutionItem,
   TokenUsage,
   ToolExecutionItem,
-  TurnCompletion,
   TurnMetrics,
 } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
@@ -27,16 +35,19 @@ import {
   type AgentStatus,
   AsyncQueue,
   BoundedQueue,
+  createSessionEventReceiver,
   fingerprintTurnInput,
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
   type SessionEvent,
   type SessionIdleCause,
-  SessionIo,
+  type SessionEndpoints,
   type SessionOp,
   type SessionPermissionEvent,
   SessionStatus,
   type TurnInput,
+  type InputSource,
+  type InputPurpose,
   type TurnInputSubmission,
 } from "./session-io.ts"
 import {
@@ -44,115 +55,40 @@ import {
   type RolloutAppend,
   type SessionRolloutStore,
 } from "./thread-store.ts"
-import { createUserInput, inputContentFromModelMessage } from "./user-input.ts"
+import { createUserInput, inputContentToModelMessage } from "./user-input.ts"
 
 export type { TurnCompletion } from "../kernel/events.ts"
 
 const submissionCapacity = 512
 const gracefulInterruptionTimeoutMs = 100
 
-export type SessionSnapshot = {
-  readonly metadata: ThreadMetadata
-  readonly context: ContextSnapshot
-  readonly configuration?: SessionConfigurationSnapshot
-  readonly activeTurnId?: string
-}
+export type SessionSnapshot = Readonly<{
+  metadata: ThreadMetadata
+  context: ContextSnapshot
+  configuration?: SessionConfigurationSnapshot
+  activeTurnId?: string
+}>
 
-export type TurnControl = {
-  readonly signal: AbortSignal
-  takeSteering(): readonly TurnInput[]
-  takeSteeringOrComplete():
-    | { readonly type: "steering"; readonly inputs: readonly TurnInput[] }
-    | { readonly type: "complete" }
-}
-
-export type TurnRuntime = {
-  recordModelAttempt(attempt: ModelAttemptRecord): Promise<void>
-  recordInitialInput(): Promise<void>
-  recordThreadMessageInput(input: TurnInput): Promise<void>
-  recordModelContext(settings: ModelContextSettings): Promise<void>
-  snapshot(): SessionSnapshot
-  recordUsage(usage: TokenUsage): Promise<void>
-  recordRequestStartedAt(startedAt: number): void
-  invalidateRequestStartedAt(): void
-  recordTurnMetrics(metrics: TurnMetrics): void
-  recordContextTokens(
-    input: Readonly<{
-      activeContextTokens: number
-      inputTokens?: number
-      estimatedPrefill?: boolean
-      capacityTokens?: number
-      historyAnchorItemId: string
-      historyAnchorTokens?: number
-      provider: string
-      model: string
-    }>,
-  ): Promise<void>
-  emitModelStream(input: {
-    readonly itemId: string
-    readonly kind: "assistant" | "reasoning"
-    readonly delta: string
-  }): void
-  emitWarning(message: string, diagnostic?: KernelError): void
-  emitItemStarted(item: StartedExecutionItem): void
-  recordToolStarted(item: ToolExecutionItem): Promise<void>
-  emitPermissionEvent(event: SessionPermissionEvent): void
-  recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
-  recordItemCompletions(items: readonly CompletedExecutionItem[]): Promise<void>
-  recordToolResult(
-    response: ResponseItemEnvelope,
-    completion: Extract<CompletedExecutionItem, { toolCallId: string }>,
-  ): Promise<void>
-  recordWorldStateUpdate(
-    items: readonly ResponseItemEnvelope[],
-    update: Readonly<{
-      full: boolean
-      state: JsonObject
-      snapshot: JsonObject
-    }>,
-  ): Promise<void>
-  replaceConversationHistory(input: {
-    readonly replacement: readonly ResponseItemEnvelope[]
-    readonly summary: string
-    readonly baseHistoryLength: number
-    readonly expectedPrefix?: readonly ResponseItemEnvelope[]
-    readonly worldState?: Readonly<{ state: JsonObject; snapshot: JsonObject }>
-  }): Promise<boolean>
-}
-
-export type TurnProcessor = {
-  prepare(
-    snapshot: SessionSnapshot,
-    input: TurnInput,
-  ): TurnContextItem | Promise<TurnContextItem>
-  prepareSteering?(
-    snapshot: SessionSnapshot,
-    input: TurnInput,
-  ): SessionConfigurationSnapshot | undefined
-  start(
-    runtime: TurnRuntime,
-    input: TurnInput,
-    context: TurnContextItem,
-    control: TurnControl,
-  ): TurnTask
-  dispose?(): void | Promise<void>
-}
-
-// The processor owns effects outside Session state, so cancellation must stop
-// the underlying task rather than only detach its Promise from the Session.
-export type TurnTask = {
-  // biome-ignore lint/suspicious/noConfusingVoidType: Tasks such as manual compaction return no completion metadata.
-  readonly completion: Promise<TurnCompletion | void>
-  abort(): void
-}
+export type ExecutionRecord =
+  | Readonly<{ type: "usage"; usage: TokenUsage }>
+  | Readonly<{ type: "world_state"; snapshot: JsonObject }>
+  | Readonly<{ type: "tool_started"; item: ToolExecutionItem }>
+  | Readonly<{
+      type: "tool_result"
+      completion: Extract<CompletedExecutionItem, { toolCallId: string }>
+    }>
+  | Readonly<{ type: "conversation"; items: readonly ResponseItemEnvelope[] }>
 
 type ActiveTurn = {
+  messageAdmission?: Readonly<{ resolve(): void; reject(error: unknown): void }>
   readonly input: TurnInput
   readonly inputItem: ResponseItemEnvelope
   inputRecorded: boolean
   // Compaction can replace model history before a continued answer finishes.
   assistantItems: ResponseItemEnvelope[]
-  readonly context: TurnContextItem
+  context: TurnContextItem | undefined
+  readonly execution: ExecutionContext
+  readonly definition: SessionTask
   readonly abort: AbortController
   readonly steering: TurnInput[]
   readonly steeringFingerprints: Map<string, string>
@@ -161,18 +97,20 @@ type ActiveTurn = {
   usage: TokenUsage | undefined
   lastRequestStartedAt: string | undefined
   metrics: TurnMetrics | undefined
-  readonly resolveAbort: () => void
-  taskHandle: TurnTask | undefined
-  task: Promise<void>
+  escalation: Promise<void> | undefined
+  escalationTimer: ReturnType<typeof setTimeout> | undefined
+  cleanupError: unknown
+  readonly handle: SessionTaskHandle
+  readonly finalized: Promise<void>
   interruptReason: string | undefined
 }
 
-type ForkBarrierCommand = {
-  readonly type: "fork_barrier"
-  readonly run: (snapshot: SessionSnapshot) => Promise<unknown>
-  readonly resolve: (value: unknown) => void
-  readonly reject: (error: unknown) => void
-}
+type ForkBarrierCommand = Readonly<{
+  type: "fork_barrier"
+  run: (snapshot: SessionSnapshot) => Promise<unknown>
+  resolve: (value: unknown) => void
+  reject: (error: unknown) => void
+}>
 
 type SessionCommand = SessionOp | ForkBarrierCommand
 
@@ -196,13 +134,16 @@ type PendingTurnStart = {
   readonly context: TurnContextItem
   readonly inputItem: ResponseItemEnvelope
   readonly items: readonly RolloutItem[]
-  readonly requestFingerprint: string
   append?: RolloutAppend
 }
 
 export class Session {
   readonly id: string
-  readonly io: SessionIo
+  readonly endpoints: SessionEndpoints
+  readonly #executionObservers = new Map<
+    ExecutionContext,
+    Set<(record: ExecutionRecord) => void>
+  >()
   readonly #metadata: ThreadMetadata
   readonly #contextManager: ContextManager
   #configuration: SessionConfigurationSnapshot | undefined
@@ -210,7 +151,8 @@ export class Session {
     string,
     Readonly<{
       fingerprint: string | undefined
-      restoredFingerprint?: string
+      source: InputSource
+      purpose: InputPurpose
       inputItemId: string
       turnId: string
       threadId: string
@@ -218,12 +160,8 @@ export class Session {
   >()
   readonly #threadMessages = new Map<string, AcceptedThreadMessage>()
   #pendingTurnStart: PendingTurnStart | undefined
-  // Resolves when the pending Turn's recording has either launched or failed,
-  // so barrier operations (fork) can wait out the recording instead of
-  // racing it.
-  #pendingTurnReady: Promise<void> | undefined
   readonly #store: SessionRolloutStore
-  readonly #processor: TurnProcessor
+  readonly #processor: SessionTaskRunner
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
   readonly #events = new AsyncQueue<SessionEvent>()
   readonly #statusListeners = new Set<
@@ -243,7 +181,7 @@ export class Session {
   constructor(input: {
     stored: StoredThread
     store: SessionRolloutStore
-    processor: TurnProcessor
+    processor: SessionTaskRunner
     onPersistenceError?: (error: unknown) => void
   }) {
     this.id = input.stored.metadata.id
@@ -251,13 +189,6 @@ export class Session {
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
     this.#configuration = latestConfiguration(input.stored)
     this.#agentStatus = agentStatusFromStoredThread(input.stored)
-    const recordedInputs = new Map(
-      input.stored.rollout.flatMap((record) =>
-        record.item.type === "response_item"
-          ? [[record.item.item.id, record.item.item] as const]
-          : [],
-      ),
-    )
     let recordedTurnId: string | undefined
     for (const record of input.stored.rollout) {
       if (record.item.type === "agent_message") {
@@ -266,21 +197,17 @@ export class Session {
       if (record.item.type === "turn_started")
         recordedTurnId = record.item.turnId
       if (record.item.type === "response_item")
-        this.#rememberRecordedSteer(
+        this.#rememberRecordedInput(
           record.item.item,
           recordedTurnId ?? record.item.item.turnId,
           record.threadId,
         )
       if (record.item.type === "turn_started") {
-        const recorded = recordedInputs.get(record.item.inputItemId)
-        const restoredFingerprint =
-          recorded === undefined || record.item.requestFingerprint === undefined
-            ? undefined
-            : recordedInputFingerprint(recorded, record.item.requestFingerprint)
         this.#submittedInputs.set(record.item.turnId, {
           threadId: record.threadId,
           fingerprint: record.item.requestFingerprint,
-          ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
+          source: record.item.source ?? "human",
+          purpose: record.item.purpose ?? "message",
           inputItemId: record.item.inputItemId,
           turnId: record.item.turnId,
         })
@@ -301,6 +228,8 @@ export class Session {
         this.#submittedInputs.set(item.submissionId, {
           threadId,
           fingerprint: item.requestFingerprint,
+          source: inputSource(item.input),
+          purpose: inputPurpose(item.input),
           inputItemId: item.inputItemId,
           turnId: item.targetTurnId,
         })
@@ -313,12 +242,19 @@ export class Session {
     this.#processor = input.processor
     this.#onPersistenceError = input.onPersistenceError
     this.#submissionLoop = this.#runSubmissionLoop()
-    this.io = new SessionIo({
-      send: (operation) => this.#submissions.send(operation),
-      beforeShutdown: () => {
-        this.#closing = true
+    this.endpoints = {
+      send: (operation) =>
+        this.#closing
+          ? Promise.reject(new Error("Session is shutting down."))
+          : this.#submissions.send(operation),
+      shutdown: () => {
+        if (!this.#closing) {
+          this.#closing = true
+          void this.#submissions.send({ type: "shutdown" })
+        }
+        return this.#submissionLoop
       },
-      events: this.#events,
+      events: createSessionEventReceiver(() => this.#events.receive()),
       readStatus: () => this.#status,
       subscribeStatus: (listener) => {
         this.#statusListeners.add(listener)
@@ -330,7 +266,7 @@ export class Session {
         return () => this.#agentStatusListeners.delete(listener)
       },
       termination: this.#submissionLoop,
-    })
+    }
   }
 
   snapshot(): SessionSnapshot {
@@ -379,12 +315,13 @@ export class Session {
         }
         await this.#dispatch(operation)
       }
-      // The acknowledged Turn owns a persistence task before its processor
-      // task exists. Wait for that fence before disposing the processor and
-      // closing its writer.
-      await this.#pendingTurnReady
-      await this.#activeTurn?.task.catch(() => undefined)
+      // The task owns preparation, recording and resource settlement. Finish
+      // those before disposing Session services and closing its writer.
+      await this.#activeTurn?.finalized
+      if (this.#activeTurn?.cleanupError !== undefined)
+        throw this.#activeTurn.cleanupError
     } finally {
+      this.#closing = true
       try {
         await this.#processor.dispose?.()
       } finally {
@@ -401,7 +338,7 @@ export class Session {
   }
 
   async #dispatch(
-    operation: Exclude<SessionOp, { readonly type: "shutdown" }>,
+    operation: Exclude<SessionOp, Readonly<{ type: "shutdown" }>>,
   ): Promise<void> {
     if (operation.type === "compact") {
       try {
@@ -456,6 +393,15 @@ export class Session {
       }
       return
     }
+    if (operation.input.provenance !== undefined) {
+      // Registration is synchronous; the external sender awaits its durable
+      // receipt independently, so discovery cannot block cancellation commands.
+      void this.#routeTurnInput(operation.input, operation.mode).then(
+        operation.reply.resolve,
+        operation.reply.reject,
+      )
+      return
+    }
     try {
       operation.reply.resolve(
         await this.#routeTurnInput(operation.input, operation.mode),
@@ -465,31 +411,17 @@ export class Session {
     }
   }
 
-  #rememberRecordedSteer(
+  #rememberRecordedInput(
     item: ResponseItemEnvelope,
     turnId: string,
     threadId = this.id,
   ): void {
-    if (
-      !item.id.startsWith("message_") ||
-      item.item.role !== "user" ||
-      item.item.context !== undefined
-    )
-      return
-    // Older steering envelopes identify their request but did not persist its
-    // fingerprint; reserve that ID and report a conflict rather than guessing
-    // intent from lossy legacy model content and repeating its effects.
-    const restoredFingerprint =
-      item.submissionMetadata?.requestFingerprint === undefined
-        ? undefined
-        : recordedInputFingerprint(
-            item,
-            item.submissionMetadata.requestFingerprint,
-          )
+    if (item.submissionMetadata?.source === undefined) return
     this.#submittedInputs.set(item.turnId, {
       threadId,
       fingerprint: item.submissionMetadata?.requestFingerprint,
-      ...(restoredFingerprint === undefined ? {} : { restoredFingerprint }),
+      source: item.submissionMetadata?.source ?? "human",
+      purpose: item.submissionMetadata?.purpose ?? "message",
       inputItemId: item.id,
       turnId,
     })
@@ -497,7 +429,7 @@ export class Session {
 
   async #routeTurnInput(
     input: TurnInput,
-    mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
+    mode: Extract<SessionOp, Readonly<{ type: "turn_input" }>>["mode"],
   ): Promise<TurnInputSubmission> {
     const fingerprint = fingerprintTurnInput(input)
     const recorded = this.#submittedInputs.get(input.submissionId)
@@ -507,9 +439,11 @@ export class Session {
         : recorded
     if (submitted !== undefined) {
       if (
-        submitted.fingerprint !== fingerprint &&
-        (submitted.restoredFingerprint === undefined ||
-          submitted.restoredFingerprint !== restoredInputFingerprint(input))
+        (submitted.source === "human" &&
+          submitted.purpose !== "question_answer") ||
+        inputPurpose(input) !== submitted.purpose ||
+        inputSource(input) !== submitted.source ||
+        submitted.fingerprint !== fingerprint
       ) {
         return notSubmitted(Reason.RequestConflict)
       }
@@ -568,7 +502,7 @@ export class Session {
     }
     const previousSteering = active.steeringFingerprints.get(input.submissionId)
     if (previousSteering !== undefined) {
-      return previousSteering === fingerprint
+      return inputSource(input) !== "human" && previousSteering === fingerprint
         ? { type: "steered", turnId: active.input.submissionId }
         : notSubmitted(Reason.RequestConflict)
     }
@@ -618,64 +552,62 @@ export class Session {
     ])
   }
 
-  // The admission decision happens here, on the actor: prepare the batch,
-  // register the dedupe entry, and establish the active Turn so follow-up
-  // commands (steer, interrupt, shutdown) see it synchronously. Durability
-  // continues in the background (Codex: ack at the routing decision, record
-  // in the run task). Accepted input materializes the new rollout before
-  // sampling; a blocked prompt leaves the staged Session unmaterialized.
   async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
-    let context: TurnContextItem
+    let definition: SessionTask
     try {
-      context = await this.#processor.prepare(this.snapshot(), input)
+      definition = this.#processor.createTask(this.snapshot(), input)
     } catch (error) {
       await this.#recordAgentFailure(
-        error instanceof Error ? error.message : "Turn preparation failed.",
+        error instanceof Error ? error.message : "Task capture failed.",
       )
       throw error
     }
-    if (context.turnId !== input.submissionId) {
-      throw new Error("Turn processor prepared a mismatched Turn id.")
-    }
-    this.#configuration = structuredClone(context.configuration)
     const inputItem =
       input.provenance === undefined
         ? buildInputItem(input)
         : this.#acceptThreadMessage(input, input.submissionId, "started")
             .envelope
-    const requestFingerprint = fingerprintTurnInput(input)
-    const items: readonly RolloutItem[] = [
-      {
-        type: "turn_started",
-        turnId: input.submissionId,
-        inputItemId: inputItem.id,
-        requestFingerprint,
-      },
-      { type: "turn_context", context },
-    ]
-    const pending: PendingTurnStart = {
-      input,
-      context,
-      inputItem,
-      items,
-      requestFingerprint,
-    }
-    this.#pendingTurnStart = pending
     this.#submittedInputs.set(input.submissionId, {
       threadId: this.id,
-      fingerprint: requestFingerprint,
+      fingerprint:
+        inputSource(input) === "human" &&
+        inputPurpose(input) !== "question_answer"
+          ? undefined
+          : fingerprintTurnInput(input),
+      source: inputSource(input),
+      purpose: inputPurpose(input),
       inputItemId: inputItem.id,
       turnId: input.submissionId,
     })
     const abort = new AbortController()
-    const aborted = deferred<void>()
+    let messageAdmission: ActiveTurn["messageAdmission"]
+    const admitted =
+      input.provenance === undefined
+        ? undefined
+        : new Promise<void>((resolve, reject) => {
+            messageAdmission = { resolve, reject }
+          })
+    const execution: ExecutionContext = {
+      executionId: `execution_${globalThis.crypto.randomUUID()}`,
+      input,
+      signal: abort.signal,
+    }
+    const handle: SessionTaskHandle = {
+      kind: definition.kind,
+      executionId: execution.executionId,
+      cancel: () => this.#cancelTask(active),
+      settled: Promise.resolve().then(() => this.#settleTask(active)),
+    }
     const active: ActiveTurn = {
+      ...(messageAdmission === undefined ? {} : { messageAdmission }),
       finishing: false,
       input,
       inputItem,
       inputRecorded: false,
       assistantItems: [],
-      context,
+      context: undefined,
+      execution,
+      definition,
       abort,
       steering: [],
       steeringFingerprints: new Map(),
@@ -683,34 +615,21 @@ export class Session {
       usage: undefined,
       lastRequestStartedAt: undefined,
       metrics: undefined,
-      resolveAbort: () => aborted.resolve(),
-      taskHandle: undefined,
-      task: Promise.resolve(),
+      escalation: undefined,
+      escalationTimer: undefined,
+      cleanupError: undefined,
+      handle,
+      finalized: handle.settled.then((outcome) =>
+        this.#onTaskSettled(active, outcome),
+      ),
       interruptReason: undefined,
     }
     this.#activeTurn = active
     this.#setStatus(SessionStatus.Active)
     this.#setAgentStatus("running")
     this.#events.send({ type: "turn.started", threadId: this.id, input })
-    let launchError: unknown
-    const launch = (async () => {
-      try {
-        await this.#persistAndLaunchTurn(pending, active, aborted.promise)
-      } catch (error) {
-        launchError = error
-        await this.#failPendingTurn(pending, active, error)
-      }
-    })().catch((error: unknown) => {
-      this.#reportPersistenceError(error)
-    })
-    const ready = launch.finally(() => {
-      if (this.#pendingTurnReady === ready) this.#pendingTurnReady = undefined
-    })
-    this.#pendingTurnReady = ready
-    if (input.provenance !== undefined) {
-      await ready
-      if (launchError !== undefined) throw launchError
-    }
+    // The handle already owns preparation and cleanup before admission publishes.
+    await admitted
     return {
       type: "started",
       turnId: input.submissionId,
@@ -718,11 +637,104 @@ export class Session {
     }
   }
 
-  async #persistAndLaunchTurn(
-    pending: PendingTurnStart,
+  async #settleTask(active: ActiveTurn): Promise<TaskSettlement> {
+    let outcome: TaskOutcome
+    try {
+      const completion = await active.definition.run(this, active.execution)
+      outcome = active.abort.signal.aborted
+        ? { type: "interrupted" }
+        : {
+            type: "completed",
+            ...(completion === undefined ? {} : { completion }),
+          }
+    } catch (error) {
+      if (error instanceof TaskCleanupError) active.cleanupError = error
+      outcome = active.abort.signal.aborted
+        ? { type: "interrupted" }
+        : { type: "failed", error }
+    }
+    clearTimeout(active.escalationTimer)
+    await active.escalation
+    return active.cleanupError === undefined
+      ? outcome
+      : { type: "cleanup_failed", error: active.cleanupError }
+  }
+
+  async #onTaskSettled(
     active: ActiveTurn,
-    aborted: Promise<void>,
+    outcome: TaskSettlement,
   ): Promise<void> {
+    // Execution settlement has no authority to publish a business terminal.
+    // Session chooses that disposition after resource settlement and admitted writes.
+    if (outcome.type === "cleanup_failed") {
+      active.finishing = true
+      active.acceptingSteering = false
+      const message =
+        "Task resource cleanup failed; the Session remains occupied."
+      this.#setAgentStatus({ errored: message })
+      this.#events.send({
+        type: "session.error",
+        threadId: this.id,
+        operation: "interrupt",
+        message,
+      })
+      active.messageAdmission?.reject(outcome.error)
+      return
+    }
+    try {
+      await this.#finishTurn(active, outcome)
+    } finally {
+      active.messageAdmission?.reject(
+        outcome.type === "failed"
+          ? outcome.error
+          : new Error("Task finished before its thread message admission."),
+      )
+    }
+  }
+
+  async beginExecution(
+    execution: ExecutionContext,
+    context: TurnContextItem,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+    if (
+      context.turnId !== active.input.submissionId ||
+      active.context !== undefined
+    )
+      throw new Error("Task prepared a mismatched or duplicate Turn context.")
+    active.context = structuredClone(context)
+    this.#configuration = structuredClone(context.configuration)
+    const input = active.input
+    const pending: PendingTurnStart = {
+      input,
+      context,
+      inputItem: active.inputItem,
+      items: [
+        {
+          type: "turn_started",
+          turnId: input.submissionId,
+          inputItemId: active.inputItem.id,
+          source: inputSource(input),
+          purpose: inputPurpose(input),
+          ...(inputSource(input) === "human" &&
+          inputPurpose(input) !== "question_answer"
+            ? {}
+            : { requestFingerprint: fingerprintTurnInput(input) }),
+        },
+        { type: "turn_context", context },
+      ],
+    }
+    this.#pendingTurnStart = pending
+    await this.#recordTurnStart(pending)
+    const message = this.#threadMessages.get(input.submissionId)
+    if (message !== undefined) {
+      await this.#withContextMutation(() => this.#persistThreadMessage(message))
+      active.messageAdmission?.resolve()
+    }
+    this.#requireExecution(execution)
+  }
+
+  async #recordTurnStart(pending: PendingTurnStart): Promise<void> {
     const input = pending.input
     try {
       pending.append = await this.#store.appendItems(this.id, pending.items)
@@ -789,125 +801,31 @@ export class Session {
       threadId: this.id,
       ...pending.append,
     })
-
-    const threadMessage = this.#threadMessages.get(input.submissionId)
-    if (threadMessage !== undefined)
-      await this.#withContextMutation(() =>
-        this.#persistThreadMessage(threadMessage),
-      )
-
-    let taskHandle: TurnTask
-    try {
-      taskHandle = this.#processor.start(
-        this.#turnRuntime(active),
-        input,
-        active.context,
-        {
-          signal: active.abort.signal,
-          takeSteering: () => active.steering.splice(0),
-          takeSteeringOrComplete: () => {
-            const inputs = active.steering.splice(0)
-            if (inputs.length > 0) return { type: "steering", inputs }
-            active.acceptingSteering = false
-            return { type: "complete" }
-          },
-        },
-      )
-    } catch (error) {
-      taskHandle = {
-        completion: Promise.reject(error),
-        abort() {},
-      }
-    }
-    active.taskHandle = taskHandle
-    const processorTask = taskHandle.completion
-    let processorSettled = false
-    const settled = processorTask
-      .then(
-        (completion) =>
-          active.abort.signal.aborted
-            ? { type: "interrupted" as const }
-            : {
-                type: "completed" as const,
-                ...(completion === undefined ? {} : { completion }),
-              },
-        (error: unknown) =>
-          active.abort.signal.aborted
-            ? { type: "interrupted" as const }
-            : { type: "failed" as const, error },
-      )
-      .finally(() => {
-        processorSettled = true
-      })
-    const outcome = Promise.race([
-      settled,
-      aborted.then(async () => {
-        await Promise.race([
-          processorTask.catch(() => undefined),
-          delay(gracefulInterruptionTimeoutMs),
-        ])
-        if (!processorSettled) {
-          try {
-            active.taskHandle?.abort()
-          } catch (error) {
-            this.#events.send({
-              type: "session.error",
-              threadId: this.id,
-              operation: "interrupt",
-              message:
-                error instanceof Error
-                  ? error.message
-                  : "Turn hard abort failed.",
-            })
-          }
-        }
-        return { type: "interrupted" as const }
-      }),
-    ])
-    void processorTask.catch(() => undefined)
-    active.task = outcome.then((result) => this.#finishTurn(active, result))
   }
 
-  // A Turn that never became durable: clear the starting marker, unwind the
-  // active shell, and surface the failure. The dedupe entry stays: the batch
-  // may already be durable, and a retry must replay rather than risk a
-  // duplicate — the Turn's failure is visible through the agent status.
-  async #failPendingTurn(
-    pending: PendingTurnStart,
-    active: ActiveTurn,
-    error: unknown,
-  ): Promise<void> {
-    active.finishing = true
-    active.acceptingSteering = false
-    if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
-    try {
-      await this.#store.flushThread(this.id)
-    } catch (recoveryError) {
-      this.#reportPersistenceError(recoveryError)
-    }
-    try {
-      await this.#recordAgentFailure(
-        error instanceof Error ? error.message : "Turn persistence failed.",
-      )
-    } catch (failureError) {
-      this.#reportPersistenceError(failureError)
-    } finally {
-      // Keep ownership until the failure status is settled, as for a started
-      // Turn; otherwise it can overwrite a newly admitted Turn's status.
-      this.#releaseTurn(active, "failed")
-    }
-  }
-
-  async #finishTurn(
-    active: ActiveTurn,
-    outcome:
-      | Readonly<{ type: "completed"; completion?: TurnCompletion }>
-      | { readonly type: "interrupted" }
-      | { readonly type: "failed"; readonly error: unknown },
-  ): Promise<void> {
+  async #finishTurn(active: ActiveTurn, outcome: TaskOutcome): Promise<void> {
     if (this.#activeTurn !== active) return
     active.finishing = true
     active.acceptingSteering = false
+    if (this.#pendingTurnStart?.input === active.input) {
+      this.#pendingTurnStart = undefined
+      await this.#contextMutationTail
+      try {
+        await this.#store.flushThread(this.id)
+      } catch (error) {
+        this.#reportPersistenceError(error)
+      }
+      try {
+        await this.#recordAgentFailure(
+          outcome.type === "failed" && outcome.error instanceof Error
+            ? outcome.error.message
+            : "Turn persistence failed.",
+        )
+      } finally {
+        this.#releaseTurn(active, "failed")
+      }
+      return
+    }
     // Results already being committed must precede the terminal record. New
     // commits are rejected, including tools that outlive the interruption grace.
     await this.#contextMutationTail
@@ -1009,6 +927,7 @@ export class Session {
 
   #releaseTurn(active: ActiveTurn, idleCause: SessionIdleCause): void {
     if (this.#activeTurn !== active) return
+    this.#executionObservers.delete(active.execution)
     this.#activeTurn = undefined
     if (!this.#closing) this.#setStatus(SessionStatus.Idle, idleCause)
   }
@@ -1016,380 +935,552 @@ export class Session {
   #interruptActiveTurn(reason: string): void {
     if (this.#activeTurn === undefined) return
     this.#activeTurn.interruptReason = reason
-    this.#activeTurn.acceptingSteering = false
-    this.#activeTurn.abort.abort()
-    this.#activeTurn.resolveAbort()
+    this.#activeTurn.handle.cancel()
   }
 
-  #turnRuntime(active: ActiveTurn): TurnRuntime {
-    const requireActive = () => {
-      if (this.#activeTurn !== active || active.finishing) {
-        throw new Error("Turn is no longer active.")
-      }
-    }
-    const requireLease = () => {
-      requireActive()
-      if (active.abort.signal.aborted) {
-        throw new Error("Turn is no longer active.")
-      }
-    }
-    return {
-      recordInitialInput: async () => {
-        requireLease()
-        if (active.inputRecorded) return
-        if (active.input.provenance !== undefined) {
-          await this.#recordThreadMessageInput(active, active.input)
-          active.inputRecorded = true
-          return
-        }
-        await this.#withContextMutation(async () => {
-          requireLease()
-          if (active.inputRecorded) return
-          const items: readonly RolloutItem[] = [
-            { type: "response_item", item: active.inputItem },
-          ]
-          this.#contextManager.record([active.inputItem])
-          active.inputRecorded = true
-          let append: RolloutAppend
-          try {
-            append = await this.#store.appendItems(this.id, items)
-          } catch (error) {
-            this.#reportPersistenceError(error)
-            try {
-              await this.#store.flushThread(this.id)
-              const stored = await this.#store.readThread(this.id)
-              const existing = stored?.rollout.find(
-                ({ item }) =>
-                  item.type === "response_item" &&
-                  item.item.id === active.inputItem.id,
-              )
-              append =
-                existing === undefined
-                  ? await this.#store.appendItems(this.id, items)
-                  : { throughSeq: existing.seq + 1, records: [existing] }
-            } catch (recoveryError) {
-              this.#reportPersistenceError(recoveryError)
-              this.#events.send({
-                type: "runtime.warning",
-                threadId: this.id,
-                turnId: active.input.submissionId,
-                message: "Failed to save the accepted user input.",
-              })
-              return
-            }
-          }
-          try {
-            await this.#store.persistThread(this.id, PersistContext.TurnStart)
-          } catch (error) {
-            this.#reportPersistenceError(error)
-            this.#events.send({
-              type: "runtime.warning",
-              threadId: this.id,
-              turnId: active.input.submissionId,
-              message: "Failed to save the accepted user input.",
-            })
-          }
-          this.#events.send({
-            type: "rollout.appended",
-            threadId: this.id,
-            ...append,
-          })
-        })
-      },
-      recordThreadMessageInput: (input) =>
-        this.#recordThreadMessageInput(active, input),
-      recordModelContext: async (settings) => {
-        requireLease()
-        await this.#appendRollout([{ type: "model_context", settings }])
-        this.#contextManager.setPreviousModel(settings)
-      },
-      snapshot: () => {
-        requireLease()
-        return this.snapshot()
-      },
-      recordUsage: async (usage) => {
-        requireActive()
-        const snapshot = structuredClone(usage)
-        active.usage = snapshot
-        // Admission is fenced above, not inside the queue: finishTurn waits
-        // for admitted writes even after it marks the Turn as finishing.
-        await this.#withContextMutation(async () => {
-          const items: readonly RolloutItem[] = [
-            {
-              type: "turn_usage",
-              turnId: active.input.submissionId,
-              usage: snapshot,
-            },
-          ]
-          try {
-            const append = await this.#store.appendItems(this.id, items)
-            await this.#store.flushThread(this.id)
-            this.#events.send({
-              type: "rollout.appended",
-              threadId: this.id,
-              ...append,
-            })
-          } catch (error) {
-            this.#reportPersistenceError(error)
-            throw error
-          }
-        })
-      },
-      recordRequestStartedAt: (startedAt) => {
-        requireLease()
-        active.lastRequestStartedAt = new Date(startedAt).toISOString()
-      },
-      invalidateRequestStartedAt: () => {
-        requireLease()
-        active.lastRequestStartedAt = undefined
-      },
-      recordTurnMetrics: (metrics) => {
-        requireActive()
-        active.metrics = metrics
-      },
-      recordContextTokens: async (input) => {
-        requireLease()
-        if (
-          !Number.isSafeInteger(input.activeContextTokens) ||
-          input.activeContextTokens < 0 ||
-          (input.inputTokens !== undefined &&
-            (!Number.isSafeInteger(input.inputTokens) ||
-              input.inputTokens < 0)) ||
-          (input.capacityTokens !== undefined &&
-            (!Number.isSafeInteger(input.capacityTokens) ||
-              input.capacityTokens < 0)) ||
-          (input.historyAnchorTokens !== undefined &&
-            (!Number.isSafeInteger(input.historyAnchorTokens) ||
-              input.historyAnchorTokens < 0)) ||
-          input.historyAnchorItemId.trim().length === 0 ||
-          input.provider.trim().length === 0 ||
-          input.model.trim().length === 0
-        ) {
-          throw new Error(
-            "Active context tokens must be a non-negative integer.",
-          )
-        }
-        const next = this.#contextManager.contextTokensAfterUpdate(input)
-        await this.#appendRollout([
-          {
-            type: "token_count",
-            turnId: active.input.submissionId,
-            ...next,
-            ...(input.capacityTokens === undefined
-              ? {}
-              : { capacityTokens: input.capacityTokens }),
-          },
-        ])
-        this.#contextManager.setContextTokens(next)
-      },
-      emitModelStream: (input) => {
-        requireLease()
-        this.#events.send({
-          type: "model.stream",
-          threadId: this.id,
-          turnId: active.input.submissionId,
-          ...input,
-        })
-      },
-      emitWarning: (message, diagnostic) => {
-        requireLease()
+  #cancelTask(active: ActiveTurn): void {
+    active.acceptingSteering = false
+    active.abort.abort()
+    if (active.escalationTimer === undefined && !active.finishing) {
+      // This grace is an implementation safety boundary for transports that
+      // need an explicit close. It never proves execution has stopped.
+      active.escalationTimer = setTimeout(() => {
         this.#events.send({
           type: "runtime.warning",
           threadId: this.id,
           turnId: active.input.submissionId,
-          message,
-          ...(diagnostic?.code === undefined ? {} : { code: diagnostic.code }),
-          ...(diagnostic?.details === undefined
-            ? {}
-            : { details: diagnostic.details }),
+          code: "task.stopping",
+          message:
+            "Waiting for the current execution to stop and release its resources.",
         })
-      },
-      recordToolStarted: async (item) => {
-        requireLease()
-        // Tool starts must survive a GUI reconnect while the model stream is
-        // still active. Use the same durable item id for start and completion.
-        await this.#appendRollout([
-          {
-            type: "item_started",
+        active.escalation = Promise.resolve()
+          .then(() => active.definition.abort?.())
+          .catch((error: unknown) => {
+            active.cleanupError = error
+            this.#events.send({
+              type: "session.error",
+              threadId: this.id,
+              operation: "interrupt",
+              message:
+                error instanceof Error ? error.message : "Task abort failed.",
+            })
+          })
+      }, gracefulInterruptionTimeoutMs)
+    }
+  }
+
+  observeExecution(
+    execution: ExecutionContext,
+    listener: (record: ExecutionRecord) => void,
+  ): () => void {
+    this.#requireExecution(execution)
+    const listeners = this.#executionObservers.get(execution) ?? new Set()
+    listeners.add(listener)
+    this.#executionObservers.set(execution, listeners)
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0) this.#executionObservers.delete(execution)
+    }
+  }
+
+  #notifyExecution(execution: ExecutionContext, record: ExecutionRecord): void {
+    for (const listener of this.#executionObservers.get(execution) ?? [])
+      listener(record)
+  }
+
+  #requireExecution(
+    execution: ExecutionContext,
+    allowStopping = false,
+  ): ActiveTurn {
+    const active = this.#activeTurn
+    if (
+      active === undefined ||
+      active.execution !== execution ||
+      active.finishing ||
+      (!allowStopping && active.abort.signal.aborted)
+    )
+      throw new Error("Turn execution is no longer active.")
+    return active
+  }
+
+  takeSteering(execution: ExecutionContext): readonly TurnInput[] {
+    return this.#requireExecution(execution).steering.splice(0)
+  }
+
+  takeSteeringOrComplete(
+    execution: ExecutionContext,
+  ): ReturnType<TurnControl["takeSteeringOrComplete"]> {
+    const active = this.#requireExecution(execution)
+    const inputs = active.steering.splice(0)
+    if (inputs.length > 0) return { type: "steering", inputs }
+    active.acceptingSteering = false
+    return { type: "complete" }
+  }
+
+  // Ordinary records update history and publish append sequences. Save errors
+  // are observable diagnostics; these operations do not promise a durable flush.
+  async recordInitialInput(execution: ExecutionContext): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    if (active.inputRecorded) return
+    if (active.input.provenance !== undefined) {
+      await this.recordThreadMessageInput(execution, active.input)
+      active.inputRecorded = true
+      return
+    }
+    await this.#withContextMutation(async () => {
+      this.#requireExecution(execution)
+      if (active.inputRecorded) return
+      const items: readonly RolloutItem[] = [
+        { type: "response_item", item: active.inputItem },
+      ]
+      this.#contextManager.record([active.inputItem])
+      active.inputRecorded = true
+      let append: RolloutAppend
+      try {
+        append = await this.#store.appendItems(this.id, items)
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        try {
+          await this.#store.flushThread(this.id)
+          const stored = await this.#store.readThread(this.id)
+          const existing = stored?.rollout.find(
+            ({ item }) =>
+              item.type === "response_item" &&
+              item.item.id === active.inputItem.id,
+          )
+          append =
+            existing === undefined
+              ? await this.#store.appendItems(this.id, items)
+              : { throughSeq: existing.seq + 1, records: [existing] }
+        } catch (recoveryError) {
+          this.#reportPersistenceError(recoveryError)
+          this.#events.send({
+            type: "runtime.warning",
+            threadId: this.id,
             turnId: active.input.submissionId,
-            item: structuredClone(item),
-          },
-        ])
-        requireLease()
-      },
-      emitItemStarted: (item) => {
-        requireLease()
+            message: "Failed to save the accepted user input.",
+          })
+          return
+        }
+      }
+      try {
+        await this.#store.persistThread(this.id, PersistContext.TurnStart)
+      } catch (error) {
+        this.#reportPersistenceError(error)
         this.#events.send({
-          type: "item.started",
+          type: "runtime.warning",
           threadId: this.id,
           turnId: active.input.submissionId,
-          item: structuredClone(item),
+          message: "Failed to save the accepted user input.",
         })
-      },
-      emitPermissionEvent: (event) => {
-        requireActive()
-        if (
-          event.sessionId !== this.id ||
-          event.turnId !== active.input.submissionId
-        ) {
-          throw new Error(
-            "Permission event does not belong to the active Turn.",
-          )
-        }
+      }
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        ...append,
+      })
+    })
+  }
+
+  async recordModelContext(
+    execution: ExecutionContext,
+    settings: ModelContextSettings,
+  ): Promise<void> {
+    this.#requireExecution(execution)
+
+    await this.#appendRollout([{ type: "model_context", settings }])
+    this.#contextManager.setPreviousModel(settings)
+  }
+
+  async recordModelAttempt(
+    execution: ExecutionContext,
+    attempt: ModelAttemptRecord,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution, true)
+    await this.#appendRollout([
+      { type: "model_attempt", turnId: active.input.submissionId, attempt },
+    ])
+  }
+
+  executionSnapshot(execution: ExecutionContext): SessionSnapshot {
+    this.#requireExecution(execution)
+
+    return this.snapshot()
+  }
+
+  // This checkpoint resolves only after the writer flush; failure propagates.
+  async checkpointUsage(
+    execution: ExecutionContext,
+    usage: TokenUsage,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution, true)
+
+    const snapshot = structuredClone(usage)
+    active.usage = snapshot
+    // Admission is fenced above, not inside the queue: finishTurn waits
+    // for admitted writes even after it marks the Turn as finishing.
+    await this.#withContextMutation(async () => {
+      const items: readonly RolloutItem[] = [
+        {
+          type: "turn_usage",
+          turnId: active.input.submissionId,
+          usage: snapshot,
+        },
+      ]
+      try {
+        const append = await this.#store.appendItems(this.id, items)
+        await this.#store.flushThread(this.id)
         this.#events.send({
-          type: "permission",
+          type: "rollout.appended",
           threadId: this.id,
-          event: structuredClone(event),
+          ...append,
         })
-      },
-      recordModelAttempt: async (attempt) => {
-        requireActive()
-        await this.#appendRollout([
-          { type: "model_attempt", turnId: active.input.submissionId, attempt },
-        ])
-      },
-      recordConversationItems: async (items) => {
-        requireLease()
-        if (items.length === 0) return
-        await this.#withContextMutation(async () => {
-          requireLease()
-          await this.#appendRollout(
-            items.map((item): RolloutItem => ({ type: "response_item", item })),
-          )
-          for (const item of items)
-            this.#rememberRecordedSteer(item, active.input.submissionId)
-          this.#contextManager.record(items)
-          active.assistantItems.push(
-            ...items.filter((item) => item.item.role === "assistant"),
-          )
-        })
-      },
-      recordItemCompletions: async (items) => {
-        requireLease()
-        if (items.length === 0) return
-        await this.#appendRollout(
-          items.map(
-            (item): RolloutItem => ({
-              type: "item_completed",
-              turnId: active.input.submissionId,
-              item,
-            }),
-          ),
-        )
-      },
-      recordToolResult: async (response, completion) => {
-        // Cancellation stops new work, but Codex-style draining still records
-        // completed tool effects until this Turn begins finalization.
-        requireActive()
-        if (
-          response.turnId !== active.input.submissionId ||
-          response.item.role !== "tool" ||
-          response.item.toolCallId !== completion.toolCallId ||
-          response.id !== completion.resultItemId
-        ) {
-          throw new Error("Tool result does not match its completion and Turn.")
-        }
-        // Admission happened before joining the mutation queue. Finalization
-        // waits for this queue, so retain the result even if it starts meanwhile.
-        await this.#withContextMutation(async () => {
-          await this.#appendRollout([
-            { type: "response_item", item: response },
-            {
-              type: "item_completed",
-              turnId: active.input.submissionId,
-              item: completion,
-            },
-          ])
-          this.#contextManager.record([response])
-        })
-      },
-      recordWorldStateUpdate: async (items, update) => {
-        requireLease()
-        await this.#withContextMutation(async () => {
-          requireLease()
-          if (items.length > 0) {
-            this.#contextManager.record(items)
-          }
-          this.#contextManager.setWorldStateBaseline(update.snapshot)
-          await this.#appendRollout([
-            ...items.map(
-              (item): RolloutItem => ({ type: "response_item", item }),
-            ),
-            {
-              type: "world_state",
-              turnId: active.input.submissionId,
-              full: update.full,
-              state: update.state,
-            },
-          ])
-        })
-      },
-      replaceConversationHistory: async (input) => {
-        requireLease()
-        return this.#withContextMutation(async () => {
-          requireLease()
-          const current = this.#contextManager.snapshot().history
-          if (
-            input.expectedPrefix !== undefined &&
-            (input.expectedPrefix.length !== input.baseHistoryLength ||
-              JSON.stringify(current.slice(0, input.baseHistoryLength)) !==
-                JSON.stringify(input.expectedPrefix))
-          )
-            return false
-          // A pre-Turn checkpoint covers only the old prefix. Keep both the
-          // already admitted current input and messages appended meanwhile.
-          const concurrentTail = current.slice(input.baseHistoryLength)
-          const replacement = [...input.replacement, ...concurrentTail]
-          const items: readonly RolloutItem[] = [
-            {
-              type: "compacted",
-              turnId: active.input.submissionId,
-              replacement,
-              summary: input.summary,
-            },
-            ...(input.worldState === undefined
-              ? []
-              : [
-                  {
-                    type: "world_state" as const,
-                    turnId: active.input.submissionId,
-                    full: true,
-                    state: input.worldState.state,
-                  },
-                ]),
-          ]
-          let append: RolloutAppend
-          try {
-            append = await this.#store.appendItems(this.id, items)
-            await this.#store.flushThread(this.id)
-          } catch (error) {
-            this.#reportPersistenceError(error)
-            throw error
-          }
-          this.#contextManager.replace(replacement)
-          if (input.worldState !== undefined) {
-            this.#contextManager.setWorldStateBaseline(
-              input.worldState.snapshot,
-            )
-          }
-          this.#events.send({
-            type: "rollout.appended",
-            threadId: this.id,
-            ...append,
-          })
-          return true
-        })
-      },
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+    })
+    this.#notifyExecution(execution, { type: "usage", usage: snapshot })
+  }
+
+  recordRequestStartedAt(execution: ExecutionContext, startedAt: number): void {
+    const active = this.#requireExecution(execution)
+
+    active.lastRequestStartedAt = new Date(startedAt).toISOString()
+  }
+
+  invalidateRequestStartedAt(execution: ExecutionContext): void {
+    const active = this.#requireExecution(execution)
+
+    active.lastRequestStartedAt = undefined
+  }
+
+  recordTurnMetrics(execution: ExecutionContext, metrics: TurnMetrics): void {
+    const active = this.#requireExecution(execution, true)
+
+    active.metrics = metrics
+  }
+
+  async recordContextTokens(
+    execution: ExecutionContext,
+    input: Readonly<{
+      activeContextTokens: number
+      inputTokens?: number
+      estimatedPrefill?: boolean
+      capacityTokens?: number
+      historyAnchorItemId: string
+      historyAnchorTokens?: number
+      provider: string
+      model: string
+    }>,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    if (
+      !Number.isSafeInteger(input.activeContextTokens) ||
+      input.activeContextTokens < 0 ||
+      (input.inputTokens !== undefined &&
+        (!Number.isSafeInteger(input.inputTokens) || input.inputTokens < 0)) ||
+      (input.capacityTokens !== undefined &&
+        (!Number.isSafeInteger(input.capacityTokens) ||
+          input.capacityTokens < 0)) ||
+      (input.historyAnchorTokens !== undefined &&
+        (!Number.isSafeInteger(input.historyAnchorTokens) ||
+          input.historyAnchorTokens < 0)) ||
+      input.historyAnchorItemId.trim().length === 0 ||
+      input.provider.trim().length === 0 ||
+      input.model.trim().length === 0
+    ) {
+      throw new Error("Active context tokens must be a non-negative integer.")
     }
+    const next = this.#contextManager.contextTokensAfterUpdate(input)
+    await this.#appendRollout([
+      {
+        type: "token_count",
+        turnId: active.input.submissionId,
+        ...next,
+        ...(input.capacityTokens === undefined
+          ? {}
+          : { capacityTokens: input.capacityTokens }),
+      },
+    ])
+    this.#contextManager.setContextTokens(next)
+  }
+
+  emitModelStream(
+    execution: ExecutionContext,
+    input: Readonly<{
+      itemId: string
+      kind: "assistant" | "reasoning"
+      delta: string
+    }>,
+  ): void {
+    const active = this.#requireExecution(execution)
+
+    this.#events.send({
+      type: "model.stream",
+      threadId: this.id,
+      turnId: active.input.submissionId,
+      ...input,
+    })
+  }
+
+  emitWarning(
+    execution: ExecutionContext,
+    message: string,
+    diagnostic?: KernelError,
+  ): void {
+    const active = this.#requireExecution(execution)
+
+    this.#events.send({
+      type: "runtime.warning",
+      threadId: this.id,
+      turnId: active.input.submissionId,
+      message,
+      ...(diagnostic?.code === undefined ? {} : { code: diagnostic.code }),
+      ...(diagnostic?.details === undefined
+        ? {}
+        : { details: diagnostic.details }),
+    })
+  }
+
+  async recordToolStarted(
+    execution: ExecutionContext,
+    item: ToolExecutionItem,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    // Tool starts must survive a GUI reconnect while the model stream is
+    // still active. Use the same durable item id for start and completion.
+    await this.#appendRollout([
+      {
+        type: "item_started",
+        turnId: active.input.submissionId,
+        item: structuredClone(item),
+      },
+    ])
+    this.#requireExecution(execution)
+    this.#notifyExecution(execution, { type: "tool_started", item })
+  }
+
+  emitItemStarted(
+    execution: ExecutionContext,
+    item: StartedExecutionItem,
+  ): void {
+    const active = this.#requireExecution(execution)
+
+    this.#events.send({
+      type: "item.started",
+      threadId: this.id,
+      turnId: active.input.submissionId,
+      item: structuredClone(item),
+    })
+  }
+
+  emitPermissionEvent(
+    execution: ExecutionContext,
+    event: SessionPermissionEvent,
+  ): void {
+    const active = this.#requireExecution(execution, true)
+
+    if (
+      event.sessionId !== this.id ||
+      event.turnId !== active.input.submissionId
+    ) {
+      throw new Error("Permission event does not belong to the active Turn.")
+    }
+    this.#events.send({
+      type: "permission",
+      threadId: this.id,
+      event: structuredClone(event),
+    })
+  }
+
+  async recordConversationItems(
+    execution: ExecutionContext,
+    items: readonly ResponseItemEnvelope[],
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    if (items.length === 0) return
+    await this.#withContextMutation(async () => {
+      this.#requireExecution(execution)
+      await this.#appendRollout(
+        items.map((item): RolloutItem => ({ type: "response_item", item })),
+      )
+      for (const item of items)
+        this.#rememberRecordedInput(item, active.input.submissionId)
+      this.#contextManager.record(items)
+      this.#notifyExecution(execution, { type: "conversation", items })
+      active.assistantItems.push(
+        ...items.filter((item) => item.item.role === "assistant"),
+      )
+    })
+  }
+
+  async recordItemCompletions(
+    execution: ExecutionContext,
+    items: readonly CompletedExecutionItem[],
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    if (items.length === 0) return
+    await this.#appendRollout(
+      items.map(
+        (item): RolloutItem => ({
+          type: "item_completed",
+          turnId: active.input.submissionId,
+          item,
+        }),
+      ),
+    )
+  }
+
+  async recordToolResult(
+    execution: ExecutionContext,
+    response: ResponseItemEnvelope,
+    completion: Extract<CompletedExecutionItem, { toolCallId: string }>,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution, true)
+
+    // Cancellation stops new work, but Codex-style draining still records
+    // completed tool effects until this Turn begins finalization.
+    if (
+      response.turnId !== active.input.submissionId ||
+      response.item.role !== "tool" ||
+      response.item.toolCallId !== completion.toolCallId ||
+      response.id !== completion.resultItemId
+    ) {
+      throw new Error("Tool result does not match its completion and Turn.")
+    }
+    // Admission above is the lease check. Finalization drains this mutation
+    // queue, so accepted tool effects remain writable after it starts.
+    await this.#withContextMutation(async () => {
+      await this.#appendRollout([
+        { type: "response_item", item: response },
+        {
+          type: "item_completed",
+          turnId: active.input.submissionId,
+          item: completion,
+        },
+      ])
+      this.#contextManager.record([response])
+      this.#notifyExecution(execution, { type: "tool_result", completion })
+    })
+  }
+
+  async recordWorldStateUpdate(
+    execution: ExecutionContext,
+    items: readonly ResponseItemEnvelope[],
+    update: Readonly<{
+      full: boolean
+      state: JsonObject
+      snapshot: JsonObject
+    }>,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution)
+
+    await this.#withContextMutation(async () => {
+      this.#requireExecution(execution)
+      if (items.length > 0) {
+        this.#contextManager.record(items)
+      }
+      this.#contextManager.setWorldStateBaseline(update.snapshot)
+      await this.#appendRollout([
+        ...items.map((item): RolloutItem => ({ type: "response_item", item })),
+        {
+          type: "world_state",
+          turnId: active.input.submissionId,
+          full: update.full,
+          state: update.state,
+        },
+      ])
+      this.#notifyExecution(execution, {
+        type: "world_state",
+        snapshot: update.snapshot,
+      })
+    })
+  }
+
+  // Apply the replacement only after its durable checkpoint, preserving the
+  // concurrent tail under the same mutation lock used by conversation records.
+  async checkpointHistory(
+    execution: ExecutionContext,
+    input: Readonly<{
+      replacement: readonly ResponseItemEnvelope[]
+      summary: string
+      baseHistoryLength: number
+      expectedPrefix?: readonly ResponseItemEnvelope[]
+      worldState?: Readonly<{
+        state: JsonObject
+        snapshot: JsonObject
+      }>
+    }>,
+  ): Promise<boolean> {
+    const active = this.#requireExecution(execution)
+
+    return this.#withContextMutation(async () => {
+      this.#requireExecution(execution)
+      const current = this.#contextManager.snapshot().history
+      if (
+        input.expectedPrefix !== undefined &&
+        (input.expectedPrefix.length !== input.baseHistoryLength ||
+          JSON.stringify(current.slice(0, input.baseHistoryLength)) !==
+            JSON.stringify(input.expectedPrefix))
+      )
+        return false
+      // A pre-Turn checkpoint covers only the old prefix. Keep both the
+      // already admitted current input and messages appended meanwhile.
+      const concurrentTail = current.slice(input.baseHistoryLength)
+      const replacement = [...input.replacement, ...concurrentTail]
+      const items: readonly RolloutItem[] = [
+        {
+          type: "compacted",
+          turnId: active.input.submissionId,
+          replacement,
+          summary: input.summary,
+        },
+        ...(input.worldState === undefined
+          ? []
+          : [
+              {
+                type: "world_state" as const,
+                turnId: active.input.submissionId,
+                full: true,
+                state: input.worldState.state,
+              },
+            ]),
+      ]
+      let append: RolloutAppend
+      try {
+        append = await this.#store.appendItems(this.id, items)
+        await this.#store.flushThread(this.id)
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+      this.#contextManager.replace(replacement)
+      if (input.worldState !== undefined) {
+        this.#contextManager.setWorldStateBaseline(input.worldState.snapshot)
+      }
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        ...append,
+      })
+      return true
+    })
   }
 
   async #runForkBarrier(operation: ForkBarrierCommand): Promise<void> {
     try {
-      // A Turn being recorded must land before the barrier snapshots: wait
-      // out the recording instead of racing it.
-      await this.#pendingTurnReady
+      // Settle execution and its accepted writes before the fork snapshot.
+      // Later commands remain behind this barrier.
       this.#interruptActiveTurn("conversation_fork")
-      await this.#activeTurn?.task.catch(() => undefined)
+      await this.#activeTurn?.finalized
+      if (this.#activeTurn?.cleanupError !== undefined)
+        throw this.#activeTurn.cleanupError
       await this.#store.flushThread(this.id)
       operation.resolve(await operation.run(this.snapshot()))
     } catch (error) {
@@ -1509,6 +1600,7 @@ export class Session {
             id: messageId,
             turnId: this.#activeTurn?.input.submissionId ?? createTurnId(),
             createdAt: new Date().toISOString(),
+            submissionMetadata: { source: "agent", purpose: "message" },
             item: { role: "user", content: [{ type: "text", text }] },
           }
           const items: readonly RolloutItem[] = [
@@ -1590,6 +1682,8 @@ export class Session {
     this.#submittedInputs.set(input.submissionId, {
       threadId: this.id,
       fingerprint: admission.requestFingerprint,
+      source: inputSource(input),
+      purpose: inputPurpose(input),
       inputItemId: envelope.id,
       turnId: targetTurnId,
     })
@@ -1646,10 +1740,11 @@ export class Session {
     }
   }
 
-  async #recordThreadMessageInput(
-    active: ActiveTurn,
+  async recordThreadMessageInput(
+    execution: ExecutionContext,
     input: TurnInput,
   ): Promise<void> {
+    const active = this.#requireExecution(execution)
     await this.#withContextMutation(async () => {
       if (
         this.#activeTurn !== active ||
@@ -1699,56 +1794,24 @@ export class Session {
   }
 }
 
-// Before drafts were persisted, model blocks and submission metadata retained
-// the input's meaning. The new draft folds empty/adjacent text blocks and makes
-// default image detail explicit. Compare that format only for restored IDs
-// that have an admission fingerprint; never infer identity for an unverified ID.
-function recordedInputFingerprint(
-  envelope: ResponseItemEnvelope,
-  admissionFingerprint: string,
-): string | undefined {
-  if (envelope.submissionMetadata?.content !== undefined) return undefined
-  const message = envelope.item
-  const content =
-    message.role === "user"
-      ? inputContentFromModelMessage(message)
-      : message.role === "developer" && message.context?.type === "goal"
-        ? createUserInput(message.content.map((block) => block.text).join(""))
-        : undefined
-  if (content === undefined) return undefined
-  return restoredInputFingerprint({
-    submissionId: envelope.turnId,
-    content,
-    ...(message.role === "developer" && message.context?.type === "goal"
-      ? { goalId: message.context.goalId }
-      : {}),
-    ...(admissionFingerprint.startsWith("compact:")
-      ? { manualCompact: true }
-      : {}),
-    ...(envelope.submissionMetadata?.modelSelection === undefined
-      ? {}
-      : { modelSelection: envelope.submissionMetadata.modelSelection }),
-    ...(envelope.submissionMetadata?.parentInputId === undefined
-      ? {}
-      : { parentInputId: envelope.submissionMetadata.parentInputId }),
-    ...(envelope.submissionMetadata?.metadata === undefined
-      ? {}
-      : { metadata: envelope.submissionMetadata.metadata }),
-  })
+export function inputPurpose(input: TurnInput): InputPurpose {
+  return (
+    input.purpose ??
+    (input.goalId !== undefined || input.source === "agent"
+      ? "task"
+      : "message")
+  )
 }
 
-function restoredInputFingerprint(input: TurnInput): string {
-  return fingerprintTurnInput({
-    ...input,
-    content: {
-      ...input.content,
-      attachments: input.content.attachments.map((attachment) =>
-        attachment.mediaType === "application/pdf"
-          ? attachment
-          : { ...attachment, detail: attachment.detail ?? "high" },
-      ),
-    },
-  })
+export function inputSource(input: TurnInput): InputSource {
+  return (
+    input.source ??
+    (input.provenance !== undefined
+      ? "agent"
+      : input.goalId === undefined
+        ? "human"
+        : "runtime")
+  )
 }
 
 export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
@@ -1841,6 +1904,12 @@ function turnInputSubmissionMetadata(
 ): Pick<ResponseItemEnvelope, "submissionMetadata"> {
   return {
     submissionMetadata: {
+      source: inputSource(input),
+      purpose: inputPurpose(input),
+      ...(inputSource(input) === "human" &&
+      inputPurpose(input) !== "question_answer"
+        ? {}
+        : { requestFingerprint: fingerprintTurnInput(input) }),
       content: input.content,
       ...(input.provenance === undefined
         ? {}
@@ -1870,16 +1939,4 @@ function latestConfiguration(
     }
   }
   return undefined
-}
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void
-  const promise = new Promise<T>((accept) => {
-    resolve = accept
-  })
-  return { promise, resolve }
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }

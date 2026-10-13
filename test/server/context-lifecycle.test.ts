@@ -5,7 +5,6 @@ import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
 import type { ContextExcerpt } from "../../src/core/input-context.ts"
-import type { StoredRolloutItem } from "../../src/core/rollout.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
 import { draftToEditorParts } from "../../src/gui/input-draft.ts"
 import { type InputContent, isKernelEvent } from "../../src/kernel/events.ts"
@@ -199,7 +198,7 @@ describe("structured context and ephemeral forks", () => {
   it.each([
     "steer",
     "queue",
-  ] as const)("preserves ordered %s admission, request retries and durable replay", async (route) => {
+  ] as const)("preserves ordered %s input and rejects repeated human IDs after consumption", async (route) => {
     const requests: ModelRequest[] = []
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
@@ -272,10 +271,11 @@ describe("structured context and ephemeral forks", () => {
           })
     const accepted = await submit(content)
     if (!accepted.ok) throw new Error(accepted.error.message)
-    expect(await submit(content)).toMatchObject({
-      ok: true,
-      value: accepted.value,
-    })
+    expect(await submit(content)).toMatchObject(
+      route === "queue"
+        ? { ok: true, value: accepted.value }
+        : { ok: false, error: { code: "conflict" } },
+    )
     expect(
       await submit(
         inputFixture([
@@ -322,10 +322,10 @@ describe("structured context and ephemeral forks", () => {
             { type: "text", text: "after image" },
           ]),
         ),
-      ).toMatchObject({ ok: true })
+      ).toMatchObject({ ok: false, error: { code: "conflict" } })
       await expect(
         context.app.rolloutAssets.read(retryImage.file),
-      ).rejects.toMatchObject({ code: "ENOENT" })
+      ).resolves.toEqual(bytes)
     }
     finishSecond()
     await until(
@@ -410,13 +410,7 @@ describe("structured context and ephemeral forks", () => {
       requestId: "ordered_followup",
       content: accepted.value.content,
     })
-    expect(replayed).toMatchObject({
-      ok: true,
-      value: {
-        turnId: route === "steer" ? "ordered_active" : "ordered_followup",
-        content: accepted.value.content,
-      },
-    })
+    expect(replayed).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(requests).toHaveLength(2)
     expect(
       await context.app.handlers.admitInput({
@@ -432,44 +426,8 @@ describe("structured context and ephemeral forks", () => {
     ).toMatchObject({ ok: false, error: { code: "conflict" } })
     if (route === "steer") {
       expect(await submit(accepted.value.content)).toMatchObject({
-        ok: true,
-        value: { turnId: "ordered_active", content: accepted.value.content },
-      })
-      await context.restart(async () => {
-        const path = join(
-          context.app.sessionStoreRoot,
-          "rollouts",
-          id,
-          "rollout.jsonl",
-        )
-        const lines = (await readFile(path, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line): StoredRolloutItem => JSON.parse(line))
-        const legacy = lines.map((line) => {
-          if (
-            line.item.type !== "response_item" ||
-            line.item.item.turnId !== "ordered_followup"
-          )
-            return line
-          const { requestFingerprint: _fingerprint, ...metadata } =
-            line.item.item.submissionMetadata ?? {}
-          return {
-            ...line,
-            item: {
-              ...line.item,
-              item: { ...line.item.item, submissionMetadata: metadata },
-            },
-          }
-        })
-        await writeFile(
-          path,
-          `${legacy.map((line) => JSON.stringify(line)).join("\n")}\n`,
-        )
-      })
-      expect(await submit(accepted.value.content)).toMatchObject({
         ok: false,
-        error: { details: { reason: "request_conflict" } },
+        error: { code: "conflict" },
       })
       expect(requests).toHaveLength(2)
     }
@@ -555,10 +513,11 @@ describe("structured context and ephemeral forks", () => {
     }
     const accepted = await submit(content)
     if (!accepted.ok) throw new Error(accepted.error.message)
-    expect(await submit(content)).toMatchObject({
-      ok: true,
-      value: accepted.value,
-    })
+    expect(await submit(content)).toMatchObject(
+      route === "queue"
+        ? { ok: true, value: accepted.value }
+        : { ok: false, error: { code: "conflict" } },
+    )
     expect(
       await submit({ ...content, text: `${content.text} changed input` }),
     ).toMatchObject({ ok: false, error: { code: "conflict" } })
@@ -628,7 +587,7 @@ describe("structured context and ephemeral forks", () => {
         modelSelection: { provider: "openai", model: "gpt-6-astra" },
         content: admission.data.content,
       }),
-    ).toMatchObject({ ok: true })
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     if (route === "direct") {
       const foreign = await context.app.handlers.forkSession({
         sessionId: id,
@@ -1128,7 +1087,13 @@ describe("structured context and ephemeral forks", () => {
     if (!events.ok) throw new Error(events.error.message)
     expect(JSON.stringify(events.value)).toContain('"references"')
     expect(JSON.stringify(events.value)).toContain('"text":"Explain this"')
-    await admit(context.app, id, "context_turn", "Explain this", excerpts)
+    expect(
+      await context.app.handlers.admitInput({
+        sessionId: id,
+        requestId: "context_turn",
+        content: createUserInput("Explain this", [], [], excerpts),
+      }),
+    ).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(requests).toHaveLength(1)
     await admit(context.app, id, "only_context", "", excerpts)
     expect(

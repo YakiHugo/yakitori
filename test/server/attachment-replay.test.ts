@@ -15,11 +15,11 @@ const png = Buffer.from(
   "base64",
 )
 
-describe("attachment admission replay", () => {
+describe("attachment admission reconciliation", () => {
   it.each([
     false,
     true,
-  ])("replays an original cross-rollout draft after cleanup (reopen: %s)", async (reopen) => {
+  ])("recovers promoted attachments from history after draft cleanup (reopen: %s)", async (reopen) => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-attachment-replay-"))
     let app: YakitoriApplication | undefined
     let modelCalls = 0
@@ -74,9 +74,23 @@ describe("attachment admission replay", () => {
         await app.close()
         app = await createYakitoriApplication(options)
       }
-      // A lost response leaves the renderer with the original source reference.
+      // A lost response is reconciled from history using its original ID.
       const replayed = await app.handlers.admitInput(request)
-      expect(replayed).toMatchObject({ ok: true, value: submitted.value })
+      expect(replayed).toMatchObject({ ok: false, error: { code: "conflict" } })
+      const history = await app.handlers.readSessionEvents({
+        sessionId: request.sessionId,
+      })
+      if (!history.ok) throw new Error(history.error.message)
+      expect(
+        history.value.events.filter((event) => event.type === "input.admitted"),
+      ).toEqual([
+        expect.objectContaining({
+          data: expect.objectContaining({
+            requestId: request.requestId,
+            content: submitted.value.content,
+          }),
+        }),
+      ])
       expect(modelCalls).toBe(1)
       const changedText = await app.handlers.admitInput({
         ...request,

@@ -1,5 +1,5 @@
 import { once } from "node:events"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -14,7 +14,7 @@ export async function createSmokeEnvironment(): Promise<
     cleanup(): Promise<void>
   }>
 > {
-  const root = await mkdtemp(join(tmpdir(), "yakitori-smoke-"))
+  const root = await realpath(await mkdtemp(join(tmpdir(), "yakitori-smoke-")))
   const home = join(root, "home")
   const workspace = join(root, "workspace")
   const bin = join(root, "bin")

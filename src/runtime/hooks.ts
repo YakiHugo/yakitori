@@ -1,3 +1,4 @@
+import { signalProcessGroup } from "./process-signal.ts"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
@@ -133,8 +134,8 @@ async function runCommandHook(
     throw new DOMException("The operation was aborted.", "AbortError")
   const child = spawn(process.env.SHELL ?? "/bin/sh", ["-c", handler.command], {
     cwd: request.cwd,
-    detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
     env: process.env,
   })
   let stdout = ""
@@ -154,17 +155,6 @@ async function runCommandHook(
       let forceKill: ReturnType<typeof setTimeout> | undefined
       let closed = false
       let exitCode: number | null = null
-      const signalProcess = (signal: NodeJS.Signals) => {
-        try {
-          if (process.platform !== "win32" && child.pid !== undefined) {
-            process.kill(-child.pid, signal)
-          } else {
-            child.kill(signal)
-          }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
-        }
-      }
       const finish = () => {
         if (!closed || forceKill !== undefined) return
         cancelTimeout()
@@ -178,7 +168,7 @@ async function runCommandHook(
         )
         if (forceKill !== undefined) clearTimeout(forceKill)
         forceKill = undefined
-        signalProcess("SIGKILL")
+        signalProcessGroup(child, "SIGKILL")
         finish()
       })
       const onAbort = () => {
@@ -187,12 +177,12 @@ async function runCommandHook(
           "The operation was aborted.",
           "AbortError",
         )
-        signalProcess("SIGTERM")
+        signalProcessGroup(child, "SIGTERM")
         // A descendant may ignore SIGTERM after the shell exits and closes its
         // pipes. Keep ownership through escalation, not just the leader's exit.
         forceKill = setTimeout(() => {
           forceKill = undefined
-          signalProcess("SIGKILL")
+          signalProcessGroup(child, "SIGKILL")
           finish()
         }, 1_000)
       }
@@ -204,7 +194,7 @@ async function runCommandHook(
         // Hooks are allowed to finish without consuming their input.
         if (error.code === "EPIPE") return
         terminationError ??= error
-        signalProcess("SIGKILL")
+        signalProcessGroup(child, "SIGKILL")
       })
       // Like wait_with_output in the reference runners, completion includes
       // draining inherited pipes. A shell's exit alone does not end ownership.

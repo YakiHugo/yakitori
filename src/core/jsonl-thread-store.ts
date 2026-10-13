@@ -2373,11 +2373,15 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "submissionId",
         "content",
         "provenance",
+        "source",
+        "purpose",
         "modelSelection",
         "metadata",
         "parentInputId",
       ]) &&
       value.input.submissionId === value.submissionId &&
+      isInputSource(value.input.source) &&
+      isInputPurpose(value.input.purpose) &&
       isThreadMessageProvenance(value.input.provenance) &&
       value.input.provenance.sourceThreadId === value.sourceThreadId &&
       value.input.provenance.sourceRequestId === value.sourceRequestId &&
@@ -2398,9 +2402,13 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "turnId",
         "inputItemId",
         "requestFingerprint",
+        "source",
+        "purpose",
       ]) &&
       typeof value.turnId === "string" &&
       typeof value.inputItemId === "string" &&
+      isInputSource(value.source) &&
+      isInputPurpose(value.purpose) &&
       (value.requestFingerprint === undefined ||
         typeof value.requestFingerprint === "string")
     )
@@ -2668,9 +2676,13 @@ function isSubmissionMetadata(value: unknown): boolean {
       "queuedDispatch",
       "requestFingerprint",
       "provenance",
+      "source",
+      "purpose",
     ]) &&
     (value.provenance === undefined ||
       isThreadMessageProvenance(value.provenance)) &&
+    isInputSource(value.source) &&
+    isInputPurpose(value.purpose) &&
     (value.content === undefined || isInputContent(value.content)) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
@@ -2793,5 +2805,23 @@ function hasErrorCode(error: unknown, code: string): boolean {
     error instanceof Error &&
     "code" in error &&
     (error as Error & { readonly code?: string }).code === code
+  )
+}
+
+function isInputSource(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === "human" ||
+    value === "agent" ||
+    value === "runtime"
+  )
+}
+
+function isInputPurpose(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === "message" ||
+    value === "task" ||
+    value === "question_answer"
   )
 }

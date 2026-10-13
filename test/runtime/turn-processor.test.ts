@@ -972,7 +972,7 @@ describe("Turn processor", () => {
         modelClient,
         provider: "faux",
         model: "faux",
-        loadModelTransport: async () => ({
+        readModelTransport: () => ({
           maxAttempts,
           providers: { faux: { streamIdleTimeoutMs: 300_000 } },
         }),
@@ -2658,9 +2658,7 @@ describe("Turn processor", () => {
     )
     const invalidThread = await invalid.createThread()
     await expect(
-      invalidThread.startIfIdle({
-        content: inputFixture([{ type: "text" as const, text: "run" }]),
-      }),
+      invalidThread.startIfIdle({ content: createUserInput("run") }),
     ).rejects.toThrow(
       "model_context_window 12346 exceeds faux/scripted maximum of 12345",
     )
@@ -3476,8 +3474,10 @@ describe("Turn processor", () => {
     expect(provider.callCount).toBe(2)
   })
 
-  it("closes a force-aborted model Turn session once and starts the next Turn fresh", async () => {
+  it("waits for model stream and session cleanup before starting the next Turn", async () => {
     const streamEntered = deferred<void>()
+    const streamStopped = deferred<void>()
+    const cleanupMayFinish = deferred<void>()
     const closes: number[] = []
     let sessions = 0
     const modelClient: ModelClient = {
@@ -3501,18 +3501,22 @@ describe("Turn processor", () => {
               },
               async next() {
                 streamEntered.resolve()
-                await new Promise<void>(() => undefined)
+                await streamStopped.promise
                 return { done: true, value: undefined }
               },
               async return() {
-                await new Promise<void>(() => undefined)
+                await cleanupMayFinish.promise
                 return { done: true, value: undefined }
               },
             }
             return iterator
           },
-          close() {
+          async close() {
             closes[index] = (closes[index] ?? 0) + 1
+            if (index === 0) {
+              streamStopped.resolve()
+              await cleanupMayFinish.promise
+            }
           },
         }
       },
@@ -3532,6 +3536,12 @@ describe("Turn processor", () => {
     })
     await streamEntered.promise
     await thread.interrupt("test")
+    await expect.poll(() => closes[0]).toBe(1)
+    expect(thread.status).toBe("active")
+    expect(
+      await thread.startIfIdle({ content: createUserInput("too soon") }),
+    ).toEqual({ type: "not_submitted", reason: "not_idle" })
+    cleanupMayFinish.resolve()
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.interrupted")
     expect(closes).toEqual([1])
@@ -3543,6 +3553,225 @@ describe("Turn processor", () => {
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(sessions).toBe(2)
     expect(closes).toEqual([1, 1])
+  })
+
+  it("keeps a registered background command usable by write_stdin in the next Turn", async () => {
+    let processId: number | undefined
+    let calls = 0
+    const stream: StreamFn = async function* (request) {
+      calls++
+      if (calls === 1) {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "kept_exec",
+                name: "exec_command",
+                input: {
+                  cmd: "sleep 2; printf 'still alive'",
+                  yield_time_ms: 250,
+                  max_output_tokens: 100,
+                },
+              },
+            ],
+          },
+        }
+      } else if (calls === 2) yield responseEvent("launched")
+      else if (calls === 3) {
+        if (processId === undefined)
+          throw new Error("Missing registered process ID")
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "kept_poll",
+                name: "write_stdin",
+                input: {
+                  session_id: processId,
+                  chars: "",
+                  yield_time_ms: 1_000,
+                  max_output_tokens: 100,
+                },
+              },
+            ],
+          },
+        }
+      } else {
+        expect(
+          toolContentText(
+            request.messages.filter((message) => message.role === "tool").at(-1)
+              ?.content ?? [],
+          ),
+        ).toContain("still alive")
+        yield responseEvent("collected")
+      }
+    }
+    const runtime = await createRuntime(stream, createToolRegistry(), {
+      provider: "openai",
+      model: "gpt-6-astra",
+    })
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: createUserInput("launch") })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "launched" })
+    const stored = await runtime.store.readThread(thread.id)
+    const completed = stored?.rollout.find(
+      ({ item }) =>
+        item.type === "item_completed" &&
+        "toolCallId" in item.item &&
+        item.item.toolCallId === "kept_exec",
+    )?.item
+    const output =
+      completed?.type === "item_completed" && "output" in completed.item
+        ? completed.item.output
+        : undefined
+    if (
+      output === undefined ||
+      output === null ||
+      typeof output !== "object" ||
+      !("session_id" in output) ||
+      typeof output.session_id !== "number"
+    )
+      throw new Error("Command was not registered as background work")
+    processId = output.session_id
+    await thread.startIfIdle({ content: createUserInput("collect") })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "collected" })
+  })
+
+  it("handles cancellation and shutdown while shared model discovery is stalled", async () => {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    let closed = 0
+    let samples = 0
+    const models = {
+      ...createStaticModelsManager("faux"),
+      async refresh() {
+        entered.resolve()
+        await release.promise
+      },
+    }
+    const modelClient: ModelClient = {
+      hasProvider: () => true,
+      models: () => models,
+      startTurn() {
+        return {
+          models,
+          stream: async function* () {
+            samples++
+            yield responseEvent("unreachable")
+          },
+          close() {
+            closed++
+          },
+        }
+      },
+      close() {},
+    }
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("unreachable")
+      },
+      createToolRegistry([]),
+      { modelClient },
+    )
+    const thread = await runtime.createThread()
+    try {
+      const accepted = await thread.startIfIdle({
+        content: createUserInput("prepare"),
+      })
+      if (accepted.type !== "started") throw new Error("Missing admission")
+      await entered.promise
+      expect(await thread.interruptTurn(accepted.turnId)).toBe(true)
+      await thread.shutdownAndWait()
+      expect(closed).toBe(1)
+      expect(samples).toBe(0)
+      expect(thread.status).toBe("shutdown")
+    } finally {
+      release.resolve()
+    }
+  })
+
+  it("retains admission-time provider and transport while discovery and steering overlap a host reload", async () => {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const models = {
+      ...createStaticModelsManager("faux"),
+      async refresh() {
+        entered.resolve()
+        await release.promise
+      },
+    }
+    const registry = createProviderRegistry({
+      faux: createModelProvider({
+        info: {
+          id: "faux",
+          wireApi: "unknown",
+          capabilities: { remoteCompaction: false },
+        },
+        models,
+        stream: async function* (request) {
+          expect(JSON.stringify(request.messages)).toContain(
+            "steering during preparation",
+          )
+          yield responseEvent("captured provider")
+        },
+      }),
+    })
+    const transport = { maxAttempts: 4 }
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("unreachable")
+      },
+      createToolRegistry([]),
+      {
+        modelClient: registry.createClient(),
+        readModelTransport: () => transport,
+      },
+    )
+    const thread = await runtime.createThread()
+    const accepted = await thread.startIfIdle({
+      content: createUserInput("prepare"),
+    })
+    if (accepted.type !== "started") throw new Error("Missing admission")
+    await entered.promise
+    transport.maxAttempts = 2
+    registry.replace({
+      faux: createModelProvider({
+        info: {
+          id: "faux",
+          wireApi: "unknown",
+          capabilities: { remoteCompaction: false },
+        },
+        stream: async function* () {
+          yield responseEvent("replacement provider")
+        },
+      }),
+    })
+    expect(
+      await thread.steer(
+        { content: createUserInput("steering during preparation") },
+        accepted.turnId,
+      ),
+    ).toEqual({ type: "steered", turnId: accepted.turnId })
+    release.resolve()
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "captured provider" })
+    expect(thread.snapshot().configuration?.modelTransport?.maxAttempts).toBe(4)
+    await thread.startIfIdle({ content: createUserInput("next") })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "replacement provider" })
+    expect(thread.snapshot().configuration?.modelTransport?.maxAttempts).toBe(2)
   })
 
   it("consumes steering in the active task and aborts the underlying stream", async () => {
@@ -3842,11 +4071,13 @@ describe("Turn processor", () => {
     })
     await entered.promise
     await thread.interrupt("hard stop")
-    await nextLifecycleEvent(thread)
-    await nextLifecycleEvent(thread)
+    await expect.poll(() => runtimeErrors.length).toBe(1)
+    expect(thread.status).toBe("active")
     release.resolve()
     await waitForValue(() => runtimeErrors.length === 2)
-    await runtime.manager.closeThread(thread.id)
+    await expect(runtime.manager.closeThread(thread.id)).rejects.toThrow(
+      "Task resource cleanup failed",
+    )
     const trailingEvents: SessionEvent[] = []
     for (;;) {
       const event = await thread.nextEvent()
@@ -4325,6 +4556,7 @@ describe("Turn processor", () => {
           return { done: true as const, value: undefined }
         },
         async return() {
+          never.resolve()
           returnCalls += 1
           return { done: true as const, value: undefined }
         },

@@ -67,6 +67,8 @@ export type ResponseItemEnvelope = Readonly<{
   toolContentBlockCount?: number
   providerMetadata?: JsonObject
   submissionMetadata?: Readonly<{
+    source?: import("./session-io.ts").InputSource
+    purpose?: import("./session-io.ts").InputPurpose
     // Preserve editor ranges and references; model blocks cannot reconstruct them.
     content?: InputContent
     modelSelection?: ModelSelection
@@ -143,12 +145,14 @@ export type RolloutItem =
   | { readonly type: "session_meta"; readonly metadata: ThreadMetadata }
   | { readonly type: "response_item"; readonly item: ResponseItemEnvelope }
   | { readonly type: "turn_context"; readonly context: TurnContextItem }
-  | {
-      readonly type: "turn_started"
-      readonly turnId: string
-      readonly inputItemId: string
-      readonly requestFingerprint?: string
-    }
+  | Readonly<{
+      type: "turn_started"
+      turnId: string
+      inputItemId: string
+      source?: import("./session-io.ts").InputSource
+      purpose?: import("./session-io.ts").InputPurpose
+      requestFingerprint?: string
+    }>
   | Readonly<{
       type: "auxiliary_usage"
       source: "session_title"

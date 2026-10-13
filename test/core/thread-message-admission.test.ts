@@ -7,14 +7,17 @@ import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
-  TurnProcessor,
-  TurnRuntime,
-} from "../../src/core/session.ts"
+  SessionTaskRunner,
+} from "../../src/core/session-task.ts"
+import {
+  bindExecution,
+  testTurnContext,
+  type TestTurnRuntime,
+} from "../support/session-execution.ts"
 import type { TurnInput } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { ThreadStore } from "../../src/core/thread-store.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
-import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("thread message admission", () => {
@@ -646,32 +649,27 @@ function message(requestId: string, text: string): TurnInput {
 function createManager(
   store: ThreadStore,
   run: (
-    runtime: TurnRuntime,
+    runtime: TestTurnRuntime,
     input: TurnInput,
     control: TurnControl,
   ) => Promise<void> = async () => {},
 ): ThreadManager {
-  const processor: TurnProcessor = {
-    prepare(_snapshot, input) {
-      const selection = { provider: "faux", model: "scripted" }
+  const processor: SessionTaskRunner = {
+    createTask(snapshot, input) {
+      const context = testTurnContext(snapshot, input)
       return {
-        turnId: input.submissionId,
-        selection,
-        configuration: SessionConfiguration.create({
-          selection,
-          workspaceRoot: "/workspace",
-          enabledTools: [],
-          approvalPolicy: "always_approve",
-          promptCacheKey: input.submissionId,
-        }).snapshot,
-      }
-    },
-    start(runtime, input, _context, control) {
-      return {
-        completion: runtime
-          .recordInitialInput()
-          .then(() => run(runtime, input, control)),
-        abort() {},
+        kind: "regular",
+        async run(session, execution) {
+          await session.beginExecution(execution, context)
+          await session.recordInitialInput(execution)
+          await run(bindExecution(session, execution), input, {
+            signal: execution.signal,
+            takeSteering: () => session.takeSteering(execution),
+            takeSteeringOrComplete: () =>
+              session.takeSteeringOrComplete(execution),
+          })
+          return undefined
+        },
       }
     },
   }

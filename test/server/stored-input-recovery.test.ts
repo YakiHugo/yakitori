@@ -1,3 +1,4 @@
+import { bindExecution } from "../support/session-execution.ts"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -54,7 +55,7 @@ describe("stored input recovery", () => {
       content: f.expected,
       metadata: { source: "saved" },
     })
-    expect(retry).toMatchObject({ ok: true })
+    expect(retry).toMatchObject({ ok: false, error: { code: "conflict" } })
     await expect.poll(() => f.queue.list(f.id).length).toBe(0)
     expect(f.runs()).toBe(0)
     expect(await readFile(f.rolloutPath, "utf8")).toBe(originalBytes)
@@ -106,90 +107,37 @@ describe("stored input recovery", () => {
     expect(f.runs()).toBe(1)
   })
 
-  it.each([
-    "start",
-    "steer",
-  ] as const)("reserves an old %s request ID without a fingerprint instead of executing it again", async (kind) => {
-    const f = await recoveryFixture("parts", false, kind === "steer")
+  it("reserves a recorded human ID without requiring a replay fingerprint", async () => {
+    const f = await recoveryFixture("parts", false)
     const thread = await f.manager.resumeThread(f.id)
     expect(
       await thread?.startIfIdle({
-        submissionId: kind === "start" ? "request_saved" : "request_steer",
-        content: kind === "start" ? f.expected : createUserInput("steered"),
-        ...(kind === "start" ? { metadata: { source: "saved" } } : {}),
+        submissionId: "request_saved",
+        content: f.expected,
       }),
     ).toEqual({ type: "not_submitted", reason: "request_conflict" })
     expect(f.runs()).toBe(0)
   })
 
-  it.each([
-    "goal",
-    "compact",
-  ] as const)("replays a restored %s input without starting another Turn", async (kind) => {
+  it("replays a recorded automatic goal continuation without re-executing its work", async () => {
     const f = await recoveryFixture("parts")
-    const text = kind === "goal" ? "finish the task" : "/compact"
-    const admission = fingerprintOperation({
-      role: kind === "goal" ? "runtime" : "user",
-      content: { kind: "text", text },
-      parentInputId: null,
-      metadata: null,
-    })
-    const requestFingerprint =
-      kind === "goal"
-        ? fingerprintOperation({ goalId: "goal_saved", input: admission })
-        : `compact:${admission}`
-    await f.store.resumeThread(f.id)
-    await f.store.appendItems(f.id, [
-      {
-        type: "turn_started",
-        turnId: "request_control",
-        inputItemId: "input_control",
-        requestFingerprint,
-      },
-      {
-        type: "response_item",
-        item: {
-          id: "input_control",
-          turnId: "request_control",
-          createdAt: new Date().toISOString(),
-          item:
-            kind === "goal"
-              ? {
-                  role: "developer",
-                  content: [{ type: "text", text }],
-                  context: { type: "goal", goalId: "goal_saved" },
-                }
-              : { role: "user", content: [{ type: "text", text }] },
-        },
-      },
-      {
-        type: "turn_completed",
-        turnId: "request_control",
-        outcome: "completed",
-      },
-    ])
-    await f.store.shutdownThread(f.id)
     const thread = await f.manager.resumeThread(f.id)
-    expect(
-      kind === "compact"
-        ? await thread?.compact("request_control")
-        : await thread?.startIfIdle({
-            submissionId: "request_control",
-            content: createUserInput(text),
-            goalId: "goal_saved",
-          }),
-    ).toEqual({
+    if (!thread) throw new Error("Missing thread")
+    const input = {
+      submissionId: "request_goal",
+      content: createUserInput("finish the task"),
+      goalId: "goal_saved",
+    }
+    const accepted = await thread.startIfIdle(input)
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: null })
+    await f.manager.closeThread(f.id)
+    const resumed = await f.manager.resumeThread(f.id)
+    expect(await resumed?.startIfIdle(input)).toMatchObject({
       type: "replayed",
-      turnId: "request_control",
-      inputItemId: "input_control",
+      turnId: "request_goal",
     })
-    expect(
-      await thread?.startIfIdle({
-        submissionId: "request_control",
-        content: createUserInput(text),
-      }),
-    ).toEqual({ type: "not_submitted", reason: "request_conflict" })
-    expect(f.runs()).toBe(0)
+    expect(accepted.type).toBe("started")
+    expect(f.runs()).toBe(1)
   })
 })
 
@@ -211,25 +159,41 @@ async function recoveryFixture(
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      prepare(_snapshot, input) {
-        const selection = { provider: "faux", model: "scripted" }
-        return {
-          turnId: input.submissionId,
-          selection,
-          configuration: SessionConfiguration.create({
+      dispose() {},
+      createTask(snapshot, input) {
+        const context = ((_snapshot, input) => {
+          const selection = { provider: "faux", model: "scripted" }
+          return {
+            turnId: input.submissionId,
             selection,
-            workspaceRoot: root,
-            enabledTools: [],
-            approvalPolicy: "always_approve",
-            promptCacheKey: input.submissionId,
-          }).snapshot,
+            configuration: SessionConfiguration.create({
+              selection,
+              workspaceRoot: root,
+              enabledTools: [],
+              approvalPolicy: "always_approve",
+              promptCacheKey: input.submissionId,
+            }).snapshot,
+          }
+        })(snapshot, input)
+        let stop: (() => void) | undefined
+        return {
+          kind: input.manualCompact === true ? "compact" : "regular",
+          async run(session, execution) {
+            await session.beginExecution(execution, context)
+            const runtime = bindExecution(session, execution)
+
+            const task = (() => {
+              runs++
+              return { completion: runtime.recordInitialInput(), abort() {} }
+            })()
+            stop = task.abort
+            return (await task.completion) ?? undefined
+          },
+          async abort() {
+            stop?.()
+          },
         }
       },
-      start(runtime) {
-        runs++
-        return { completion: runtime.recordInitialInput(), abort() {} }
-      },
-      dispose() {},
     }),
   })
   const handlers = createThreadServerHandlers({

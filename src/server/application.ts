@@ -23,7 +23,10 @@ import {
   ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
-import type { TurnProcessor } from "../core/session.ts"
+import {
+  settleTaskResources,
+  type SessionTaskRunner,
+} from "../core/session-task.ts"
 import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
 import {
@@ -319,6 +322,17 @@ export async function createYakitoriApplication(
         ? {}
         : { configPath: options.userConfigPath }),
     })
+    const sessionConfigurationPublishers = new Map<
+      string,
+      () => Promise<void>
+    >()
+    const publishSessionConfigurations = async () => {
+      await Promise.all(
+        [...sessionConfigurationPublishers.values()].map((publish) =>
+          publish(),
+        ),
+      )
+    }
     const routedUserConfig: UserConfigStore = {
       read: () => userConfig.read(),
       readConfiguration: async (input = {}) => {
@@ -337,14 +351,24 @@ export async function createYakitoriApplication(
         )
         return createSessionUserConfig(root).readSnapshot(input)
       },
-      write: (preference) => userConfig.write(preference),
+      write: async (preference) => {
+        const result = await userConfig.write(preference)
+        await publishSessionConfigurations()
+        return result
+      },
       writeValue: async (input) => {
-        if (input.cwd === undefined) return userConfig.writeValue(input)
+        if (input.cwd === undefined) {
+          const result = await userConfig.writeValue(input)
+          await publishSessionConfigurations()
+          return result
+        }
         const root = await resolveProjectConfigRoot(
           ownedProjectStore,
           input.cwd,
         )
-        return createSessionUserConfig(root).writeValue(input)
+        const result = await createSessionUserConfig(root).writeValue(input)
+        await publishSessionConfigurations()
+        return result
       },
     }
     function createSessionUserConfig(root: string): UserConfigStore {
@@ -382,7 +406,7 @@ export async function createYakitoriApplication(
     const mcpManagers = new Map<string, McpConnectionManager>()
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
-    let computerOwner: string | undefined
+    let computerOwner: { sessionId: string; turnId: string } | undefined
     const activeMate = await resolveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -809,7 +833,7 @@ export async function createYakitoriApplication(
     const createSessionProcessor = async (
       stored: StoredThread,
       sideConversation = false,
-    ): Promise<TurnProcessor> => {
+    ): Promise<SessionTaskRunner> => {
       const workingDirectory = stored.metadata.workingDirectory ?? workspace
       const configRoot = await resolveProjectConfigRoot(
         ownedProjectStore,
@@ -821,6 +845,7 @@ export async function createYakitoriApplication(
         cwd: workingDirectory,
       })
       const sessionConfiguration = config.configuration
+      let publishedConfiguration = sessionConfiguration
       const shellEnvironmentPolicy =
         options.shellEnvironmentPolicy ??
         sessionConfiguration.shellEnvironmentPolicy
@@ -883,12 +908,11 @@ export async function createYakitoriApplication(
                     context.signal?.throwIfAborted()
                     if (context.turnId === undefined)
                       throw new Error("Computer use requires an active turn.")
-                    // Request IDs are scoped to a session, not the process.
-                    const owner = JSON.stringify([
-                      stored.metadata.id,
-                      context.turnId,
-                    ])
-                    if (computerOwner !== undefined && computerOwner !== owner)
+                    if (
+                      computerOwner !== undefined &&
+                      (computerOwner.sessionId !== stored.metadata.id ||
+                        computerOwner.turnId !== context.turnId)
+                    )
                       return {
                         ok: false,
                         code: "computer_busy",
@@ -897,7 +921,10 @@ export async function createYakitoriApplication(
                         content:
                           "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
                       }
-                    computerOwner = owner
+                    computerOwner = {
+                      sessionId: stored.metadata.id,
+                      turnId: context.turnId,
+                    }
                     return tool.execute(input, context)
                   },
                 })),
@@ -948,6 +975,7 @@ export async function createYakitoriApplication(
             const snapshot = await sessionUserConfig.readSnapshot({
               cwd: workingDirectory,
             })
+            publishedConfiguration = snapshot.configuration
             const servers = resolveSessionMcpServers(snapshot, workingDirectory)
             const fingerprint = JSON.stringify(servers)
             if (fingerprint !== mcpConfiguration) {
@@ -976,12 +1004,7 @@ export async function createYakitoriApplication(
               }),
             }
           },
-          loadModelTransport: async () =>
-            (
-              await sessionUserConfig.readSnapshot({
-                cwd: workingDirectory,
-              })
-            ).configuration.modelTransport,
+          readModelTransport: () => publishedConfiguration.modelTransport,
           loadSessionGoal: async () =>
             sideConversation ? undefined : goalRuntime.get(stored.metadata.id),
           modelClient: providerRegistry.createClient(),
@@ -1061,30 +1084,35 @@ export async function createYakitoriApplication(
         throw error
       }
       mcpManagers.set(stored.metadata.id, mcpManager)
-      const ownedProcessor: TurnProcessor = {
-        prepare: processor.prepare,
+      const ownedProcessor: SessionTaskRunner = {
         ...(processor.prepareSteering === undefined
           ? {}
           : { prepareSteering: processor.prepareSteering }),
-        start(runtime, input, context, control) {
-          const running = processor.start(runtime, input, context, control)
+        createTask(snapshot, input) {
+          const task = processor.createTask(snapshot, input)
           return {
-            ...running,
-            completion: running.completion.finally(async () => {
-              const owner = JSON.stringify([
-                stored.metadata.id,
-                input.submissionId,
-              ])
-              if (computerOwner !== owner) return
+            ...task,
+            async run(session, execution) {
               try {
-                await mcpManager.finishTurn()
+                return await task.run(session, execution)
               } finally {
-                if (computerOwner === owner) computerOwner = undefined
+                if (
+                  computerOwner?.sessionId === stored.metadata.id &&
+                  computerOwner.turnId === input.submissionId
+                ) {
+                  await settleTaskResources(() => mcpManager.finishTurn())
+                  if (
+                    computerOwner?.sessionId === stored.metadata.id &&
+                    computerOwner.turnId === input.submissionId
+                  )
+                    computerOwner = undefined
+                }
               }
-            }),
+            },
           }
         },
         async dispose() {
+          sessionConfigurationPublishers.delete(stored.metadata.id)
           await sessionTitle?.closeSession(stored.metadata.id)
           elicitations.cancelSession(stored.metadata.id)
           if (mcpManagers.get(stored.metadata.id) === mcpManager)
@@ -1096,6 +1124,13 @@ export async function createYakitoriApplication(
             hookRunner?.dispose(),
             mcpManager.close(),
           ])
+          // A failed turn cleanup keeps the computer occupied until its owning
+          // Session confirms that the managed MCP connection/process is closed.
+          if (
+            resourceResults[1]?.status === "fulfilled" &&
+            computerOwner?.sessionId === stored.metadata.id
+          )
+            computerOwner = undefined
           const results = [...processorResult, ...resourceResults]
           const errors = results.flatMap((result) =>
             result.status === "rejected" ? [result.reason] : [],
@@ -1108,6 +1143,14 @@ export async function createYakitoriApplication(
           }
         },
       }
+      // Publish disk/config changes at the host boundary. Task admission reads
+      // this stable value synchronously; its captured transport never follows a
+      // later settings update while model discovery is in flight.
+      sessionConfigurationPublishers.set(stored.metadata.id, async () => {
+        publishedConfiguration = (
+          await sessionUserConfig.readSnapshot({ cwd: workingDirectory })
+        ).configuration
+      })
       sessionTitle?.openSession(stored.metadata.id)
       return sideConversation
         ? ownedProcessor

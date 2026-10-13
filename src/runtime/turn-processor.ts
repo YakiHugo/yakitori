@@ -1,11 +1,13 @@
 import { isDeepStrictEqual } from "node:util"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
+import type { TurnCompletion, Session } from "../core/session.ts"
 import type {
-  TurnCompletion,
   TurnControl,
-  TurnProcessor,
-  TurnRuntime,
-} from "../core/session.ts"
+  ExecutionContext,
+  SessionTaskRunner,
+} from "../core/session-task.ts"
+import { inputPurpose, inputSource } from "../core/session.ts"
+import { settleTaskResources, TaskCleanupError } from "../core/session-task.ts"
 import { fingerprintTurnInput, type TurnInput } from "../core/session-io.ts"
 import {
   inputContentText,
@@ -141,6 +143,13 @@ const MAX_SERVER_TOOL_PAUSES = 8
 const LENGTH_CONTINUE_REMINDER =
   "Your previous answer was cut off by a generation limit. Continue exactly where it stopped, without repeating it. If a newer user message follows this reminder, answer that message instead."
 
+type WithoutExecution<T> = T extends (
+  execution: ExecutionContext,
+  ...args: infer A
+) => infer R
+  ? (...args: A) => R
+  : never
+
 export type TurnProcessorOptions = {
   readonly modelClient?: ModelClient
   readonly stream?: StreamFn
@@ -158,7 +167,7 @@ export type TurnProcessorOptions = {
   readonly modelContextWindowTokens?: number
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
-  readonly loadModelTransport?: () => Promise<ModelTransportPolicy | undefined>
+  readonly readModelTransport?: () => ModelTransportPolicy | undefined
   readonly loadSessionGoal?: () => Promise<
     | Readonly<{
         objective: string
@@ -218,7 +227,7 @@ export type TurnProcessorOperationalFailureReporter = (
 
 export function createTurnProcessor(
   options: TurnProcessorOptions,
-): TurnProcessor {
+): SessionTaskRunner {
   if (options.modelClient === undefined && options.stream === undefined) {
     throw new Error("Turn processor requires a model client or stream.")
   }
@@ -238,7 +247,8 @@ export function createTurnProcessor(
   let startHooksPromise: Promise<void> | undefined
 
   const ensureSessionHooks = (
-    runtime: TurnRuntime,
+    session: Session,
+    execution: ExecutionContext,
     turnId: string,
     signal: AbortSignal,
   ): Promise<void> => {
@@ -271,7 +281,8 @@ export function createTurnProcessor(
           )
         }
         await recordHookContext(
-          runtime,
+          session,
+          execution,
           turnId,
           outcome?.additionalContext ?? [],
         )
@@ -320,7 +331,7 @@ export function createTurnProcessor(
         throw new AggregateError(errors, "Failed to dispose Turn processor.")
       }
     },
-    async prepare(snapshot, input) {
+    createTask(snapshot, input) {
       const metadata = snapshot.metadata
       if (
         metadata.mateId === undefined ||
@@ -333,26 +344,22 @@ export function createTurnProcessor(
       }
       const selection: ModelSelection = input.modelSelection ??
         snapshot.configuration?.defaultTarget ?? { provider, model }
-      const models = options.modelClient?.models(selection.provider)
-      // Account-scoped catalogs may be empty until first use. Load missing
-      // choices here, but retain admission-time refresh for known models so it
-      // stays paired with the captured Turn transport across provider reloads.
-      try {
-        models?.validate(selection)
-      } catch (error) {
-        if (!(error instanceof ModelNotConfiguredError)) throw error
-        await models?.refresh()
-      }
-      const modelTransport =
-        options.loadModelTransport === undefined
+      const modelTransport = structuredClone(
+        options.readModelTransport === undefined
           ? snapshot.configuration?.modelTransport
-          : await options.loadModelTransport()
-      const configuration =
-        snapshot.configuration === undefined
+          : options.readModelTransport(),
+      )
+      const resolveConfiguration = (
+        models: import("./models-manager.ts").ModelsManager | undefined,
+      ) => {
+        return snapshot.configuration === undefined
           ? SessionConfiguration.create(
               {
                 selection,
-                workspaceRoot: metadata.workingDirectory,
+                workspaceRoot: requireValue(
+                  metadata.workingDirectory,
+                  "Working directory",
+                ),
                 enabledTools: toolRegistry.trustedToolNames(),
                 approvalPolicy,
                 promptCacheKey: metadata.conversationId,
@@ -390,10 +397,107 @@ export function createTurnProcessor(
               ),
               models,
             )
+      }
+      let capturedConfiguration: SessionConfiguration | undefined
+      try {
+        capturedConfiguration = resolveConfiguration(
+          options.modelClient?.models(selection.provider),
+        )
+      } catch (error) {
+        if (!(error instanceof ModelNotConfiguredError)) throw error
+      }
+      // The provider's synchronous start captures its transport/capabilities
+      // before host reloads. Discovery is a shared catalog service, not a Turn effect.
+      const modelSession = options.modelClient?.startTurn(
+        selection.provider,
+        resolveModelRequestPolicy(modelTransport, selection.provider),
+      )
+      let activeStream: AsyncIterator<ModelStreamEvent> | undefined
+      let closePromise: Promise<void> | undefined
+      const closeModelSession = () =>
+        (closePromise ??= Promise.resolve().then(() => modelSession?.close()))
       return {
-        turnId: input.submissionId,
-        configuration: configuration.snapshot,
-        selection,
+        kind: input.manualCompact === true ? "compact" : "regular",
+        async run(session, execution) {
+          try {
+            throwIfAborted(execution.signal)
+            const models = modelSession?.models
+            // Cancellation detaches only our wait on this Session-owned catalog;
+            // discovery can safely finish for the other consumers of that service.
+            await waitForToolReadiness(
+              Promise.resolve().then(() => models?.refresh()),
+              execution.signal,
+            )
+            const configuration =
+              capturedConfiguration ??
+              resolveConfiguration(modelSession?.models)
+            const context = {
+              turnId: input.submissionId,
+              configuration: configuration.snapshot,
+              selection,
+            }
+            await session.beginExecution(execution, context)
+            await ensureSessionHooks(
+              session,
+              execution,
+              input.submissionId,
+              execution.signal,
+            )
+            return await executeTurn({
+              session,
+              execution,
+              input,
+              context,
+              modelSession,
+              control: {
+                signal: execution.signal,
+                takeSteering: () => session.takeSteering(execution),
+                takeSteeringOrComplete: () =>
+                  session.takeSteeringOrComplete(execution),
+              },
+              signal: execution.signal,
+              toolRegistry,
+              permissionGate,
+              runtimeTiming,
+              projectInstructionLoader,
+              skillsLoader,
+              toolExecutionGate,
+              options,
+              setActiveStream(stream) {
+                activeStream = stream
+              },
+            })
+          } finally {
+            await settleTaskResources(closeModelSession)
+          }
+        },
+        async abort() {
+          const results = await Promise.allSettled([
+            Promise.resolve()
+              .then(() => activeStream?.return?.())
+              .catch((cause: unknown) => {
+                reportOperationalFailure(options.onOperationalFailure, {
+                  operation: "abort-model-stream",
+                  cause,
+                })
+                throw cause
+              }),
+            closeModelSession().catch((cause: unknown) => {
+              reportOperationalFailure(options.onOperationalFailure, {
+                operation: "close-model-session",
+                cause,
+              })
+              throw cause
+            }),
+          ])
+          const errors = results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+          )
+          if (errors.length > 0)
+            throw new TaskCleanupError(
+              new AggregateError(errors, "Failed to stop model resources."),
+            )
+        },
       }
     },
 
@@ -412,57 +516,6 @@ export function createTurnProcessor(
         options.modelClient?.models(input.modelSelection.provider),
       ).snapshot
     },
-
-    start(runtime, input, context, control) {
-      const forcedAbort = new AbortController()
-      const signal = AbortSignal.any([control.signal, forcedAbort.signal])
-      let activeStream: AsyncIterator<ModelStreamEvent> | undefined
-      let closeModelSession: (() => Promise<void>) | undefined
-      const completion = ensureSessionHooks(
-        runtime,
-        input.submissionId,
-        signal,
-      ).then(() =>
-        executeTurn({
-          runtime,
-          input,
-          context,
-          control,
-          signal,
-          toolRegistry,
-          permissionGate,
-          runtimeTiming,
-          projectInstructionLoader,
-          skillsLoader,
-          toolExecutionGate,
-          options,
-          setActiveStream(stream) {
-            activeStream = stream
-          },
-          setCloseModelSession(close) {
-            closeModelSession = close
-          },
-        }),
-      )
-      return {
-        completion,
-        abort() {
-          forcedAbort.abort()
-          void activeStream?.return?.().catch((cause) =>
-            reportOperationalFailure(options.onOperationalFailure, {
-              operation: "abort-model-stream",
-              cause,
-            }),
-          )
-          void closeModelSession?.().catch((cause) =>
-            reportOperationalFailure(options.onOperationalFailure, {
-              operation: "close-model-session",
-              cause,
-            }),
-          )
-        },
-      }
-    },
   }
 }
 
@@ -480,7 +533,9 @@ function replaceModelTransport(
 }
 
 async function executeTurn(input: {
-  readonly runtime: TurnRuntime
+  readonly session: Session
+  readonly execution: ExecutionContext
+  readonly modelSession: ModelClientSession | undefined
   readonly input: TurnInput
   readonly context: TurnContextItem
   readonly control: TurnControl
@@ -495,29 +550,17 @@ async function executeTurn(input: {
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
-  readonly setCloseModelSession: (
-    close: (() => Promise<void>) | undefined,
-  ) => void
 }): Promise<TurnCompletion | undefined> {
   const processorStartedAt = Date.now()
   let admittedAt: number | undefined
-  const metadata = input.runtime.snapshot().metadata
-  const modelSession = input.options.modelClient?.startTurn(
-    input.context.selection.provider,
-    resolveModelRequestPolicy(
-      input.context.configuration.modelTransport,
-      input.context.selection.provider,
-    ),
-  )
-  let closePromise: Promise<void> | undefined
-  const closeModelSession = () => {
-    closePromise ??= Promise.resolve().then(() => modelSession?.close())
-    return closePromise
-  }
-  input.setCloseModelSession(closeModelSession)
+  const metadata = input.session.executionSnapshot(input.execution).metadata
+  const modelSession = input.modelSession
   try {
     const models = modelSession?.models
-    await models?.refresh()
+    await waitForToolReadiness(
+      Promise.resolve().then(() => models?.refresh()),
+      input.signal,
+    )
     const requestSettings = SessionConfiguration.restore(
       input.context.configuration,
       models,
@@ -528,7 +571,8 @@ async function executeTurn(input: {
       mateRevisionId: requireValue(metadata.mateRevisionId, "Mate revision id"),
     })
     if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
-      input.runtime.emitWarning(
+      input.session.emitWarning(
+        input.execution,
         `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using generic model settings${turn.requestSettings.modelInfo.fileEditingToolType === "none" ? "; file editing tools are unavailable" : " and coding tools"}.`,
       )
     }
@@ -541,7 +585,7 @@ async function executeTurn(input: {
       if (initialInputHandled) return true
       initialInputHandled = true
       const promptHook =
-        input.input.goalId === undefined && input.input.provenance === undefined
+        inputSource(input.input) === "human"
           ? await input.options.hookRunner?.run({
               event: HookEvent.UserPromptSubmit,
               payload: {
@@ -555,16 +599,18 @@ async function executeTurn(input: {
           : undefined
       if (promptHook?.continue === false) {
         await recordHookContext(
-          input.runtime,
+          input.session,
+          input.execution,
           input.input.submissionId,
           promptHook.additionalContext ?? [],
         )
         return false
       }
-      await input.runtime.recordInitialInput()
+      await input.session.recordInitialInput(input.execution)
       admittedAt = Date.now()
       await recordHookContext(
-        input.runtime,
+        input.session,
+        input.execution,
         input.input.submissionId,
         promptHook?.additionalContext ?? [],
       )
@@ -603,12 +649,6 @@ async function executeTurn(input: {
       }
     }
     throw error
-  } finally {
-    try {
-      await closeModelSession()
-    } finally {
-      input.setCloseModelSession(undefined)
-    }
   }
 }
 
@@ -623,7 +663,7 @@ async function executeTurnModelLoop(
   const remoteCompaction = modelSession?.remoteCompaction ?? false
   const wireApi = modelSession?.wireApi
   const nativePdf = modelSession?.nativePdf === true
-  const metadata = input.runtime.snapshot().metadata
+  const metadata = input.session.executionSnapshot(input.execution).metadata
   const latency: { -readonly [K in keyof TurnLatency]: TurnLatency[K] } = {
     setupMs: Math.max(0, Date.now() - timing.startedAt),
     backgroundCompactionMs: 0,
@@ -650,7 +690,7 @@ async function executeTurnModelLoop(
   let continuationNeedsCompaction = false
   const answerItemIds: string[] = []
   const finish = (reason?: TurnCompletion["reason"]): TurnCompletion => {
-    input.runtime.recordTurnMetrics({
+    input.session.recordTurnMetrics(input.execution, {
       modelCalls: modelCalls + compactionModelCalls + warmupModelCalls,
       toolCalls,
       modelDurationMs,
@@ -709,7 +749,7 @@ async function executeTurnModelLoop(
       budget?.assertAvailable()
       const reminder = budget?.pendingReminder(metadata.id)
       if (reminder !== undefined) {
-        await input.runtime.recordConversationItems([
+        await input.session.recordConversationItems(input.execution, [
           envelope(input.input.submissionId, {
             role: "developer",
             content: [
@@ -769,7 +809,7 @@ async function executeTurnModelLoop(
         currentDiagnostics.add(key)
         if (previousDiagnostics.has(key)) continue
         const message = `${diagnostic.path}: ${diagnostic.message}`
-        input.runtime.emitWarning(message)
+        input.session.emitWarning(input.execution, message)
         reportOperationalFailure(input.options.onOperationalFailure, {
           operation: "load-instructions",
           cause: new Error(message),
@@ -787,7 +827,7 @@ async function executeTurnModelLoop(
           ? {}
           : { now: input.options.now() }),
       })
-      const beforeStep = input.runtime.snapshot()
+      const beforeStep = input.session.executionSnapshot(input.execution)
       const currentInputIndex = beforeStep.context.history.findIndex(
         (entry) => entry.turnId === input.input.submissionId,
       )
@@ -858,23 +898,27 @@ async function executeTurnModelLoop(
           !input.signal.aborted &&
           pendingSteering.length === 0
         ) {
-          const applied = await input.runtime.replaceConversationHistory({
-            replacement: candidate.replacement,
-            summary: candidate.summary,
-            baseHistoryLength: candidate.prefix.length,
-            expectedPrefix: candidate.prefix,
-          })
+          const applied = await input.session.checkpointHistory(
+            input.execution,
+            {
+              replacement: candidate.replacement,
+              summary: candidate.summary,
+              baseHistoryLength: candidate.prefix.length,
+              expectedPrefix: candidate.prefix,
+            },
+          )
           if (applied) {
             latency.backgroundCompactionsApplied += 1
             const item: StartedExecutionItem = {
               type: "context_compaction",
               itemId: createCompactionId(),
             }
-            input.runtime.emitItemStarted(item)
-            await input.runtime.recordItemCompletions([
+            input.session.emitItemStarted(input.execution, item)
+            await input.session.recordItemCompletions(input.execution, [
               completeCompactionItem(item, "completed"),
             ])
-            const history = input.runtime.snapshot().context.history
+            const history = input.session.executionSnapshot(input.execution)
+              .context.history
             const tokens = estimateModelRequestBudget({
               target: step.target,
               system: [configuration.baseInstructions],
@@ -882,7 +926,7 @@ async function executeTurnModelLoop(
               tools: step.toolRouter.modelDefinitions,
               toolWireProtocol: step.toolWireProtocol,
             }).estimatedInputTokens
-            await input.runtime.recordContextTokens({
+            await input.session.recordContextTokens(input.execution, {
               activeContextTokens: tokens,
               inputTokens: tokens,
               estimatedPrefill: true,
@@ -899,7 +943,7 @@ async function executeTurnModelLoop(
         latency.backgroundCompactionsDiscarded += 1
       }
       if (input.input.manualCompact) {
-        await input.runtime.recordModelContext({
+        await input.session.recordModelContext(input.execution, {
           provider: step.target.provider,
           model: step.target.model,
           ...(step.modelInfo.compactionHash === undefined
@@ -907,7 +951,8 @@ async function executeTurnModelLoop(
             : { compactionHash: step.modelInfo.compactionHash }),
         })
         const compacted = await compactLiveHistory({
-          runtime: input.runtime,
+          session: input.session,
+          execution: input.execution,
           turnId: input.input.submissionId,
           step,
           worldState,
@@ -931,7 +976,7 @@ async function executeTurnModelLoop(
         })
         if (!compacted)
           throw new Error("There is no conversation history to compact.")
-        input.runtime.recordTurnMetrics({
+        input.session.recordTurnMetrics(input.execution, {
           modelCalls: compactionModelCalls,
           toolCalls: 0,
           modelDurationMs,
@@ -1055,7 +1100,8 @@ async function executeTurnModelLoop(
               })
               try {
                 await compactLiveHistory({
-                  runtime: input.runtime,
+                  session: input.session,
+                  execution: input.execution,
                   turnId: input.input.submissionId,
                   step: sourceStep,
                   worldState,
@@ -1100,7 +1146,8 @@ async function executeTurnModelLoop(
         compactedAtModelCall !== modelCalls
       ) {
         const compacted = await compactLiveHistory({
-          runtime: input.runtime,
+          session: input.session,
+          execution: input.execution,
           turnId: input.input.submissionId,
           step,
           worldState,
@@ -1171,7 +1218,7 @@ async function executeTurnModelLoop(
         continuationNeedsCompaction = false
       }
       if (continuingAnswer && continuationReminderNeeded) {
-        await input.runtime.recordConversationItems([
+        await input.session.recordConversationItems(input.execution, [
           envelope(input.input.submissionId, {
             role: "developer",
             content: [{ type: "text", text: LENGTH_CONTINUE_REMINDER }],
@@ -1180,13 +1227,9 @@ async function executeTurnModelLoop(
         continuationReminderNeeded = false
       }
       for (const submitted of pendingSkillInputs.splice(0)) {
-        if (
-          submitted.goalId !== undefined ||
-          submitted.provenance !== undefined
-        )
-          continue
-        const alreadyLoaded = input.runtime
-          .snapshot()
+        if (inputSource(submitted) !== "human") continue
+        const alreadyLoaded = input.session
+          .executionSnapshot(input.execution)
           .context.history.some(
             ({ item }) =>
               (item.role === "user" || item.role === "developer") &&
@@ -1197,13 +1240,13 @@ async function executeTurnModelLoop(
         const text = await loadExplicitSkillInstructions(
           inputContentText(submitted.content),
           skillSnapshot,
-          (message) => input.runtime.emitWarning(message),
+          (message) => input.session.emitWarning(input.execution, message),
           instructionConfiguration.skillMcpServers === undefined
             ? undefined
             : { mcpServers: instructionConfiguration.skillMcpServers },
         )
         if (text !== undefined)
-          await input.runtime.recordConversationItems([
+          await input.session.recordConversationItems(input.execution, [
             envelope(submitted.submissionId, {
               role: "user",
               content: [{ type: "text", text }],
@@ -1219,7 +1262,8 @@ async function executeTurnModelLoop(
         worldState,
       )
       if (worldDiff !== undefined) {
-        await input.runtime.recordWorldStateUpdate(
+        await input.session.recordWorldStateUpdate(
+          input.execution,
           worldDiff.fragments.map((fragment) =>
             envelope(input.input.submissionId, {
               role: fragment.role,
@@ -1239,7 +1283,8 @@ async function executeTurnModelLoop(
         )
       }
 
-      const stablePrefix = input.runtime.snapshot().context.history
+      const stablePrefix = input.session.executionSnapshot(input.execution)
+        .context.history
       const durableMessages = completeToolCallHistory(
         stablePrefix.map(({ item }) => item),
       )
@@ -1247,8 +1292,8 @@ async function executeTurnModelLoop(
       let visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
-      let requestHistoryAnchorItemId = input.runtime
-        .snapshot()
+      let requestHistoryAnchorItemId = input.session
+        .executionSnapshot(input.execution)
         .context.history.at(-1)?.id
       const request: ModelRequest = {
         assets: {
@@ -1267,7 +1312,9 @@ async function executeTurnModelLoop(
             if (outcome.status === "rejected") throw outcome.reason
           }
           throwIfAborted(input.signal)
-          const currentHistory = input.runtime.snapshot().context.history
+          const currentHistory = input.session.executionSnapshot(
+            input.execution,
+          ).context.history
           requestHistoryAnchorItemId = currentHistory.at(-1)?.id
           const history = completeToolCallHistory(
             currentHistory.map(({ item }) => item),
@@ -1311,7 +1358,7 @@ async function executeTurnModelLoop(
         signal: input.signal,
       }
       if (modelCalls === 0) {
-        await input.runtime.recordModelContext({
+        await input.session.recordModelContext(input.execution, {
           provider: step.target.provider,
           model: step.target.model,
           ...(step.modelInfo.compactionHash === undefined
@@ -1352,12 +1399,12 @@ async function executeTurnModelLoop(
         | undefined
       const modelStartedAt = Date.now()
       latency.firstRequestMs ??= elapsed()
-      input.runtime.recordRequestStartedAt(modelStartedAt)
+      input.session.recordRequestStartedAt(input.execution, modelStartedAt)
       let firstTokenAt: number | undefined
       const executionStep = step
       const callIndex = modelCalls + 1
       const attempt = createModelAttemptTracker(
-        input.runtime.recordModelAttempt,
+        (attempt) => input.session.recordModelAttempt(input.execution, attempt),
         executionStep.target,
         wireApi,
       )
@@ -1399,10 +1446,10 @@ async function executeTurnModelLoop(
               permissionGate: input.permissionGate,
               recordToolStarted: async (item) => {
                 latency.firstToolMs ??= elapsed()
-                await input.runtime.recordToolStarted(item)
+                await input.session.recordToolStarted(input.execution, item)
               },
               publishPermissionEvent: (event) =>
-                input.runtime.emitPermissionEvent(event),
+                input.session.emitPermissionEvent(input.execution, event),
               permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
               approvalPolicy: configuration.approvalPolicy,
               rolloutAssets: input.options.rolloutAssets,
@@ -1476,7 +1523,8 @@ async function executeTurnModelLoop(
                   ? {}
                   : { toolContentBlockCount }),
               }
-              await input.runtime.recordToolResult(
+              await input.session.recordToolResult(
+                input.execution,
                 resultItem,
                 completeToolItem(
                   toolPlan,
@@ -1537,8 +1585,11 @@ async function executeTurnModelLoop(
           },
           itemId,
         )
-        await input.runtime.recordConversationItems([item])
-        await input.runtime.recordItemCompletions(completedResponseItems(item))
+        await input.session.recordConversationItems(input.execution, [item])
+        await input.session.recordItemCompletions(
+          input.execution,
+          completedResponseItems(item),
+        )
         if (content.some((block) => block.type === "tool_call")) {
           answerItemIds.length = 0
           answerStartIndex = 0
@@ -1592,14 +1643,14 @@ async function executeTurnModelLoop(
         emitModelStream: (event) => {
           if (event.kind === "assistant" && event.delta.trim().length > 0)
             latency.firstUsefulOutputMs ??= elapsed()
-          input.runtime.emitModelStream(event)
+          input.session.emitModelStream(input.execution, event)
         },
         emitWarning: (message, diagnostic) =>
-          input.runtime.emitWarning(message, diagnostic),
+          input.session.emitWarning(input.execution, message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
         onRetry(committed) {
-          input.runtime.invalidateRequestStartedAt()
+          input.session.invalidateRequestStartedAt(input.execution)
           if (committed) {
             // A transport retry starts another attempt, not a Length answer
             // fragment. Earlier Length continuations still belong to the answer.
@@ -1621,7 +1672,7 @@ async function executeTurnModelLoop(
           usages.push(usage)
           const aggregate = aggregateTokenUsage(usages)
           if (aggregate !== undefined)
-            await input.runtime.recordUsage(aggregate)
+            await input.session.checkpointUsage(input.execution, aggregate)
           const contextTokens =
             usage.activeContextTokens ??
             (usage.inputTokens === undefined
@@ -1713,9 +1764,11 @@ async function executeTurnModelLoop(
         )
         const historyAnchorItemId = streamedTools
           ? requestHistoryAnchorItemId
-          : input.runtime.snapshot().context.history.at(-1)?.id
+          : input.session
+              .executionSnapshot(input.execution)
+              .context.history.at(-1)?.id
         if (historyAnchorItemId !== undefined) {
-          await input.runtime.recordContextTokens({
+          await input.session.recordContextTokens(input.execution, {
             ...sampledContext,
             ...(streamedTools
               ? { historyAnchorTokens: sampledContext.inputTokens }
@@ -1756,7 +1809,9 @@ async function executeTurnModelLoop(
       // unfinished preparation at handoff overlaps an otherwise serial wait,
       // rather than adding speculative latency to an admitted next request.
       // Foreground compaction remains the universal fallback.
-      const afterResponse = input.runtime.snapshot().context
+      const afterResponse = input.session.executionSnapshot(
+        input.execution,
+      ).context
       if (
         calls.length > 0 &&
         pendingToolBatches > 0 &&
@@ -1819,14 +1874,15 @@ async function executeTurnModelLoop(
                 signal,
               }),
               stream,
-              recordModelAttempt: input.runtime.recordModelAttempt,
+              recordModelAttempt: (attempt) =>
+                input.session.recordModelAttempt(input.execution, attempt),
               ...(wireApi === undefined ? {} : { wireApi }),
               threadId: metadata.id,
               turnId: input.input.submissionId,
               assistantResponseBytes:
                 step.executionPolicy.assistantResponseBytes,
               emitWarning: (message, diagnostic) =>
-                input.runtime.emitWarning(message, diagnostic),
+                input.session.emitWarning(input.execution, message, diagnostic),
               onOperationalFailure: input.options.onOperationalFailure,
               onFirstToken() {
                 firstTokenAt ??= Date.now()
@@ -1835,7 +1891,10 @@ async function executeTurnModelLoop(
                 usages.push(usage)
                 const aggregate = aggregateTokenUsage(usages)
                 if (aggregate !== undefined)
-                  await input.runtime.recordUsage(aggregate)
+                  await input.session.checkpointUsage(
+                    input.execution,
+                    aggregate,
+                  )
                 budget?.recordUsage(usage)
               },
               setActiveStream: input.setActiveStream,
@@ -1864,7 +1923,9 @@ async function executeTurnModelLoop(
               checkpoint: envelope(input.input.submissionId, checkpoint),
             })
           } catch (error) {
-            if (!signal.aborted && !isAbortError(error)) {
+            if (error instanceof TaskCleanupError)
+              backgroundFailure = { cause: error }
+            else if (!signal.aborted && !isAbortError(error)) {
               if (
                 error instanceof ModelFailureError ||
                 isContextOverflowError(error)
@@ -1926,7 +1987,7 @@ async function executeTurnModelLoop(
             usages.push(usage)
             const aggregate = aggregateTokenUsage(usages)
             if (aggregate !== undefined)
-              await input.runtime.recordUsage(aggregate)
+              await input.session.checkpointUsage(input.execution, aggregate)
             budget?.recordUsage(usage)
           },
         })
@@ -2002,7 +2063,8 @@ async function executeTurnModelLoop(
           lengthContinuations += 1
           continuingAnswer = true
           continuationNeedsCompaction = response.lengthReason === "context"
-          input.runtime.emitWarning(
+          input.session.emitWarning(
+            input.execution,
             `Model answer reached its generation limit; continuing (${lengthContinuations}/${MAX_LENGTH_CONTINUATIONS}).`,
             {
               code: "model_length_continuation",
@@ -2046,16 +2108,22 @@ async function executeTurnModelLoop(
           signal: input.signal,
         })
         if (stopHook?.continue === false) {
-          await recordHookContext(input.runtime, input.input.submissionId, [
-            ...(stopHook.additionalContext ?? []),
-            stopHook.reason ?? "Stop hook requested another model step.",
-          ])
+          await recordHookContext(
+            input.session,
+            input.execution,
+            input.input.submissionId,
+            [
+              ...(stopHook.additionalContext ?? []),
+              stopHook.reason ?? "Stop hook requested another model step.",
+            ],
+          )
           answerItemIds.length = 0
           continuationReminderNeeded = true
           continue
         }
         await recordHookContext(
-          input.runtime,
+          input.session,
+          input.execution,
           input.input.submissionId,
           stopHook?.additionalContext ?? [],
         )
@@ -2077,12 +2145,13 @@ async function executeTurnModelLoop(
         const capacity =
           step?.configuration.modelCapacity?.effectiveContextWindowTokens
         if (capacity !== undefined && step !== undefined)
-          await input.runtime.recordContextTokens({
+          await input.session.recordContextTokens(input.execution, {
             activeContextTokens: capacity,
             capacityTokens: capacity,
             historyAnchorItemId:
-              input.runtime.snapshot().context.history.at(-1)?.id ??
-              input.input.submissionId,
+              input.session
+                .executionSnapshot(input.execution)
+                .context.history.at(-1)?.id ?? input.input.submissionId,
             provider: step.target.provider,
             model: step.target.model,
           })
@@ -2093,8 +2162,18 @@ async function executeTurnModelLoop(
       warmupController?.abort()
       await backgroundWork
       await warmupWork
-      await Promise.all(pendingTools)
+      const stoppedTools = await Promise.all(pendingTools)
       await step?.toolRouter.release()
+      await settleTaskResources(() => {
+        if (backgroundFailure?.cause instanceof TaskCleanupError)
+          throw backgroundFailure.cause
+        const failedStop = stoppedTools.find(
+          (result) =>
+            result.status === "rejected" &&
+            result.reason instanceof TaskCleanupError,
+        )
+        if (failedStop?.status === "rejected") throw failedStop.reason
+      })
     }
   }
 }
@@ -2105,8 +2184,8 @@ async function consumeModelStream(input: {
   readonly threadId: string
   readonly turnId: string
   readonly itemId?: string
-  readonly emitModelStream?: TurnRuntime["emitModelStream"]
-  readonly emitWarning?: TurnRuntime["emitWarning"]
+  readonly emitModelStream?: WithoutExecution<Session["emitModelStream"]>
+  readonly emitWarning?: WithoutExecution<Session["emitWarning"]>
   readonly assistantResponseBytes: number
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
@@ -2117,7 +2196,9 @@ async function consumeModelStream(input: {
     native?: readonly ModelNativeItem[],
   ) => Promise<void>
   readonly attempt?: ReturnType<typeof createModelAttemptTracker>
-  readonly recordModelAttempt?: TurnRuntime["recordModelAttempt"]
+  readonly recordModelAttempt?: (
+    attempt: import("../core/rollout.ts").ModelAttemptRecord,
+  ) => Promise<void>
   readonly wireApi?: ModelWireApi | undefined
   readonly onFirstToken?: () => void
   readonly onRetry?: (committedOutput: boolean, nextAttempt: number) => void
@@ -2295,14 +2376,17 @@ async function consumeModelStream(input: {
   } finally {
     input.setActiveStream(undefined)
     if (!exhausted) {
-      try {
-        await iterator.return?.()
-      } catch (error) {
-        reportOperationalFailure(input.onOperationalFailure, {
-          operation: "close-model-stream",
-          cause: error,
-        })
-      }
+      await settleTaskResources(async () => {
+        try {
+          await iterator.return?.()
+        } catch (error) {
+          reportOperationalFailure(input.onOperationalFailure, {
+            operation: "close-model-stream",
+            cause: error,
+          })
+          throw error
+        }
+      })
     }
   }
   if (terminal === undefined) {
@@ -2371,7 +2455,8 @@ async function compactLiveHistory(
     remoteCompaction?: ModelClientSession["remoteCompaction"]
     fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
     injectWorldState?: boolean
-    runtime: TurnRuntime
+    session: Session
+    execution: ExecutionContext
     turnId: string
     step: StepContext
     worldState: WorldState
@@ -2412,7 +2497,7 @@ async function compactLiveHistory(
     event: HookEvent.PreCompact,
     matcher: input.remoteCompaction ? "remote" : "local",
     payload: {
-      session_id: input.runtime.snapshot().metadata.id,
+      session_id: input.session.executionSnapshot(input.execution).metadata.id,
       turn_id: input.turnId,
       trigger: input.trigger ?? "auto",
       custom_instructions: null,
@@ -2424,7 +2509,8 @@ async function compactLiveHistory(
     throw new Error(preHook.reason ?? "PreCompact hook blocked compaction.")
   }
   await recordHookContext(
-    input.runtime,
+    input.session,
+    input.execution,
     input.turnId,
     preHook?.additionalContext ?? [],
   )
@@ -2433,27 +2519,29 @@ async function compactLiveHistory(
     type: "context_compaction",
     itemId: createCompactionId(),
   }
-  input.runtime.emitItemStarted(compactionItem)
+  input.session.emitItemStarted(input.execution, compactionItem)
   let completed = false
 
   try {
     const compact = async (request: ModelRequest) => {
       const modelStartedAt = Date.now()
-      input.runtime.recordRequestStartedAt(modelStartedAt)
+      input.session.recordRequestStartedAt(input.execution, modelStartedAt)
       let firstTokenAt: number | undefined
       const response = await consumeModelStream({
         request,
         stream: compactionStream,
-        recordModelAttempt: input.runtime.recordModelAttempt,
+        recordModelAttempt: (attempt) =>
+          input.session.recordModelAttempt(input.execution, attempt),
         wireApi: input.wireApi,
-        threadId: input.runtime.snapshot().metadata.id,
+        threadId: input.session.executionSnapshot(input.execution).metadata.id,
         turnId: input.turnId,
         assistantResponseBytes:
           compactionStep.executionPolicy.assistantResponseBytes,
         emitWarning: (message, diagnostic) =>
-          input.runtime.emitWarning(message, diagnostic),
+          input.session.emitWarning(input.execution, message, diagnostic),
         onOperationalFailure: input.onOperationalFailure,
-        onRetry: input.runtime.invalidateRequestStartedAt,
+        onRetry: () =>
+          input.session.invalidateRequestStartedAt(input.execution),
         onFirstToken() {
           firstTokenAt ??= Date.now()
         },
@@ -2461,7 +2549,7 @@ async function compactLiveHistory(
           input.usages.push(usage)
           const aggregate = aggregateTokenUsage(input.usages)
           if (aggregate !== undefined)
-            await input.runtime.recordUsage(aggregate)
+            await input.session.checkpointUsage(input.execution, aggregate)
           input.rolloutBudget?.recordUsage(usage)
         },
         setActiveStream: input.setActiveStream,
@@ -2653,7 +2741,7 @@ async function compactLiveHistory(
             ...retained.slice(-1),
             summaryItem,
           ]
-    await input.runtime.replaceConversationHistory({
+    await input.session.checkpointHistory(input.execution, {
       replacement,
       summary: result.summary,
       baseHistoryLength: input.baseHistoryLength ?? input.history.length,
@@ -2669,18 +2757,19 @@ async function compactLiveHistory(
     const estimatedContextTokens = estimateModelRequestBudget({
       target: compactionStep.target,
       system: [compactionStep.configuration.baseInstructions],
-      messages: input.runtime
-        .snapshot()
+      messages: input.session
+        .executionSnapshot(input.execution)
         .context.history.map((item) => item.item),
       tools: [],
       toolWireProtocol: "eager",
     }).estimatedInputTokens
-    await input.runtime.recordContextTokens({
+    await input.session.recordContextTokens(input.execution, {
       activeContextTokens: estimatedContextTokens,
       inputTokens: estimatedContextTokens,
       estimatedPrefill: true,
       historyAnchorItemId:
-        input.runtime.snapshot().context.history.at(-1)?.id ?? input.turnId,
+        input.session.executionSnapshot(input.execution).context.history.at(-1)
+          ?.id ?? input.turnId,
       provider: compactionStep.target.provider,
       model: compactionStep.target.model,
       ...(compactionStep.configuration.modelCapacity
@@ -2692,7 +2781,7 @@ async function compactLiveHistory(
                 .effectiveContextWindowTokens,
           }),
     })
-    await input.runtime.recordItemCompletions([
+    await input.session.recordItemCompletions(input.execution, [
       completeCompactionItem(compactionItem, "completed"),
     ])
     completed = true
@@ -2700,7 +2789,8 @@ async function compactLiveHistory(
       event: HookEvent.PostCompact,
       matcher: input.remoteCompaction ? "remote" : "local",
       payload: {
-        session_id: input.runtime.snapshot().metadata.id,
+        session_id: input.session.executionSnapshot(input.execution).metadata
+          .id,
         turn_id: input.turnId,
         trigger: input.trigger ?? "auto",
       },
@@ -2711,16 +2801,19 @@ async function compactLiveHistory(
       throw new Error(postHook.reason ?? "PostCompact hook blocked the Turn.")
     }
     await recordHookContext(
-      input.runtime,
+      input.session,
+      input.execution,
       input.turnId,
       postHook?.additionalContext ?? [],
     )
-    input.rolloutBudget?.rearm(input.runtime.snapshot().metadata.id)
+    input.rolloutBudget?.rearm(
+      input.session.executionSnapshot(input.execution).metadata.id,
+    )
     return true
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) throw abortError()
     if (!completed) {
-      await input.runtime.recordItemCompletions([
+      await input.session.recordItemCompletions(input.execution, [
         completeCompactionItem(compactionItem, "failed", error),
       ])
     }
@@ -2737,8 +2830,10 @@ type ToolExecutionScope = {
   readonly signal: AbortSignal
   readonly toolPlan: ReturnType<ToolRegistry["finalize"]>
   readonly permissionGate: PermissionGate
-  readonly recordToolStarted: TurnRuntime["recordToolStarted"]
-  readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
+  readonly recordToolStarted: WithoutExecution<Session["recordToolStarted"]>
+  readonly publishPermissionEvent: WithoutExecution<
+    Session["emitPermissionEvent"]
+  >
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
   readonly rolloutAssets: RolloutAssets | undefined
@@ -3222,7 +3317,7 @@ async function recordSteering(
 ): Promise<readonly TurnInput[]> {
   const accepted: TurnInput[] = []
   if (steering.length === 0) return accepted
-  const metadata = input.runtime.snapshot().metadata
+  const metadata = input.session.executionSnapshot(input.execution).metadata
   for (const item of steering) {
     const hook =
       item.goalId === undefined && item.provenance === undefined
@@ -3239,15 +3334,16 @@ async function recordSteering(
         : undefined
     if (hook?.continue !== false) {
       if (item.provenance !== undefined)
-        await input.runtime.recordThreadMessageInput(item)
+        await input.session.recordThreadMessageInput(input.execution, item)
       else
-        await input.runtime.recordConversationItems([
+        await input.session.recordConversationItems(input.execution, [
           inputEnvelope(item, item.submissionId),
         ])
       accepted.push(item)
     }
     await recordHookContext(
-      input.runtime,
+      input.session,
+      input.execution,
       input.input.submissionId,
       hook?.additionalContext ?? [],
     )
@@ -3256,13 +3352,14 @@ async function recordSteering(
 }
 
 async function recordHookContext(
-  runtime: TurnRuntime,
+  session: Session,
+  execution: ExecutionContext,
   turnId: string,
   context: readonly string[],
 ): Promise<void> {
   const content = context.filter((entry) => entry.trim() !== "")
   if (content.length === 0) return
-  await runtime.recordConversationItems([
+  await session.recordConversationItems(execution, [
     envelope(turnId, {
       role: "developer",
       content: [
@@ -3283,7 +3380,12 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
     ),
     submissionMetadata: {
       content: input.content,
-      requestFingerprint: fingerprintTurnInput(input),
+      source: inputSource(input),
+      purpose: inputPurpose(input),
+      ...(inputSource(input) === "human" &&
+      inputPurpose(input) !== "question_answer"
+        ? {}
+        : { requestFingerprint: fingerprintTurnInput(input) }),
       ...(input.modelSelection === undefined
         ? {}
         : { modelSelection: input.modelSelection }),
