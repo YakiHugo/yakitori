@@ -1,3 +1,4 @@
+import { bindExecution } from "../../support/session-execution.ts"
 import {
   mkdir,
   mkdtemp,
@@ -70,22 +71,38 @@ function createRealHandlers(
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      prepare(_snapshot, input) {
-        const selection = { provider: "faux", model: "scripted" }
-        return {
-          turnId: input.submissionId,
-          selection,
-          configuration: SessionConfiguration.create({
+      createTask(snapshot, input) {
+        const context = ((_snapshot, input) => {
+          const selection = { provider: "faux", model: "scripted" }
+          return {
+            turnId: input.submissionId,
             selection,
-            workspaceRoot: process.cwd(),
-            enabledTools: [],
-            approvalPolicy: "always_approve",
-            promptCacheKey: input.submissionId,
-          }).snapshot,
+            configuration: SessionConfiguration.create({
+              selection,
+              workspaceRoot: process.cwd(),
+              enabledTools: [],
+              approvalPolicy: "always_approve",
+              promptCacheKey: input.submissionId,
+            }).snapshot,
+          }
+        })(snapshot, input)
+        let stop: (() => void) | undefined
+        return {
+          kind: input.manualCompact === true ? "compact" : "regular",
+          async run(session, execution) {
+            await session.beginExecution(execution, context)
+            const runtime = bindExecution(session, execution)
+
+            const task = (() => {
+              return { completion: runtime.recordInitialInput(), abort() {} }
+            })()
+            stop = task.abort
+            return (await task.completion) ?? undefined
+          },
+          async abort() {
+            stop?.()
+          },
         }
-      },
-      start(runtime) {
-        return { completion: runtime.recordInitialInput(), abort() {} }
       },
     }),
   })
@@ -322,7 +339,7 @@ describe("session methods over real handlers", () => {
     })
   })
 
-  it("deduplicates retried admissions", async () => {
+  it("rejects repeated human IDs without duplicating their durable input", async () => {
     const { connection } = realSetup()
     await initializeConnection(connection)
     const created = await createSession(connection)
@@ -333,9 +350,9 @@ describe("session methods over real handlers", () => {
       content: inputFixture([{ type: "text" as const, text: "persist once" }]),
     }
 
-    const first = await rpc(connection, "session/input", request)
-    const replayed = await rpc(connection, "session/input", request)
-    expect(replayed).toEqual(first)
+    await rpc(connection, "session/input", request)
+    const replayed = await rpcError(connection, "session/input", request)
+    expect(replayed).toMatchObject({ data: { code: "conflict" } })
 
     const conflict = await rpcError(connection, "session/input", {
       ...request,

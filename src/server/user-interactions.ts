@@ -134,25 +134,28 @@ export function createSessionInteractions(
         throw new UserInteractionError(
           "Answer each question before submitting.",
         )
-      // Admission owns deduplication and its durable persistence barrier. The
-      // same question cannot enqueue another answer after reconnect or restart.
-      return handlers.admitInput({
-        sessionId: request.sessionId,
-        requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
-        role: "user",
-        content: createUserInput(
-          questions.questions
-            .map(
-              (question, index) =>
-                `${question.title}\n${request.answers[index]}`,
-            )
-            .join("\n\n"),
-        ),
-        metadata: {
-          userQuestionId: request.toolCallId,
-          userQuestionAnswers: request.answers,
+      // A typed question response retains one delivery identity across reconnect
+      // and restart; ordinary composer sends remain separate human inputs.
+      return handlers.admitInput(
+        {
+          sessionId: request.sessionId,
+          requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
+          role: "user",
+          content: createUserInput(
+            questions.questions
+              .map(
+                (question, index) =>
+                  `${question.title}\n${request.answers[index]}`,
+              )
+              .join("\n\n"),
+          ),
+          metadata: {
+            userQuestionId: request.toolCallId,
+            userQuestionAnswers: request.answers,
+          },
         },
-      })
+        "question_answer",
+      )
     },
   }
 }

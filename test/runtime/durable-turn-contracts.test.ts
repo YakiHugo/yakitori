@@ -263,6 +263,12 @@ describe("durable Turn execution contracts", () => {
       return events
     })
     try {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      if (mode === "raw") {
+        expect(published).toBe(false)
+        expect(thread.status).toBe("active")
+      }
+      release.resolve()
       // Race observable milestones, not a timeout, so skipping the barrier fails immediately.
       expect(
         await Promise.race([

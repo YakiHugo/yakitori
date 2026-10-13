@@ -133,6 +133,7 @@ export function createAgentRuntime(input: {
         ...(request.messageId === undefined
           ? {}
           : { submissionId: request.messageId }),
+        source: "agent",
         content: createUserInput(request.message),
         // Follow-ups keep the recipient's configured model and use the same
         // fingerprint whether accepted as steering or as a fresh Turn.
@@ -163,6 +164,7 @@ export function createAgentRuntime(input: {
       const submission = await thread.steer(
         {
           submissionId: request.messageId,
+          source: "agent",
           content: createUserInput(request.message),
         },
         turnId,

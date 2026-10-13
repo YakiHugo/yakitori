@@ -2363,7 +2363,7 @@ describe("model selection", () => {
         useAppStore.getState().apiBase,
         "session_1",
       ),
-    ).toHaveLength(0)
+    ).toHaveLength(1)
   })
 
   it("restores promoted image refs after store reset and requeues them on retry", async () => {
@@ -2471,14 +2471,36 @@ describe("model selection", () => {
     await submission
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("late reply"))
     expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
+    replay?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 4,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: steer.requestId,
+            inputId: "input_confirmed",
+            role: InputRole.User,
+            content: requestedInputContent(steer.requestId),
+          },
+        },
+      }),
+    )
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
-  it("replaces restored draft image refs when the steer reply arrives after replay", async () => {
+  it.each([
+    "live",
+    "after navigation",
+  ])("keeps promoted recovered steer attachments until durable confirmation %s", async (receipt) => {
     const original = {
       name: "screen.png",
       mediaType: "image/png" as const,
       sizeBytes: 9,
-      file: { rolloutId: "draft_1", path: "attachments/staging/1.png" },
+      file: {
+        rolloutId: receipt === "live" ? "draft_live" : "draft_navigation",
+        path: "attachments/staging/1.png",
+      },
     }
     const promoted = {
       ...original,
@@ -2522,19 +2544,37 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("inspect image", [promoted]),
     )
-    useAppStore.getState().stream?.close()
-    useAppStore.setState({
-      ...createInitialAppState(),
-      apiBase: "http://api.test",
-    })
-    await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(fakeRef.current.streams.at(-1), { ...sessionDetail, seq: 3 })
-    fakeRef.current.streams.at(-1)?.emitReplayComplete()
+    if (receipt === "after navigation") {
+      useAppStore.getState().stream?.close()
+      useAppStore.setState({
+        ...createInitialAppState(),
+        apiBase: "http://api.test",
+      })
+      await useAppStore.getState().selectSession("session_1")
+      emitSnapshot(fakeRef.current.streams.at(-1), { ...sessionDetail, seq: 3 })
+      fakeRef.current.streams.at(-1)?.emitReplayComplete()
+    }
     expect(
       (useAppStore.getState().promptDraft?.attachments ?? []).filter(
         (attachment) => attachment.mediaType !== "application/pdf",
       ),
     ).toEqual(inputParts("", [promoted]).attachments)
+    fakeRef.current.streams.at(-1)?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 4,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: steer.requestId,
+            inputId: "input_confirmed",
+            role: InputRole.User,
+            content: inputFixture(inputParts("inspect image", [promoted])),
+          },
+        },
+      }),
+    )
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
   it("falls back to a queued admission when the active turn ended before steering", async () => {
@@ -2754,7 +2794,7 @@ describe("model selection", () => {
         inputRecoveryMemory.listAdmissionsForApiBase(
           useAppStore.getState().apiBase,
         ),
-      ).toHaveLength(0),
+      ).toHaveLength(1),
     )
   })
 
@@ -4863,7 +4903,9 @@ it.each([
   }
   await sending
   if (failure === "transport failure") {
-    expect(useAppStore.getState().message).toBe("Connection lost")
+    expect(useAppStore.getState().message).toBe(
+      "Sending status is unconfirmed. This input has not been resent.",
+    )
     stream.emitReplayComplete()
   }
   await vi.waitFor(() =>
@@ -4878,6 +4920,111 @@ it.each([
   expect(
     useAppStore.getState().execution.admittedRequestIds[request.requestId],
   ).toBeUndefined()
+})
+
+it("keeps an unconfirmed notice across replay and preserves a later draft with identical text", async () => {
+  fakeRef.current.respond = (method) =>
+    method === "session/queue/list"
+      ? { items: [] }
+      : method === "session/skills"
+        ? { skills: [] }
+        : notFound()
+  const admission = inputRecoveryMemory.reserveAdmission({
+    apiBase: useAppStore.getState().apiBase,
+    sessionId: "session_1",
+    content: inputFixture(inputParts("Same text")),
+  })
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  if (!stream) throw new Error("Missing stream")
+  emitSnapshot(stream)
+  stream.emitReplayComplete()
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("Same text")),
+  )
+  useAppStore.setState({ message: undefined })
+  stream.emitReplayComplete()
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().message).toBe(
+      "Sending status is unconfirmed. This input has not been resent.",
+    ),
+  )
+  useAppStore.getState().setPromptDraft(inputParts("Same text"))
+  stream.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: admission.requestId,
+          inputId: "input_confirmed",
+          role: InputRole.User,
+          content: admission.content,
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("Same text"))
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toEqual([])
+  expect(fakeRef.current.requestsFor("session/input")).toEqual([])
+})
+
+it("retires all confirmed recovery fragments even when receipts arrive before their draft prefix", async () => {
+  fakeRef.current.respond = (method) =>
+    method === "session/queue/list"
+      ? { items: [] }
+      : method === "session/skills"
+        ? { skills: [] }
+        : notFound()
+  const first = inputRecoveryMemory.reserveAdmission({
+    apiBase: useAppStore.getState().apiBase,
+    sessionId: "session_1",
+    content: inputFixture(inputParts("First")),
+  })
+  const second = inputRecoveryMemory.reserveAdmission({
+    apiBase: useAppStore.getState().apiBase,
+    sessionId: "session_1",
+    content: inputFixture(inputParts("Second")),
+  })
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  if (!stream) throw new Error("Missing stream")
+  emitSnapshot(stream)
+  stream.emitReplayComplete()
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().promptDraft?.text).toBe("Second\nFirst"),
+  )
+  for (const [index, input] of [first, second].entries())
+    stream.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: index + 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: input.requestId,
+            inputId: `input_${index}`,
+            role: InputRole.User,
+            content: input.content,
+          },
+        },
+      }),
+    )
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toEqual([])
+  expect(fakeRef.current.requestsFor("session/input")).toEqual([])
 })
 
 describe("goal projections", () => {

@@ -21,6 +21,7 @@ export type EngineCapabilities = Readonly<{
 }>
 
 export type EngineInput = Readonly<{
+  purpose?: "question_answer"
   requestId: string
   text: string
   content?: InputContent

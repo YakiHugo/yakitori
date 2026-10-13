@@ -137,7 +137,7 @@ describe("thread server handlers", () => {
     }
   })
 
-  it("runs manual compaction through the live Session and recovers its checkpoint and request replay", async () => {
+  it("runs manual compaction through the shared task lifecycle and rejects duplicate requests", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-compact-"))
     const store = new JsonlThreadStore({ root: join(workspace, "store") })
     let requests = 0
@@ -215,10 +215,7 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_manual_compact",
     })
-    expect(replay).toMatchObject({
-      ok: true,
-      value: { turnId: compact.value.turnId },
-    })
+    expect(replay).toMatchObject({ ok: false, error: { code: "conflict" } })
     const busy = await handlers.compactSession({
       sessionId,
       requestId: "request_manual_compact_again",
@@ -330,10 +327,7 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_manual_compact",
     })
-    expect(resumedReplay).toMatchObject({
-      ok: true,
-      value: { turnId: compact.value.turnId },
-    })
+    expect(resumedReplay).toMatchObject({ ok: false, error: { code: "conflict" } })
     expect(requests).toBe(2)
   })
 
@@ -2056,7 +2050,7 @@ describe("thread server handlers", () => {
         { type: "image" as const, ...draft },
       ]),
     })
-    expect(replayed).toMatchObject({ ok: true })
+    expect(replayed).toMatchObject({ ok: false, error: { code: "conflict" } })
     await expect(rolloutAssets.read(draft.file)).resolves.toEqual(pngBytes())
     await vi.waitFor(async () => {
       await expect(

@@ -9,7 +9,7 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApplicationResult } from "../../src/server/application-result.ts"
-
+import { createUserInput } from "../../src/core/user-input.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 function body<T>(response: ApplicationResult<T>): T {
@@ -167,8 +167,11 @@ async function fixture(waitForFirstAbort = false) {
     },
     async close() {
       await writeFile(release, "")
-      await application.close()
-      await rm(root, { recursive: true, force: true })
+      try {
+        await application.close()
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
     },
   }
 }
@@ -198,13 +201,46 @@ describe("computer ownership through application turn lifecycle", () => {
   it.each([
     false,
     true,
-  ])("releases ownership after normal completion or cleanup failure (failure=%s)", async (failure) => {
+  ])("releases ownership after successful cleanup and retains failed cleanup until Session closure (failure=%s)", async (failure) => {
     const context = await fixture()
     try {
       await writeFile(context.release, "")
       if (failure) await writeFile(context.fail, "")
       const first = body(await context.application.handlers.createSession())
       await input(context.application, first.session.id, "first")
+      if (failure) {
+        const thread = context.application.threadManager.getThread(
+          first.session.id,
+        )
+        await until(
+          async () =>
+            typeof thread?.agentStatus === "object" &&
+            "errored" in thread.agentStatus,
+        )
+        expect(thread?.status).toBe("active")
+        const stored = await context.application.threadStore.readThread(
+          first.session.id,
+        )
+        expect(
+          stored?.rollout.filter(({ item }) => item.type === "turn_completed"),
+        ).toEqual([])
+        await rm(context.fail, { force: true })
+        const second = body(await context.application.handlers.createSession())
+        await input(context.application, second.session.id, "other-session")
+        await idle(context.application, second.session.id)
+        expect(
+          context.toolResults.some((result) => result.includes("busy")),
+        ).toBe(true)
+        await expect(
+          context.application.threadManager.closeThread(first.session.id),
+        ).rejects.toThrow("Task resource cleanup failed")
+        await input(context.application, second.session.id, "after-release")
+        await idle(context.application, second.session.id)
+        expect(await readFile(context.calls, "utf8")).toContain(
+          "js:after-release",
+        )
+        return
+      }
       await idle(context.application, first.session.id)
       const stored = await context.application.threadStore.readThread(
         first.session.id,
@@ -283,7 +319,10 @@ describe("computer ownership through application turn lifecycle", () => {
           turnId,
         }),
       )
-      await idle(context.application, first.session.id)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(
+        context.application.threadManager.getThread(first.session.id)?.status,
+      ).toBe("active")
       await until(async () => (await context.cleanupInputs()).length === 1)
       expect(await context.cleanupInputs()).toEqual([
         {
@@ -292,14 +331,19 @@ describe("computer ownership through application turn lifecycle", () => {
           turn_id: turnId,
         },
       ])
-      await input(context.application, first.session.id, "same-session")
-      await idle(context.application, first.session.id)
+      expect(
+        await context.application.handlers.admitInput({
+          sessionId: first.session.id,
+          requestId: "same-session",
+          content: createUserInput("same-session"),
+        }),
+      ).toMatchObject({ ok: false, error: { code: "conflict" } })
       const second = body(await context.application.handlers.createSession())
       await input(context.application, second.session.id, "other-session")
       await idle(context.application, second.session.id)
       expect(
         context.toolResults.filter((result) => result.includes("busy")),
-      ).toHaveLength(2)
+      ).toHaveLength(1)
       expect(await readFile(context.calls, "utf8")).toBe(
         "js:first\nturn_ended:start\n",
       )
@@ -307,6 +351,7 @@ describe("computer ownership through application turn lifecycle", () => {
       await until(async () =>
         (await readFile(context.calls, "utf8")).includes("turn_ended:done"),
       )
+      await idle(context.application, first.session.id)
       await input(context.application, second.session.id, "after-release")
       await idle(context.application, second.session.id)
       expect(await readFile(context.calls, "utf8")).toContain(

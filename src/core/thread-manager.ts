@@ -6,7 +6,8 @@ import type {
 import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
 import type { GitInfo, ModelContextSettings, StoredThread } from "./rollout.ts"
-import { Session, type TurnProcessor } from "./session.ts"
+import { Session } from "./session.ts"
+import type { SessionTaskRunner } from "./session-task.ts"
 import { SessionStatus } from "./session-io.ts"
 import type {
   CreateThreadMetadata,
@@ -48,7 +49,7 @@ export type ThreadManagerOptions = {
   readonly store: ThreadStore
   readonly createTurnProcessor: (
     stored: StoredThread,
-  ) => TurnProcessor | Promise<TurnProcessor>
+  ) => SessionTaskRunner | Promise<SessionTaskRunner>
   readonly onPersistenceError?: (error: unknown, threadId: string) => void
   readonly onBackgroundError?: (
     error: unknown,
@@ -62,7 +63,7 @@ export class ThreadManager {
   readonly #store: ThreadStore
   readonly #createTurnProcessor: (
     stored: StoredThread,
-  ) => TurnProcessor | Promise<TurnProcessor>
+  ) => SessionTaskRunner | Promise<SessionTaskRunner>
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
@@ -373,8 +374,12 @@ export class ThreadManager {
       const live = this.#threads.get(threadId)
       if (live === undefined)
         return (await this.#store.readThread(threadId)) !== undefined
-      await live.shutdownAndWait()
-      this.#removeInstalledThread(threadId, live)
+      try {
+        await live.shutdownAndWait()
+      } finally {
+        if (live.status === "shutdown")
+          this.#removeInstalledThread(threadId, live)
+      }
       return true
     } finally {
       this.#closingThreads.delete(threadId)
@@ -413,7 +418,7 @@ export class ThreadManager {
     }
     const existing = this.getThread(threadId)
     if (existing !== undefined) return existing
-    let processor: TurnProcessor
+    let processor: SessionTaskRunner
     try {
       processor = await this.#createTurnProcessor(stored)
     } catch (error) {
@@ -442,19 +447,22 @@ export class ThreadManager {
     }
     let thread: AgentThread
     try {
-      thread = new AgentThread(
-        new Session({
-          stored,
-          store: this.#store,
-          processor,
-          ...(this.#onPersistenceError === undefined
-            ? {}
-            : {
-                onPersistenceError: (error) =>
-                  this.#onPersistenceError?.(error, threadId),
-              }),
-        }),
-      )
+      const session = new Session({
+        stored,
+        store: this.#store,
+        processor,
+        ...(this.#onPersistenceError === undefined
+          ? {}
+          : {
+              onPersistenceError: (error) =>
+                this.#onPersistenceError?.(error, threadId),
+            }),
+      })
+      thread = new AgentThread({
+        id: session.id,
+        endpoints: session.endpoints,
+        local: session,
+      })
     } catch (error) {
       const cleanup = await Promise.allSettled([
         processor.dispose?.(),

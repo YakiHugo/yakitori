@@ -74,6 +74,49 @@ describe("hook runner", () => {
     }
   })
 
+  it("cancels and joins foreground hook children before reporting cancellation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-hook-stop-"))
+    const script = join(root, "foreground.mjs")
+    const started = join(root, "started")
+    const stopped = join(root, "stopped")
+    const signal = new AbortController()
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+    await writeFile(
+      script,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(started)}, 'yes'); process.on('SIGTERM', () => setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) }, 100)); setInterval(() => {}, 1000)`,
+    )
+    const handler = {
+      type: "command" as const,
+      command: `${quote(process.execPath)} ${quote(script)}; true`,
+    }
+    const runner = createHookRunner({
+      UserPromptSubmit: [
+        { hooks: [{ ...handler, trustedHash: hookHandlerHash(handler) }] },
+      ],
+    })
+    try {
+      const running = runner.run({
+        event: HookEvent.UserPromptSubmit,
+        payload: {},
+        cwd: root,
+        signal: signal.signal,
+      })
+      const observed = running.then(
+        () => undefined,
+        (error) => error as Error,
+      )
+      await expect
+        .poll(() => readFile(started, "utf8").catch(() => undefined))
+        .toBe("yes")
+      signal.abort()
+      expect(await observed).toMatchObject({ name: "AbortError" })
+      expect(await readFile(stopped, "utf8")).toBe("yes")
+    } finally {
+      await runner.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("passes stable tool data on stdin and honors a blocking response", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-hooks-"))
     try {

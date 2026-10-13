@@ -21,7 +21,8 @@ import type {
   AttachmentBytesInput,
   RolloutAssets,
 } from "../core/rollout-assets.ts"
-import { Session, type TurnProcessor } from "../core/session.ts"
+import { Session } from "../core/session.ts"
+import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
@@ -102,7 +103,9 @@ export function createSideChatService(options: {
   defaultCwd: string
   mateId: string
   mateRevisionId: string
-  createProcessor(stored: StoredThread): TurnProcessor | Promise<TurnProcessor>
+  createProcessor(
+    stored: StoredThread,
+  ): SessionTaskRunner | Promise<SessionTaskRunner>
   readSource?(id: string): Promise<StoredThread | undefined>
   rolloutAssets?: RolloutAssets
   releaseAssets?(id: string): Promise<void>
@@ -433,7 +436,12 @@ export function createSideChatService(options: {
               "The source conversation is no longer available.",
               "not_found",
             )
-          thread = new AgentThread(new Session({ stored, store, processor }))
+          const session = new Session({ stored, store, processor })
+          thread = new AgentThread({
+            id: stored.metadata.id,
+            endpoints: session.endpoints,
+            local: session,
+          })
         } catch (error) {
           try {
             await processor.dispose?.()

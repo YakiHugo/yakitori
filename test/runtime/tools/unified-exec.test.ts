@@ -523,6 +523,48 @@ describe("unified exec tools", () => {
     await manager.close()
   })
 
+  it("joins an aborted foreground process even when its yield interval expires first", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-exec-settlement-"))
+    const manager = createUnifiedExecProcessManager({ killGraceMs: 2_000 })
+    const controller = new AbortController()
+    const script = join(root, "slow-stop.mjs")
+    const started = join(root, "started")
+    const stopping = join(root, "stopping")
+    const stopped = join(root, "stopped")
+    await writeFile(
+      script,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(started)}, 'yes'); process.on('SIGTERM', () => { writeFileSync(${JSON.stringify(stopping)}, 'yes'); setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) }, 600) }); setInterval(() => {}, 1000)`,
+    )
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+    try {
+      const running = manager.exec({
+        command: `exec ${quote(process.execPath)} ${quote(script)}`,
+        cwd: root,
+        shell: "/bin/sh",
+        env: process.env,
+        tty: false,
+        yieldTimeMs: 250,
+        maxOutputTokens: 100,
+        signal: controller.signal,
+      })
+      let settled = false
+      void running.then(() => {
+        settled = true
+      })
+      await expect.poll(() => existsSync(started)).toBe(true)
+      controller.abort()
+      await expect.poll(() => existsSync(stopping)).toBe(true)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(settled).toBe(false)
+      expect(existsSync(stopped)).toBe(false)
+      expect(await running).toMatchObject({ exit_code: 0 })
+      expect(existsSync(stopped)).toBe(true)
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("prunes exited unpolled sessions at the soft process cap", async () => {
     const manager = createUnifiedExecProcessManager({ killGraceMs: 20 })
     const sessions = await Promise.all(

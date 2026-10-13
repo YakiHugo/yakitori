@@ -1,7 +1,7 @@
 import type { AgentThread } from "../core/agent-thread.ts"
 import { createGoalId, GoalStatus, type ThreadGoal } from "../core/goal.ts"
 import type { ThreadMetadata } from "../core/rollout.ts"
-import type { TurnProcessor } from "../core/session.ts"
+import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionIdleCause } from "../core/session-io.ts"
 import type { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createUserInput } from "../core/user-input.ts"
@@ -289,8 +289,8 @@ export class GoalRuntime implements GoalToolService {
 
   wrapProcessor(
     metadata: ThreadMetadata,
-    processor: TurnProcessor,
-  ): TurnProcessor {
+    processor: SessionTaskRunner,
+  ): SessionTaskRunner {
     const threadId = metadata.id
     const agent = metadata.metadata?.agent
     const rootThreadId =
@@ -303,109 +303,103 @@ export class GoalRuntime implements GoalToolService {
         : undefined
     return {
       ...processor,
-      start: (runtime, input, context, control) => {
-        if (input.goalId === undefined)
-          this.#store.setContinuationDeferred(threadId, false)
-        const ownGoal = this.#store.read(threadId)
-        const targets = [
-          threadId,
-          ...(rootThreadId === undefined || rootThreadId === threadId
-            ? []
-            : [rootThreadId]),
-        ].flatMap((id) => {
-          const goal = this.#store.read(id)
-          return goal?.status === "active"
-            ? [{ threadId: id, goalId: goal.id }]
-            : []
-        })
-        const turn: RunningGoalTurn = {
-          threadId,
-          turnId: context.turnId,
-          ...(rootThreadId === undefined ? {} : { rootThreadId }),
-          targets,
-          tokens: 0,
-          receipt: 0,
-          startedAt: Date.now(),
-          ...(ownGoal === undefined ? {} : { goalId: ownGoal.id }),
-          goalObjective: goalObjective(
-            runtime.snapshot().context.worldStateBaseline,
-          ),
-          automatic: input.goalId !== undefined,
-          output: false,
-          tool: false,
-          successfulTool: false,
-          failedExecution: false,
-        }
-        this.#running.set(threadId, turn)
-        const task = processor.start(
-          {
-            ...runtime,
-            recordWorldStateUpdate: async (items, update) => {
-              await runtime.recordWorldStateUpdate(items, update)
-              // Only accept the objective actually supplied to model context.
-              // A user edit must not let an already-running response complete it.
-              turn.goalObjective = goalObjective(update.snapshot)
-            },
-            recordUsage: async (usage) => {
-              await runtime.recordUsage(usage)
-              this.#accountUsage(turn, usage)
-            },
-            recordToolStarted: (item) => {
-              turn.tool = true
-              return runtime.recordToolStarted(item)
-            },
-            recordToolResult: (response, completion) => {
-              if (completion.error === undefined) turn.successfulTool = true
-              // A command's nonzero exit is a completed execution. Only a
-              // failure to execute counts toward the infrastructure stop.
-              if (
-                completion.name === "exec_command" &&
-                completion.error?.code === "exec_command_failed"
-              )
-                turn.failedExecution = true
-              return runtime.recordToolResult(response, completion)
-            },
-            recordConversationItems: (items) => {
-              if (
-                items.some(
-                  (item) =>
-                    item.item.role === "assistant" &&
-                    item.item.content.some(
-                      (part) =>
-                        part.type === "text" && part.text.trim().length > 0,
-                    ),
-                )
-              )
-                turn.output = true
-              return runtime.recordConversationItems(items)
-            },
-          },
-          input,
-          context,
-          control,
-        )
+      createTask: (snapshot, input) => {
+        const task = processor.createTask(snapshot, input)
         return {
           ...task,
-          completion: task.completion
-            .then((completion) => {
-              // A new goal turn must not reset the processor's recovery stop.
+          run: async (session, execution) => {
+            if (input.goalId === undefined)
+              this.#store.setContinuationDeferred(threadId, false)
+            const ownGoal = this.#store.read(threadId)
+            const targets = [
+              threadId,
+              ...(rootThreadId === undefined || rootThreadId === threadId
+                ? []
+                : [rootThreadId]),
+            ].flatMap((id) => {
+              const goal = this.#store.read(id)
+              return goal?.status === "active"
+                ? [{ threadId: id, goalId: goal.id }]
+                : []
+            })
+            const turn: RunningGoalTurn = {
+              threadId,
+              turnId: input.submissionId,
+              ...(rootThreadId === undefined ? {} : { rootThreadId }),
+              targets,
+              tokens: 0,
+              receipt: 0,
+              startedAt: Date.now(),
+              ...(ownGoal === undefined ? {} : { goalId: ownGoal.id }),
+              goalObjective: goalObjective(
+                session.executionSnapshot(execution).context.worldStateBaseline,
+              ),
+              automatic: input.goalId !== undefined,
+              output: false,
+              tool: false,
+              successfulTool: false,
+              failedExecution: false,
+            }
+            this.#running.set(threadId, turn)
+            const unsubscribe = session.observeExecution(
+              execution,
+              (record) => {
+                switch (record.type) {
+                  case "usage":
+                    this.#accountUsage(turn, record.usage)
+                    break
+                  case "world_state":
+                    turn.goalObjective = goalObjective(record.snapshot)
+                    break
+                  case "tool_started":
+                    turn.tool = true
+                    break
+                  case "tool_result":
+                    if (record.completion.error === undefined)
+                      turn.successfulTool = true
+                    if (
+                      record.completion.name === "exec_command" &&
+                      record.completion.error?.code === "exec_command_failed"
+                    )
+                      turn.failedExecution = true
+                    break
+                  case "conversation":
+                    if (
+                      record.items.some(
+                        (item) =>
+                          item.item.role === "assistant" &&
+                          item.item.content.some(
+                            (part) =>
+                              part.type === "text" &&
+                              part.text.trim().length > 0,
+                          ),
+                      )
+                    )
+                      turn.output = true
+                }
+              },
+            )
+            try {
+              const completion = await task.run(session, execution)
               if (
-                !control.signal.aborted &&
+                !execution.signal.aborted &&
                 (completion?.reason === "refused" ||
                   completion?.reason === "truncated")
               )
                 turn.failed = "blocked"
               return completion
-            })
-            .catch((error: unknown) => {
-              if (!control.signal.aborted)
+            } catch (error) {
+              if (!execution.signal.aborted)
                 turn.failed =
                   error instanceof ModelFailureError &&
                   error.failure.kind === "rate_limited"
                     ? "usage_limited"
                     : "blocked"
               throw error
-            }),
+            } finally {
+              unsubscribe()
+            }
+          },
         }
       },
     }

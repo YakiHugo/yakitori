@@ -10,7 +10,7 @@ import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
 describe("native full-agent boundary", () => {
-  it("keeps native rollout canonical and replays only the same admitted request", async () => {
+  it("keeps native rollout canonical and rejects reuse of a human request ID", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({
       store,
@@ -61,7 +61,7 @@ describe("native full-agent boundary", () => {
         requestId: "request_one",
         text: "hello",
       })
-      expect(replay).toMatchObject({ status: "accepted", replayed: true })
+      expect(replay).toEqual({ status: "rejected", reason: "request_conflict" })
       expect(
         await service.send("app-one", {
           requestId: "request_one",

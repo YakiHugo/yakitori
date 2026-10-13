@@ -15,7 +15,17 @@ const WARMUP_LIFETIME_MS = 15_000
 export function createOpenAIResponsesTransport(client: OpenAI) {
   let socket: ResponsesWS | undefined
   let expiry: ReturnType<typeof setTimeout> | undefined
-  let stopReading: (() => void) | undefined
+  let stopReading: (() => Promise<void>) | undefined
+  const retiring = new Set<Promise<void>>()
+  const retirementErrors: unknown[] = []
+  const trackRetirement = (work: Promise<void>) => {
+    const settled = work
+      .catch((error: unknown) => {
+        retirementErrors.push(error)
+      })
+      .finally(() => retiring.delete(settled))
+    retiring.add(settled)
+  }
   let used = false
   let closed = false
   let epoch = 0
@@ -35,9 +45,18 @@ export function createOpenAIResponsesTransport(client: OpenAI) {
     expiry = undefined
     const owned = socket
     socket = undefined
-    stopReading?.()
+    if (stopReading !== undefined) trackRetirement(stopReading())
     stopReading = undefined
-    owned?.close()
+    if (owned !== undefined && owned.socket.readyState !== 3) {
+      const stopped = new Promise<void>((resolve) =>
+        owned.socket.once("close", () => resolve()),
+      )
+      // This socket belongs only to this Turn. A close-frame request alone is
+      // not settlement: stop the local connection and join its actual close.
+      owned.close()
+      owned.socket.platformSocket.terminate()
+      trackRetirement(stopped)
+    }
   }
 
   async function* exchange(
@@ -50,8 +69,8 @@ export function createOpenAIResponsesTransport(client: OpenAI) {
   ): AsyncGenerator<ResponseStreamEvent> {
     const generation = epoch
     const events = owned[Symbol.asyncIterator]()
-    stopReading = () => {
-      void events.return?.()
+    stopReading = async () => {
+      await events.return?.()
     }
     const abort = () => discard()
     signal?.addEventListener("abort", abort, { once: true })
@@ -205,9 +224,15 @@ export function createOpenAIResponsesTransport(client: OpenAI) {
       expiry = undefined
       return exchange(owned, body, signal, false, previous, scope)
     },
-    close() {
+    async close() {
       closed = true
       discard()
+      await Promise.all(retiring)
+      if (retirementErrors.length > 0)
+        throw new AggregateError(
+          retirementErrors,
+          "Failed to close OpenAI Turn transport.",
+        )
     },
   }
 }

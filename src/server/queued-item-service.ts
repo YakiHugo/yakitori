@@ -193,6 +193,23 @@ export class QueuedItemService {
   ): Promise<TurnInputSubmission> {
     if (await this.#isArchived?.(thread.id))
       throw new QueuedSessionArchivedError()
+    // A queued input has an automatic delivery owner. Reconcile its exact
+    // accepted ID before dispatch after a crash; never re-execute its task.
+    const stored = await this.#manager.readStoredThread(thread.id)
+    const accepted = stored?.rollout.find(
+      ({ item: record }) =>
+        record.type === "turn_started" &&
+        record.turnId === item.input.submissionId,
+    )?.item
+    if (accepted?.type === "turn_started") {
+      this.delete(thread.id, item.id)
+      this.wake(thread)
+      return {
+        type: "replayed",
+        turnId: accepted.turnId,
+        inputItemId: accepted.inputItemId,
+      }
+    }
     this.#onStarting?.(item)
     let submission: TurnInputSubmission
     try {

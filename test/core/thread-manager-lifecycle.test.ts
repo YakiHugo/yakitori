@@ -79,10 +79,7 @@ it("releases and removes a fork created across the shutdown boundary", async () 
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      async prepare() {
-        throw new Error("Turn execution must not be reached.")
-      },
-      start() {
+      createTask() {
         throw new Error("Turn execution must not be reached.")
       },
     }),

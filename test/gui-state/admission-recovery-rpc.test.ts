@@ -1,3 +1,4 @@
+import { bindExecution } from "../support/session-execution.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import "./setup-store-environment.ts"
 import { afterEach, expect, it, vi } from "vitest"
@@ -36,7 +37,7 @@ afterEach(() => {
   useAppStore.setState(createInitialAppState())
 })
 
-it("retries a committed queued input with the original snapshot when its RPC acknowledgment is lost", async () => {
+it("reconciles a committed queued input by ID without resending after its RPC acknowledgment is lost", async () => {
   const store = new MemoryThreadStore()
   let release!: () => void
   const completion = new Promise<void>((resolve) => {
@@ -45,32 +46,48 @@ it("retries a committed queued input with the original snapshot when its RPC ack
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      prepare(_snapshot, input) {
-        const selection = { provider: "faux", model: "scripted" }
-        return {
-          turnId: input.submissionId,
-          selection,
-          configuration: {
-            schemaVersion: 5 as const,
-            defaultTarget: selection,
-            workspaceRoot: process.cwd(),
-            enabledTools: [],
-            approvalPolicy: "always_approve" as const,
-            promptCacheKey: input.submissionId,
-            baseInstructions: {
-              text: "Test turn",
-              revision: "test",
-              provenance: { type: "custom" as const },
+      createTask(snapshot, input) {
+        const context = ((_snapshot, input) => {
+          const selection = { provider: "faux", model: "scripted" }
+          return {
+            turnId: input.submissionId,
+            selection,
+            configuration: {
+              schemaVersion: 5 as const,
+              defaultTarget: selection,
+              workspaceRoot: process.cwd(),
+              enabledTools: [],
+              approvalPolicy: "always_approve" as const,
+              promptCacheKey: input.submissionId,
+              baseInstructions: {
+                text: "Test turn",
+                revision: "test",
+                provenance: { type: "custom" as const },
+              },
+              executionPolicyDefaults: createSessionExecutionPolicy(),
+              modelAutoCompactTokenLimitScope: "total" as const,
             },
-            executionPolicyDefaults: createSessionExecutionPolicy(),
-            modelAutoCompactTokenLimitScope: "total" as const,
-          },
-        }
-      },
-      start(runtime) {
+          }
+        })(snapshot, input)
+        let stop: (() => void) | undefined
         return {
-          completion: runtime.recordInitialInput().then(() => completion),
-          abort: release,
+          kind: input.manualCompact === true ? "compact" : "regular",
+          async run(session, execution) {
+            await session.beginExecution(execution, context)
+            const runtime = bindExecution(session, execution)
+
+            const task = (() => {
+              return {
+                completion: runtime.recordInitialInput().then(() => completion),
+                abort: release,
+              }
+            })()
+            stop = task.abort
+            return (await task.completion) ?? undefined
+          },
+          async abort() {
+            stop?.()
+          },
         }
       },
     }),
@@ -130,7 +147,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
     })
     await useAppStore.getState().admitInput(inputParts("Follow up"), "queue")
     expect(useAppStore.getState().message).toBe(
-      "The connection to the server was lost.",
+      "Sending status is unconfirmed. This input has not been resent.",
     )
     const queued = await handlers.listQueuedInputs({ sessionId })
     if (!queued.ok) throw new Error(queued.error.message)
@@ -138,26 +155,8 @@ it("retries a committed queued input with the original snapshot when its RPC ack
     const first = queued.value.items[0]
     if (first === undefined) throw new Error("Missing committed queued input")
 
-    useAppStore.setState({
-      promptExcerpts: [
-        {
-          source: {
-            messageId: "answer_one",
-            label: "Assistant",
-            kind: "message",
-          },
-          anchor: { endOffset: 15, startOffset: 0 },
-          comment: "Check this",
-          text: "Selected answer",
-          kind: "annotation",
-          id: "annotation_one",
-        },
-      ],
-      modelSelections: { [sessionId]: { model: "scripted", provider: "faux" } },
-    })
-    await useAppStore.getState().admitInput(inputParts("Follow up"), "queue")
-
-    expect(useAppStore.getState().message).toBeUndefined()
+    await useAppStore.getState().refreshQueuedInputs()
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().queuedItems).toEqual([
       expect.objectContaining({
         id: first.id,
@@ -176,7 +175,7 @@ it("retries a committed queued input with the original snapshot when its RPC ack
         sessionId,
       ),
     ).toEqual([])
-    expect(client.requestsFor("session/input/queue")).toHaveLength(2)
+    expect(client.requestsFor("session/input/queue")).toHaveLength(1)
   } finally {
     await processor.closeConnection(connection.id)
     release()
