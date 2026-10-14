@@ -18,7 +18,7 @@ const officialAgents = {
 describe("prompt registry", () => {
   it.each(
     catalog.models,
-  )("binds $provider/$model to a versioned first-party prompt", (model) => {
+  )("binds $provider/$model to a versioned model profile", (model) => {
     const id = requireInstructionProfileId(model.instructionProfileId)
     const prompt = getInstructionProfile(id)
     expect(id).toBe(model.provider === "faux" ? "default" : model.model)

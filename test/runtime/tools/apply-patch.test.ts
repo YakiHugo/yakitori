@@ -167,6 +167,17 @@ describe("apply_patch", () => {
     ).resolves.toMatchObject({ ok: false, code: "invalid_tool_input" })
     await expect(
       tool.execute(
+        {
+          command: [
+            "apply_patch",
+            "*** Begin Patch\n*** Add File: x.txt\n+one\n*** End Patch",
+          ],
+        },
+        { workspaceRoot: root },
+      ),
+    ).resolves.toMatchObject({ ok: false, code: "invalid_tool_input" })
+    await expect(
+      tool.execute(
         `*** Begin Patch
 *** Add File: x.txt
 +one
