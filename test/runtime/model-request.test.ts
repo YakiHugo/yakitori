@@ -6,7 +6,10 @@ import {
   type ModelStreamEvent,
   type StreamFn,
 } from "../../src/runtime/model.ts"
-import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import {
+  createModelRequestStream,
+  ModelStreamCleanupError,
+} from "../../src/runtime/model-request.ts"
 
 describe("model request runtime", () => {
   it.each([
@@ -660,6 +663,26 @@ describe("model request runtime", () => {
     await iterator.return?.()
 
     expect(closed).toBe(true)
+  })
+
+  it("preserves resource cleanup failure when the consumer ends early", async () => {
+    const failure = new Error("Stream resource could not close")
+    const stream = createModelRequestStream(
+      async function* () {
+        try {
+          yield { type: "delta", text: "partial" }
+        } finally {
+          // biome-ignore lint/correctness/noUnsafeFinally: Model a failed iterator resource teardown.
+          throw failure
+        }
+      },
+      { wireApi: "unknown" },
+    )
+    const iterator = stream(requestFixture())[Symbol.asyncIterator]()
+    await iterator.next()
+    const closing = iterator.return?.()
+    await expect(closing).rejects.toBeInstanceOf(ModelStreamCleanupError)
+    await expect(closing).rejects.toMatchObject({ cause: failure })
   })
 
   it("reports the effective rate-limit attempt budget", async () => {

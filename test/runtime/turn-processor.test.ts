@@ -42,6 +42,7 @@ import {
   createToolRegistry,
   plainToolName,
   type RuntimeTool,
+  type ToolRegistry,
 } from "../../src/runtime/tools/registry.ts"
 import {
   createTurnProcessor,
@@ -2739,6 +2740,7 @@ describe("Turn processor", () => {
     "none",
     "short",
     "long",
+    "blocked",
   ])("persists a visible read with %s hook context so a later call can edit", async (hookKind) => {
     const provider = createFauxProvider([
       {
@@ -2774,13 +2776,17 @@ describe("Turn processor", () => {
         async dispose() {},
         async run(request) {
           return {
-            continue: true,
+            continue:
+              request.event !== HookEvent.PostToolUse || hookKind !== "blocked",
+            ...(hookKind === "blocked"
+              ? { reason: "Inspect before retrying" }
+              : {}),
             additionalContext:
               request.event === HookEvent.PostToolUse && hookKind !== "none"
                 ? [
-                    hookKind === "short"
-                      ? "short hook"
-                      : "long hook\n".repeat(6000),
+                    hookKind === "long"
+                      ? "long hook\n".repeat(6000)
+                      : "short hook",
                   ]
                 : [],
           }
@@ -3995,7 +4001,7 @@ describe("Turn processor", () => {
       }
       yield responseEvent(`response ${String(call)}`)
     }
-    const runtime = await createRuntime(stream, createToolRegistry([]), {
+    const runtime = await createRuntime(stream, () => createToolRegistry([]), {
       model: "model-a",
     })
     const thread = await runtime.createThread()
@@ -5573,7 +5579,8 @@ it.each([
 
 async function createRuntime(
   stream: StreamFn,
-  toolRegistry = createToolRegistry([]),
+  toolRegistry: ToolRegistry | (() => ToolRegistry) = () =>
+    createToolRegistry([]),
   options: Omit<Partial<TurnProcessorOptions>, "stream" | "toolRegistry"> = {},
   agentControlFactory?: (threadId: string) => AgentControl,
 ) {
@@ -5584,7 +5591,8 @@ async function createRuntime(
     createTurnProcessor: (stored) =>
       createTurnProcessor({
         stream,
-        toolRegistry,
+        toolRegistry:
+          typeof toolRegistry === "function" ? toolRegistry() : toolRegistry,
         loadProjectInstructions: async () => undefined,
         ...options,
         ...(agentControlFactory === undefined

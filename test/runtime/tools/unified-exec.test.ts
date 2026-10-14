@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs"
+import { existsSync, watch } from "node:fs"
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   createUnifiedExecProcessManager,
   createUnifiedExecTools,
@@ -531,11 +531,21 @@ describe("unified exec tools", () => {
     const started = join(root, "started")
     const stopping = join(root, "stopping")
     const stopped = join(root, "stopped")
+    const release = join(root, "release")
     await writeFile(
       script,
-      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(started)}, 'yes'); process.on('SIGTERM', () => { writeFileSync(${JSON.stringify(stopping)}, 'yes'); setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) }, 600) }); setInterval(() => {}, 1000)`,
+      `import { existsSync, writeFileSync } from 'node:fs'; process.on('SIGTERM', () => { writeFileSync(${JSON.stringify(stopping)}, 'yes'); setInterval(() => { if (existsSync(${JSON.stringify(release)})) { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) } }, 10) }); writeFileSync(${JSON.stringify(started)}, 'yes'); setInterval(() => {}, 1000)`,
     )
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+    const ready = Promise.withResolvers<void>()
+    const terminating = Promise.withResolvers<void>()
+    const watcher = watch(root, () => {
+      if (existsSync(started)) ready.resolve()
+      if (existsSync(stopping)) terminating.resolve()
+    })
+    // Control only the host's yield deadline; process startup, SIGTERM and exit
+    // still cross the real OS boundary, with the child held at an explicit fence.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
     try {
       const running = manager.exec({
         command: `exec ${quote(process.execPath)} ${quote(script)}`,
@@ -551,15 +561,19 @@ describe("unified exec tools", () => {
       void running.then(() => {
         settled = true
       })
-      await expect.poll(() => existsSync(started)).toBe(true)
+      await ready.promise
       controller.abort()
-      await expect.poll(() => existsSync(stopping)).toBe(true)
-      await new Promise((resolve) => setTimeout(resolve, 300))
+      await terminating.promise
+      await vi.advanceTimersByTimeAsync(250)
       expect(settled).toBe(false)
       expect(existsSync(stopped)).toBe(false)
+      await writeFile(release, "exit")
       expect(await running).toMatchObject({ exit_code: 0 })
       expect(existsSync(stopped)).toBe(true)
     } finally {
+      vi.useRealTimers()
+      watcher.close()
+      await writeFile(release, "exit")
       await manager.close()
       await rm(root, { recursive: true, force: true })
     }

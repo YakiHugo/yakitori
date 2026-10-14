@@ -20,6 +20,12 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647
 const DEFAULT_MAX_ATTEMPTS = 8
 const DEFAULT_RATE_LIMIT_MAX_ATTEMPTS = 2
 
+export class ModelStreamCleanupError extends Error {
+  constructor(cause: unknown) {
+    super("Model stream resource cleanup failed.", { cause })
+  }
+}
+
 export type ModelRequestOptions = ModelRequestPolicy &
   Readonly<{
     wireApi: ModelWireApi
@@ -241,6 +247,7 @@ async function* runModelRequest(
           terminalEvent = event
         }
       } catch (cause) {
+        if (cause instanceof ModelStreamCleanupError) throw cause
         if (request.signal?.aborted) {
           yield { type: "cancelled", ...usageFields() }
           return
@@ -262,39 +269,17 @@ async function* runModelRequest(
 
       if (iterator !== undefined && !exhausted) {
         attemptController.abort()
-        const closing = iterator.return?.()
         closeStarted = true
-        if (closing !== undefined) {
-          if (pendingNext) {
-            void closing.catch(() => {})
-          } else {
-            try {
-              await closing
-            } catch (cause) {
-              if (failureEvent === undefined) throw cause
-              failureEvent = {
-                ...failureEvent,
-                cause:
-                  failureEvent.cause === undefined
-                    ? cause
-                    : new AggregateError(
-                        [failureEvent.cause, cause],
-                        "Model attempt and cleanup both failed.",
-                        { cause: failureEvent.cause },
-                      ),
-              }
-            }
-          }
-        }
+        const closing = closeModelStream(iterator, failureEvent?.cause)
+        if (pendingNext) void closing.catch(() => {})
+        else await closing
       }
     } finally {
       if (iterator !== undefined && !exhausted && !closeStarted) {
         attemptController.abort()
-        const closing = iterator.return?.()
-        if (closing !== undefined) {
-          if (pendingNext) void closing.catch(() => {})
-          else await closing
-        }
+        const closing = closeModelStream(iterator)
+        if (pendingNext) void closing.catch(() => {})
+        else await closing
       }
     }
 
@@ -340,6 +325,25 @@ async function* runModelRequest(
     }
     previousFailure = failure
     await options.sleep(delayMs, request.signal)
+  }
+}
+
+async function closeModelStream(
+  iterator: AsyncIterator<ModelStreamEvent>,
+  failure?: unknown,
+): Promise<void> {
+  try {
+    await iterator.return?.()
+  } catch (cause) {
+    throw new ModelStreamCleanupError(
+      failure === undefined
+        ? cause
+        : new AggregateError(
+            [failure, cause],
+            "Model attempt and cleanup both failed.",
+            { cause: failure },
+          ),
+    )
   }
 }
 

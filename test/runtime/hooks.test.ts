@@ -9,6 +9,63 @@ import {
 } from "../../src/runtime/hooks.ts"
 
 describe("hook runner", () => {
+  it.skipIf(process.platform === "win32")(
+    "disposal cancels and joins foreground hooks without a caller signal",
+    async () => {
+      const root = await mkdtemp(
+        join(tmpdir(), "yakitori-foreground-disposal-"),
+      )
+      const started = join(root, "started")
+      const stopped = join(root, "stopped")
+      const script = join(root, "hook.mjs")
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+      await writeFile(
+        script,
+        `import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'closed'); process.exit(0) }, 100)); writeFileSync(${JSON.stringify(started)}, String(process.pid)); setInterval(() => {}, 1000);`,
+      )
+      const handler = {
+        type: "command" as const,
+        command: `exec ${quote(process.execPath)} ${quote(script)}`,
+      }
+      const runner = createHookRunner({
+        PreToolUse: [
+          { hooks: [{ ...handler, trustedHash: hookHandlerHash(handler) }] },
+        ],
+      })
+      const running = runner
+        .run({ event: HookEvent.PreToolUse, payload: {}, cwd: root })
+        .catch((error: unknown) => error)
+      let pid: number | undefined
+      try {
+        await expect
+          .poll(async () => {
+            const value = await readFile(started, "utf8").catch(() => undefined)
+            pid = value === undefined ? undefined : Number(value)
+            return pid
+          })
+          .toBeGreaterThan(0)
+        await runner.dispose()
+        expect(await readFile(stopped, "utf8")).toBe("closed")
+        expect(await running).toMatchObject({ name: "AbortError" })
+        expect(() => process.kill(pid ?? 0, 0)).toThrow()
+        await expect(
+          runner.run({ event: HookEvent.PreToolUse, payload: {}, cwd: root }),
+        ).rejects.toThrow("disposed")
+      } finally {
+        if (pid !== undefined) {
+          try {
+            process.kill(-pid, "SIGKILL")
+          } catch (error) {
+            expect(error).toMatchObject({ code: "ESRCH" })
+          }
+        }
+        await running
+        await runner.dispose()
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
+
   it("waits for SessionEnd hooks even when they are configured async", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-hooks-"))
     try {

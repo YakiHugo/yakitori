@@ -126,6 +126,7 @@ export function createToolRegistry(
   >()
   const runtimeLeases = new Map<RuntimeTool, number>()
   const retirements = new Map<RuntimeTool, Retirement>()
+  let disposePromise: Promise<void> | undefined
 
   for (const tool of trustedTools) {
     validateCustomTool(tool)
@@ -150,6 +151,8 @@ export function createToolRegistry(
       return [...trustedToolNames]
     },
     replaceExternalSource(sourceId, tools) {
+      if (disposePromise !== undefined)
+        throw new Error("Tool registry is disposed.")
       validateSourceId(sourceId)
       const previousEntries = [...registered.values()].filter(
         (entry) =>
@@ -202,17 +205,24 @@ export function createToolRegistry(
       )
       return { removed: previousEntries.length, registered: tools.length }
     },
-    async dispose() {
-      retireUnregisteredRuntimes(
-        [...registered.values()].map((entry) => entry.runtime),
-        new Map(),
-        runtimeLeases,
-        retirements,
-      )
-      registered = new Map()
-      await Promise.all([...retirements.values()].map((state) => state.promise))
+    dispose() {
+      disposePromise ??= (async () => {
+        retireUnregisteredRuntimes(
+          [...registered.values()].map((entry) => entry.runtime),
+          new Map(),
+          runtimeLeases,
+          retirements,
+        )
+        registered = new Map()
+        await settleRetirements(
+          [...retirements.values()].map((state) => state.promise),
+        )
+      })()
+      return disposePromise
     },
     finalize(options) {
+      if (disposePromise !== undefined)
+        throw new Error("Tool registry is disposed.")
       const eligible = [...registered.entries()].filter(
         ([name, entry]) =>
           entry.source.kind === "external" ||
@@ -332,7 +342,7 @@ export function createToolRegistry(
       for (const runtime of leasedRuntimes) {
         runtimeLeases.set(runtime, (runtimeLeases.get(runtime) ?? 0) + 1)
       }
-      let released = false
+      let releasePromise: Promise<void> | undefined
       return {
         definitions,
         deferredDefinitions,
@@ -418,24 +428,38 @@ export function createToolRegistry(
           }
           return tool.execute(input, context)
         },
-        async release() {
-          if (released) return
-          released = true
-          const disposals: Promise<void>[] = []
-          for (const runtime of leasedRuntimes) {
-            const disposal = releaseRuntimeLease(
-              runtime,
-              runtimeLeases,
-              retirements,
-            )
-            if (disposal !== undefined) disposals.push(disposal)
-          }
-          await Promise.all(disposals)
+        release() {
+          releasePromise ??= (async () => {
+            const disposals: Promise<void>[] = []
+            for (const runtime of leasedRuntimes) {
+              const disposal = releaseRuntimeLease(
+                runtime,
+                runtimeLeases,
+                retirements,
+              )
+              if (disposal !== undefined) disposals.push(disposal)
+            }
+            await settleRetirements(disposals)
+          })()
+          return releasePromise
         },
       }
     },
   }
   return registry
+}
+
+// A failed retirement cannot release the owner while another runtime is closing.
+async function settleRetirements(
+  disposals: readonly Promise<void>[],
+): Promise<void> {
+  const results = await Promise.allSettled(disposals)
+  const errors = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  )
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1)
+    throw new AggregateError(errors, "Failed to retire tool runtimes.")
 }
 
 function claimTrustedNamespace(
