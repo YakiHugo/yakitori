@@ -139,8 +139,12 @@ function toolInstructionsSection(
     names.has("read_file")
       ? "Use read_file to read files; continue paginated or truncated instruction reads."
       : "",
-    names.has("glob") ? "Use glob to locate files." : "",
-    names.has("grep") ? "Use grep for targeted text searches." : "",
+    names.has("glob")
+      ? "Prefer glob for bounded file-pattern searches. It uses ripgrep for file discovery and is the dedicated-tool counterpart of model guidance recommending rg --files."
+      : "",
+    names.has("grep")
+      ? "Prefer grep for bounded content searches. It uses ripgrep, so model guidance recommending rg for search performance also applies here."
+      : "",
     names.has("apply_patch")
       ? "Use apply_patch for source patches, following its schema."
       : "",
@@ -149,7 +153,7 @@ function toolInstructionsSection(
       ? "Use write_file for intentional whole-file writes."
       : "",
     names.has("exec_command")
-      ? "Use exec_command for git, package managers, builds, and tests. Follow the current permission policy."
+      ? "Use exec_command for git, package managers, builds, and tests. For searches, use it when shell pipelines or unsupported search options are needed, or when a suitable dedicated search tool is unavailable in this step. Follow the current permission policy."
       : "",
     names.has("web_fetch")
       ? "Use web_fetch to read a specific HTTP(S) URL; follow cross-origin redirects with a new call."

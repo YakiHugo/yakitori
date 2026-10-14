@@ -1,6 +1,6 @@
 # Third-party prompt sources
 
-The manifest records exact model bindings, source versions, rendering choices, and content hashes. Prompt bodies are requested first-party coding-agent instructions; host adaptations are separate.
+The manifest records model bindings, source versions, selection details, and content hashes. Profiles retain their recorded vendor guidance with the narrow local adaptations identified by adaptationNotes and upstreamSha256. Unverified upstream provenance is marked explicitly. Shared host instructions are separate; the upstream licenses and notices are preserved below.
 
 ## Codex
 
