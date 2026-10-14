@@ -54,12 +54,13 @@ export type HookOutcome = Readonly<{
 
 export type HookRunner = Readonly<{
   run(request: HookRequest): Promise<HookOutcome>
+  // Cancel and join all owned command processes, including foreground runs.
   dispose(): Promise<void>
 }>
 
 export function createHookRunner(configuration: HookConfiguration): HookRunner {
   const shutdown = new AbortController()
-  const asynchronousRuns = new Set<Promise<void>>()
+  const activeRuns = new Set<Promise<void>>()
   let disposePromise: Promise<void> | undefined
 
   return {
@@ -70,23 +71,23 @@ export function createHookRunner(configuration: HookConfiguration): HookRunner {
         matches(group.matcher, request.matcher) ? group.hooks : [],
       )
       const outcomes: HookOutcome[] = []
+      const signal =
+        request.signal === undefined
+          ? shutdown.signal
+          : AbortSignal.any([request.signal, shutdown.signal])
       for (const handler of handlers) {
         if (!hasTrustedHash(handler)) continue
+        const run = runCommandHook(handler, { ...request, signal })
+        const settled = run.then(
+          () => undefined,
+          () => undefined,
+        )
+        activeRuns.add(settled)
+        void settled.then(() => activeRuns.delete(settled))
         if (handler.async === true && request.event !== HookEvent.SessionEnd) {
-          const run = runCommandHook(handler, {
-            ...request,
-            signal:
-              request.signal === undefined
-                ? shutdown.signal
-                : AbortSignal.any([request.signal, shutdown.signal]),
-          })
-            .then(() => undefined)
-            .catch(() => undefined)
-          asynchronousRuns.add(run)
-          void run.finally(() => asynchronousRuns.delete(run))
           continue
         }
-        outcomes.push(await runCommandHook(handler, request))
+        outcomes.push(await run)
       }
       const blocked = outcomes.find((outcome) => !outcome.continue)
       const updatedInput = [...outcomes]
@@ -104,7 +105,7 @@ export function createHookRunner(configuration: HookConfiguration): HookRunner {
     dispose() {
       disposePromise ??= (async () => {
         shutdown.abort()
-        await Promise.allSettled([...asynchronousRuns])
+        await Promise.all([...activeRuns])
       })()
       return disposePromise
     },

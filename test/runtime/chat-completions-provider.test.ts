@@ -1325,7 +1325,6 @@ describe("Chat Completions provider", () => {
       async (baseURL) => {
         const root = await mkdtemp(join(tmpdir(), "yakitori-chat-images-"))
         await writeFile(join(root, "screen.png"), png)
-        const tools = createToolRegistry()
         const openManager = () => {
           const store = new JsonlThreadStore({ root })
           const assets = createRolloutAssets(root, {
@@ -1360,7 +1359,7 @@ describe("Chat Completions provider", () => {
                 }).createClient(),
                 provider: "custom_1",
                 model: "configured-model",
-                toolRegistry: tools,
+                toolRegistry: createToolRegistry(),
                 rolloutAssets: assets,
                 baseInstructions: "Image test",
                 loadProjectInstructions: async () => undefined,
@@ -1458,7 +1457,6 @@ describe("Chat Completions provider", () => {
           expect(bodies).toHaveLength(3)
         } finally {
           await runtime.manager.shutdown()
-          await tools.dispose()
           await rm(root, { recursive: true, force: true })
         }
       },

@@ -80,6 +80,7 @@ import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
 } from "./model-request-budget.ts"
+import { ModelStreamCleanupError } from "./model-request.ts"
 import { toolContentText } from "./model-tool-content.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
@@ -1131,14 +1132,15 @@ async function executeTurnModelLoop(
                   setActiveStream: input.setActiveStream,
                 })
               } finally {
-                await sourceStep.toolRouter.release()
+                await settleTaskResources(() => sourceStep.toolRouter.release())
               }
               compactedAtModelCall = modelCalls
               continue
             }
           }
         } finally {
-          if (sourceSession !== modelSession) await sourceSession?.close()
+          if (sourceSession !== modelSession)
+            await settleTaskResources(() => sourceSession?.close())
         }
       }
       if (
@@ -2163,8 +2165,8 @@ async function executeTurnModelLoop(
       await backgroundWork
       await warmupWork
       const stoppedTools = await Promise.all(pendingTools)
-      await step?.toolRouter.release()
-      await settleTaskResources(() => {
+      await settleTaskResources(async () => {
+        await step?.toolRouter.release()
         if (backgroundFailure?.cause instanceof TaskCleanupError)
           throw backgroundFailure.cause
         const failedStop = stoppedTools.find(
@@ -2369,6 +2371,9 @@ async function consumeModelStream(input: {
     await attempt?.end({ type: "response", response: terminal })
   } catch (error) {
     await attempt?.fail(error, input.request.signal?.aborted === true)
+    if (error instanceof ModelStreamCleanupError)
+      throw new TaskCleanupError(error)
+    if (error instanceof TaskCleanupError) throw error
     if (input.request.signal?.aborted) {
       throw abortError()
     }
@@ -2811,6 +2816,7 @@ async function compactLiveHistory(
     )
     return true
   } catch (error) {
+    if (error instanceof TaskCleanupError) throw error
     if (input.signal.aborted || isAbortError(error)) throw abortError()
     if (!completed) {
       await input.session.recordItemCompletions(input.execution, [
@@ -3208,13 +3214,10 @@ async function executePreparedTool(
       if (postHook?.continue === false) {
         const reason =
           postHook.reason ?? "PostToolUse hook rejected the tool result."
-        return {
-          ok: false,
-          code: "hook_blocked",
-          message: reason,
-          content: `hook_blocked: ${reason}`,
-          ...(result.output === undefined ? {} : { output: result.output }),
-        }
+        // Post-execution feedback cannot undo the effect or change its status.
+        hookContext.push(
+          `PostToolUse check reported a problem after the tool executed: ${reason}`,
+        )
       }
       if (input.toolPlan.get(prepared.invocation.name)?.effect !== "observe") {
         const observations = toolFileObservations(result)
@@ -3273,6 +3276,7 @@ async function executePreparedTool(
     })
   } catch (error) {
     reservation.cancel()
+    if (error instanceof TaskCleanupError) throw error
     if (input.signal.aborted || isAbortError(error)) throw abortError()
     reportOperationalFailure(input.onOperationalFailure, {
       operation: "execute-tool",

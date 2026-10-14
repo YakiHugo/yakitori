@@ -23,47 +23,37 @@ Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.
 
-Reference priority:
+Choose relevant local references independently according to the question,
+implementation boundary, and currency of the available evidence. There is no
+fixed project ranking, default architecture target, or excluded-project list.
+Do not ask for permission merely to inspect a relevant local reference.
 
-- Primary references: `.references/public/codex` and
-  `.references/public/grok-build`. Use these first for coding-agent behavior,
-  architecture, and implementation decisions.
-- Ignore legacy compatibility paths in reference projects unless Yakitori has
-  the same explicit historical compatibility obligation. Prefer the current
-  clean architecture and product behavior when no such obligation exists.
-- Secondary references: `.references/public/opencode-v2` and current
-  first-party Claude Code documentation and observable product behavior. Use
-  these only when the primary references leave a concrete gap or a comparison
-  would materially clarify a decision.
-- Historical reference: `.references/public/claude-code-sourcemap` is an
-  unofficial reconstruction of an older release. Consult it only for a
-  specific historical question when the primary and secondary references are
-  insufficient; do not use it to infer current behavior or architecture.
-- Do not consult DSH, Gemini CLI, Kimi Code, Manus, Raft, or another reference
-  by default. Before using one, propose it and explain why the primary and
-  secondary references are insufficient. Raft is relevant only to the later
-  persistent-colleague direction of Rooms and mentions
+- Inspect the relevant implementation and its surrounding contracts. Use
+  documentation to understand intent, and distinguish it from implemented
+  behavior. Do not use project size or popularity as a substitute for evidence.
+- Check and identify the revision, release, or date of the material used. A
+  local checkout is not necessarily the latest upstream implementation; state
+  that limitation when it matters to the comparison.
+- Evaluate applicability to Yakitori's current requirements, product scope,
+  execution ownership, and dependencies. Minimal runtimes and complete coding
+  agents may be useful references for different boundaries.
+- Label unofficial reconstructions and historical releases explicitly. Use
+  them for the behavior they actually demonstrate, not to infer current
+  product behavior.
+- Ignore legacy compatibility paths unless Yakitori has the same explicit
+  historical compatibility obligation.
 
-When the primary references agree, or only one implements the relevant
-boundary, adopt that established implementation and documented product
-direction by default. When they materially differ, present the alternatives,
-their concrete differences, and their consequences for Yakitori, then ask the
-user to choose. Do not select or synthesize an architecture independently
-unless the user has already established the relevant preference.
+Compare materially different approaches by their concrete mechanisms,
+constraints, and consequences for Yakitori. Recommend an approach with its
+evidence and rationale rather than automatically adopting a reference's whole
+architecture. Ask the user when an unresolved product preference or requirement
+is needed to decide, not merely because reference implementations differ.
 
-Once a reference project has been selected for a boundary, align both the
-architecture and the concrete implementation design with that project's
-current implementation by default. Deviate only when an explicit constraint,
-such as multi-provider support or a Yakitori-specific product requirement,
-requires it; identify the difference and its reason before implementing it.
-
-Design an independent approach only when an explicit reason makes it better
-for Yakitori's scenario. Record that reason in module-local notes or code
-comments only when it affects an implementation boundary. Do not copy large
-blocks of code or prose from reference repositories.
-
-Unless user has preference，do not take design cues from small personal projects, 
-niche frameworks, or unaffiliated industry analysis sites.
+Respect explicitly adopted project decisions unless the user requests their
+reevaluation. Explain design choices and deviations in terms of Yakitori's
+requirements. Record the rationale in module-local notes or code comments only
+when it affects an implementation boundary. Do not copy large blocks of code
+or prose from reference repositories.
 
 Product limits, model capabilities, defaults, and quotas must come from an
 explicit requirement or an authoritative first-party source. Locally chosen
