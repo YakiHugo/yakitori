@@ -44,7 +44,8 @@ describe("anthropic provider conversion", () => {
               usage: { output_tokens: 20 },
             }
             controller.abort()
-            if (wrapped) await new Promise(() => {})
+            if (wrapped)
+              await new Promise<void>((resolve) => setImmediate(resolve))
           })()
         },
       },
