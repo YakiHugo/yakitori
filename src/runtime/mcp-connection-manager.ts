@@ -103,13 +103,23 @@ export function createMcpConnectionManager(
   const maxRestartDelayMs = options.maxRestartDelayMs ?? 30_000
   const maxRestartAttempts = options.maxRestartAttempts ?? 5
   let closed = false
+  let closePromise: Promise<void> | undefined
 
+  const pendingTurnCleanups = new Set<Promise<PromiseSettledResult<void>>>()
   const finishTurn = async () => {
     const cleanups = [...turnCleanups.values()]
     turnCleanups.clear()
-    const results = await Promise.allSettled(
-      cleanups.map((cleanup) => cleanup()),
-    )
+    for (const cleanup of cleanups) {
+      const task = Promise.resolve()
+        .then(cleanup)
+        .then(
+          () => ({ status: "fulfilled", value: undefined }) as const,
+          (reason: unknown) => ({ status: "rejected", reason }) as const,
+        )
+      pendingTurnCleanups.add(task)
+      void task.then(() => pendingTurnCleanups.delete(task))
+    }
+    const results = await Promise.all([...pendingTurnCleanups])
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
     )
@@ -122,6 +132,7 @@ export function createMcpConnectionManager(
     else console.error("MCP background operation failed", error)
   }
   const notifyStatus = () => {
+    if (closed) return
     for (const listener of statusListeners) {
       try {
         listener()
@@ -135,6 +146,7 @@ export function createMcpConnectionManager(
     tools: readonly RuntimeTool[],
     commit: () => void = () => {},
   ) => {
+    if (closed) return
     options.installTools?.(name, tools)
     commit()
     for (const listener of listeners) {
@@ -187,6 +199,7 @@ export function createMcpConnectionManager(
     generation: number,
     signal?: AbortSignal,
   ): Promise<void> => {
+    if (closed) return
     const active = connecting.get(name)
     if (active?.generation === generation) return active.promise
     const cancellation = new AbortController()
@@ -254,7 +267,7 @@ export function createMcpConnectionManager(
         return
       }
 
-      if (connections.get(name)?.client !== client) return
+      if (closed || connections.get(name)?.client !== client) return
       if (refreshing.has(client)) {
         refreshing.set(client, true)
         return
@@ -265,7 +278,7 @@ export function createMcpConnectionManager(
           while (refreshing.get(client) === true && !closed) {
             refreshing.set(client, false)
             const descriptions = await client.listTools()
-            if (connections.get(name)?.client !== client) return
+            if (closed || connections.get(name)?.client !== client) return
             turnEndTool = descriptions.find(
               (tool) => tool.name === options.turnEndTools?.[name]?.name,
             )
@@ -611,25 +624,39 @@ export function createMcpConnectionManager(
       return () => statusListeners.delete(listener)
     },
     finishTurn,
-    async close() {
-      if (closed) return
+    close() {
+      if (closePromise !== undefined) return closePromise
       closed = true
       for (const timer of restartTimers.values()) clearTimeout(timer)
       restartTimers.clear()
-      const cleanup = await Promise.allSettled([finishTurn()])
-      await Promise.all([...clients].map((client) => client.close()))
-      await Promise.allSettled(
-        [...connecting.values()].map((connection) => connection.promise),
-      )
-      await Promise.allSettled([...refreshTasks])
-      connections.clear()
-      configuredServers.clear()
-      connecting.clear()
-      generations.clear()
-      failures.clear()
-      clients.clear()
-      listeners.clear()
-      if (cleanup[0]?.status === "rejected") throw cleanup[0].reason
+      for (const connection of connecting.values())
+        connection.cancellation.abort()
+      const ownedClients = [...clients]
+      closePromise = (async () => {
+        const cleanup = await Promise.allSettled([finishTurn()])
+        const clientResults = await Promise.allSettled(
+          ownedClients.map((client) => client.close()),
+        )
+        await updateQueue
+        await Promise.allSettled(
+          [...connecting.values()].map((connection) => connection.promise),
+        )
+        await Promise.allSettled([...refreshTasks])
+        connections.clear()
+        configuredServers.clear()
+        connecting.clear()
+        generations.clear()
+        failures.clear()
+        clients.clear()
+        listeners.clear()
+        statusListeners.clear()
+        const errors = [...cleanup, ...clientResults].flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        )
+        if (errors.length > 0)
+          throw new AggregateError(errors, "Failed to close MCP connections.")
+      })()
+      return closePromise
     },
   }
 }

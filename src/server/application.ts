@@ -61,7 +61,7 @@ import {
   createGrokProvider,
   createFileModelsCacheStore,
   createHookRunner,
-  createMcpConnectionManager,
+  createMcpExtension,
   createModelProvider,
   createOpenAITurnTransport,
   createPermissionGate,
@@ -175,9 +175,6 @@ const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 // codex-rs refreshes the model catalog every 4.5 min, just under the 5 min
 // manager TTL, so OnlineIfUncached effectively never waits on the network.
 const MODELS_REFRESH_INTERVAL_MS = 270_000
-// Shared per-Step grace for MCP servers that are still connecting (codex-rs
-// optional_mcp_startup_grace, 1 s).
-const MCP_STEP_GRACE_MS = 1_000
 
 // The C8-D1 initialize handshake identifies the host as name/version, read
 // from the package manifest (bundled into the desktop build at build time).
@@ -201,6 +198,7 @@ export type YakitoriApplicationOptions = {
   readonly stream?: StreamFn
   readonly providerStreams?: Readonly<Record<string, StreamFn>>
   readonly providerPlugins?: readonly ModelProviderPlugin[]
+  readonly mcp?: boolean
   readonly modelDirectory?: ModelDirectory
   readonly userConfigPath?: string
   readonly baseInstructions?: string
@@ -893,92 +891,114 @@ export async function createYakitoriApplication(
             (!sideConversation && !isSubagentThread(stored)),
         ),
       )
-      const mcpManager = createMcpConnectionManager({
-        authProvider: (name, config) =>
-          "url" in config ? mcpOAuth.provider(name, config) : undefined,
-        onElicitation: (request, signal) =>
-          elicitations.request(
-            stored.metadata.id,
-            request.serverName,
-            request.params,
-            signal,
-          ),
-        // Codex's bundled Computer Use Stop/Interrupt/SubagentStop hook.
-        turnEndTools: {
-          cua_repl: {
-            name: "turn_ended",
-            input(context) {
-              if (context.turnId === undefined)
-                throw new Error("Computer cleanup requires a turn identity.")
-              return {
-                hook_event_name: context.signal?.aborted
-                  ? "Interrupt"
-                  : isSubagentThread(stored)
-                    ? "SubagentStop"
-                    : "Stop",
-                session_id: stored.metadata.id,
-                turn_id: context.turnId,
-              }
-            },
-          },
-        },
-        installTools: (name, tools) => {
-          toolRegistry.replaceExternalSource(
-            `mcp:${name}`,
-            name !== "cua_repl"
-              ? tools
-              : tools.map((tool) => ({
-                  ...tool,
-                  async execute(input, context) {
-                    context.signal?.throwIfAborted()
-                    if (context.turnId === undefined)
-                      throw new Error("Computer use requires an active turn.")
-                    if (
-                      computerOwner !== undefined &&
-                      (computerOwner.sessionId !== stored.metadata.id ||
-                        computerOwner.turnId !== context.turnId)
-                    )
+      const mcpExtension =
+        options.mcp === false
+          ? undefined
+          : createMcpExtension({
+              registry: toolRegistry,
+              connection: {
+                authProvider: (name, config) =>
+                  "url" in config ? mcpOAuth.provider(name, config) : undefined,
+                onElicitation: (request, signal) =>
+                  elicitations.request(
+                    stored.metadata.id,
+                    request.serverName,
+                    request.params,
+                    signal,
+                  ),
+                // Codex's bundled Computer Use Stop/Interrupt/SubagentStop hook.
+                turnEndTools: {
+                  cua_repl: {
+                    name: "turn_ended",
+                    input(context) {
+                      if (context.turnId === undefined)
+                        throw new Error(
+                          "Computer cleanup requires a turn identity.",
+                        )
                       return {
-                        ok: false,
-                        code: "computer_busy",
-                        message:
-                          "Computer use is busy in another conversation.",
-                        content:
-                          "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
+                        hook_event_name: context.signal?.aborted
+                          ? "Interrupt"
+                          : isSubagentThread(stored)
+                            ? "SubagentStop"
+                            : "Stop",
+                        session_id: stored.metadata.id,
+                        turn_id: context.turnId,
                       }
-                    computerOwner = {
-                      sessionId: stored.metadata.id,
-                      turnId: context.turnId,
-                    }
-                    return tool.execute(input, context)
+                    },
                   },
-                })),
-          )
-        },
-        onBackgroundError: (cause) =>
-          reportOperationalFailure(reporter, {
-            component: "mcp",
-            operation: "background",
-            cause,
-            sessionId: stored.metadata.id,
-          }),
-      })
-      mcpManager.subscribeStatus(() =>
+                },
+                onBackgroundError: (cause) =>
+                  reportOperationalFailure(reporter, {
+                    component: "mcp",
+                    operation: "background",
+                    cause,
+                    sessionId: stored.metadata.id,
+                  }),
+              },
+              mapTools: (name, tools) =>
+                name !== "cua_repl"
+                  ? tools
+                  : tools.map((tool) => ({
+                      ...tool,
+                      async execute(input, context) {
+                        context.signal?.throwIfAborted()
+                        if (context.turnId === undefined)
+                          throw new Error(
+                            "Computer use requires an active turn.",
+                          )
+                        if (
+                          computerOwner !== undefined &&
+                          (computerOwner.sessionId !== stored.metadata.id ||
+                            computerOwner.turnId !== context.turnId)
+                        )
+                          return {
+                            ok: false,
+                            code: "computer_busy",
+                            message:
+                              "Computer use is busy in another conversation.",
+                            content:
+                              "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
+                          }
+                        computerOwner = {
+                          sessionId: stored.metadata.id,
+                          turnId: context.turnId,
+                        }
+                        return tool.execute(input, context)
+                      },
+                    })),
+            })
+      const mcpManager = mcpExtension?.manager
+      mcpManager?.subscribeStatus(() =>
         broadcastNotification?.(mcpStatusChangedMethod, {
           sessionId: stored.metadata.id,
         }),
       )
+      const failPreparation = async (
+        cause: unknown,
+        hooks?: ReturnType<typeof createHookRunner>,
+      ): Promise<never> => {
+        const mcpResult = await Promise.allSettled([mcpExtension?.close()])
+        const resources = await Promise.allSettled([
+          toolRegistry.dispose(),
+          hooks?.dispose(),
+        ])
+        const errors = [...mcpResult, ...resources].flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        )
+        if (errors.length > 0)
+          throw new AggregateError(
+            [cause, ...errors],
+            "Session preparation and cleanup failed.",
+          )
+        throw cause
+      }
       try {
-        await mcpManager.update(
+        await mcpExtension?.update(
           resolveSessionMcpServers(config, workingDirectory),
         )
       } catch (error) {
-        await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
-        throw error
+        return failPreparation(error)
       }
-      let mcpConfiguration = JSON.stringify(
-        resolveSessionMcpServers(config, workingDirectory),
-      )
       let processor: ReturnType<typeof createTurnProcessor>
       let hookRunner: ReturnType<typeof createHookRunner> | undefined
       try {
@@ -1002,31 +1022,10 @@ export async function createYakitoriApplication(
             })
             publishedConfiguration = snapshot.configuration
             const servers = resolveSessionMcpServers(snapshot, workingDirectory)
-            const fingerprint = JSON.stringify(servers)
-            if (fingerprint !== mcpConfiguration) {
-              await mcpManager.update(servers, signal)
-              mcpConfiguration = fingerprint
-            }
-            // Give servers that are nearly ready a short shared grace so a
-            // Step snapshot usually includes them (codex-rs optional
-            // startup_grace); slower servers join the next Step.
-            await mcpManager.settleConnecting(MCP_STEP_GRACE_MS, signal)
-            const status = new Map(
-              mcpManager.status().map((server) => [server.name, server]),
-            )
             return {
               ...snapshot.configuration,
-              skillMcpServers: Object.entries(servers).map(([name, server]) => {
-                const current = status.get(name)
-                return {
-                  name,
-                  ...("url" in server ? { url: server.url } : {}),
-                  available: current?.state === "ready",
-                  ...(current?.error === undefined
-                    ? {}
-                    : { reason: current.error }),
-                }
-              }),
+              skillMcpServers:
+                (await mcpExtension?.prepare(servers, signal)) ?? [],
             }
           },
           readModelTransport: () => publishedConfiguration.modelTransport,
@@ -1101,14 +1100,10 @@ export async function createYakitoriApplication(
           },
         })
       } catch (error) {
-        await Promise.allSettled([
-          hookRunner?.dispose(),
-          toolRegistry.dispose(),
-          mcpManager.close(),
-        ])
-        throw error
+        return failPreparation(error, hookRunner)
       }
-      mcpManagers.set(stored.metadata.id, mcpManager)
+      if (mcpManager !== undefined)
+        mcpManagers.set(stored.metadata.id, mcpManager)
       const ownedProcessor: SessionTaskRunner = {
         ...(processor.prepareSteering === undefined
           ? {}
@@ -1125,7 +1120,7 @@ export async function createYakitoriApplication(
                   computerOwner?.sessionId === stored.metadata.id &&
                   computerOwner.turnId === input.submissionId
                 ) {
-                  await settleTaskResources(() => mcpManager.finishTurn())
+                  await settleTaskResources(() => mcpManager?.finishTurn())
                   if (
                     computerOwner?.sessionId === stored.metadata.id &&
                     computerOwner.turnId === input.submissionId
@@ -1142,21 +1137,21 @@ export async function createYakitoriApplication(
           elicitations.cancelSession(stored.metadata.id)
           if (mcpManagers.get(stored.metadata.id) === mcpManager)
             mcpManagers.delete(stored.metadata.id)
+          const mcpResult = await Promise.allSettled([mcpExtension?.close()])
           const processorResult = await Promise.allSettled([
             processor.dispose?.(),
           ])
           const resourceResults = await Promise.allSettled([
             hookRunner?.dispose(),
-            mcpManager.close(),
           ])
           // A failed turn cleanup keeps the computer occupied until its owning
           // Session confirms that the managed MCP connection/process is closed.
           if (
-            resourceResults[1]?.status === "fulfilled" &&
+            mcpResult[0]?.status === "fulfilled" &&
             computerOwner?.sessionId === stored.metadata.id
           )
             computerOwner = undefined
-          const results = [...processorResult, ...resourceResults]
+          const results = [...mcpResult, ...processorResult, ...resourceResults]
           const errors = results.flatMap((result) =>
             result.status === "rejected" ? [result.reason] : [],
           )
@@ -1296,6 +1291,7 @@ export async function createYakitoriApplication(
           throw new McpServiceError("Session not found.")
       },
       async readServers(sessionId) {
+        if (options.mcp === false) return {}
         const stored =
           sessionId === undefined
             ? undefined

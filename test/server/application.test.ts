@@ -2649,6 +2649,48 @@ describe("application composition", () => {
     })
   })
 
+  it("runs and persists native inference with the MCP capability absent", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(
+        configPath,
+        '[mcp_servers.absent]\ncommand = "yakitori-nonexistent-mcp-fixture"\nrequired = true\n',
+      )
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        userConfigPath: configPath,
+        mcp: false,
+        stream: createFauxProvider([
+          { content: [{ type: "text", text: "No MCP required" }] },
+        ]).stream,
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "without_mcp",
+            content: inputFixture([{ type: "text", text: "run" }]),
+          }),
+        )
+        await expect
+          .poll(
+            () => application.threadManager.getThread(sessionId)?.agentStatus,
+          )
+          .toEqual({ completed: "No MCP required" })
+        expect(
+          completedTurnCount(
+            await application.threadStore.readThread(sessionId),
+          ),
+        ).toBe(1)
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it("resolves MCP cwd by provenance and reloads changes before the next Step", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const configPath = join(rootDir, "config.toml")
