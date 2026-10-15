@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest"
+import type { GoalStatus } from "../../src/core/goal.ts"
+import {
+  createProjectInstructionsSection,
+  createSkillsSection,
+  createGoalSection,
+} from "../../src/runtime/native-context-sections.ts"
 import { applyJsonMergePatch } from "../../src/kernel/json-equality.ts"
 import type { ProjectInstructions } from "../../src/runtime/project-instructions.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import {
-  buildWorldStateFromSnapshot,
+  buildWorldState,
   diffWorldState,
+  snapshotWorldState,
 } from "../../src/runtime/world-state.ts"
 
 describe("world state", () => {
@@ -324,10 +331,10 @@ function worldState(
   project?: ProjectInstructions,
   currentDate = "2026-08-21",
   enabledTools: readonly string[] = [],
-  multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
+  multiAgent?: Parameters<typeof buildWorldState>[0]["multiAgent"],
   approvalPolicy: "always_approve" | "auto_file_tools" = "always_approve",
   goal?: string,
-  goalStatus?: Parameters<typeof buildWorldStateFromSnapshot>[0]["goalStatus"],
+  goalStatus?: GoalStatus,
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
@@ -336,7 +343,7 @@ function worldState(
     enabledTools,
     approvalPolicy,
   })
-  return buildWorldStateFromSnapshot({
+  return buildWorldState({
     configuration: sessionConfiguration.resolveStep(
       sessionConfiguration.snapshot.defaultTarget,
     ),
@@ -350,9 +357,11 @@ function worldState(
       timezone: "Asia/Shanghai",
     },
     ...(multiAgent === undefined ? {} : { multiAgent }),
-    ...(project === undefined ? {} : { projectInstructions: project }),
-    ...(goal === undefined ? {} : { goal }),
-    ...(goalStatus === undefined ? {} : { goalStatus }),
+    extensionSections: [
+      createProjectInstructionsSection(project),
+      createSkillsSection(undefined),
+      createGoalSection(goal, goalStatus),
+    ],
   })
 }
 
@@ -381,4 +390,14 @@ it("updates permission guidance and removes disabled tool guidance", () => {
   expect(
     changed?.fragments.find((fragment) => fragment.id === "tools")?.text,
   ).not.toContain("exec_command")
+})
+
+it.each([
+  { id: "custom", snapshot: null },
+  { id: "custom", snapshot: { nested: { deleted: null } } },
+  { id: " ", snapshot: {} },
+])("rejects extension snapshots that cannot form a durable section: %j", (section) => {
+  expect(() =>
+    snapshotWorldState({ sections: [{ ...section, renderDiff: () => [] }] }),
+  ).toThrow()
 })

@@ -17,6 +17,7 @@ import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
+import type { SkillsSnapshot, SkillsSource } from "../../src/runtime/skills.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
@@ -2645,6 +2646,122 @@ describe("application composition", () => {
       } finally {
         await closeServer(server)
         await application.close()
+      }
+    })
+  })
+
+  it.each([
+    true,
+    false,
+  ])("shares skills source policy between the catalog and native input expansion (enabled=%s)", async (enabled) => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const requests: string[] = []
+      const catalog: SkillsSnapshot = {
+        skills: [
+          {
+            name: "remote-demo",
+            description: "Remote source skill",
+            path: "skills://source/demo",
+            scope: "user",
+          },
+        ],
+        diagnostics: [],
+      }
+      const endpoint = createServer((request, response) => {
+        requests.push(request.url ?? "")
+        response.end(
+          request.url === "/catalog"
+            ? JSON.stringify(catalog)
+            : "SourceOwnedBodyMarker",
+        )
+      })
+      const baseURL = await listen(endpoint)
+      const source: SkillsSource = {
+        async load() {
+          const snapshot = (await (
+            await fetch(`${baseURL}/catalog`)
+          ).json()) as SkillsSnapshot
+          return {
+            ...snapshot,
+            resources: {
+              async resolve(path) {
+                return path
+              },
+              async read(skill) {
+                if (skill.path !== "skills://source/demo")
+                  throw new Error("Unknown source resource")
+                const text = await (await fetch(`${baseURL}/body`)).text()
+                return {
+                  text,
+                  truncated: false,
+                  byteCount: Buffer.byteLength(text),
+                }
+              },
+            },
+          }
+        },
+      }
+      const prompts: ModelRequest[] = []
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        userConfigPath: join(rootDir, "config.toml"),
+        skillsSource: source,
+        skills: enabled,
+        stream: async function* (request) {
+          prompts.push(request)
+          yield {
+            type: "response",
+            response: {
+              stopReason: "end_turn",
+              content: [{ type: "text", text: "source complete" }],
+            },
+          }
+        },
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const sessionId = created.value.session.id
+        const listed = await application.handlers.listSkills({ sessionId })
+        expectOk(listed)
+        if (enabled)
+          expect(JSON.stringify(listed.value)).toContain("skills://source/demo")
+        else
+          expect(JSON.stringify(listed.value)).not.toContain(
+            "skills://source/demo",
+          )
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "source_input",
+            content: inputFixture([
+              {
+                type: "text",
+                text: "Use [$remote-demo](skills://source/demo)",
+              },
+            ]),
+          }),
+        )
+        await expect
+          .poll(
+            () => application.threadManager.getThread(sessionId)?.agentStatus,
+          )
+          .toEqual({ completed: "source complete" })
+        if (enabled) {
+          expect(JSON.stringify(prompts)).toContain("SourceOwnedBodyMarker")
+          expect(requests.filter((path) => path === "/body")).toHaveLength(1)
+        } else {
+          expect(JSON.stringify(prompts)).not.toContain("SourceOwnedBodyMarker")
+          expect(requests).toEqual([])
+        }
+        expect(
+          completedTurnCount(
+            await application.threadStore.readThread(sessionId),
+          ),
+        ).toBe(1)
+      } finally {
+        await application.close()
+        await new Promise<void>((resolve) => endpoint.close(() => resolve()))
       }
     })
   })

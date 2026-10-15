@@ -423,3 +423,36 @@ it("bounds each root independently so a large repo cannot starve user skills", a
     await rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+it("bounds injected skill text even when a custom source exceeds the requested read size", async () => {
+  const text = `${"x".repeat(300_000)}OutsideResourceBudget`
+  const loaded = await loadExplicitSkillInstructions(
+    "$remote",
+    {
+      skills: [
+        {
+          name: "remote",
+          description: "Source fixture",
+          path: "skills://source/remote",
+          scope: "user",
+        },
+      ],
+      diagnostics: [],
+    },
+    undefined,
+    {
+      source: {
+        async resolve(path) {
+          return path
+        },
+        async read() {
+          return { text, byteCount: Buffer.byteLength(text), truncated: false }
+        },
+      },
+    },
+  )
+  expect(loaded).not.toContain("OutsideResourceBudget")
+  expect(loaded).toContain(
+    "Skill body reached the host injection safety boundary; read the remainder before acting.",
+  )
+})

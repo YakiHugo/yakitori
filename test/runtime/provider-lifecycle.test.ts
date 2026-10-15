@@ -8,6 +8,7 @@ import type {
 } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
+import { ModelStreamCleanupError } from "../../src/runtime/model-request.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 
 it.each([
@@ -254,3 +255,58 @@ async function endpoint(label: string, id = "personal", failClose = false) {
   })
   return { provider, closed: () => closed, catalogEntered, releaseCatalog }
 }
+
+it("retains unresolved stream ownership even when the transport close callback succeeds", async () => {
+  const { promise: release, resolve: finishRead } =
+    Promise.withResolvers<void>()
+  const { promise: settled, resolve: finished } = Promise.withResolvers<void>()
+  const controller = new AbortController()
+  let disposed = false
+  const registry = createProviderRegistry({
+    personal: createModelProvider({
+      info: {
+        id: "personal",
+        wireApi: "unknown",
+        capabilities: { remoteCompaction: false },
+        retry: { maxAttempts: 1, streamCleanupTimeoutMs: 5 },
+      },
+      createTurnTransport: () => ({
+        stream: async function* () {
+          try {
+            yield { type: "delta", text: "started" }
+            await release
+          } finally {
+            finished()
+          }
+        },
+        close() {},
+      }),
+      close() {
+        disposed = true
+      },
+    }),
+  })
+  const client = registry.createClient()
+  const turn = client.startTurn("personal")
+  try {
+    await expect(
+      (async () => {
+        for await (const event of turn.stream({
+          ...request,
+          signal: controller.signal,
+        })) {
+          if (event.type === "delta") controller.abort()
+        }
+      })(),
+    ).rejects.toBeInstanceOf(ModelStreamCleanupError)
+    await turn.close()
+    await client.close()
+    await expect(registry.close()).rejects.toThrow(
+      "Failed to close provider registry",
+    )
+    expect(disposed).toBe(false)
+  } finally {
+    finishRead()
+    await settled
+  }
+})
