@@ -206,13 +206,14 @@ describe("ChatGPT model connections", () => {
       },
     })
     const provider = connections.provider(account, providerId)
-    const registry = createProviderRegistry({ [providerId]: provider })
+    const registry = createProviderRegistry()
+    const registration = registry.register("test", { [providerId]: provider })
     const client = registry.createClient()
     const oldTurn = client.startTurn(providerId)
     try {
       await collect(oldTurn.stream(request))
       suffix = "two"
-      registry.replace({
+      void registration.replace({
         [providerId]: connections.provider(
           { ...account, subject: "fake-account-b" },
           providerId,

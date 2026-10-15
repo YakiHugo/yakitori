@@ -3716,7 +3716,8 @@ describe("Turn processor", () => {
         await release.promise
       },
     }
-    const registry = createProviderRegistry({
+    const registry = createProviderRegistry()
+    const registration = registry.register("test", {
       faux: createModelProvider({
         info: {
           id: "faux",
@@ -3750,7 +3751,7 @@ describe("Turn processor", () => {
     if (accepted.type !== "started") throw new Error("Missing admission")
     await entered.promise
     transport.maxAttempts = 2
-    registry.replace({
+    void registration.replace({
       faux: createModelProvider({
         info: {
           id: "faux",
@@ -5321,7 +5322,8 @@ it("keeps a Turn's model directory and transport together across provider replac
       },
     ],
   })
-  const registry = createProviderRegistry({
+  const registry = createProviderRegistry()
+  const registration = registry.register("test", {
     personal: createModelProvider({
       info: {
         id: "personal",
@@ -5355,7 +5357,7 @@ it("keeps a Turn's model directory and transport together across provider replac
     content: inputFixture([{ type: "text" as const, text: "Read the report" }]),
   })
   await refreshEntered.promise
-  registry.replace({
+  void registration.replace({
     personal: createModelProvider({
       info: {
         id: "personal",

@@ -74,6 +74,7 @@ import {
   discoverOpenAiCompatibleModels,
   type McpConnectionManager,
   type ModelProvider,
+  type ProviderRegistry,
   ModelStopReason,
   type RuntimeLock,
   readCodexLogin,
@@ -126,6 +127,10 @@ import type {
 } from "./protocol.ts"
 import type { StoredProviderConfiguration } from "./provider-configuration.ts"
 import { createProviderService } from "./provider-service.ts"
+import {
+  registerProviderPlugins,
+  type ModelProviderPlugin,
+} from "./provider-plugins.ts"
 import type { RequestGate } from "./request-gate.ts"
 import { createSessionTitleGenerator } from "./session-title.ts"
 import {
@@ -195,6 +200,7 @@ export type YakitoriApplicationOptions = {
   readonly workspace?: string
   readonly stream?: StreamFn
   readonly providerStreams?: Readonly<Record<string, StreamFn>>
+  readonly providerPlugins?: readonly ModelProviderPlugin[]
   readonly modelDirectory?: ModelDirectory
   readonly userConfigPath?: string
   readonly baseInstructions?: string
@@ -259,6 +265,7 @@ export async function createYakitoriApplication(
   const approvalPolicy = resolveApprovalPolicy(
     process.env.YAKITORI_APPROVAL_POLICY,
   )
+  let providerRegistryForCleanup: ProviderRegistry | undefined
   let engines: EngineRegistry | undefined
   let goals: GoalRuntime | undefined
   let runtimeLock: RuntimeLock | undefined
@@ -489,10 +496,17 @@ export async function createYakitoriApplication(
       },
     })
     await providerConfiguration.reload()
+    const providerRegistry = createProviderRegistry()
+    providerRegistryForCleanup = providerRegistry
+    await registerProviderPlugins(
+      providerRegistry,
+      options.providerPlugins ?? [],
+    )
     const providerName =
       options.provider ?? process.env.YAKITORI_PROVIDER ?? "faux"
     const provider = await configureProviders({
       provider: providerName,
+      pluginProviders: providerRegistry.providers,
       model: options.model ?? process.env.YAKITORI_MODEL ?? undefined,
       fauxScenario: options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
       primaryStream: options.stream,
@@ -517,11 +531,22 @@ export async function createYakitoriApplication(
       ...configured,
       ...chatGPTProviders,
     })
-    const providerRegistry = createProviderRegistry(
+    const hostProviders = providerRegistry.register(
+      "application",
       executableProviders(configuredProviders),
     )
-    applyChatGPT = () =>
-      providerRegistry.replace(executableProviders(configuredProviders))
+    const replaceHostProviders = () => {
+      void hostProviders
+        .replace(executableProviders(configuredProviders))
+        .catch((cause: unknown) =>
+          reportOperationalFailure(reporter, {
+            component: "provider-registry",
+            operation: "retire-provider",
+            cause,
+          }),
+        )
+    }
+    applyChatGPT = replaceHostProviders
     subscriptionConnections = createSubscriptionConnections({
       async readAvailability() {
         const states = await providerCredentialStates(
@@ -575,7 +600,7 @@ export async function createYakitoriApplication(
     })
     applyConfigured = (configured) => {
       configuredProviders = configured
-      providerRegistry.replace(executableProviders(configured))
+      replaceHostProviders()
     }
     // The configuration file is also a model-editable interface. Observe
     // only provider definitions; unrelated settings do not rebuild transports.
@@ -1406,6 +1431,7 @@ export async function createYakitoriApplication(
           closeExtensions,
           goals,
           engines,
+          providerRegistry,
         )
         await closePromise
       },
@@ -1426,6 +1452,7 @@ export async function createYakitoriApplication(
         closeExtensions,
         goals,
         engines,
+        providerRegistryForCleanup,
       )
     } catch (cleanupError) {
       throw new AggregateError(
@@ -1703,6 +1730,7 @@ async function configureProviders(
     provider: string
     model: string | undefined
     fauxScenario: string | undefined
+    pluginProviders: readonly string[]
     primaryStream: StreamFn | undefined
     injected: Readonly<Record<string, StreamFn>> | undefined
     configured: Readonly<Record<string, ModelProvider>>
@@ -1759,6 +1787,11 @@ async function configureProviders(
       model: model ?? "injected",
       providers,
     }
+  }
+  if (input.pluginProviders.includes(input.provider)) {
+    if (!model)
+      throw new Error("A model must be selected for the plugin provider.")
+    return { provider: input.provider, model, providers }
   }
   if (input.provider === "faux") {
     providers.faux = createModelProvider({
@@ -2010,6 +2043,7 @@ async function closeApplicationResources(
   closeExtensions?: () => Promise<void>,
   goals?: GoalRuntime,
   engines?: EngineRegistry,
+  providers?: ProviderRegistry,
 ): Promise<void> {
   const errors: unknown[] = []
   try {
@@ -2034,6 +2068,11 @@ async function closeApplicationResources(
   }
   try {
     await threadManager?.shutdown()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    await providers?.close()
   } catch (error) {
     errors.push(error)
   }

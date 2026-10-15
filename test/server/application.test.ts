@@ -6,7 +6,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
-import type { Server as HttpServer } from "node:http"
+import { createServer, type Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -17,6 +17,9 @@ import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
+import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
 import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
@@ -157,6 +160,125 @@ describe("application composition", () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+  })
+
+  it("runs a host-provided model plugin through the native agent and persists its result", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const requests: string[] = []
+      const endpoint = createServer((request, response) => {
+        requests.push(request.url ?? "")
+        request.resume()
+        response.writeHead(200, { "content-type": "text/event-stream" })
+        response.end(
+          `data: ${JSON.stringify({ id: "plugin_response", object: "chat.completion.chunk", created: 1, model: "plugin-model", choices: [{ index: 0, delta: { content: "Plugin finished" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        )
+      })
+      const baseURL = await listen(endpoint)
+      let disposed = 0
+      let application: YakitoriApplication | undefined
+      try {
+        application = await createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: join(rootDir, "config.toml"),
+          provider: "custom",
+          model: "plugin-model",
+          providerPlugins: [
+            {
+              id: "local-transport",
+              createProviders: () => ({
+                custom: createModelProvider({
+                  info: {
+                    id: "custom",
+                    wireApi: "openai_chat_completions",
+                    capabilities: { remoteCompaction: false },
+                    retry: { maxAttempts: 1 },
+                  },
+                  models: createConfiguredModelsManager({
+                    provider: "custom",
+                    models: [
+                      { id: "plugin-model", contextWindowTokens: 64000 },
+                    ],
+                  }),
+                  stream: createChatCompletionsProvider({
+                    apiKey: "test",
+                    baseURL,
+                    model: "plugin-model",
+                  }),
+                  close() {
+                    disposed++
+                  },
+                }),
+              }),
+            },
+          ],
+        })
+        const created = await application.handlers.createSession({
+          title: "Plugin inference",
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "plugin_input",
+            content: inputFixture([{ type: "text", text: "Run the plugin" }]),
+          }),
+        )
+        await expect
+          .poll(
+            () => application?.threadManager.getThread(sessionId)?.agentStatus,
+          )
+          .toEqual({ completed: "Plugin finished" })
+        expect(
+          completedTurnCount(
+            await application.threadStore.readThread(sessionId),
+          ),
+        ).toBe(1)
+        expect(requests).toEqual(["/chat/completions"])
+        expect(disposed).toBe(0)
+        await application.close()
+        await application.close()
+        expect(disposed).toBe(1)
+      } finally {
+        await application?.close()
+        await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+      }
+    })
+  })
+
+  it("cleans up accepted and rejected provider plugins when startup cannot publish a duplicate route", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const closed: string[] = []
+      await expect(
+        createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: join(rootDir, "config.toml"),
+          providerPlugins: ["first", "second"].map((id) => ({
+            id,
+            createProviders: () => ({
+              custom: createModelProvider({
+                info: {
+                  id: "custom",
+                  wireApi: "unknown",
+                  capabilities: { remoteCompaction: false },
+                },
+                stream: async function* () {},
+                close() {
+                  closed.push(id)
+                },
+              }),
+            }),
+          })),
+        }),
+      ).rejects.toThrow("already registered by another source")
+      expect(closed).toEqual(["second", "first"])
+      const restarted = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      await restarted.close()
+    })
   })
 
   it.each([

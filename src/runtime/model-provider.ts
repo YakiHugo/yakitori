@@ -52,6 +52,9 @@ export type ModelProvider = {
   readonly info: ModelProviderInfo
   readonly models: ModelsManager
   startTurn(policy?: ModelRequestPolicy): ModelClientSession
+  // Called after captured Turns and catalog operations settle. Join any
+  // provider-owned background work before releasing shared resources.
+  close?(): void | Promise<void>
 }
 
 export type ModelAttemptContext = NonNullable<ModelRequest["attempt"]>
@@ -79,6 +82,7 @@ export function createModelProvider(
     info: ModelProviderInfo
     models?: ModelsManager
     continuationScope?: string
+    close?: () => void | Promise<void>
   }> &
     (
       | Readonly<{ stream: StreamFn }>
@@ -106,10 +110,21 @@ export function createModelProvider(
       `Provider ${input.info.id} cannot use models manager for ${models.provider}.`,
     )
   }
+  let closing: Promise<void> | undefined
   return {
     info: input.info,
     models,
+    ...(input.close === undefined
+      ? {}
+      : {
+          close() {
+            closing ??= Promise.resolve().then(() => input.close?.())
+            return closing
+          },
+        }),
     startTurn(policy) {
+      if (closing !== undefined)
+        throw new Error(`Provider ${input.info.id} is closed.`)
       const transport =
         "createTurnTransport" in input ? input.createTurnTransport() : undefined
       const warmupStream = transport?.warmup

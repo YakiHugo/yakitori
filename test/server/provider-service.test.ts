@@ -35,10 +35,13 @@ async function fixture() {
   const credentialDirectory = join(directory, "keys")
   const userConfig = createUserConfigStore({ configPath })
   const registry = createProviderRegistry({})
+  const registrySource = registry.register("test", {})
   const service = createProviderService({
     userConfig,
     credentialDirectory,
-    apply: (providers) => registry.replace(providers),
+    apply: (providers) => {
+      void registrySource.replace(providers)
+    },
   })
   return { service, registry, userConfig, configPath, credentialDirectory }
 }
@@ -188,10 +191,13 @@ describe("provider configuration", () => {
           ?.credentialRef,
       ).toBeUndefined()
       const restartedRegistry = createProviderRegistry({})
+      const restartedRegistrySource = restartedRegistry.register("test", {})
       const restarted = createProviderService({
         userConfig: createUserConfigStore({ configPath }),
         credentialDirectory,
-        apply: (providers) => restartedRegistry.replace(providers),
+        apply: (providers) => {
+          void restartedRegistrySource.replace(providers)
+        },
       })
       await restarted.reload()
       expect(await restarted.read()).toEqual(await service.read())
@@ -393,10 +399,13 @@ describe("provider configuration", () => {
           0o777,
       ).toBe(0o600)
     const restored = createProviderRegistry({})
+    const restoredSource = restored.register("test", {})
     const next = createProviderService({
       userConfig: createUserConfigStore({ configPath }),
       credentialDirectory,
-      apply: (providers) => restored.replace(providers),
+      apply: (providers) => {
+        void restoredSource.replace(providers)
+      },
     })
     await next.reload()
     expect(
