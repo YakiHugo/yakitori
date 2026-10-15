@@ -127,7 +127,9 @@ describe.skipIf(process.platform === "win32")(
             cwd: root,
           }),
         ).resolves.toMatchObject({ continue: true })
-        await expect(waitForFile(marker)).resolves.toBe("done")
+        await expect
+          .poll(() => readFile(marker, "utf8"), { timeout: 5_000 })
+          .toBe("done")
       } finally {
         await runner.dispose()
         await rm(root, { recursive: true, force: true })

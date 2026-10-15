@@ -1,4 +1,3 @@
-import { modelFailureFromUnknown } from "./model-failure.ts"
 import type { ModelRequestPolicy } from "../kernel/index.ts"
 import {
   type ModelFailure,
@@ -9,6 +8,7 @@ import {
   type ModelWireApi,
   type StreamFn,
 } from "./model.ts"
+import { modelFailureFromUnknown } from "./model-failure.ts"
 
 export type { ModelRequestPolicy } from "../kernel/index.ts"
 
@@ -19,6 +19,9 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 const DEFAULT_MAX_ATTEMPTS = 8
 const DEFAULT_RATE_LIMIT_MAX_ATTEMPTS = 2
+// Iterator teardown can ignore cancellation indefinitely. This host safety
+// boundary reports unresolved ownership; it never treats expiry as release.
+const DEFAULT_STREAM_CLEANUP_TIMEOUT_MS = 1_000
 
 export class ModelStreamCleanupError extends Error {
   constructor(cause: unknown) {
@@ -29,6 +32,7 @@ export class ModelStreamCleanupError extends Error {
 export type ModelRequestOptions = ModelRequestPolicy &
   Readonly<{
     wireApi: ModelWireApi
+    streamCleanupTimeoutMs?: number
     baseDelayMs?: number
     maxDelayMs?: number
     sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
@@ -54,6 +58,8 @@ export function createModelRequestStream(
     baseDelayMs: options.baseDelayMs ?? 500,
     maxDelayMs: options.maxDelayMs ?? 8_000,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 300_000,
+    streamCleanupTimeoutMs:
+      options.streamCleanupTimeoutMs ?? DEFAULT_STREAM_CLEANUP_TIMEOUT_MS,
     sleep: options.sleep ?? realSleep,
     random: options.random ?? Math.random,
   }
@@ -87,7 +93,7 @@ async function* runModelRequest(
     let stage: "connect" | "response_body" = "connect"
     let exhausted = false
     let closeStarted = false
-    let pendingNext = false
+    let pendingNext: Promise<IteratorResult<ModelStreamEvent>> | undefined
     let terminalEvent:
       | Extract<ModelStreamEvent, { readonly type: "response" }>
       | undefined
@@ -113,18 +119,19 @@ async function* runModelRequest(
         })[Symbol.asyncIterator]()
         stage = "response_body"
         for (;;) {
+          const pending = iterator.next()
           const next = await nextWithDeadline(
-            iterator,
+            pending,
             options.streamIdleTimeoutMs,
             request.signal,
           )
           if (next === cancelled) {
-            pendingNext = true
+            pendingNext = pending
             yield { type: "cancelled", ...usageFields() }
             return
           }
           if (next === idleTimeout) {
-            pendingNext = true
+            pendingNext = pending
             attemptController.abort()
             failureEvent =
               terminalEvent === undefined
@@ -270,16 +277,21 @@ async function* runModelRequest(
       if (iterator !== undefined && !exhausted) {
         attemptController.abort()
         closeStarted = true
-        const closing = closeModelStream(iterator, failureEvent?.cause)
-        if (pendingNext) void closing.catch(() => {})
-        else await closing
+        await closeModelStream(
+          iterator,
+          pendingNext,
+          options.streamCleanupTimeoutMs,
+          failureEvent?.cause,
+        )
       }
     } finally {
       if (iterator !== undefined && !exhausted && !closeStarted) {
         attemptController.abort()
-        const closing = closeModelStream(iterator)
-        if (pendingNext) void closing.catch(() => {})
-        else await closing
+        await closeModelStream(
+          iterator,
+          pendingNext,
+          options.streamCleanupTimeoutMs,
+        )
       }
     }
 
@@ -330,11 +342,52 @@ async function* runModelRequest(
 
 async function closeModelStream(
   iterator: AsyncIterator<ModelStreamEvent>,
+  pendingNext: Promise<IteratorResult<ModelStreamEvent>> | undefined,
+  timeoutMs: number,
   failure?: unknown,
 ): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await iterator.return?.()
+    const closing = Promise.allSettled([
+      Promise.resolve().then(() => iterator.return?.()),
+      ...(pendingNext === undefined ? [] : [pendingNext]),
+    ]).then((results) => {
+      const errors = [
+        ...new Set(
+          results.flatMap((result, index) => {
+            if (result.status !== "rejected") return []
+            // Abort rejects the outstanding read normally; return() still has to
+            // confirm cleanup. Other late read failures cannot be silently lost.
+            if (
+              index === 1 &&
+              result.reason instanceof Error &&
+              ["AbortError", "APIUserAbortError"].includes(result.reason.name)
+            )
+              return []
+            return [result.reason]
+          }),
+        ),
+      ]
+      if (errors.length === 1) throw errors[0]
+      if (errors.length > 1)
+        throw new AggregateError(errors, "Model stream teardown failed.")
+    })
+    await Promise.race([
+      closing,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                "Model stream did not settle after cancellation; resource ownership is unresolved.",
+              ),
+            ),
+          timeoutMs,
+        )
+      }),
+    ])
   } catch (cause) {
+    if (cause instanceof ModelStreamCleanupError) throw cause
     throw new ModelStreamCleanupError(
       failure === undefined
         ? cause
@@ -344,6 +397,8 @@ async function closeModelStream(
             { cause: failure },
           ),
     )
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
@@ -414,6 +469,7 @@ function validateOptions(options: ResolvedModelRequestOptions): void {
     ["maxAttempts", options.maxAttempts],
     ["rateLimitMaxAttempts", options.rateLimitMaxAttempts],
     ["streamIdleTimeoutMs", options.streamIdleTimeoutMs],
+    ["streamCleanupTimeoutMs", options.streamCleanupTimeoutMs],
   ] as const) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${name} must be a positive integer.`)
@@ -424,6 +480,10 @@ function validateOptions(options: ResolvedModelRequestOptions): void {
       `streamIdleTimeoutMs must be at most ${String(MAX_TIMER_DELAY_MS)}.`,
     )
   }
+  if (options.streamCleanupTimeoutMs > MAX_TIMER_DELAY_MS)
+    throw new Error(
+      `streamCleanupTimeoutMs must be at most ${String(MAX_TIMER_DELAY_MS)}.`,
+    )
   if (
     !Number.isFinite(options.baseDelayMs) ||
     options.baseDelayMs < 0 ||
@@ -442,7 +502,7 @@ const idleTimeout = Symbol("idle_timeout")
 const cancelled = Symbol("cancelled")
 
 async function nextWithDeadline(
-  iterator: AsyncIterator<ModelStreamEvent>,
+  pending: Promise<IteratorResult<ModelStreamEvent>>,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<
@@ -456,7 +516,7 @@ async function nextWithDeadline(
         IteratorResult<ModelStreamEvent> | typeof idleTimeout | typeof cancelled
       >
     > = [
-      iterator.next(),
+      pending,
       new Promise<typeof idleTimeout>((resolve) => {
         timer = setTimeout(() => resolve(idleTimeout), timeoutMs)
       }),

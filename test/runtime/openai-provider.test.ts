@@ -198,7 +198,8 @@ describe("OpenAI Responses provider", () => {
               }),
             }
             controller.abort()
-            if (wrapped) await new Promise(() => {})
+            if (wrapped)
+              await new Promise<void>((resolve) => setImmediate(resolve))
           })()
         },
       },

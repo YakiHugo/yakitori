@@ -20,7 +20,7 @@ describe("model request runtime", () => {
   ])("keeps observed terminal usage when the stream tail ends with %s", async (tail) => {
     const controller = new AbortController()
     const usage = { inputTokens: 100, outputTokens: 20 }
-    const provider: StreamFn = async function* () {
+    const provider: StreamFn = async function* (request) {
       yield { ...success, response: { ...success.response, usage } }
       if (tail === "throw") throw new Error("bad tail")
       if (tail === "extra") {
@@ -28,7 +28,13 @@ describe("model request runtime", () => {
         return
       }
       if (tail === "cancel") controller.abort()
-      await new Promise(() => {})
+      await new Promise<void>((resolve) => {
+        if (request.signal?.aborted) resolve()
+        else
+          request.signal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          })
+      })
     }
     const stream = createModelRequestStream(provider, {
       wireApi: "unknown",
@@ -79,7 +85,7 @@ describe("model request runtime", () => {
     expect(seen).toHaveLength(4)
   })
 
-  it("captures a reported snapshot even when cancellation wins the pending provider next", async () => {
+  it("preserves observed usage and rejects cancellation whose read never settles", async () => {
     const controller = new AbortController()
     const provider: StreamFn = async function* (request) {
       request.onUsageSnapshot?.({ inputTokens: 100, outputTokens: 0 })
@@ -87,14 +93,23 @@ describe("model request runtime", () => {
       controller.abort()
       await new Promise(() => {})
     }
-    expect(
-      await collect(
-        createModelRequestStream(provider, { wireApi: "unknown" }),
-        controller.signal,
-      ),
-    ).toEqual([
-      { type: "cancelled", usage: { inputTokens: 100, outputTokens: 20 } },
-    ])
+    const stream = createModelRequestStream(provider, {
+      wireApi: "unknown",
+      streamCleanupTimeoutMs: 5,
+    })
+    const iterator = stream(requestFixture(controller.signal))[
+      Symbol.asyncIterator
+    ]()
+    expect(await iterator.next()).toEqual({
+      done: false,
+      value: {
+        type: "cancelled",
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    })
+    await expect(iterator.next()).rejects.toBeInstanceOf(
+      ModelStreamCleanupError,
+    )
   })
 
   it("does not carry a failed attempt's usage into a later unmetered attempt", async () => {
@@ -461,25 +476,38 @@ describe("model request runtime", () => {
     ])
   })
 
-  it("aborts a stalled transport and recovers before visible output", async () => {
+  it("settles a stalled attempt's read and teardown before starting its retry", async () => {
     let transportAborted = false
     let attempts = 0
-    const halfOpen: StreamFn = async function* (request) {
+    const closing = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<IteratorResult<ModelStreamEvent>>()
+    const halfOpen: StreamFn = (request) => {
       if (++attempts === 2) {
         expect(transportAborted).toBe(true)
-        yield success
-        return
+        return (async function* () {
+          yield success
+        })()
       }
-      await new Promise<void>((resolve) => {
-        request.signal?.addEventListener(
-          "abort",
-          () => {
-            transportAborted = true
-            resolve()
-          },
-          { once: true },
-        )
-      })
+      const reading = Promise.withResolvers<IteratorResult<ModelStreamEvent>>()
+      request.signal?.addEventListener(
+        "abort",
+        () => {
+          transportAborted = true
+          reading.resolve({ done: true, value: undefined })
+        },
+        { once: true },
+      )
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => reading.promise,
+            return() {
+              closing.resolve()
+              return released.promise
+            },
+          }
+        },
+      }
     }
     const stream = createModelRequestStream(halfOpen, {
       wireApi: "unknown",
@@ -488,7 +516,15 @@ describe("model request runtime", () => {
       sleep: async () => {},
     })
 
-    expect(await collect(stream)).toEqual([
+    const collecting = collect(stream)
+    try {
+      await closing.promise
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(attempts).toBe(1)
+    } finally {
+      released.resolve({ done: true, value: undefined })
+    }
+    expect(await collecting).toEqual([
       expect.objectContaining({
         type: "retry",
         failure: expect.objectContaining({
