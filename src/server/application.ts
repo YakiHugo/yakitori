@@ -90,7 +90,10 @@ import {
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
-import { createSkillsLoader } from "../runtime/skills.ts"
+import {
+  createLocalSkillsSource,
+  type SkillsSource,
+} from "../runtime/skills.ts"
 import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
@@ -180,36 +183,38 @@ const MODELS_REFRESH_INTERVAL_MS = 270_000
 // from the package manifest (bundled into the desktop build at build time).
 const serverUserAgent = `${packageJson.name}/${packageJson.version}`
 
-export type YakitoriApplicationOptions = {
-  readonly acpEngines?: readonly AcpEngineConfiguration[]
-  readonly chatgpt?: Readonly<{
+export type YakitoriApplicationOptions = Readonly<{
+  acpEngines?: readonly AcpEngineConfiguration[]
+  chatgpt?: Readonly<{
     fetchFn?: typeof fetch
     openAuthorization?: (url: string, signal?: AbortSignal) => Promise<void>
   }>
   // Explicitly reachable by the model backend; the local GUI origin is not public.
-  readonly assetBaseUrl?: string
-  readonly activeMateId?: string
-  readonly guiStaticDir?: string
-  readonly mateDatabasePath?: string
-  readonly projectDatabasePath?: string
-  readonly rootDir?: string
-  readonly sessionStoreRoot?: string
-  readonly workspace?: string
-  readonly stream?: StreamFn
-  readonly providerStreams?: Readonly<Record<string, StreamFn>>
-  readonly providerPlugins?: readonly ModelProviderPlugin[]
-  readonly mcp?: boolean
-  readonly modelDirectory?: ModelDirectory
-  readonly userConfigPath?: string
-  readonly baseInstructions?: string
-  readonly modelContextWindowTokens?: number
-  readonly provider?: string
-  readonly model?: string
-  readonly fauxScenario?: string
-  readonly userShellEnv?: UserShellEnv
-  readonly reportOperationalFailure?: OperationalFailureReporter
-  readonly shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
-}
+  assetBaseUrl?: string
+  activeMateId?: string
+  guiStaticDir?: string
+  mateDatabasePath?: string
+  projectDatabasePath?: string
+  rootDir?: string
+  sessionStoreRoot?: string
+  workspace?: string
+  stream?: StreamFn
+  providerStreams?: Readonly<Record<string, StreamFn>>
+  providerPlugins?: readonly ModelProviderPlugin[]
+  mcp?: boolean
+  skills?: boolean
+  skillsSource?: SkillsSource
+  modelDirectory?: ModelDirectory
+  userConfigPath?: string
+  baseInstructions?: string
+  modelContextWindowTokens?: number
+  provider?: string
+  model?: string
+  fauxScenario?: string
+  userShellEnv?: UserShellEnv
+  reportOperationalFailure?: OperationalFailureReporter
+  shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
+}>
 
 export type YakitoriApplication = {
   readonly sideChats: SideChatService
@@ -853,6 +858,7 @@ export async function createYakitoriApplication(
       },
     })
     agentRuntimeForCleanup = agentRuntime
+    const skillsSource = options.skillsSource ?? createLocalSkillsSource()
     const createSessionProcessor = async (
       stored: StoredThread,
       sideConversation = false,
@@ -1007,6 +1013,8 @@ export async function createYakitoriApplication(
             ? undefined
             : createHookRunner(sessionConfiguration.hooks)
         processor = createTurnProcessor({
+          ...(options.skills === undefined ? {} : { skills: options.skills }),
+          skillsSource,
           ...(sideConversation
             ? {
                 additionalInstructions: {
@@ -1225,7 +1233,6 @@ export async function createYakitoriApplication(
       })
     })
 
-    const skillsLoader = createSkillsLoader()
     const handlers = createThreadServerHandlers({
       manager: threadManager,
       goals: goalRuntime,
@@ -1254,6 +1261,7 @@ export async function createYakitoriApplication(
       rolloutAssets,
       releaseDraftRolloutAssets,
       listSessionSkills: async ({ workingDirectory, projectId }) => {
+        if (options.skills === false) return []
         // Resolve the config root the same way the turn-processor path does:
         // with the session's project, not a roots-only scan.
         const root = await resolveProjectConfigRoot(
@@ -1265,7 +1273,7 @@ export async function createYakitoriApplication(
           cwd: workingDirectory,
         })
         const configuration = snapshot.configuration
-        const discovered = await skillsLoader({
+        const discovered = await skillsSource.load({
           workingDirectory,
           ...(configuration.projectRootMarkers === undefined
             ? {}

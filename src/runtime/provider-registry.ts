@@ -5,7 +5,10 @@ import {
   type ModelClientSession,
   type ModelProvider,
 } from "./model-provider.ts"
-import type { ModelRequestPolicy } from "./model-request.ts"
+import {
+  ModelStreamCleanupError,
+  type ModelRequestPolicy,
+} from "./model-request.ts"
 import type { ModelsManager } from "./models-manager.ts"
 
 type ProviderDefinitions = Readonly<Record<string, ModelProvider | StreamFn>>
@@ -144,7 +147,15 @@ export function createProviderRegistry(
         const events = stream(request)
         return (async function* () {
           requireActive()
-          yield* events
+          try {
+            yield* events
+          } catch (cause) {
+            // close() may only stop the transport. A stream that timed out
+            // during teardown still owns work even if that callback succeeds.
+            if (cause instanceof ModelStreamCleanupError)
+              entry.errors.push(cause)
+            throw cause
+          }
         })()
       }
     const warmup = session.warmup

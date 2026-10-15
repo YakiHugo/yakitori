@@ -17,7 +17,7 @@ import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createTurnLoop } from "../../src/runtime/turn-loop.ts"
 
 it.each([
   { ownership: "injected", failure: false },
@@ -80,10 +80,9 @@ it.each([
     const restarted = new ThreadManager({
       store: fixture.store,
       createTurnProcessor: () =>
-        createTurnProcessor({
+        createTurnLoop({
           stream: fixture.stream,
           toolRegistry: createToolRegistry([]),
-          loadProjectInstructions: async () => undefined,
         }),
     })
     onTestFinished(() => restarted.shutdown())
@@ -220,7 +219,7 @@ async function inferenceFixture(options: {
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () =>
-      createTurnProcessor({
+      createTurnLoop({
         ...(options.ownership === "injected"
           ? { stream }
           : {
@@ -238,7 +237,6 @@ async function inferenceFixture(options: {
               }).createClient(),
             }),
         toolRegistry: createToolRegistry([]),
-        loadProjectInstructions: async () => undefined,
       }),
   })
   onTestFinished(async () => {

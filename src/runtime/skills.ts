@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path"
 import { parseDocument } from "yaml"
 import {
   type InstructionDiagnostic,
+  type InstructionPrefix,
   instructionDirectories,
   instructionHome,
   isFileSystemError,
@@ -81,6 +82,42 @@ export type SkillLoadInput = Readonly<{
   projectRootMarkers?: readonly string[]
   configuration?: SkillConfiguration
 }>
+
+// Discovery and reads share one source authority. Custom resources never fall
+// back to the host filesystem merely because their identifiers resemble paths.
+export type SkillResourceReader = Readonly<{
+  resolve(path: string): Promise<string>
+  read(skill: SkillMetadata, maxBytes: number): Promise<InstructionPrefix>
+}>
+
+export type SkillsSource = Readonly<{
+  // Capture the matching reader with each inventory, so refreshing a source
+  // cannot redirect an already prepared Step to a different account/package.
+  load(
+    input: SkillLoadInput,
+  ): Promise<SkillsSnapshot & Readonly<{ resources: SkillResourceReader }>>
+}>
+
+const localSkillResources: SkillResourceReader = {
+  async resolve(path) {
+    try {
+      return await realpath(path)
+    } catch (error) {
+      if (!isFileSystemError(error)) throw error
+      return path
+    }
+  },
+  read: (skill, maxBytes) => readInstructionPrefix(skill.path, maxBytes),
+}
+
+export function createLocalSkillsSource(): SkillsSource {
+  const load = createSkillsLoader()
+  return {
+    async load(input) {
+      return { ...(await load(input)), resources: localSkillResources }
+    },
+  }
+}
 
 const usage = `## Skills
 A skill is a workflow in a SKILL.md file. User instructions take precedence over skill instructions.
@@ -287,8 +324,12 @@ export async function loadExplicitSkillInstructions(
   text: string,
   snapshot: SkillsSnapshot,
   onWarning?: (message: string) => void,
-  options?: Readonly<{ mcpServers?: readonly SkillMcpServer[] }>,
+  options?: Readonly<{
+    mcpServers?: readonly SkillMcpServer[]
+    source?: SkillResourceReader
+  }>,
 ): Promise<string | undefined> {
+  const resources = options?.source ?? localSkillResources
   const selected = new Map<string, SkillMetadata>()
   const diagnostics: string[] = []
   const paths = new Set(
@@ -300,14 +341,8 @@ export async function loadExplicitSkillInstructions(
       .map((match) => match[2]),
   )
   for (const path of paths) {
-    let canonical = path
-    if (path !== undefined) {
-      try {
-        canonical = await realpath(path)
-      } catch (error) {
-        if (!isFileSystemError(error)) throw error
-      }
-    }
+    const canonical =
+      path === undefined ? undefined : await resources.resolve(path)
     const skill = snapshot.skills.find((skill) => skill.path === canonical)
     if (skill !== undefined && skill.enabled !== false)
       selected.set(skill.path, skill)
@@ -345,9 +380,13 @@ export async function loadExplicitSkillInstructions(
     )
   for (const skill of selected.values()) {
     try {
-      const body = await readInstructionPrefix(skill.path, BODY_READ_BYTES)
+      const resource = await resources.read(skill, BODY_READ_BYTES)
+      // Keep the host injection bound even when a custom reader returns more
+      // than requested. Reader hints do not control model context admission.
+      const body = utf8Prefix(resource.text, BODY_READ_BYTES)
+      const truncated = resource.truncated || body.length < resource.text.length
       blocks.push(
-        `<skill>\n<name>${skill.name}</name>\n<path>${skill.path}</path>\n${body.text}\n${body.truncated ? "Skill body reached the host injection safety boundary; read the remainder before acting.\n" : ""}</skill>`,
+        `<skill>\n<name>${skill.name}</name>\n<path>${skill.path}</path>\n${body}\n${truncated ? "Skill body reached the host injection safety boundary; read the remainder before acting.\n" : ""}</skill>`,
       )
     } catch (error) {
       if (!isFileSystemError(error)) throw error

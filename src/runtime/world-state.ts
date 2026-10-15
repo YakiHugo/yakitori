@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto"
-import { GoalStatus } from "../core/goal.ts"
 import type {
   JsonObject,
   JsonValue,
@@ -14,9 +13,7 @@ import {
   type EnvironmentSnapshot,
   renderEnvironmentContext,
 } from "./environment-context.ts"
-import type { ProjectInstructions } from "./project-instructions.ts"
 import type { ResolvedStepConfiguration } from "./session-configuration.ts"
-import type { SkillsCatalog } from "./skills.ts"
 
 export const WorldStateSectionId = {
   Model: "model",
@@ -35,7 +32,7 @@ export type PreviousSectionState<T> =
   | { readonly type: "unknown" }
 
 export type WorldState = Readonly<{
-  sections: readonly ErasedWorldStateSection[]
+  sections: readonly WorldStateSection[]
 }>
 
 export type WorldStateDiff = Readonly<{
@@ -45,23 +42,20 @@ export type WorldStateDiff = Readonly<{
   fragments: readonly WorldStateFragment[]
 }>
 
-type ErasedWorldStateSection = Readonly<{
+export type WorldStateSection = Readonly<{
   id: string
   snapshot: JsonValue
   renderDiff(previous: PreviousSectionState<JsonValue>): WorldStateFragment[]
 }>
 
-export function buildWorldStateFromSnapshot(input: {
+export function buildWorldState(input: {
   readonly configuration: ResolvedStepConfiguration
   readonly enabledToolNames?: ReadonlySet<string>
   readonly baseModelId?: string | undefined
   readonly previousModelId?: string | undefined
   readonly environment: EnvironmentSnapshot
-  readonly projectInstructions?: ProjectInstructions
   readonly multiAgent?: AgentRuntimeContext
-  readonly skills?: SkillsCatalog
-  readonly goal?: string
-  readonly goalStatus?: GoalStatus
+  readonly extensionSections?: readonly WorldStateSection[]
 }): WorldState {
   return {
     sections: [
@@ -85,9 +79,7 @@ export function buildWorldStateFromSnapshot(input: {
       toolInstructionsSection(
         input.enabledToolNames ?? new Set(input.configuration.enabledTools),
       ),
-      projectInstructionsSection(input.projectInstructions),
-      skillsSection(input.skills),
-      goalSection(input.goal, input.goalStatus),
+      ...(input.extensionSections ?? []),
       environmentSection(input.environment),
     ],
   }
@@ -95,8 +87,8 @@ export function buildWorldStateFromSnapshot(input: {
 
 function permissionSection(
   policy: ResolvedStepConfiguration["approvalPolicy"],
-): ErasedWorldStateSection {
-  return section({
+): WorldStateSection {
+  return createWorldStateSection({
     id: WorldStateSectionId.Permissions,
     snapshot: policy,
     decode: stringSnapshot,
@@ -107,7 +99,7 @@ function permissionSection(
           ? "Tool approval requests are automatically approved. Commands run with the host user's authority and are not sandboxed. Follow the user's authorization and task scope."
           : "File tools are automatically approved. Shell command execution requires approval through the tool permission gate. Submit the tool call to request approval; do not claim it ran before the result. Commands are not sandboxed."
       return [
-        fragment(
+        createWorldStateFragment(
           WorldStateSectionId.Permissions,
           "developer",
           `<permissions_instructions>\n${text}\n</permissions_instructions>`,
@@ -119,7 +111,7 @@ function permissionSection(
 
 function toolInstructionsSection(
   names: ReadonlySet<string>,
-): ErasedWorldStateSection {
+): WorldStateSection {
   const guidance = [
     "You are Yakitori, running in the user's local workspace. Only the tools exposed in this request are available; use their schemas and the current harness permission policy even when a model template mentions another host or tool.",
     "Vendor coding-agent instructions describe the original host. Here the host is Yakitori: repository instructions and live environment arrive in developer messages. Vendor slash commands, documentation paths, memory stores, and integrations are not provided unless explicitly exposed by this harness. Use only the active tool-name equivalents below and follow their actual schemas and lifecycles.",
@@ -164,14 +156,14 @@ function toolInstructionsSection(
   ]
     .filter(Boolean)
     .join("\n")
-  return section({
+  return createWorldStateSection({
     id: WorldStateSectionId.Tools,
     snapshot: guidance,
     decode: stringSnapshot,
     render(previous) {
       if (previous.type === "known" && previous.snapshot === guidance) return []
       return [
-        fragment(
+        createWorldStateFragment(
           WorldStateSectionId.Tools,
           "developer",
           `<tool_instructions>\n${guidance}\n</tool_instructions>`,
@@ -181,58 +173,10 @@ function toolInstructionsSection(
   })
 }
 
-function skillsSection(
-  catalog: SkillsCatalog | undefined,
-): ErasedWorldStateSection {
-  const snapshot: JsonObject = {
-    skills:
-      catalog?.skills.map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-        path: skill.path,
-        scope: skill.scope,
-      })) ?? [],
-    truncated: catalog?.truncated ?? false,
-    text: catalog?.text ?? "",
-  }
-  return section({
-    id: WorldStateSectionId.Skills,
-    snapshot,
-    decode: jsonObjectSnapshot,
-    render(previous) {
-      if (previous.type === "known" && equalJson(previous.snapshot, snapshot)) {
-        return []
-      }
-      if (catalog === undefined) {
-        return previous.type === "known" &&
-          Array.isArray(previous.snapshot.skills) &&
-          previous.snapshot.skills.length > 0
-          ? [
-              fragment(
-                WorldStateSectionId.Skills,
-                "developer",
-                "<skills_update>No skills are currently available.</skills_update>",
-              ),
-            ]
-          : []
-      }
-      return [
-        fragment(
-          WorldStateSectionId.Skills,
-          "developer",
-          previous.type === "absent"
-            ? catalog.text
-            : `<skills_update>Replace the previous skills catalog with this catalog.\n\n${catalog.text}\n</skills_update>`,
-        ),
-      ]
-    },
-  })
-}
-
 function multiAgentSection(
   context: AgentRuntimeContext,
   canSpawnAgent: boolean,
-): ErasedWorldStateSection {
+): WorldStateSection {
   const snapshot: JsonObject = {
     path: context.path,
     taskName: context.taskName,
@@ -245,7 +189,7 @@ function multiAgentSection(
       ? {}
       : { parentPath: context.parentPath }),
   }
-  return section({
+  return createWorldStateSection({
     id: WorldStateSectionId.MultiAgent,
     snapshot,
     decode: jsonObjectSnapshot,
@@ -263,7 +207,7 @@ function multiAgentSection(
           ? `Delegation depth ${String(context.maxDepth)} has been reached. Do not retry spawn_agent; complete the work yourself.`
           : `You may spawn descendants up to depth ${String(context.maxDepth)} when a bounded task can run independently.`
       return [
-        fragment(
+        createWorldStateFragment(
           WorldStateSectionId.MultiAgent,
           "developer",
           `<multi_agent_context>\nYou are agent ${context.path}${context.parentPath === undefined ? "." : `, reporting to ${context.parentPath}.`} ${role}\n${delegation}\nThe shared tree allows ${String(context.maxConcurrentAgents)} concurrently running agents including the root. All agents receive the same tool definitions; follow the role guidance above when choosing actions.\n</multi_agent_context>`,
@@ -309,13 +253,13 @@ function modelSection(
   configuration: ResolvedStepConfiguration,
   previousModelId: string | undefined,
   modelOwnedBase: boolean,
-): ErasedWorldStateSection {
+): WorldStateSection {
   const modelId = `${configuration.target.provider}/${configuration.target.model}`
   const snapshot = {
     id: modelId,
     instructionsRevision: configuration.modelInstructions.revision,
   }
-  return section({
+  return createWorldStateSection({
     id: WorldStateSectionId.Model,
     snapshot,
     decode: jsonObjectSnapshot,
@@ -333,7 +277,7 @@ function modelSection(
       if (!changed || configuration.modelInstructions.text.length === 0)
         return []
       return [
-        fragment(
+        createWorldStateFragment(
           WorldStateSectionId.Model,
           "developer",
           `<model_switch>\nThe active model or its instructions have changed. Continue the conversation according to the following model-specific instructions.\n\n${configuration.modelInstructions.text}\n</model_switch>`,
@@ -343,159 +287,12 @@ function modelSection(
   })
 }
 
-type ProjectInstructionsSnapshot = Readonly<{
-  directory?: string
-  text?: string
-}>
-
-function projectInstructionsSection(
-  instructions: ProjectInstructions | undefined,
-): ErasedWorldStateSection {
-  const text = instructions?.text
-  const snapshot: ProjectInstructionsSnapshot = {
-    ...(instructions === undefined
-      ? {}
-      : { directory: instructions.directory, text: text ?? "" }),
-  }
-  return section({
-    id: WorldStateSectionId.ProjectInstructions,
-    snapshot: snapshot as JsonObject,
-    decode: projectInstructionsSnapshot,
-    render(previous) {
-      if (
-        previous.type === "known" &&
-        equalJson(previous.snapshot as JsonValue, snapshot as JsonValue)
-      ) {
-        return []
-      }
-      const previousMayContainInstructions =
-        previous.type === "unknown" ||
-        (previous.type === "known" && previous.snapshot.text !== undefined)
-      if (text !== undefined) {
-        return [
-          fragment(
-            WorldStateSectionId.ProjectInstructions,
-            "user",
-            previousMayContainInstructions
-              ? `<project_instructions_update>\nThese project instructions replace all previously supplied project instructions.\n\n${text}\n</project_instructions_update>`
-              : text,
-          ),
-        ]
-      }
-      return previousMayContainInstructions
-        ? [
-            fragment(
-              WorldStateSectionId.ProjectInstructions,
-              "user",
-              "<project_instructions_update>\nThe previously supplied project instructions no longer apply.\n</project_instructions_update>",
-            ),
-          ]
-        : []
-    },
-  })
-}
-
-type GoalSnapshot = Readonly<{ text?: string; status?: GoalStatus }>
-
-function goalSection(
-  goal: string | undefined,
-  status: GoalStatus | undefined,
-): ErasedWorldStateSection {
-  const snapshot: GoalSnapshot =
-    goal === undefined
-      ? {}
-      : { text: goal, status: status ?? GoalStatus.Active }
-  return section({
-    id: WorldStateSectionId.Goal,
-    snapshot: snapshot as JsonObject,
-    decode: goalSnapshot,
-    render(previous) {
-      if (
-        previous.type === "known" &&
-        equalJson(previous.snapshot as JsonValue, snapshot as JsonValue)
-      ) {
-        return []
-      }
-      const previousMayContainGoal =
-        previous.type === "unknown" ||
-        (previous.type === "known" && previous.snapshot.text !== undefined)
-      const previousStatus =
-        previous.type === "known" ? previous.snapshot.status : undefined
-      // Older snapshots stored only the objective. Treat that as active so a
-      // status field added later does not look like a resume.
-      if (
-        goal !== undefined &&
-        previous.type === "known" &&
-        previous.snapshot.text === goal &&
-        previousStatus === undefined &&
-        (snapshot.status === undefined || snapshot.status === GoalStatus.Active)
-      ) {
-        return []
-      }
-      if (goal !== undefined) {
-        return [
-          fragment(
-            WorldStateSectionId.Goal,
-            "developer",
-            goalFragment(
-              goal,
-              snapshot.status,
-              previousMayContainGoal,
-              previousStatus,
-            ),
-          ),
-        ]
-      }
-      return previousMayContainGoal
-        ? [
-            fragment(
-              WorldStateSectionId.Goal,
-              "developer",
-              "<session_goal_update>\nThe previous session goal has been cleared; it no longer applies.\n</session_goal_update>",
-            ),
-          ]
-        : []
-    },
-  })
-}
-
-function goalFragment(
-  goal: string,
-  status: GoalStatus | undefined,
-  previousMayContainGoal: boolean,
-  previousStatus: GoalStatus | undefined,
-): string {
-  if (status === undefined || status === GoalStatus.Active) {
-    if (
-      previousMayContainGoal &&
-      previousStatus !== undefined &&
-      previousStatus !== GoalStatus.Active
-    ) {
-      return `<session_goal_update>\nThe user resumed this session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
-    }
-    return previousMayContainGoal
-      ? `<session_goal_update>\nThis goal replaces the previous session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
-      : `<session_goal>\nThe user has set a goal for this session. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal>`
-  }
-  const reason =
-    status === GoalStatus.Paused
-      ? "The user paused this session goal. Do not keep working toward it until they resume it."
-      : status === GoalStatus.Complete
-        ? "This session goal is achieved. Do not keep working toward it unless the user sets a new one."
-        : status === GoalStatus.Blocked
-          ? "This session goal is stalled. Do not keep working toward it until the user resumes it."
-          : status === GoalStatus.UsageLimited
-            ? "This session goal is usage limited. Do not keep working toward it until the user resumes it."
-            : "This session goal has reached its token budget. Do not start further substantive work for it. Wrap up this turn soon: summarize useful progress, remaining work or blockers, and the next step for the user. Only mark complete if all required work is actually finished. A budget limit takes precedence over a requested pause."
-  return `<session_goal_update>\n${reason}\n\nGoal: ${goal}\n</session_goal_update>`
-}
-
 function environmentSection(
   environment: EnvironmentSnapshot,
-): ErasedWorldStateSection {
+): WorldStateSection {
   const snapshot = { ...environment }
   const text = renderEnvironmentContext(environment)
-  return section({
+  return createWorldStateSection({
     id: WorldStateSectionId.Environment,
     snapshot,
     decode: environmentSnapshot,
@@ -507,7 +304,7 @@ function environmentSection(
         return []
       }
       return [
-        fragment(
+        createWorldStateFragment(
           WorldStateSectionId.Environment,
           "user",
           previous.type === "absent"
@@ -519,7 +316,7 @@ function environmentSection(
   })
 }
 
-function fragment(
+export function createWorldStateFragment(
   id: string,
   role: WorldStateFragment["role"],
   text: string,
@@ -527,12 +324,12 @@ function fragment(
   return { id, role, text, revision: fingerprint(`${role}\0${text}`) }
 }
 
-function section<T>(input: {
+export function createWorldStateSection<T>(input: {
   readonly id: string
   readonly snapshot: JsonValue
   readonly decode: (value: JsonValue) => T | undefined
   readonly render: (previous: PreviousSectionState<T>) => WorldStateFragment[]
-}): ErasedWorldStateSection {
+}): WorldStateSection {
   requireMergePatchSafeSnapshot(input.id, input.snapshot)
   return {
     id: input.id,
@@ -552,6 +349,10 @@ function section<T>(input: {
 // RFC 7386 reserves null object fields for deletion, so persisted section
 // snapshots must express absence by omitting a field instead.
 function requireMergePatchSafeSnapshot(id: string, value: JsonValue): void {
+  if (value === null)
+    throw new Error(
+      `World-state section ${id} cannot use null as its snapshot.`,
+    )
   if (Array.isArray(value)) return
   if (!isJsonRecord(value)) return
   for (const [key, child] of Object.entries(value)) {
@@ -578,47 +379,6 @@ function stringSnapshot(value: JsonValue): string | undefined {
 
 function jsonObjectSnapshot(value: JsonValue): JsonObject | undefined {
   return isJsonRecord(value) ? value : undefined
-}
-
-function projectInstructionsSnapshot(
-  value: JsonValue,
-): ProjectInstructionsSnapshot | undefined {
-  if (!isJsonRecord(value)) return undefined
-  const directory = value.directory
-  const text = value.text
-  if (
-    (directory !== undefined && typeof directory !== "string") ||
-    (text !== undefined && typeof text !== "string")
-  ) {
-    return undefined
-  }
-  return {
-    ...(directory === undefined ? {} : { directory }),
-    ...(text === undefined ? {} : { text }),
-  }
-}
-
-function goalSnapshot(value: JsonValue): GoalSnapshot | undefined {
-  if (!isJsonRecord(value)) return undefined
-  if (value.text !== undefined && typeof value.text !== "string")
-    return undefined
-  if (
-    value.status !== undefined &&
-    value.status !== GoalStatus.Active &&
-    value.status !== GoalStatus.Paused &&
-    value.status !== GoalStatus.Blocked &&
-    value.status !== GoalStatus.UsageLimited &&
-    value.status !== GoalStatus.BudgetLimited &&
-    value.status !== GoalStatus.Complete
-  ) {
-    return undefined
-  }
-  return {
-    ...(value.text === undefined ? {} : { text: value.text }),
-    ...(value.status === undefined
-      ? {}
-      : { status: value.status as GoalStatus }),
-  }
 }
 
 function environmentSnapshot(
@@ -650,11 +410,12 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function requireUniqueSectionIds(
-  sections: readonly ErasedWorldStateSection[],
-): void {
+function requireUniqueSectionIds(sections: readonly WorldStateSection[]): void {
   const ids = new Set<string>()
   for (const section of sections) {
+    if (section.id.trim() === "")
+      throw new Error("World-state section ID must not be empty.")
+    requireMergePatchSafeSnapshot(section.id, section.snapshot)
     if (ids.has(section.id)) {
       throw new Error(`Duplicate world-state section ID: ${section.id}`)
     }
