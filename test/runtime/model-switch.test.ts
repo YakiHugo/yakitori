@@ -47,7 +47,7 @@ describe("pre-sampling model switches", () => {
       .poll(() => thread.agentStatus)
       .toEqual({ completed: "done model-a" })
 
-    harness.registry.replace({
+    await harness.registration.replace({
       work: harness.provider("work", [
         { id: "model-b", contextWindowTokens: 100_000 },
       ]),
@@ -144,7 +144,7 @@ describe("pre-sampling model switches", () => {
       requests.filter((request) => request.compaction === "codex_remote"),
     ).toHaveLength(1)
     const provider = removed === "model" ? "work" : "other"
-    harness.registry.replace({
+    await harness.registration.replace({
       [provider]: harness.provider(provider, [
         { id: "model-b", contextWindowTokens: 200_000 },
       ]),
@@ -565,7 +565,8 @@ async function setupConfigured(stream: StreamFn, remoteCompaction = false) {
       continuationScope: `${id}:account`,
       stream,
     })
-  const registry = createProviderRegistry({
+  const registry = createProviderRegistry()
+  const registration = registry.register("test", {
     work: provider("work", [
       {
         id: "model-a",
@@ -585,7 +586,7 @@ async function setupConfigured(stream: StreamFn, remoteCompaction = false) {
       }),
   })
   cleanups.push(() => manager.shutdown())
-  return { root, manager, registry, provider }
+  return { root, manager, registration, provider }
 }
 
 function recordingStream(requests: ModelRequest[], usage: number): StreamFn {

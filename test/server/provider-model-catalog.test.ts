@@ -47,6 +47,7 @@ async function fixture() {
   }
   const create = () => {
     const registry = createProviderRegistry({})
+    const registrySource = registry.register("test", {})
     const service = createProviderService({
       userConfig: createUserConfigStore({
         configPath: join(directory, "config.toml"),
@@ -54,7 +55,9 @@ async function fixture() {
       credentialDirectory: join(directory, "keys"),
       now: () => now,
       catalogTtlMs: 1000,
-      apply: (providers) => registry.replace(providers),
+      apply: (providers) => {
+        void registrySource.replace(providers)
+      },
     })
     return { registry, service }
   }

@@ -126,12 +126,15 @@ it("discovers native pages using header authentication and persists input-only l
       throw new Error("Missing catalog address")
     const create = () => {
       const registry = createProviderRegistry({})
+      const registrySource = registry.register("test", {})
       const service = createProviderService({
         userConfig: createUserConfigStore({
           configPath: join(directory, "config.toml"),
         }),
         credentialDirectory: join(directory, "keys"),
-        apply: (providers) => registry.replace(providers),
+        apply: (providers) => {
+          void registrySource.replace(providers)
+        },
       })
       return { registry, service }
     }

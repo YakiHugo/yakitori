@@ -11,7 +11,8 @@ import {
 describe("provider registry", () => {
   it("applies provider replacements to future Turns while retaining active transports", async () => {
     const seen: string[] = []
-    const registry = createProviderRegistry({
+    const registry = createProviderRegistry()
+    const registration = registry.register("test", {
       personal: createModelProvider({
         info: {
           id: "personal",
@@ -24,7 +25,7 @@ describe("provider registry", () => {
     const available = registry.providers
     const client = registry.createClient()
     const active = client.startTurn("personal")
-    registry.replace({
+    const replacing = registration.replace({
       personal: createModelProvider({
         info: {
           id: "personal",
@@ -44,13 +45,16 @@ describe("provider registry", () => {
       void event
     expect(seen).toEqual(["old", "new"])
     expect(available).toEqual(["personal", "work"])
-    registry.replace({})
+    const withdrawing = registration.replace({})
     expect(client.hasProvider("personal")).toBe(false)
     expect(() => client.startTurn("personal")).toThrow("not registered")
     for await (const event of active.stream(request("personal", "model")))
       void event
     expect(seen).toEqual(["old", "new", "old"])
     await client.close()
+    await replacing
+    await withdrawing
+    await registry.close()
   })
 
   it("derives stable continuation scopes from provider configuration", () => {

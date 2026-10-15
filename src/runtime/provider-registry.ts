@@ -2,81 +2,303 @@ import type { ModelRequest, StreamFn } from "./model.ts"
 import {
   createInjectedModelProvider,
   type ModelClient,
+  type ModelClientSession,
   type ModelProvider,
 } from "./model-provider.ts"
+import type { ModelRequestPolicy } from "./model-request.ts"
 import type { ModelsManager } from "./models-manager.ts"
+
+type ProviderDefinitions = Readonly<Record<string, ModelProvider | StreamFn>>
+
+export type ProviderRegistration = Readonly<{
+  // Publication is synchronous; the Promise joins retirement of replaced entries.
+  replace(providers: ProviderDefinitions): Promise<void>
+  close(): Promise<void>
+}>
 
 export type ProviderRegistry = {
   readonly providers: readonly string[]
-  replace(providers: Readonly<Record<string, ModelProvider | StreamFn>>): void
-  readonly createClient: () => ModelClient
-  readonly models: (provider: string) => ModelsManager
-  // Single-request callers such as title generation automatically release
-  // their Turn. Session execution retains its explicit createClient owner.
+  register(owner: string, providers: ProviderDefinitions): ProviderRegistration
+  createClient(): ModelClient
+  models(provider: string): ModelsManager
   readonly stream: StreamFn
+  close(): Promise<void>
+}
+
+type ProviderEntry = {
+  definition: ModelProvider | StreamFn
+  provider: ModelProvider
+  uses: number
+  retired: boolean
+  closing: boolean
+  errors: unknown[]
+  settled: Promise<void>
+  finish(): void
 }
 
 export function createProviderRegistry(
-  providers: Readonly<Record<string, ModelProvider | StreamFn>>,
+  initial: ProviderDefinitions = {},
 ): ProviderRegistry {
-  const resolveEntries = (
-    providers: Readonly<Record<string, ModelProvider | StreamFn>>,
-  ) =>
-    Object.entries(providers).map(([id, provider]) => {
-      const resolved =
-        typeof provider === "function"
-          ? createInjectedModelProvider(id, provider)
-          : provider
-      if (resolved.info.id !== id) {
-        throw new Error(
-          `Provider registry key ${id} does not match provider id ${resolved.info.id}.`,
-        )
-      }
-      return [id, resolved] as const
-    })
-  const entries = resolveEntries(providers)
-  const byId = new Map(entries)
-  // Keep the list identity stable: admission and RPC callers retain this view.
-  const names = entries.map(([provider]) => provider)
-
-  const requireProvider = (provider: string): ModelProvider => {
-    const resolved = byId.get(provider)
-    if (resolved !== undefined) return resolved
+  const byId = new Map<string, ProviderEntry>()
+  const sources = new Map<string, ProviderRegistration>()
+  const disposed = new WeakSet<ModelProvider>()
+  // Admission and RPC callers retain this view.
+  const names: string[] = []
+  let closePromise: Promise<void> | undefined
+  const publishNames = () => names.splice(0, names.length, ...byId.keys())
+  const requireOpen = () => {
+    if (closePromise !== undefined)
+      throw new Error("Provider registry is closed.")
+  }
+  const requireEntry = (id: string) => {
+    requireOpen()
+    const entry = byId.get(id)
+    if (entry !== undefined) return entry
     throw new Error(
-      `Provider ${provider} is not registered. Available providers: ${names.join(", ") || "none"}.`,
+      `Provider ${id} is not registered. Available providers: ${names.join(", ") || "none"}.`,
     )
   }
-
+  const acquire = (entry: ProviderEntry) => {
+    if (entry.retired)
+      throw new Error(`Provider ${entry.provider.info.id} is retired.`)
+    entry.uses++
+    return () => {
+      entry.uses--
+      settle(entry)
+    }
+  }
+  const settle = (entry: ProviderEntry) => {
+    if (!entry.retired || entry.uses !== 0 || entry.closing) return
+    entry.closing = true
+    // A failed Turn close leaves resource ownership unresolved. Do not dispose
+    // shared provider resources under that Turn; retain the failure for shutdown.
+    void Promise.resolve()
+      .then(() =>
+        entry.errors.length === 0 ? entry.provider.close?.() : undefined,
+      )
+      .catch((cause: unknown) => {
+        entry.errors.push(cause)
+      })
+      .finally(entry.finish)
+  }
+  const retire = (entry: ProviderEntry) => {
+    entry.retired = true
+    if (entry.provider.close !== undefined) disposed.add(entry.provider)
+    settle(entry)
+  }
+  const join = async (entries: readonly ProviderEntry[]) => {
+    await Promise.all(entries.map((entry) => entry.settled))
+    const errors = entries.flatMap((entry) => entry.errors)
+    if (errors.length > 0)
+      throw new AggregateError(errors, "Failed to retire model providers.")
+  }
+  const models = (entry: ProviderEntry): ModelsManager => ({
+    provider: entry.provider.info.id,
+    // Pure metadata reads stay usable for a catalog result already returned to
+    // the caller, even if retirement follows that asynchronous read immediately.
+    resolve: (selection) => entry.provider.models.resolve(selection),
+    validate: (selection) => entry.provider.models.validate(selection),
+    capacity: (selection) => entry.provider.models.capacity(selection),
+    async refresh() {
+      const release = acquire(entry)
+      try {
+        await entry.provider.models.refresh()
+      } finally {
+        release()
+      }
+    },
+    async listModels() {
+      const release = acquire(entry)
+      try {
+        return await entry.provider.models.listModels()
+      } finally {
+        release()
+      }
+    },
+  })
+  const startTurn = (
+    entry: ProviderEntry,
+    policy?: ModelRequestPolicy,
+  ): ModelClientSession => {
+    requireOpen()
+    const release = acquire(entry)
+    let session: ModelClientSession
+    try {
+      session = entry.provider.startTurn(policy)
+    } catch (cause) {
+      release()
+      throw cause
+    }
+    let closing: Promise<void> | undefined
+    const requireActive = () => {
+      if (closing !== undefined) throw new Error("Model Turn is closed.")
+    }
+    const guarded =
+      (stream: StreamFn): StreamFn =>
+      (request) => {
+        requireActive()
+        if (request.target.provider !== entry.provider.info.id)
+          throw new Error(
+            `Turn transport for ${entry.provider.info.id} cannot stream target ${request.target.provider}/${request.target.model}.`,
+          )
+        const events = stream(request)
+        return (async function* () {
+          requireActive()
+          yield* events
+        })()
+      }
+    const warmup = session.warmup
+    return {
+      models: entry.provider.models,
+      wireApi: entry.provider.info.wireApi,
+      remoteCompaction: session.remoteCompaction ?? false,
+      nativePdf: entry.provider.info.capabilities.nativePdf === true,
+      stream: guarded((request) => session.stream(request)),
+      ...(warmup === undefined
+        ? {}
+        : { warmup: guarded((request) => warmup(request)) }),
+      close() {
+        closing ??= Promise.resolve()
+          .then(() => session.close())
+          .catch((cause: unknown) => {
+            entry.errors.push(cause)
+            throw cause
+          })
+          .finally(release)
+        return closing
+      },
+    }
+  }
+  const register: ProviderRegistry["register"] = (owner, providers) => {
+    requireOpen()
+    if (owner.trim() === "" || sources.has(owner))
+      throw new Error(
+        `Provider source ${owner} is empty or already registered.`,
+      )
+    let current = new Map<string, ProviderEntry>()
+    const owned = new Set<ProviderEntry>()
+    let closing: Promise<void> | undefined
+    const replace = (definitions: ProviderDefinitions) => {
+      requireOpen()
+      if (closing !== undefined)
+        throw new Error(`Provider source ${owner} is closed.`)
+      // Validate the entire candidate before changing routing or resource ownership.
+      const next = new Map(
+        Object.entries(definitions).map(([id, definition]) => {
+          const existing = current.get(id)
+          if (existing?.definition === definition)
+            return [id, existing] as const
+          if (byId.has(id) && !current.has(id))
+            throw new Error(
+              `Provider ${id} is already registered by another source.`,
+            )
+          const provider =
+            typeof definition === "function"
+              ? createInjectedModelProvider(id, definition)
+              : definition
+          if (
+            id.trim() === "" ||
+            provider.info.id !== id ||
+            provider.models.provider !== id
+          )
+            throw new Error(
+              `Provider registry key ${id} does not match provider id ${provider.info.id} and models ${provider.models.provider}.`,
+            )
+          if (disposed.has(provider))
+            throw new Error(`Provider ${id} has already been retired.`)
+          const { promise: settled, resolve: finish } =
+            Promise.withResolvers<void>()
+          return [
+            id,
+            {
+              definition,
+              provider,
+              uses: 0,
+              retired: false,
+              closing: false,
+              errors: [],
+              settled,
+              finish,
+            } satisfies ProviderEntry,
+          ] as const
+        }),
+      )
+      const removed = [...current]
+        .filter(([id, entry]) => next.get(id) !== entry)
+        .map(([, entry]) => entry)
+      for (const id of current.keys()) byId.delete(id)
+      current = next
+      for (const [id, entry] of next) {
+        byId.set(id, entry)
+        owned.add(entry)
+      }
+      publishNames()
+      for (const entry of removed) retire(entry)
+      return join(removed).finally(() => {
+        for (const entry of removed)
+          if (entry.errors.length === 0) owned.delete(entry)
+      })
+    }
+    const registration: ProviderRegistration = {
+      replace,
+      close() {
+        if (closing !== undefined) return closing
+        for (const id of current.keys()) byId.delete(id)
+        current.clear()
+        publishNames()
+        const entries = [...owned]
+        for (const entry of entries) retire(entry)
+        closing = join(entries).then(() => {
+          sources.delete(owner)
+        })
+        return closing
+      },
+    }
+    // Initial validation can throw without leaving a partially registered source.
+    void replace(providers)
+    sources.set(owner, registration)
+    return registration
+  }
+  if (Object.keys(initial).length > 0) register("builtin", initial)
   return {
     providers: names,
-    replace(providers) {
-      const next = resolveEntries(providers)
-      byId.clear()
-      for (const [id, provider] of next) byId.set(id, provider)
-      names.splice(0, names.length, ...next.map(([id]) => id))
-    },
-    models(provider) {
-      return requireProvider(provider).models
+    register,
+    models(id) {
+      return models(requireEntry(id))
     },
     createClient() {
-      return createRegistryClient(requireProvider, (provider) =>
-        byId.has(provider),
+      requireOpen()
+      return createRegistryClient(
+        (id, policy) => startTurn(requireEntry(id), policy),
+        (id) => closePromise === undefined && byId.has(id),
+        (id) => models(requireEntry(id)),
       )
     },
     stream(request) {
-      return streamSingleRequest(
-        requireProvider(request.target.provider),
-        request,
-      )
+      const entry = requireEntry(request.target.provider)
+      return streamSingleRequest(() => startTurn(entry), request)
+    },
+    close() {
+      closePromise ??= Promise.resolve().then(async () => {
+        const results = await Promise.allSettled(
+          [...sources.values()].map((source) => source.close()),
+        )
+        const errors = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        )
+        if (errors.length > 0)
+          throw new AggregateError(errors, "Failed to close provider registry.")
+      })
+      return closePromise
     },
   }
 }
 
 async function* streamSingleRequest(
-  provider: ModelProvider,
+  start: () => ModelClientSession,
   request: ModelRequest,
 ) {
-  const session = provider.startTurn()
+  const session = start()
   try {
     yield* session.stream(request)
   } finally {
@@ -85,63 +307,50 @@ async function* streamSingleRequest(
 }
 
 function createRegistryClient(
-  requireProvider: (provider: string) => ModelProvider,
-  hasProvider: (provider: string) => boolean,
+  startTurn: (
+    provider: string,
+    policy?: ModelRequestPolicy,
+  ) => ModelClientSession,
+  hasProvider: ModelClient["hasProvider"],
+  models: ModelClient["models"],
 ): ModelClient {
-  const turnSessions = new Set<ReturnType<ModelClient["startTurn"]>>()
-  let sessionClosePromise: Promise<void> | undefined
+  const turns = new Set<ModelClientSession>()
+  let closing: Promise<void> | undefined
   return {
-    hasProvider,
+    hasProvider: (provider) => closing === undefined && hasProvider(provider),
     models(provider) {
-      return requireProvider(provider).models
+      if (closing !== undefined) throw new Error("Model client is closed.")
+      return models(provider)
     },
     startTurn(provider, policy) {
-      if (sessionClosePromise !== undefined)
-        throw new Error("Model client is closed.")
-      // Running Turns retain their provider; a subsequent Turn resolves the
-      // replacement configuration even within an already resident Session.
-      const resolved = requireProvider(provider)
-      const session = resolved.startTurn(policy)
-      let turnClosePromise: Promise<void> | undefined
-      const ownedSession: ReturnType<ModelClient["startTurn"]> = {
-        models: resolved.models,
-        wireApi: resolved.info.wireApi,
-        remoteCompaction: session.remoteCompaction ?? false,
-        nativePdf: resolved.info.capabilities.nativePdf === true,
-        stream(request) {
-          if (request.target.provider !== provider) {
-            throw new Error(
-              `Turn transport for ${provider} cannot stream target ${request.target.provider}/${request.target.model}.`,
-            )
-          }
-          return session.stream(request)
-        },
-        ...(session.warmup === undefined ? {} : { warmup: session.warmup }),
-        close() {
-          turnClosePromise ??= Promise.resolve()
-            .then(() => session.close())
-            .finally(() => turnSessions.delete(ownedSession))
-          return turnClosePromise
-        },
+      if (closing !== undefined) throw new Error("Model client is closed.")
+      const session = startTurn(provider, policy)
+      // Keep failed closes so a later client close reports the unresolved owner.
+      let turnClosing: Promise<void> | undefined
+      const owned = {
+        ...session,
+        close: () =>
+          (turnClosing ??= Promise.resolve(session.close()).then(() => {
+            turns.delete(owned)
+          })),
       }
-      turnSessions.add(ownedSession)
-      return ownedSession
+      turns.add(owned)
+      return owned
     },
     close() {
-      sessionClosePromise ??= Promise.allSettled(
-        [...turnSessions].map((session) => session.close()),
+      closing ??= Promise.allSettled(
+        [...turns].map((turn) => turn.close()),
       ).then((results) => {
         const errors = results.flatMap((result) =>
           result.status === "rejected" ? [result.reason] : [],
         )
-        if (errors.length > 0) {
+        if (errors.length > 0)
           throw new AggregateError(
             errors,
             "Failed to close model Turn sessions.",
           )
-        }
       })
-      return sessionClosePromise
+      return closing
     },
   }
 }
