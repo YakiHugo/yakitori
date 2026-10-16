@@ -1,8 +1,3 @@
-import {
-  readAcpEngineConfiguration,
-  type AcpEngineConfiguration,
-} from "./engine-configuration.ts"
-import { EngineRegistry } from "./engine-registry.ts"
 import { createHash } from "node:crypto"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
@@ -24,8 +19,8 @@ import {
   type ThreadStore,
 } from "../core/index.ts"
 import {
-  settleTaskResources,
   type SessionTaskRunner,
+  settleTaskResources,
 } from "../core/session-task.ts"
 import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
@@ -36,6 +31,7 @@ import {
   type MateProjection,
   type SqliteMateStore,
 } from "../mates/index.ts"
+import { computerUseServerName } from "../protocol/connections.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
@@ -58,8 +54,8 @@ import {
   createCodexProvider,
   createDefaultTools,
   createDiscoveringModelsManager,
-  createGrokProvider,
   createFileModelsCacheStore,
+  createGrokProvider,
   createHookRunner,
   createMcpExtension,
   createModelProvider,
@@ -74,8 +70,8 @@ import {
   discoverOpenAiCompatibleModels,
   type McpConnectionManager,
   type ModelProvider,
-  type ProviderRegistry,
   ModelStopReason,
+  type ProviderRegistry,
   type RuntimeLock,
   readCodexLogin,
   readCodexUsage,
@@ -105,6 +101,11 @@ import {
   ChatGPTModelCatalogError,
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
+import {
+  type AcpEngineConfiguration,
+  readAcpEngineConfiguration,
+} from "./engine-configuration.ts"
+import { EngineRegistry } from "./engine-registry.ts"
 import { resolveYakitoriHome } from "./env-file.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
@@ -129,11 +130,11 @@ import type {
   ApiSubscriptionProvider,
 } from "./protocol.ts"
 import type { StoredProviderConfiguration } from "./provider-configuration.ts"
-import { createProviderService } from "./provider-service.ts"
 import {
-  registerProviderPlugins,
   type ModelProviderPlugin,
+  registerProviderPlugins,
 } from "./provider-plugins.ts"
+import { createProviderService } from "./provider-service.ts"
 import type { RequestGate } from "./request-gate.ts"
 import { createSessionTitleGenerator } from "./session-title.ts"
 import {
@@ -912,25 +913,10 @@ export async function createYakitoriApplication(
                     request.params,
                     signal,
                   ),
-                // Codex's bundled Computer Use Stop/Interrupt/SubagentStop hook.
                 turnEndTools: {
-                  cua_repl: {
+                  [computerUseServerName]: {
                     name: "turn_ended",
-                    input(context) {
-                      if (context.turnId === undefined)
-                        throw new Error(
-                          "Computer cleanup requires a turn identity.",
-                        )
-                      return {
-                        hook_event_name: context.signal?.aborted
-                          ? "Interrupt"
-                          : isSubagentThread(stored)
-                            ? "SubagentStop"
-                            : "Stop",
-                        session_id: stored.metadata.id,
-                        turn_id: context.turnId,
-                      }
-                    },
+                    input: () => ({}),
                   },
                 },
                 onBackgroundError: (cause) =>
@@ -942,7 +928,7 @@ export async function createYakitoriApplication(
                   }),
               },
               mapTools: (name, tools) =>
-                name !== "cua_repl"
+                name !== computerUseServerName
                   ? tools
                   : tools.map((tool) => ({
                       ...tool,

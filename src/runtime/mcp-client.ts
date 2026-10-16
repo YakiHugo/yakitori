@@ -78,8 +78,6 @@ const MAX_STDIO_BUFFER_BYTES = 8 * 1024 * 1024
 export class McpClient {
   readonly #client: Client
   readonly #config: McpServerConfig
-  readonly #computerUse: boolean
-  #activeComputerCalls = 0
   #running = false
   #closing = false
   #close: Promise<void> | undefined
@@ -112,43 +110,17 @@ export class McpClient {
     this.#onExit = onExit
     this.#authProvider = options.authProvider
     this.#config = config
-    this.#computerUse = name === "cua_repl"
     this.#client = new Client(
       { name: "yakitori", version: "0.0.0" },
-      this.#computerUse || options.onElicitation
+      options.onElicitation
         ? { capabilities: { elicitation: { form: {}, url: {} } } }
         : {},
     )
-    if (this.#computerUse || options.onElicitation) {
+    if (options.onElicitation) {
       this.#client.setRequestHandler(
         ElicitRequestSchema,
         async (request, extra) => {
           const params = request.params
-          const metadata = params._meta
-          const target = metadata?.tool_params
-          // Execution has already passed the host permission gate. The native
-          // service additionally requests app access; this acceptance lasts only
-          // for the current call and never writes Codex's persistent app grants.
-          if (
-            this.#activeComputerCalls > 0 &&
-            params.mode !== "url" &&
-            Object.keys(params.requestedSchema.properties).length === 0 &&
-            (params.requestedSchema.required?.length ?? 0) === 0 &&
-            metadata?.codex_approval_kind === "mcp_tool_call" &&
-            metadata.connector_id === "computer-use" &&
-            metadata.codex_request_type === undefined &&
-            typeof target === "object" &&
-            target !== null &&
-            "app" in target &&
-            typeof target.app === "string" &&
-            target.app.trim() !== ""
-          ) {
-            return {
-              action: "accept",
-              content: {},
-              _meta: { persist: "session" },
-            }
-          }
           if (!options.onElicitation) return { action: "decline" }
           const active = [...this.#activeCalls]
           const first = active[0]
@@ -506,8 +478,6 @@ export class McpClient {
           "MCP tool arguments must be an object.",
         )
       // A failed side-effecting call is never automatically replayed.
-      const computerCall = this.#computerUse && name === "js"
-      if (computerCall) this.#activeComputerCalls += 1
       const cancellation = new AbortController()
       const activeContext =
         context === undefined
@@ -537,7 +507,6 @@ export class McpClient {
         throw error
       } finally {
         cancellation.abort()
-        if (computerCall) this.#activeComputerCalls -= 1
         if (activeContext) this.#activeCalls.delete(activeContext)
       }
       if (validate !== undefined) {

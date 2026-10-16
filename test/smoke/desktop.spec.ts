@@ -1,19 +1,19 @@
 import { execFile } from "node:child_process"
-import { realpath, readFile } from "node:fs/promises"
+import { readFile, realpath } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import {
+  test as base,
   type ElectronApplication,
   expect,
   type Page,
-  test as base,
 } from "@playwright/test"
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
-  runFauxTurn,
   runExternalEngineFlow,
+  runFauxTurn,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
@@ -203,6 +203,22 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   })
   expect(bridge.platform).toBe("darwin")
   expect(["granted", "unsupported"]).toContain(bridge.permission)
+  await page
+    .getByRole("button", { name: "Show workspace", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Add workspace tab", exact: true })
+    .click()
+  await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+  await expect(
+    page.getByRole("button", { name: "Connect computer", exact: true }),
+  ).toBeEnabled()
+  await expect(
+    page.getByText(
+      "Yakitori Computer requires macOS and the bundled native helper.",
+      { exact: true },
+    ),
+  ).toHaveCount(0)
   await runFauxTurn(page)
   await runBudgetedGoal(page)
   const downloadPath = testInfo.outputPath("ordered-smoke.pdf")

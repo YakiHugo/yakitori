@@ -31,6 +31,8 @@ files:
   - node_modules/pdfjs-dist/**
   - node_modules/@napi-rs/canvas*/**
 extraResources:
+  - from: dist/native
+    to: computer
   - from: dist/gui
     to: gui
 mac:

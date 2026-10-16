@@ -13,10 +13,10 @@
     "icons:check": "node scripts/generate-app-icons.ts --check",
     "dev": "pnpm run --parallel \"/^dev:(gui|server)$/\"",
     "dev:gui": "vite --host 127.0.0.1 --strictPort",
-    "dev:server": "node src/server/start.ts",
+    "dev:server": "pnpm build:computer && node src/server/start.ts",
     "build": "pnpm build:gui",
     "build:gui": "vite build",
-    "build:desktop": "vite build --mode desktop && node scripts/verify-desktop-prompts.ts",
+    "build:desktop": "pnpm build:computer && vite build --mode desktop && node scripts/verify-desktop-prompts.ts",
     "start:desktop": "pnpm build:gui && pnpm build:desktop && electron .",
     "dev:desktop": "pnpm build:desktop && pnpm run --parallel \"/^dev:desktop:(gui|shell)$/\"",
     "dev:desktop:gui": "vite --host 127.0.0.1 --strictPort",
@@ -32,7 +32,11 @@
     "test:watch": "vitest",
     "lint": "biome lint .",
     "format": "biome format --write .",
-    "check": "pnpm typecheck && pnpm lint && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "build:computer": "node scripts/build-computer.ts",
+    "test:computer": "pnpm build:computer && node scripts/test-computer.ts",
+    "test:computer:live": "node scripts/test-computer-live.ts",
+    "bench:computer": "node scripts/test-computer-live.ts --repeat 5 --report test-results/computer-bench.json"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",

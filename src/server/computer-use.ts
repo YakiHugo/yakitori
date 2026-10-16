@@ -1,108 +1,55 @@
-import type { ComputerUseStatus } from "../protocol/connections.ts"
-
-export type { ComputerUseStatus } from "../protocol/connections.ts"
-
 import { constants } from "node:fs"
-import { access, readdir, readFile } from "node:fs/promises"
-import { homedir } from "node:os"
-import { isAbsolute, join } from "node:path"
-import { computerUseServerName } from "../protocol/connections.ts"
+import { access } from "node:fs/promises"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import {
+  type ComputerUseStatus,
+  computerUseServerName,
+} from "../protocol/connections.ts"
 import { McpClient, McpConnectionError } from "../runtime/mcp-client.ts"
 import type { McpServerConfig } from "../runtime/mcp-config.ts"
 import type { UserConfigStore } from "./user-config.ts"
 
+export type { ComputerUseStatus } from "../protocol/connections.ts"
 export { computerUseServerName } from "../protocol/connections.ts"
 
 export type ComputerUseDiscoveryOptions = Readonly<{
-  codexHome?: string
+  helperPath?: string
   platform?: string
-}>
-
-type InstalledComputer = Readonly<{
-  command: string
-  args: string[]
-  env: Record<string, string>
-  startupTimeoutMs: number
-  enabledTools: readonly string[]
 }>
 
 export class ComputerUseUnavailableError extends Error {}
 
-// The first-party plugin owns the OS driver and its API. Yakitori owns tool
-// execution through its existing MCP client; no second agent loop is started.
+type InstalledComputer = Readonly<{
+  command: string
+  args: string[]
+  enabledTools: string[]
+}>
+
 export async function discoverComputerUse(
   options: ComputerUseDiscoveryOptions = {},
 ): Promise<InstalledComputer | undefined> {
   if ((options.platform ?? process.platform) !== "darwin") return undefined
-  const codexHome =
-    options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex")
-  const cache = join(
-    codexHome,
-    "plugins",
-    "cache",
-    "openai-bundled",
-    "unified-computer-use",
-  )
-  const entries = await readdir(cache, { withFileTypes: true }).catch(
-    (error: unknown) => {
-      if (missingFile(error)) return []
-      throw error
-    },
-  )
-  const versions = entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort((left, right) =>
-      right.localeCompare(left, undefined, { numeric: true }),
+  const command =
+    options.helperPath ??
+    process.env.YAKITORI_COMPUTER_EXECUTABLE ??
+    resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../..",
+      "dist/native/Yakitori Computer.app/Contents/MacOS/yakitori-computer",
     )
-  for (const version of versions) {
-    const manifest: unknown = JSON.parse(
-      await readFile(join(cache, version, ".mcp.json"), "utf8"),
-    )
-    const server = object(object(manifest)?.mcpServers)?.cua_repl
-    const config = object(server)
+  try {
+    await access(command, constants.X_OK)
+  } catch (error) {
     if (
-      config === undefined ||
-      typeof config.command !== "string" ||
-      !isAbsolute(config.command) ||
-      !Array.isArray(config.args) ||
-      !config.args.every(
-        (argument): argument is string => typeof argument === "string",
-      )
-    ) {
-      continue
-    }
-    const env = object(config.env)
-    if (
-      env === undefined ||
-      !Object.values(env).every((value) => typeof value === "string")
-    ) {
-      continue
-    }
-    const executablePresent = await access(config.command, constants.X_OK).then(
-      () => true,
-      (error: unknown) => {
-        if (missingFile(error)) return false
-        throw error
-      },
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
     )
-    if (!executablePresent) continue
-    return {
-      command: config.command,
-      args: config.args,
-      env: {
-        ...(env as Record<string, string>),
-        CUA_REPL_ENABLED_SURFACES: "computer",
-      },
-      // Match the installed plugin's documented startup allowance.
-      startupTimeoutMs:
-        typeof config.startup_timeout_sec === "number"
-          ? config.startup_timeout_sec * 1_000
-          : 120_000,
-      enabledTools: ["js", "js_reset"],
-    }
+      return undefined
+    throw error
   }
-  return undefined
+  return { command, args: ["--mcp"], enabledTools: ["control"] }
 }
 
 export async function readComputerUseStatus(
@@ -110,21 +57,20 @@ export async function readComputerUseStatus(
   options: ComputerUseDiscoveryOptions = {},
 ): Promise<ComputerUseStatus> {
   const installed = await discoverComputerUse(options)
+  if (installed === undefined) return unavailableStatus()
   const configured = (await userConfig.readConfiguration()).mcpServers?.[
     computerUseServerName
   ]
-  if (installed === undefined) return unavailableStatus()
-  if (configured === undefined || configured.enabled === false) {
-    return status(false, [])
-  }
+  if (configured === undefined || configured.enabled === false)
+    return status(false)
   try {
     return status(true, await probeComputerUse(configured))
   } catch (error) {
     if (!(error instanceof McpConnectionError)) throw error
     return {
-      ...status(false, []),
+      ...status(false),
       message:
-        "The configured computer service could not be reached. Connect again to refresh it.",
+        "The computer helper could not be reached. Connect again to refresh it.",
     }
   }
 }
@@ -134,13 +80,12 @@ export async function connectComputerUse(
   options: ComputerUseDiscoveryOptions = {},
 ): Promise<ComputerUseStatus> {
   const installed = await discoverComputerUse(options)
-  if (installed === undefined) {
+  if (installed === undefined)
     throw new ComputerUseUnavailableError(
-      "Install Codex Computer Use on this Mac before connecting.",
+      "Yakitori Computer is unavailable. Build the native helper on macOS before connecting.",
     )
-  }
   const snapshot = await userConfig.readSnapshot()
-  const tools = await probeComputerUse(installed)
+  const permissions = await probeComputerUse(installed, true)
   const version = snapshot.layers.find(
     (layer) => layer.source === "user",
   )?.version
@@ -149,14 +94,12 @@ export async function connectComputerUse(
     value: {
       command: installed.command,
       args: installed.args,
-      env: installed.env,
       enabled: true,
-      startup_timeout_ms: installed.startupTimeoutMs,
       enabled_tools: installed.enabledTools,
     },
     ...(version === undefined ? {} : { expectedVersion: version }),
   })
-  return status(true, tools)
+  return status(true, permissions)
 }
 
 export async function disconnectComputerUse(
@@ -178,12 +121,13 @@ export async function disconnectComputerUse(
   }
   return (await discoverComputerUse(options)) === undefined
     ? unavailableStatus()
-    : status(false, [])
+    : status(false)
 }
 
 export async function probeComputerUse(
   config: McpServerConfig,
-): Promise<readonly string[]> {
+  requestPermissions = false,
+): Promise<NonNullable<ComputerUseStatus["permissions"]>> {
   const client = new McpClient(
     computerUseServerName,
     config,
@@ -192,23 +136,42 @@ export async function probeComputerUse(
     () => {},
   )
   try {
-    const tools = await client.start()
-    if (!tools.some((tool) => tool.name === "js")) {
+    if (
+      config.disabledTools?.includes("control") ||
+      (config.enabledTools !== undefined &&
+        !config.enabledTools.includes("control"))
+    )
       throw new McpConnectionError(
-        "The computer service did not advertise its desktop tool.",
-        {
-          code: "catalog_invalid",
-        },
+        "The computer control tool is disabled in configuration.",
+        { code: "catalog_invalid" },
       )
+    const tools = await client.start()
+    const control = tools.find((tool) => tool.name === "control")
+    if (
+      control === undefined ||
+      !tools.some((tool) => tool.name === "turn_ended")
+    )
+      throw new McpConnectionError(
+        "The computer service did not advertise its desktop tool and cleanup hook.",
+        { code: "catalog_invalid" },
+      )
+    const result = await client.bindTool(control)({
+      action: requestPermissions ? "permissions" : "status",
+    })
+    const permissions = result.structuredContent
+    if (
+      result.isError ||
+      typeof permissions?.accessibility !== "boolean" ||
+      typeof permissions.screenRecording !== "boolean"
+    )
+      throw new McpConnectionError(
+        "The computer helper did not report its macOS permissions.",
+        { code: "catalog_invalid" },
+      )
+    return {
+      accessibility: permissions.accessibility,
+      screenRecording: permissions.screenRecording,
     }
-    return tools
-      .filter(
-        (tool) =>
-          (config.enabledTools === undefined ||
-            config.enabledTools.includes(tool.name)) &&
-          !config.disabledTools?.includes(tool.name),
-      )
-      .map((tool) => tool.name)
   } finally {
     await client.close()
   }
@@ -216,14 +179,22 @@ export async function probeComputerUse(
 
 function status(
   connected: boolean,
-  tools: readonly string[],
+  permissions?: NonNullable<ComputerUseStatus["permissions"]>,
 ): ComputerUseStatus {
   return {
     available: true,
     connected,
-    backend: "codex-unified",
+    backend: "yakitori-native",
     serverName: computerUseServerName,
-    tools,
+    tools: connected ? ["control"] : [],
+    ...(permissions === undefined ? {} : { permissions }),
+    ...(permissions &&
+    (!permissions.accessibility || !permissions.screenRecording)
+      ? {
+          message:
+            "Enable Accessibility and Screen Recording for Yakitori Computer in System Settings, then refresh the connection.",
+        }
+      : {}),
   }
 }
 
@@ -234,20 +205,6 @@ function unavailableStatus(): ComputerUseStatus {
     backend: null,
     serverName: computerUseServerName,
     tools: [],
-    message: "Codex Computer Use is not installed on this Mac.",
+    message: "Yakitori Computer requires macOS and the bundled native helper.",
   }
-}
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
-}
-
-function missingFile(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error.code === "ENOENT" || error.code === "ENOTDIR")
-  )
 }
