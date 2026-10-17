@@ -249,6 +249,17 @@ try {
       },
     )
     await check(
+      "per-process pixel click reaches the addressed window",
+      async () => {
+        const observed = await observe()
+        await input("click", observed, {
+          x: 100,
+          y: (await state()).height - 118,
+        })
+        await waitFor(async () => (await state()).count === 3)
+      },
+    )
+    await check(
       "explicit foreground pixel click reaches the button",
       async () => {
         const observed = await observe()
@@ -258,7 +269,7 @@ try {
           y: (await state()).height - 118,
           delivery: "foreground",
         })
-        await waitFor(async () => (await state()).count === 3)
+        await waitFor(async () => (await state()).count === 4)
       },
     )
     await check("cancelled drag releases its held mouse button", async () => {
@@ -315,7 +326,7 @@ try {
         const next = await observe()
         assert((await state()).second.length < 100_000)
         await input("press", next, { element: element(next, "Increment") })
-        await waitFor(async () => (await state()).count === 4)
+        await waitFor(async () => (await state()).count === 5)
       },
     )
     await check("moved window rejects the previous observation", async () => {
@@ -328,7 +339,7 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 4)
+      assert.equal((await state()).count, 5)
     })
     await check("closed window rejects the previous observation", async () => {
       const observed = await observe()
@@ -340,7 +351,7 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 4)
+      assert.equal((await state()).count, 5)
     })
     const exited = once(fixture, "exit")
     fixture.kill("SIGTERM")

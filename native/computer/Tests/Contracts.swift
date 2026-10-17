@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -27,6 +28,23 @@ import Foundation
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
         rejects { _ = try keyChord("TYPO+A") }
+        // Exercise Apple's event bridge without posting input or requesting TCC.
+        // Window hit-test fields alone still produce NSEvent.windowNumber == 0.
+        let source = CGEventSource(stateID: .privateState)
+        let click = CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
+                            mouseCursorPosition: CGPoint(x: -200, y: 100), mouseButton: .right)!
+        click.flags = .maskShift
+        click.setIntegerValueField(.mouseEventClickState, value: 2)
+        let routedClick = try windowPointerEvent(click, window: window)
+        let nativeClick = NSEvent(cgEvent: routedClick)!
+        precondition(nativeClick.windowNumber == 7 && nativeClick.type == .rightMouseDown)
+        precondition(nativeClick.buttonNumber == 1 && nativeClick.clickCount == 2)
+        precondition(nativeClick.modifierFlags.contains(.shift) && routedClick.location == CGPoint(x: -200, y: 100))
+        let scroll = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: 13, wheel2: -7, wheel3: 0)!
+        scroll.location = CGPoint(x: -200, y: 100)
+        let nativeScroll = NSEvent(cgEvent: try windowPointerEvent(scroll, window: window))!
+        precondition(nativeScroll.windowNumber == 7 && nativeScroll.type == .scrollWheel)
+        precondition(nativeScroll.hasPreciseScrollingDeltas && nativeScroll.scrollingDeltaY == 13 && nativeScroll.scrollingDeltaX == -7)
         let (started, callback) = AsyncStream<(Result<Int, Error>) -> Void>.makeStream()
         let waiting = Task { try await nativeRequest { done in callback.yield(done) } }
         var events = started.makeAsyncIterator()
@@ -42,6 +60,6 @@ import Foundation
             let _: Int = try await nativeRequest(timeout: 0.01) { _ in }
             fatalError("A stuck native request must time out")
         } catch let failure as ComputerFailure { precondition(failure.code == "native_timeout") }
-        print("Native geometry, observation identity, keyboard and capture cancellation contracts passed.")
+        print("Native geometry, observation identity, pointer routing, keyboard and capture cancellation contracts passed.")
     }
 }

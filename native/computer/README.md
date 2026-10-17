@@ -14,11 +14,12 @@ windows on the current desktop, and background typing requires confirmed AX
 focus. This does not yet establish support for every macOS application, other
 Spaces, minimized windows, locked desktops, or arbitrary canvas keyboard input.
 
-The local Wuu reference was inspected at
-`2bab386ca0d3ee9beb49cef72275fdf73d0c83de` (2026-10-15), specifically its
-native input/capture and process contracts. That snapshot predates upstream
-changes discussed in research. Implementation here is independent, uses Apple
-frameworks directly, and has no dependency on reference checkouts or Cua Driver.
+The Wuu reference was inspected at
+`2903ea990580a92e53215781cd99a821c5df80f3` (2026-10-17), including its native
+input/capture, focus, virtual-display and process contracts. Implementation here
+uses Apple frameworks directly, with no dependency on reference checkouts or
+Cua Driver. Directed pointer events encode an AppKit window identity as well as
+Quartz hit-test fields: the latter alone leave `NSEvent.windowNumber` at zero.
 
 `pnpm test:computer` checks native coordinate/identity/cancellation contracts and
 the real signed app's LaunchServices/MCP lifecycle without requesting access.

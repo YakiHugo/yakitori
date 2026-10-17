@@ -95,7 +95,8 @@ extension Computer {
                 guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
                     throw ComputerFailure("input_failed", "macOS could not create a mouse event.")
                 }
-                return event
+                if foreground { return event }
+                return try windowPointerEvent(event, window: window)
             }
             if let point, action == "click" {
                 for count in 1...clickCount {
@@ -123,7 +124,7 @@ extension Computer {
                     throw ComputerFailure("input_failed", "macOS could not create a scroll event.")
                 }
                 event.location = point
-                try post(event)
+                try post(foreground ? event : windowPointerEvent(event, window: window))
             } else if let chord {
                 guard let down = CGEvent(keyboardEventSource: source, virtualKey: chord.0, keyDown: true),
                       let up = CGEvent(keyboardEventSource: source, virtualKey: chord.0, keyDown: false) else {
