@@ -7,8 +7,8 @@ import {
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
-  runFauxTurn,
   runExternalEngineFlow,
+  runFauxTurn,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
@@ -31,6 +31,20 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
       onStderr: (line) => logs.push(line),
     })
     await page.goto(server.url)
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+    const connectComputer = page.getByRole("button", {
+      name: "Connect computer",
+      exact: true,
+    })
+    if (process.platform === "darwin")
+      await expect(connectComputer).toBeEnabled()
+    else await expect(connectComputer).toBeDisabled()
     await runFauxTurn(page)
     await page.reload()
     await expect(

@@ -1,6 +1,9 @@
 import { Check, LoaderCircle, Monitor, RefreshCw, Unplug } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
-import type { ComputerUseStatus } from "../../protocol/connections.ts"
+import {
+  type ComputerUseStatus,
+  computerUseServerName,
+} from "../../protocol/connections.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -17,7 +20,7 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
       if (
         entry &&
         entry.kind === "tool" &&
-        entry.execution.name.includes("cua_repl") &&
+        entry.execution.name.startsWith(`${computerUseServerName}__`) &&
         entry.resultContent?.some(
           (part) => part.type === "image" && part.file !== undefined,
         )
@@ -142,11 +145,15 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
         {status?.connected && (
           <div className="space-y-3 border-t pt-4">
             <p className="flex items-center gap-2 text-xs">
-              <Check size={14} /> Ready for your next message
+              <Check size={14} />{" "}
+              {status.permissions?.accessibility &&
+              status.permissions.screenRecording
+                ? "Ready for your next message"
+                : "Connected · macOS access required"}
             </p>
             <p className="text-xs leading-relaxed text-muted-foreground">
               If macOS requests access, enable Screen Recording and
-              Accessibility for Codex Computer Use in System Settings.
+              Accessibility for Yakitori Computer in System Settings.
             </p>
           </div>
         )}

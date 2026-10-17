@@ -94,6 +94,14 @@ async function start(): Promise<void> {
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
+          YAKITORI_COMPUTER_EXECUTABLE: path.join(
+            process.resourcesPath,
+            "computer",
+            "Yakitori Computer.app",
+            "Contents",
+            "MacOS",
+            "yakitori-computer",
+          ),
           YAKITORI_WORKSPACE: workspace,
           YAKITORI_STORE_DIR: storeDir,
           YAKITORI_GUI_DIR: path.join(process.resourcesPath, "gui"),

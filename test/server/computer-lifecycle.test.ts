@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { createUserInput } from "../../src/core/user-input.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
@@ -9,7 +10,6 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApplicationResult } from "../../src/server/application-result.ts"
-import { createUserInput } from "../../src/core/user-input.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
 function body<T>(response: ApplicationResult<T>): T {
@@ -41,15 +41,15 @@ async function fixture(waitForFirstAbort = false) {
       "import {appendFileSync,existsSync} from 'node:fs';",
       "import readline from 'node:readline';",
       `const calls=${JSON.stringify(calls)},cleanupInputs=${JSON.stringify(cleanupInputs)},release=${JSON.stringify(release)},fail=${JSON.stringify(fail)};`,
-      "const cleanupKeys=['hook_event_name','session_id','turn_id'];",
+      "const cleanupKeys=[];",
       "const cleanupSchema={type:'object',properties:Object.fromEntries(cleanupKeys.map(key=>[key,{type:'string',minLength:1}])),required:cleanupKeys,additionalProperties:false};",
       "readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;",
       "const reply=result=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');",
-      "if(m.method==='tools/list')return reply({tools:['js','turn_ended'].map(name=>({name,description:'computer tool',inputSchema:name==='turn_ended'?cleanupSchema:{type:'object'}}))});",
+      "if(m.method==='tools/list')return reply({tools:['control','turn_ended'].map(name=>({name,description:'computer tool',inputSchema:name==='turn_ended'?cleanupSchema:{type:'object'}}))});",
       "if(m.method!=='tools/call')return reply({protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}});",
       "const name=m.params.name;appendFileSync(calls,name+':'+(m.params.arguments?.label??'start')+'\\n');",
       "if(name==='turn_ended'){const args=m.params.arguments;",
-      "if(typeof args!=='object'||args===null||Array.isArray(args)||Object.keys(args).length!==cleanupKeys.length||cleanupKeys.some(key=>typeof args[key]!=='string'||args[key].length===0)){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32602,message:'turn_ended requires exactly hook_event_name, session_id, and turn_id as nonempty strings'}})+'\\n');return;}",
+      "if(typeof args!=='object'||args===null||Array.isArray(args)||Object.keys(args).length!==cleanupKeys.length||cleanupKeys.some(key=>typeof args[key]!=='string'||args[key].length===0)){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32602,message:'turn_ended requires empty arguments'}})+'\\n');return;}",
       "appendFileSync(cleanupInputs,JSON.stringify(args)+'\\n');",
       "const finish=()=>{appendFileSync(calls,'turn_ended:done\\n');reply({isError:existsSync(fail),content:[{type:'text',text:'released'}]});};",
       "if(existsSync(release))finish();else{const timer=setInterval(()=>{if(existsSync(release)){clearInterval(timer);finish();}},10);}return;}",
@@ -59,11 +59,11 @@ async function fixture(waitForFirstAbort = false) {
   await writeFile(
     join(root, "config.toml"),
     [
-      "[mcp_servers.cua_repl]",
+      "[mcp_servers.computer]",
       `command = ${JSON.stringify(process.execPath)}`,
       `args = [${JSON.stringify(script)}]`,
-      'enabled_tools = ["js"]',
-      // The first Turn calls js immediately; required keeps the fixture
+      'enabled_tools = ["control"]',
+      // The first Turn calls control immediately; required keeps the fixture
       // connected before Session creation returns.
       "required = true",
     ].join("\n"),
@@ -99,7 +99,7 @@ async function fixture(waitForFirstAbort = false) {
     )
     const used = request.messages.find(
       (message) =>
-        message.role === "tool" && message.toolCallId === `${label}:js`,
+        message.role === "tool" && message.toolCallId === `${label}:control`,
     )
     if (used?.role === "tool") {
       toolResults.push(toolContentText(used.content))
@@ -133,9 +133,9 @@ async function fixture(waitForFirstAbort = false) {
         content: [
           {
             type: "tool_call",
-            id: `${label}:${searched ? "js" : "search"}`,
-            name: searched ? "cua_repl__js" : "tool_search",
-            input: searched ? { label } : { query: "cua_repl computer js" },
+            id: `${label}:${searched ? "control" : "search"}`,
+            name: searched ? "computer__control" : "tool_search",
+            input: searched ? { label } : { query: "computer control" },
           },
         ],
       },
@@ -237,7 +237,7 @@ describe("computer ownership through application turn lifecycle", () => {
         await input(context.application, second.session.id, "after-release")
         await idle(context.application, second.session.id)
         expect(await readFile(context.calls, "utf8")).toContain(
-          "js:after-release",
+          "control:after-release",
         )
         return
       }
@@ -254,27 +254,9 @@ describe("computer ownership through application turn lifecycle", () => {
       const second = body(await context.application.handlers.createSession())
       await input(context.application, second.session.id, "second")
       await idle(context.application, second.session.id)
-      const secondStored = await context.application.threadStore.readThread(
-        second.session.id,
-      )
-      expect(await context.cleanupInputs()).toEqual([
-        {
-          hook_event_name: "Stop",
-          session_id: first.session.id,
-          turn_id: stored?.rollout.flatMap(({ item }) =>
-            item.type === "turn_started" ? [item.turnId] : [],
-          )[0],
-        },
-        {
-          hook_event_name: "Stop",
-          session_id: second.session.id,
-          turn_id: secondStored?.rollout.flatMap(({ item }) =>
-            item.type === "turn_started" ? [item.turnId] : [],
-          )[0],
-        },
-      ])
+      expect(await context.cleanupInputs()).toEqual([{}, {}])
       expect(await readFile(context.calls, "utf8")).toBe(
-        "js:first\nturn_ended:start\nturn_ended:done\njs:second\nturn_ended:start\nturn_ended:done\n",
+        "control:first\nturn_ended:start\nturn_ended:done\ncontrol:second\nturn_ended:start\nturn_ended:done\n",
       )
     } finally {
       await context.close()
@@ -297,7 +279,7 @@ describe("computer ownership through application turn lifecycle", () => {
       )
       await until(async () => context.toolResults.length === 2)
       expect(context.toolResults[1]).toContain("busy")
-      expect(await readFile(context.calls, "utf8")).toBe("js:first\n")
+      expect(await readFile(context.calls, "utf8")).toBe("control:first\n")
       expect(await context.cleanupInputs()).toEqual([])
     } finally {
       await context.close()
@@ -324,13 +306,7 @@ describe("computer ownership through application turn lifecycle", () => {
         context.application.threadManager.getThread(first.session.id)?.status,
       ).toBe("active")
       await until(async () => (await context.cleanupInputs()).length === 1)
-      expect(await context.cleanupInputs()).toEqual([
-        {
-          hook_event_name: "Interrupt",
-          session_id: first.session.id,
-          turn_id: turnId,
-        },
-      ])
+      expect(await context.cleanupInputs()).toEqual([{}])
       expect(
         await context.application.handlers.admitInput({
           sessionId: first.session.id,
@@ -345,7 +321,7 @@ describe("computer ownership through application turn lifecycle", () => {
         context.toolResults.filter((result) => result.includes("busy")),
       ).toHaveLength(1)
       expect(await readFile(context.calls, "utf8")).toBe(
-        "js:first\nturn_ended:start\n",
+        "control:first\nturn_ended:start\n",
       )
       await writeFile(context.release, "")
       await until(async () =>
@@ -355,7 +331,7 @@ describe("computer ownership through application turn lifecycle", () => {
       await input(context.application, second.session.id, "after-release")
       await idle(context.application, second.session.id)
       expect(await readFile(context.calls, "utf8")).toContain(
-        "js:after-release\n",
+        "control:after-release\n",
       )
     } finally {
       await context.close()

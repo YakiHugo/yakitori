@@ -24,6 +24,18 @@ const runtimeDirectory = join(
 await access(executable)
 await access(runtimeDirectory)
 await access(join(runtimeDirectory, "read-pdf-worker.js"))
+await access(
+  join(
+    applicationDirectory,
+    "Contents",
+    "Resources",
+    "computer",
+    "Yakitori Computer.app",
+    "Contents",
+    "MacOS",
+    "yakitori-computer",
+  ),
+)
 
 // Check the icon selected by the actual bundle, not just builder configuration.
 const iconName = execFileSync(

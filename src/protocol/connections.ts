@@ -16,14 +16,15 @@ export type ChatGPTConnectionState = Readonly<{
   welcomeRequired: boolean
 }>
 
-export const computerUseServerName = "cua_repl"
+export const computerUseServerName = "computer"
 
 export type ComputerUseStatus = Readonly<{
   available: boolean
   connected: boolean
-  backend: "codex-unified" | null
+  backend: "yakitori-native" | null
   serverName: typeof computerUseServerName
   tools: readonly string[]
+  permissions?: Readonly<{ accessibility: boolean; screenRecording: boolean }>
   message?: string
 }>
 
