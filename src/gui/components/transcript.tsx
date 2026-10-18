@@ -28,6 +28,11 @@ import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
+import {
+  type ContextSourceNavigation,
+  findContextSource,
+  revealContextSourceEvent,
+} from "./annotation-layer.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -418,6 +423,37 @@ const TurnBlock = memo(
   }>) {
     const [liveActivityCollapsed, setLiveActivityCollapsed] = useState(false)
     const [activityExpanded, setActivityExpanded] = useState(false)
+    const [sourceNavigation, setSourceNavigation] =
+      useState<ContextSourceNavigation>()
+    useEffect(() => {
+      const revealSource = (event: Event) => {
+        const navigation = (event as CustomEvent<ContextSourceNavigation>)
+          .detail
+        const { source } = navigation
+        if (
+          source.kind !== "message" ||
+          source.sessionId !== useAppStore.getState().selection.sessionId ||
+          !entries.some(
+            (entry) =>
+              entry.kind === "assistant" && entry.itemId === source.messageId,
+          )
+        )
+          return
+        setActivityExpanded(true)
+        setLiveActivityCollapsed(false)
+        setSourceNavigation(navigation)
+      }
+      window.addEventListener(revealContextSourceEvent, revealSource)
+      return () =>
+        window.removeEventListener(revealContextSourceEvent, revealSource)
+    }, [entries])
+    useLayoutEffect(() => {
+      // Navigation can only scroll after the collapsed source has mounted.
+      if (sourceNavigation)
+        findContextSource(sourceNavigation.source)?.scrollIntoView(
+          sourceNavigation.options,
+        )
+    }, [sourceNavigation])
     const contentId = useId()
     const labelId = useId()
     const answerInBlock = entries.some(

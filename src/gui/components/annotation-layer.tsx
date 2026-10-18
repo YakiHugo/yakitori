@@ -8,6 +8,11 @@ import type {
 
 const editEvent = "yakitori:edit-annotation"
 const highlightName = "yakitori-response-annotations"
+export const revealContextSourceEvent = "yakitori:reveal-context-source"
+export type ContextSourceNavigation = Readonly<{
+  source: ContextSource
+  options: ScrollIntoViewOptions
+}>
 
 export function requestAnnotationEdit(id: string) {
   window.dispatchEvent(new CustomEvent(editEvent, { detail: id }))
@@ -28,6 +33,20 @@ export function findContextSource(
       element.dataset.contextPath === source.path &&
       element.dataset.contextUrl === source.url,
   )
+}
+
+export function scrollToContextSource(
+  source: ContextSource,
+  options: ScrollIntoViewOptions,
+) {
+  const element = findContextSource(source)
+  if (element) element.scrollIntoView(options)
+  else
+    window.dispatchEvent(
+      new CustomEvent<ContextSourceNavigation>(revealContextSourceEvent, {
+        detail: { source, options },
+      }),
+    )
 }
 
 export function selectionOffsets(source: HTMLElement, range: Range) {
@@ -231,7 +250,7 @@ export function AnnotationLayer({
         (item) => item.id === id,
       )
       if (!annotation) return
-      findContextSource(annotation.source)?.scrollIntoView({
+      scrollToContextSource(annotation.source, {
         block: "nearest",
         behavior: "smooth",
       })

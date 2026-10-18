@@ -9,8 +9,8 @@ import type {
 import {
   type AnnotationDetails,
   AnnotationLayer,
-  findContextSource,
   requestAnnotationEdit,
+  scrollToContextSource,
   selectionOffsets,
 } from "./annotation-layer.tsx"
 
@@ -372,12 +372,10 @@ export function ContextExcerptChips({
                             if (excerpt.kind === "annotation" && onChange)
                               requestAnnotationEdit(excerpt.id)
                             else
-                              findContextSource(excerpt.source)?.scrollIntoView(
-                                {
-                                  block: "center",
-                                  behavior: "smooth",
-                                },
-                              )
+                              scrollToContextSource(excerpt.source, {
+                                block: "center",
+                                behavior: "smooth",
+                              })
                             setExpanded(undefined)
                           }}
                         >

@@ -534,8 +534,8 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
-      page.getByRole("heading", { name: "Untitled session", exact: true }),
-    ).toBeVisible()
+      page.getByRole("combobox", { name: "New session project", exact: true }),
+    ).toBeDisabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()
@@ -548,6 +548,15 @@ export async function runProviderFlow(
       page.getByRole("main").getByText("Mock provider reply", { exact: true }),
     ).toBeVisible()
     const checkToolImage = async () => {
+      await expect(
+        page.getByRole("button", { name: "Interrupt", exact: true }),
+      ).toHaveCount(0)
+      const response = page
+        .getByRole("region", { name: "Response", exact: true })
+        .filter({ hasText: "Mock provider reply" })
+      const activity = response.getByRole("button", { name: /^Worked for/ })
+      await expect(activity).toHaveAttribute("aria-expanded", "false")
+      await activity.click()
       await page
         .getByRole("button", { name: "Used tools · View image", exact: true })
         .click()
@@ -710,8 +719,8 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
-      page.getByRole("heading", { name: "Untitled session", exact: true }),
-    ).toBeVisible()
+      page.getByRole("combobox", { name: "New session project", exact: true }),
+    ).toBeDisabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()
