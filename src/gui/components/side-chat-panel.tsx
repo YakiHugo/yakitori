@@ -515,7 +515,7 @@ export function SideChatPanel({
                         // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
                         key={`${message.id}:${index}`}
                         text={part.text}
-                        className="markdown side-chat-user-bubble"
+                        className="side-chat-user-bubble"
                         workspaceRoot={chat.cwd}
                       />
                     ) : part.type === "document" ? (
@@ -548,7 +548,6 @@ export function SideChatPanel({
                   apiBase={apiBase}
                   text={message.text}
                   streaming={message.streaming}
-                  className="markdown"
                   workspaceRoot={chat.cwd}
                 />
               )}

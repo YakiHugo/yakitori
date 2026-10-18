@@ -3,7 +3,7 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createServer, type ServerResponse } from "node:http"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import { expect, type Locator, test as base } from "@playwright/test"
+import { test as base, expect, type Locator } from "@playwright/test"
 import { stringify } from "smol-toml"
 import {
   type ServerProcess,
@@ -263,6 +263,133 @@ async function expectMermaidDiagram(
   if (expectedNodeCount !== undefined)
     expect(nodeLabels).toHaveLength(expectedNodeCount)
 }
+
+test("new session composer stays centered through creation and docks after the first input", async ({
+  page,
+  renderingApp,
+}) => {
+  const project = page.getByRole("combobox", { name: "New session project" })
+  await expect(project).toBeDisabled()
+  await page.evaluate(() => document.fonts.ready.then(() => undefined))
+  const recording = await page
+    .getByRole("button", { name: "New session", exact: true })
+    .evaluateHandle((button: HTMLButtonElement) => {
+      const recording = {
+        frames: [] as { top: number; centerOffset: number }[],
+        stopped: false,
+      }
+      const sample = () => {
+        if (recording.stopped) return
+        const composer = document.querySelector("[data-composer-surface]")
+        const dock = composer?.closest(".conversation-dock")
+        const surface = composer?.closest(".conversation-surface")
+        if (!composer || !dock || !surface)
+          throw new Error("Conversation layout disappeared during creation.")
+        const dockBox = dock.getBoundingClientRect()
+        const surfaceBox = surface.getBoundingClientRect()
+        recording.frames.push({
+          top: composer.getBoundingClientRect().top,
+          centerOffset:
+            dockBox.top +
+            dockBox.height / 2 -
+            (surfaceBox.top + surfaceBox.height / 2),
+        })
+        requestAnimationFrame(sample)
+      }
+      // Start before the click's first paint, including any intermediate
+      // create response or replay renders rather than only the settled layout.
+      button.click()
+      requestAnimationFrame(sample)
+      return recording
+    })
+  const prompt = "Check the composer layout."
+  await page.getByRole("textbox", { name: "Message the Mate" }).fill(prompt)
+  await expect(project).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeEnabled()
+  const frames = await recording.evaluate(async (recording) => {
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    )
+    recording.stopped = true
+    return recording.frames
+  })
+  await recording.dispose()
+  expect(frames.length).toBeGreaterThan(1)
+  for (const frame of frames)
+    expect(Math.abs(frame.centerOffset)).toBeLessThan(1)
+  const tops = frames.map((frame) => frame.top)
+  expect(Math.max(...tops) - Math.min(...tops)).toBeLessThan(1)
+
+  await renderingApp.send(prompt)
+  await renderingApp.append(prompt, "Composer layout checked.")
+  const dock = page.locator(".conversation-dock")
+  await expect
+    .poll(() =>
+      dock.evaluate((node) => {
+        const surface = node.closest(".conversation-surface")
+        if (!surface) throw new Error("Conversation surface is missing.")
+        return Math.abs(
+          node.getBoundingClientRect().bottom -
+            surface.getBoundingClientRect().bottom,
+        )
+      }),
+    )
+    .toBeLessThan(1)
+  const composer = await page.locator("[data-composer-surface]").boundingBox()
+  expect(composer?.y).toBeGreaterThan(Math.max(...tops))
+  await expect(project).toHaveCount(0)
+  await renderingApp.finish(prompt)
+})
+
+test("selected text focuses its annotation comment until confirmation focuses the composer", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Explain the annotation focus order."
+  const explanation = "Review this explanation before adding it to the draft."
+  await renderingApp.send(prompt)
+  await renderingApp.append(prompt, explanation)
+  await renderingApp.finish(prompt)
+  const response = page
+    .getByRole("region", { name: "Response", exact: true })
+    .getByText(explanation, { exact: true })
+  const composer = page.getByRole("textbox", { name: "Message the Mate" })
+  const annotations = page
+    .locator("[data-composer-surface]")
+    .getByRole("button", { name: /^\d+ annotations?$/ })
+
+  for (const [index, confirmation] of ["Done", "Enter"].entries()) {
+    await response.evaluate((element) => {
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      window.getSelection()?.removeAllRanges()
+      window.getSelection()?.addRange(range)
+      element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
+    })
+    await page.getByRole("button", { name: "Add to conversation" }).click()
+    const comment = page.getByRole("textbox", {
+      name: "Annotation comment (optional)",
+    })
+    await expect(comment).toBeFocused()
+    await expect(composer).not.toBeFocused()
+    if (index === 0) await expect(annotations).toHaveCount(0)
+    else await expect(annotations).toHaveText("1 annotation")
+
+    await comment.fill(`Confirmed with ${confirmation}`)
+    await expect(comment).toBeFocused()
+    if (confirmation === "Done")
+      await page.getByRole("button", { name: "Done", exact: true }).click()
+    else await comment.press("Enter")
+
+    await expect(comment).toHaveCount(0)
+    await expect(composer).toBeFocused()
+    await expect(annotations).toHaveText(
+      index === 0 ? "1 annotation" : "2 annotations",
+    )
+  }
+})
 
 test("Markdown images load local, inline and HTTP sources during streaming and after reload", async ({
   page,

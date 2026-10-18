@@ -142,6 +142,7 @@ export function EngineConversation() {
                   </summary>
                   <MarkdownView
                     text={turn.reasoning}
+                    className="markdown-compact"
                     workspaceRoot={state.snapshot?.session.cwd}
                   />
                 </details>

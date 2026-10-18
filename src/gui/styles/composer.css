@@ -5,8 +5,8 @@
   min-height: 80px;
   max-height: 240px;
   overflow-y: auto;
-  font-size: 15px;
-  line-height: 26px;
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
   padding: 14px 16px 10px;
 }
 .prompt-editor .ProseMirror[aria-disabled="true"] {

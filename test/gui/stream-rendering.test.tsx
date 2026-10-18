@@ -58,6 +58,8 @@ it("streams new text without parsing unchanged history or reasoning again", () =
     },
   })
   render(<Transcript />)
+  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  expect(screen.getByText("Stable reasoning")).toBeDefined()
   vi.mocked(Markdown).mockClear()
 
   act(() => {
@@ -83,7 +85,6 @@ it("streams new text without parsing unchanged history or reasoning again", () =
     vi.mocked(Markdown).mock.calls.map(([props]) => props.children),
   ).toEqual(["Hello world"])
 
-  fireEvent.click(screen.getByRole("button", { name: "Working" }))
   expect(
     screen
       .getByText("Stable reasoning")
@@ -96,6 +97,7 @@ it("updates memoized Markdown when text, styling, or workspace changes", () => {
   const { rerender, container } = render(
     <MarkdownView text="First **answer**" workspaceRoot="/first" />,
   )
+  expect(container.firstElementChild?.classList.contains("markdown")).toBe(true)
   vi.mocked(Markdown).mockClear()
   rerender(<MarkdownView text="First **answer**" workspaceRoot="/first" />)
   expect(Markdown).not.toHaveBeenCalled()
@@ -110,7 +112,8 @@ it("updates memoized Markdown when text, styling, or workspace changes", () => {
   expect(screen.getByText("Second", { exact: false }).textContent).toBe(
     "Second answer",
   )
-  expect(container.firstElementChild?.className).toBe("updated")
+  expect(container.firstElementChild?.classList.contains("updated")).toBe(true)
+  expect(container.firstElementChild?.classList.contains("markdown")).toBe(true)
   expect(Markdown).toHaveBeenCalledTimes(1)
 })
 
@@ -126,7 +129,7 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
           kind: "reasoning",
           itemId: "reasoning",
           turnId: "active",
-          text: "Checking",
+          text: "**Inspecting source**\n\nChecking",
           status: "streaming",
           at,
         },
@@ -135,11 +138,10 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
     },
   })
   render(<Transcript />)
-  const toggle = screen.getByRole("button", { name: "Working" })
-  const disclosure = document.getElementById(
-    toggle.getAttribute("aria-controls") ?? "",
-  )
-  expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
+  const toggle = screen.getByRole("button", { name: "Reasoning…" })
+  const disclosure = () =>
+    document.getElementById(toggle.getAttribute("aria-controls") ?? "")
+  expect(toggle.getAttribute("aria-expanded")).toBe("false")
   expect(Markdown).not.toHaveBeenCalled()
 
   const appendReasoning = (delta: string) =>
@@ -168,21 +170,28 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
   appendReasoning(" the **latest**")
   appendReasoning(" result")
   expect(Markdown).not.toHaveBeenCalled()
-  expect(disclosure?.textContent).toBe("")
+  expect(disclosure()?.textContent ?? "").toBe("")
 
   fireEvent.click(toggle)
-  expect(disclosure?.getAttribute("aria-hidden")).toBe("false")
-  expect(disclosure?.textContent).toBe("Checking the latest result")
-  expect(disclosure?.querySelector("strong")?.textContent).toBe("latest")
+  expect(toggle.getAttribute("aria-expanded")).toBe("true")
+  expect(disclosure()?.textContent).toBe("Checking the latest result")
+  expect(disclosure()?.querySelector("strong")?.textContent).toBe("latest")
+  expect(
+    vi
+      .mocked(Markdown)
+      .mock.calls.some(([props]) =>
+        String(props.children).includes("Inspecting source"),
+      ),
+  ).toBe(false)
   appendReasoning(" now")
-  expect(disclosure?.textContent).toBe("Checking the latest result now")
+  expect(disclosure()?.textContent).toBe("Checking the latest result now")
 
   fireEvent.click(toggle)
   vi.mocked(Markdown).mockClear()
   appendReasoning(" again")
-  expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
-  expect(disclosure?.textContent).toBe("")
+  expect(toggle.getAttribute("aria-expanded")).toBe("false")
+  expect(disclosure()?.textContent ?? "").toBe("")
   expect(Markdown).not.toHaveBeenCalled()
   fireEvent.click(toggle)
-  expect(disclosure?.textContent).toBe("Checking the latest result now again")
+  expect(disclosure()?.textContent).toBe("Checking the latest result now again")
 })

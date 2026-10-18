@@ -507,7 +507,7 @@ function TraceEntry({
             text={entry.text}
             streaming={entry.status === "streaming"}
             workspaceRoot={workspaceRoot}
-            className="markdown text-sm"
+            className="markdown-compact"
           />
         </div>
       )

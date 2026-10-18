@@ -1,4 +1,11 @@
-import { ArrowDown, ChevronRight, Info, Wrench } from "lucide-react"
+import {
+  ArrowDown,
+  BookOpen,
+  ChevronRight,
+  Info,
+  Terminal,
+  Wrench,
+} from "lucide-react"
 import {
   memo,
   type ReactNode,
@@ -17,13 +24,11 @@ import type {
 } from "../execution-view.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
-import { formatElapsed } from "../lib/format.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
-import { LiveTextNotice } from "./cells/live-text-notice.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -31,9 +36,10 @@ import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import { ConversationFind } from "./conversation-find.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
-import { MarkdownView } from "./markdown.tsx"
+import { reasoningSections } from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
+import { TurnActivityLabel } from "./turn-activity-label.tsx"
 import {
   Collapsible,
   CollapsibleContent,
@@ -410,11 +416,10 @@ const TurnBlock = memo(
     finalAnswer: FinalAnswer | undefined
     retry: ActiveModelRetry | undefined
   }>) {
-    const [reasoningExpanded, setReasoningExpanded] = useState(false)
+    const [liveActivityCollapsed, setLiveActivityCollapsed] = useState(false)
+    const [activityExpanded, setActivityExpanded] = useState(false)
     const contentId = useId()
-    const workspaceRoot = useAppStore(
-      (state) => state.execution.workingDirectory,
-    )
+    const labelId = useId()
     const answerInBlock = entries.some(
       (entry) =>
         entry.kind === "assistant" &&
@@ -439,46 +444,53 @@ const TurnBlock = memo(
       entries.filter(
         (entry) =>
           !persistent.includes(entry) &&
-          entry.kind !== "reasoning" &&
+          (entry.kind !== "reasoning" ||
+            entry.incomplete ||
+            reasoningSections(entry.text).some((section) =>
+              section.body.trim(),
+            )) &&
           !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
       ),
     )
-    const reasoningText = reasoning
-      .map((entry) => entry.text.trim())
-      .filter(Boolean)
-      .join("\n\n")
-    const seconds =
-      timing?.startedAt && timing.completedAt
-        ? Math.max(
-            0,
-            Math.floor(
-              (Date.parse(timing.completedAt) - Date.parse(timing.startedAt)) /
-                1000,
-            ),
+    const currentSummary = active
+      ? reasoning
+          .flatMap((entry) =>
+            reasoningSections(entry.text).map((section) => section.summary),
           )
-        : undefined
-    const retryLabel =
-      retry?.kind === "rate_limited"
-        ? "Waiting for rate limit"
-        : retry?.kind === "connection_failed" ||
-            retry?.kind === "stream_disconnected" ||
-            retry?.kind === "idle_timeout"
-          ? "Reconnecting"
-          : "Retrying request"
+          .findLast((summary) => summary !== undefined && summary !== "")
+      : undefined
+    const completed = !active && timing?.completedAt !== undefined
+    // Live activity is visible, but completion starts with the process closed.
+    const expanded = completed ? activityExpanded : !liveActivityCollapsed
+    const hasDisclosure = timeline.length > 0
     const activityLabel = (
-      <span
-        className={active ? "tool-running-label" : undefined}
-        role={active ? "status" : undefined}
-      >
-        {retry
-          ? `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
-          : active
-            ? "Working"
-            : seconds === undefined
-              ? "Activity"
-              : `Worked for ${formatElapsed(seconds)}`}
-      </span>
+      <TurnActivityLabel
+        id={labelId}
+        active={active}
+        timing={timing}
+        retry={retry}
+      />
     )
+    const timelineContent =
+      timeline.length > 0 ? (
+        <ol className="agent-timeline" aria-label="Agent activity">
+          {timeline.map((item) => (
+            <li
+              key={entryKey(
+                item.kind === "entry" ? item.entry : item.entries[0],
+              )}
+              className="agent-timeline-item"
+              data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
+            >
+              {item.kind === "entry" ? (
+                <EntryCell entry={item.entry} />
+              ) : (
+                <ActionGroup entries={item.entries} />
+              )}
+            </li>
+          ))}
+        </ol>
+      ) : null
     return (
       <section
         className="flex flex-col gap-5"
@@ -492,25 +504,35 @@ const TurnBlock = memo(
                 finalAnswer ? "border-b pb-3" : "pb-1",
               )}
             >
-              {reasoningText !== "" ? (
+              {hasDisclosure ? (
                 <button
                   type="button"
-                  aria-expanded={reasoningExpanded}
+                  aria-expanded={expanded}
                   aria-controls={contentId}
-                  onClick={() => setReasoningExpanded(!reasoningExpanded)}
-                  className="flex items-center gap-1.5 text-left hover:text-foreground"
+                  aria-labelledby={labelId}
+                  onClick={() =>
+                    completed
+                      ? setActivityExpanded(!activityExpanded)
+                      : setLiveActivityCollapsed(!liveActivityCollapsed)
+                  }
+                  className="flex shrink-0 items-center gap-1.5 text-left hover:text-foreground"
                 >
                   {activityLabel}
                   <ChevronRight
                     className={cn(
                       "size-3.5 transition-transform duration-150",
-                      reasoningExpanded && "rotate-90",
+                      expanded && "rotate-90",
                     )}
                   />
                 </button>
               ) : (
                 activityLabel
               )}
+              {currentSummary ? (
+                <span className="min-w-0 truncate" title={currentSummary}>
+                  · {currentSummary}
+                </span>
+              ) : null}
               {retry ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -526,59 +548,22 @@ const TurnBlock = memo(
                 </Tooltip>
               ) : null}
             </div>
-            {reasoningText === "" ? null : (
+            {!hasDisclosure ? null : (
               <div
                 id={contentId}
                 className="conversation-disclosure"
-                data-expanded={reasoningExpanded}
-                aria-hidden={!reasoningExpanded}
-                inert={!reasoningExpanded}
+                data-expanded={expanded}
+                aria-hidden={!expanded}
+                inert={!expanded}
               >
                 <div className="min-h-0 overflow-hidden">
-                  {reasoningExpanded ? (
-                    <>
-                      {entries
-                        .filter(
-                          (entry) =>
-                            entry.kind === "reasoning" && entry.incomplete,
-                        )
-                        .slice(0, 1)
-                        .map((entry) =>
-                          entry.kind === "reasoning" ? (
-                            <LiveTextNotice key={entry.itemId} entry={entry} />
-                          ) : null,
-                        )}
-                      <MarkdownView
-                        text={reasoningText}
-                        streaming={active}
-                        className="markdown max-w-2xl pt-4 text-sm text-muted-foreground"
-                        workspaceRoot={workspaceRoot}
-                      />
-                    </>
+                  {expanded ? (
+                    <div className="pt-4">{timelineContent}</div>
                   ) : null}
                 </div>
               </div>
             )}
           </div>
-        ) : null}
-        {timeline.length > 0 ? (
-          <ol className="agent-timeline" aria-label="Agent activity">
-            {timeline.map((item) => (
-              <li
-                key={entryKey(
-                  item.kind === "entry" ? item.entry : item.entries[0],
-                )}
-                className="agent-timeline-item"
-                data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
-              >
-                {item.kind === "entry" ? (
-                  <EntryCell entry={item.entry} />
-                ) : (
-                  <ActionGroup entries={item.entries} />
-                )}
-              </li>
-            ))}
-          </ol>
         ) : null}
         {persistent.map((entry) => (
           <EntryCell key={entryKey(entry)} entry={entry} />
@@ -646,6 +631,12 @@ function ActionGroup({
     (entry): entry is Extract<ExecutionEntry, { kind: "tool" }> =>
       entry.kind === "tool",
   )
+  const Icon =
+    tools[0]?.execution.type === "file_read"
+      ? BookOpen
+      : tools[0]?.execution.type === "command_execution"
+        ? Terminal
+        : Wrench
   const active = tools.some((entry) => entry.state === "requested")
   const failed = tools.some((entry) => entry.state === "failed")
   const interrupted = tools.some((entry) => entry.state === "interrupted")
@@ -667,26 +658,45 @@ function ActionGroup({
       ? ["Approval"]
       : []),
   ].join(" · ")
+  const completedSummary = [
+    ...[...verbCounts].map(([verb, count]) => {
+      if (verb === "Read")
+        return count === 1 ? "Read file" : `Read ${count} files`
+      if (verb === "Run")
+        return count === 1 ? "Ran command" : `Ran ${count} commands`
+      return count === 1 ? verb : `${verb} ${count}`
+    }),
+    ...(entries.some((entry) => entry.kind === "permission")
+      ? ["Approval"]
+      : []),
+  ].join(" · ")
+  const statusLabel = failed
+    ? "Tool failed"
+    : interrupted
+      ? "Tool interrupted"
+      : active
+        ? "Using tools"
+        : "Used tools"
+  const completed = !active && !hasProblem
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="group/actions">
       <CollapsibleTrigger
+        aria-label={
+          summary === "" ? statusLabel : `${statusLabel} · ${summary}`
+        }
         className={cn(
           "flex max-w-full items-center gap-2 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground",
           hasProblem && "text-destructive hover:text-destructive",
         )}
       >
-        <Wrench className="size-4 shrink-0" />
-        <span className={cn(active && "tool-running-label")}>
-          {failed
-            ? "Tool failed"
-            : interrupted
-              ? "Tool interrupted"
-              : active
-                ? "Using tools"
-                : "Used tools"}
+        <Icon className="size-4 shrink-0" />
+        <span
+          className={cn("min-w-0 truncate", active && "tool-running-label")}
+        >
+          {completed ? completedSummary || statusLabel : statusLabel}
         </span>
-        {summary === "" ? null : (
+        {completed || summary === "" ? null : (
           <span
             className={cn(
               "min-w-0 truncate text-muted-foreground/80",

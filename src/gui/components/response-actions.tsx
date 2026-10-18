@@ -60,7 +60,7 @@ export function ResponseActions({
   at,
 }: Readonly<{ text: string; at: string }>) {
   return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+    <div className="flex items-center gap-2 text-caption text-muted-foreground">
       <CopyIconButton text={text} label="response" />
       <MessageTimestamp at={at} />
     </div>

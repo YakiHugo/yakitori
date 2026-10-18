@@ -160,7 +160,7 @@ export function UserMessageCell({
             return part.text ? (
               <div
                 key={key}
-                className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground"
+                className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-body text-primary-foreground"
                 {...contextSourceAttributes({
                   kind: "message",
                   label: "User message",

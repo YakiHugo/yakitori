@@ -116,13 +116,19 @@ function visibleRectangles(range: Range, source: HTMLElement): Rect[] {
 export function AnnotationLayer({
   annotations,
   details,
+  pendingId,
   onChange,
   onRemove,
+  onConfirm,
+  onDismiss,
 }: Readonly<{
   annotations: readonly ResponseAnnotation[]
   details?: AnnotationDetails | undefined
+  pendingId?: string | undefined
   onChange(annotation: ResponseAnnotation): void
   onRemove(id: string): void
+  onConfirm?(annotation: ResponseAnnotation): void
+  onDismiss?(): void
 }>) {
   const [located, setLocated] = useState<LocatedAnnotation[]>([])
   const [editing, setEditing] = useState<{
@@ -132,8 +138,8 @@ export function AnnotationLayer({
   const input = useRef<HTMLTextAreaElement>(null)
   const editor = useRef<HTMLDivElement>(null)
   const [editorPosition, setEditorPosition] = useState({ top: 0, left: 0 })
-  const current = useRef({ annotations, onChange })
-  current.current = { annotations, onChange }
+  const current = useRef({ annotations, onChange, onDismiss })
+  current.current = { annotations, onChange, onDismiss }
   const supportsHighlight =
     typeof Highlight !== "undefined" &&
     typeof CSS !== "undefined" &&
@@ -229,6 +235,7 @@ export function AnnotationLayer({
         block: "nearest",
         behavior: "smooth",
       })
+      current.current.onDismiss?.()
       setEditing({
         id: annotation.id,
         originalComment: annotation.comment,
@@ -238,7 +245,9 @@ export function AnnotationLayer({
     return () => window.removeEventListener(editEvent, edit)
   }, [])
 
-  const active = annotations.find((annotation) => annotation.id === editing?.id)
+  const active = annotations.find(
+    (annotation) => annotation.id === (pendingId ?? editing?.id),
+  )
   const activeLocation = located.find(
     (item) => item.annotation.id === active?.id,
   )
@@ -263,7 +272,7 @@ export function AnnotationLayer({
   }, [activeId, visible])
 
   useEffect(() => {
-    if (!editing) return
+    if (!editing && !pendingId) return
     const outside = (event: PointerEvent) => {
       if (
         !(event.target instanceof Element) ||
@@ -273,15 +282,16 @@ export function AnnotationLayer({
       )
         return
       setEditing(undefined)
+      current.current.onDismiss?.()
     }
     const keydown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return
       event.preventDefault()
       event.stopPropagation()
       const annotation = current.current.annotations.find(
-        (item) => item.id === editing.id,
+        (item) => item.id === editing?.id,
       )
-      if (annotation) {
+      if (annotation && editing) {
         const { comment: _comment, ...withoutComment } = annotation
         current.current.onChange(
           editing.originalComment === undefined
@@ -290,6 +300,7 @@ export function AnnotationLayer({
         )
       }
       setEditing(undefined)
+      current.current.onDismiss?.()
     }
     document.addEventListener("pointerdown", outside)
     document.addEventListener("keydown", keydown)
@@ -297,7 +308,7 @@ export function AnnotationLayer({
       document.removeEventListener("pointerdown", outside)
       document.removeEventListener("keydown", keydown)
     }
-  }, [editing])
+  }, [editing, pendingId])
 
   return createPortal(
     <div data-annotation-ui="" className="annotation-layer">
@@ -336,6 +347,8 @@ export function AnnotationLayer({
               ),
             }}
             onClick={() => {
+              if (annotation.id === pendingId) return
+              current.current.onDismiss?.()
               if (editing?.id !== annotation.id)
                 setEditing({
                   id: annotation.id,
@@ -347,7 +360,7 @@ export function AnnotationLayer({
           </button>,
         ]
       })}
-      {active && editing && lastRect ? (
+      {active && lastRect ? (
         <div
           ref={editor}
           className="annotation-editor"
@@ -362,6 +375,7 @@ export function AnnotationLayer({
             ) {
               event.preventDefault()
               setEditing(undefined)
+              onConfirm?.(active)
             }
           }}
         >
@@ -392,7 +406,10 @@ export function AnnotationLayer({
             className="annotation-editor-done"
             aria-label="Done"
             title="Save annotation"
-            onClick={() => setEditing(undefined)}
+            onClick={() => {
+              setEditing(undefined)
+              onConfirm?.(active)
+            }}
           >
             <Check size={14} />
           </button>

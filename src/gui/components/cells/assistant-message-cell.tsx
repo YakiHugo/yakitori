@@ -1,9 +1,9 @@
 import { citationURL } from "../../citation-sources.ts"
-import { openUrlTarget } from "../../lib/open-resource.ts"
-import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
+import { openUrlTarget } from "../../lib/open-resource.ts"
 import { useAppStore } from "../../store/app-store.ts"
+import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { MarkdownView } from "../markdown.tsx"
 import { LiveTextNotice } from "./live-text-notice.tsx"
 
@@ -28,7 +28,6 @@ export function AssistantMessageCell({
       <MarkdownView
         text={entry.text}
         streaming={entry.status === "streaming"}
-        className="markdown text-base"
         workspaceRoot={workspaceRoot}
       />
       {entry.sources?.length ? (

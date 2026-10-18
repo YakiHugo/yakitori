@@ -10,11 +10,15 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
-import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
 import type { InputDraft } from "../../src/protocol/user-input.ts"
-import { pastePrompt } from "./prompt-editor-helpers.ts"
+import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
+import { pastePrompt } from "./prompt-editor-helpers.ts"
 
 const fake = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -28,28 +32,29 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+const session: ApiSessionDetail = {
+  id: "session_first",
+  conversationId: "conversation_first",
+  title: "Untitled session",
+  createdAt: "2026-10-09T00:00:00Z",
+  updatedAt: "2026-10-09T00:00:00Z",
+  seq: 1,
+  pendingInputs: [],
+  pendingPermissions: [],
+  counts: {
+    turns: 0,
+    inputs: 0,
+    tools: 0,
+    pendingInputs: 0,
+    items: 0,
+    permissions: 0,
+  },
+}
+
 it.each([
   "composing",
   "committed",
 ])("keeps a %s edit attached through native creation and initial replay", async (editState) => {
-  const session: ApiSessionDetail = {
-    id: "session_first",
-    conversationId: "conversation_first",
-    title: "Untitled session",
-    createdAt: "2026-10-09T00:00:00Z",
-    updatedAt: "2026-10-09T00:00:00Z",
-    seq: 1,
-    pendingInputs: [],
-    pendingPermissions: [],
-    counts: {
-      turns: 0,
-      inputs: 0,
-      tools: 0,
-      pendingInputs: 0,
-      items: 0,
-      permissions: 0,
-    },
-  }
   let release!: () => void
   const pending = new Promise<void>((resolve) => {
     release = resolve
@@ -139,4 +144,121 @@ it.each([
   expect(useAppStore.getState().sessionDrafts[session.id]?.content?.text).toBe(
     "Check the CI smoke flow.",
   )
+})
+
+it("keeps the welcome layout through empty session creation and replay until input arrives", async () => {
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  fake.current.respond = async (method) => {
+    if (method === "session/create") {
+      await pending
+      return {
+        session,
+        event: createEventEnvelope({
+          sessionId: session.id,
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      }
+    }
+    throw new ApiRequestError("not found", "not_found")
+  }
+  render(<App />)
+  fireEvent.click(screen.getByRole("button", { name: "New session" }))
+  const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+  const surface = editor.closest(".conversation-surface")
+  const expectWelcomeLayout = () => {
+    expect(surface?.getAttribute("data-empty")).toBe("true")
+    expect(
+      screen.getByRole("heading", { name: "What would you like to work on?" }),
+    ).toBeDefined()
+    expect(
+      screen.queryByRole("heading", { name: "Untitled session" }),
+    ).toBeNull()
+    expect(screen.getByRole("textbox", { name: "Message the Mate" })).toBe(
+      editor,
+    )
+  }
+  expectWelcomeLayout()
+  await act(async () => release())
+  expectWelcomeLayout()
+  act(() =>
+    useAppStore.setState({
+      currentProject: "project_default",
+      projects: [
+        {
+          id: "project_default",
+          name: "Default project",
+          roots: ["/default"],
+          metadata: {},
+          position: 0,
+          pinned: false,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ],
+    }),
+  )
+  expectWelcomeLayout()
+  expect(
+    screen.getByRole("combobox", { name: "New session project" }),
+  ).toHaveProperty("disabled", true)
+  expect(
+    screen.getByRole("combobox", { name: "New session project" }),
+  ).toHaveProperty("value", "")
+  expect(
+    screen.getByRole("option", { name: "No project", selected: true }),
+  ).toBeDefined()
+  const stream = fake.current.streams.at(-1)
+  if (!stream) throw new Error("Session stream missing")
+  act(() => stream.emitSnapshot({ session }))
+  expectWelcomeLayout()
+  act(() => stream.emitReplayComplete())
+  expectWelcomeLayout()
+  act(() =>
+    stream.emitEvent(
+      createEventEnvelope({
+        sessionId: session.id,
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request_first",
+            inputId: "input_first",
+            role: InputRole.User,
+            content: {
+              kind: "input",
+              text: "Begin",
+              elements: [],
+              attachments: [],
+            },
+          },
+        },
+      }),
+    ),
+  )
+  expect(surface?.hasAttribute("data-empty")).toBe(false)
+  expect(
+    screen.getByRole("heading", { name: "Untitled session" }),
+  ).toBeDefined()
+  expect(screen.getByRole("textbox", { name: "Message the Mate" })).toBe(editor)
+})
+
+it("keeps a populated session docked while its snapshot awaits history replay", async () => {
+  render(<App />)
+  await act(async () => useAppStore.getState().selectSession(session.id))
+  const stream = fake.current.streams.at(-1)
+  if (!stream) throw new Error("Session stream missing")
+  const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+  const surface = editor.closest(".conversation-surface")
+  expect(surface?.hasAttribute("data-empty")).toBe(false)
+  act(() =>
+    stream.emitSnapshot({
+      session: { ...session, counts: { ...session.counts, inputs: 1 } },
+    }),
+  )
+  expect(surface?.hasAttribute("data-empty")).toBe(false)
+  expect(screen.getByRole("status").textContent).toBe("Loading conversation…")
 })

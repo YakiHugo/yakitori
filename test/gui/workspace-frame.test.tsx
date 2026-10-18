@@ -656,7 +656,7 @@ function selectQuote(element: HTMLElement) {
   fireEvent.pointerUp(element)
 }
 
-it("routes side selections to their own draft, focuses that composer, and removes the reference at its source", async () => {
+it("focuses the side annotation comment before confirmation, then attaches it and focuses its composer", async () => {
   const user = userEvent.setup()
   const rect = new DOMRect(100, 100, 120, 20)
   vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(rect)
@@ -697,18 +697,27 @@ it("routes side selections to their own draft, focuses that composer, and remove
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
   expect(useAppStore.getState().promptExcerpts).toEqual([])
   expect(useAppStore.getState().promptDraft).toEqual(mainDraft)
+  const side = () =>
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === tabId)
+  expect(side()).toMatchObject({ excerpts: [] })
+  const comment = screen.getByRole("textbox", {
+    name: "Annotation comment (optional)",
+  })
+  expect(document.activeElement).toBe(comment)
+  await user.type(comment, "A note")
+  expect(side()).toMatchObject({ excerpts: [] })
+  await user.click(screen.getByRole("button", { name: "Done" }))
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message side chat" }),
   )
   expect(
     screen.queryByRole("dialog", { name: "Annotation comment" }),
   ).toBeNull()
-  const side = () =>
-    useWorkspaceStore.getState().tabs.find((tab) => tab.id === tabId)
   expect(side()).toMatchObject({
     excerpts: [
       expect.objectContaining({
         text: "Side explanation",
+        comment: "A note",
         source: expect.objectContaining({
           sessionId: "side-source",
           messageId: "response",
@@ -719,22 +728,12 @@ it("routes side selections to their own draft, focuses that composer, and remove
   await user.click(
     screen.getByRole("button", { name: "Edit annotation 1 in Side chat" }),
   )
-  await user.type(
-    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
-    "A note",
-  )
-  await user.click(screen.getByRole("button", { name: "Done" }))
-  expect(side()).toMatchObject({
-    excerpts: [expect.objectContaining({ comment: "A note" })],
-  })
-  await user.click(
-    screen.getByRole("button", { name: "Edit annotation 1 in Side chat" }),
-  )
   await user.click(screen.getByRole("button", { name: "Remove annotation" }))
   expect(side()).toMatchObject({ excerpts: [] })
   expect(screen.getByText("Side explanation")).toBeDefined()
   selectQuote(response)
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  await user.keyboard("{Enter}")
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message side chat" }),
   )
@@ -750,10 +749,14 @@ it("routes side selections to their own draft, focuses that composer, and remove
   ).toEqual([])
 })
 
-it("focuses the main composer after adding main text while a side composer is open", async () => {
+it("focuses the main annotation comment before Enter confirms it and focuses the main composer", async () => {
   const user = userEvent.setup()
   vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
     new DOMRect(100, 100, 120, 20),
+  )
+  const rect = new DOMRect(100, 100, 120, 20)
+  vi.spyOn(Range.prototype, "getClientRects").mockReturnValue(
+    Object.assign([rect], { item: () => rect }),
   )
   useWorkspaceStore.getState().addTab("chat")
   render(
@@ -775,8 +778,18 @@ it("focuses the main composer after adding main text while a side composer is op
   )
   selectQuote(screen.getByText("Main explanation"))
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
+  )
+  await user.keyboard("Main note{Shift>}{Enter}{/Shift}More detail")
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  await user.keyboard("{Enter}")
   expect(useAppStore.getState().promptExcerpts).toEqual([
-    expect.objectContaining({ text: "Main explanation" }),
+    expect.objectContaining({
+      text: "Main explanation",
+      comment: "Main note\nMore detail",
+    }),
   ])
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message the Mate" }),

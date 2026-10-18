@@ -189,12 +189,22 @@
   gap: 6px;
 }
 .side-chat-user-bubble {
+  --prose-color: color-mix(
+    in oklab,
+    var(--primary-foreground) 85%,
+    var(--primary)
+  );
+  --prose-emphasis: var(--primary-foreground);
+  --prose-code-background: color-mix(
+    in oklab,
+    var(--primary-foreground) 12%,
+    var(--primary)
+  );
   max-width: 85%;
   padding: 12px 16px;
   border-radius: 16px;
   background: var(--primary);
   color: var(--primary-foreground);
-  font-size: 15px;
 }
 .side-chat-user-bubble.markdown a,
 .side-chat-user-bubble.markdown :where(ul > li, ol > li)::marker {
