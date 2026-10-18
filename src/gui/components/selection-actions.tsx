@@ -1,5 +1,5 @@
 import { MessageSquare, Quote, X } from "lucide-react"
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import type {
   ContextExcerpt,
@@ -9,8 +9,8 @@ import type {
 import {
   type AnnotationDetails,
   AnnotationLayer,
-  findContextSource,
   requestAnnotationEdit,
+  scrollToContextSource,
   selectionOffsets,
 } from "./annotation-layer.tsx"
 
@@ -40,6 +40,14 @@ export function SelectionActions({
   onAskInSideChat(excerpt: SelectedTextAttachment, sideChatId?: string): void
 }>) {
   const [captured, setCaptured] = useState<CapturedSelection>()
+  const [pending, setPending] = useState<{
+    annotation: ResponseAnnotation
+    sideChatId?: string
+  }>()
+  const visibleAnnotations = useMemo(
+    () => (pending ? [...annotations, pending.annotation] : annotations),
+    [annotations, pending],
+  )
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const menu = useRef<HTMLDivElement>(null)
 
@@ -198,9 +206,10 @@ export function SelectionActions({
         kind: "annotation",
         anchor: captured.anchor,
       }
-      if (captured.sideChatId)
-        onAddToConversation(annotation, captured.sideChatId)
-      else onAddToConversation(annotation)
+      setPending({
+        annotation,
+        ...(captured.sideChatId ? { sideChatId: captured.sideChatId } : {}),
+      })
     } else if (captured.sideChatId)
       onAskInSideChat(captured.excerpt, captured.sideChatId)
     else onAskInSideChat(captured.excerpt)
@@ -211,10 +220,26 @@ export function SelectionActions({
   return (
     <>
       <AnnotationLayer
-        annotations={annotations}
+        annotations={visibleAnnotations}
         details={annotationDetails}
-        onChange={onUpdateAnnotation}
-        onRemove={onRemoveAnnotation}
+        pendingId={pending?.annotation.id}
+        onChange={(annotation) => {
+          if (pending?.annotation.id === annotation.id)
+            setPending({ ...pending, annotation })
+          else onUpdateAnnotation(annotation)
+        }}
+        onRemove={(id) => {
+          if (pending?.annotation.id === id) setPending(undefined)
+          else onRemoveAnnotation(id)
+        }}
+        onDismiss={() => setPending(undefined)}
+        onConfirm={(annotation) => {
+          if (pending?.annotation.id !== annotation.id) return
+          if (pending.sideChatId)
+            onAddToConversation(annotation, pending.sideChatId)
+          else onAddToConversation(annotation)
+          setPending(undefined)
+        }}
       />
       {captured
         ? createPortal(
@@ -347,12 +372,10 @@ export function ContextExcerptChips({
                             if (excerpt.kind === "annotation" && onChange)
                               requestAnnotationEdit(excerpt.id)
                             else
-                              findContextSource(excerpt.source)?.scrollIntoView(
-                                {
-                                  block: "center",
-                                  behavior: "smooth",
-                                },
-                              )
+                              scrollToContextSource(excerpt.source, {
+                                block: "center",
+                                behavior: "smooth",
+                              })
                             setExpanded(undefined)
                           }}
                         >

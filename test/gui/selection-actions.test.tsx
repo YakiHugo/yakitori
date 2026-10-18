@@ -102,6 +102,11 @@ it("shows annotation and side chat actions above the selection and creates an an
   await user.click(
     within(toolbar).getByRole("button", { name: "Add to conversation" }),
   )
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
+  )
+  await user.click(screen.getByRole("button", { name: "Done" }))
   expect(props.onAddToConversation).toHaveBeenCalledWith(
     expect.objectContaining({
       kind: "annotation",
@@ -193,6 +198,7 @@ it.each([
   await userEvent
     .setup()
     .click(screen.getByRole("button", { name: "Add to conversation" }))
+  await userEvent.setup().click(screen.getByRole("button", { name: "Done" }))
   const captured = onAddToConversation.mock.calls[0]?.[0]
   if (!captured) throw new Error("Missing captured annotation")
   expect(captured).toMatchObject({
@@ -305,13 +311,13 @@ it("keeps a new annotation at its source and preserves its note when returning t
     screen.getByRole("button", { name: "Edit annotation 1" }).textContent,
   ).toBe("1")
   expect(document.querySelector(".annotation-highlight")).not.toBeNull()
-  expect(screen.queryByRole("textbox")).toBeNull()
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
   const comment = screen.getByRole("textbox", {
     name: "Annotation comment (optional)",
   })
   expect(document.activeElement).toBe(comment)
   await user.type(comment, "Focus on correctness.")
+  await user.click(screen.getByRole("button", { name: "Done" }))
+  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
   await user.click(screen.getByRole("button", { name: "Main composer" }))
   expect(screen.queryByRole("textbox")).toBeNull()
   await user.click(screen.getByRole("button", { name: "1 annotation" }))
@@ -331,11 +337,6 @@ it("Escape preserves an attached annotation and restores the existing note durin
   render(<Draft />)
   selectText(screen.getByText("useful explanation"))
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.keyboard("{Escape}")
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 1" }),
-  ).toBeDefined()
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
   await user.type(screen.getByRole("textbox"), "Saved note")
   await user.keyboard("{Enter}")
   await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
@@ -345,6 +346,37 @@ it("Escape preserves an attached annotation and restores the existing note durin
   expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
     "Saved note",
   )
+})
+
+it.each([
+  "Escape",
+  "outside",
+  "remove",
+])("dismisses an unconfirmed annotation without attaching it through %s", async (action) => {
+  const user = userEvent.setup()
+  const props = defaultProps()
+  render(
+    <>
+      <p {...contextSourceAttributes(source)}>A useful explanation.</p>
+      <button type="button">Outside</button>
+      <SelectionActions {...props} />
+    </>,
+  )
+  selectText(screen.getByText("A useful explanation."))
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  await user.type(screen.getByRole("textbox"), "Unconfirmed")
+  if (action === "Escape") await user.keyboard("{Escape}")
+  else
+    await user.click(
+      screen.getByRole("button", {
+        name: action === "remove" ? "Remove annotation" : "Outside",
+      }),
+    )
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(document.querySelector(".annotation-highlight")).toBeNull()
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(props.onUpdateAnnotation).not.toHaveBeenCalled()
+  expect(props.onRemoveAnnotation).not.toHaveBeenCalled()
 })
 
 it("numbers current annotations and removes highlights and editor when the main draft changes", () => {
@@ -457,6 +489,7 @@ it("captures side conversation ownership and clears native selection after eithe
   )
   selectText(screen.getByText("Side response"))
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  await user.click(screen.getByRole("button", { name: "Done" }))
   expect(props.onAddToConversation).toHaveBeenCalledWith(
     expect.objectContaining({ text: "Side response" }),
     "side-tab",

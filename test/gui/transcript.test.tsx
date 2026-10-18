@@ -9,6 +9,10 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
+import {
+  ContextExcerptChips,
+  SelectionActions,
+} from "../../src/gui/components/selection-actions.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
 import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import {
@@ -20,6 +24,10 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import type {
+  ContextExcerpt,
+  ResponseAnnotation,
+} from "../../src/protocol/input-context.ts"
 import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -146,11 +154,114 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
 
-it("keeps intent updates visible and consolidates reasoning behind the turn summary", () => {
+it("reveals a collapsed commentary source and focuses its editor when opening an attached annotation", async () => {
+  const rect = new DOMRect(100, 100, 120, 20)
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(0, 0, 1000, 800),
+  )
+  vi.spyOn(Range.prototype, "getClientRects").mockReturnValue(
+    Object.assign([rect], { item: () => rect }),
+  )
+  const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
+  const annotation: ResponseAnnotation = {
+    id: "annotation_progress",
+    kind: "annotation",
+    text: "Checking the implementation",
+    source: {
+      kind: "message",
+      label: "Assistant message",
+      sessionId: "session_1",
+      messageId: "progress",
+    },
+    anchor: { startOffset: 0, endOffset: 27 },
+    comment: "Keep this context",
+  }
+  render(
+    <TooltipProvider>
+      <Transcript />
+      <ContextExcerptChips excerpts={[annotation]} onChange={vi.fn()} />
+      <SelectionActions
+        annotations={[annotation]}
+        onAddToConversation={vi.fn()}
+        onUpdateAnnotation={vi.fn()}
+        onRemoveAnnotation={vi.fn()}
+        onAskInSideChat={vi.fn()}
+      />
+    </TooltipProvider>,
+  )
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "1 annotation" }))
+  await act(async () => {
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "annotations" })).getByRole(
+        "button",
+        { name: "Edit annotation 1" },
+      ),
+    )
+  })
+  frame(16)
+  const source = screen
+    .getByText("Checking the implementation")
+    .closest("[data-context-message-id]")
+  expect(source).not.toBeNull()
+  expect(scrollIntoView.mock.contexts).toContain(source)
+  const comment = screen.getByRole("textbox", {
+    name: "Annotation comment (optional)",
+  })
+  expect(document.activeElement).toBe(comment)
+  expect((comment as HTMLTextAreaElement).value).toBe("Keep this context")
+})
+
+it.each([
+  "annotation",
+  "selection",
+] as const)("reveals collapsed commentary when navigating a read-only %s excerpt", (kind) => {
+  const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
+  const details = {
+    id: "excerpt_progress",
+    text: "Checking the implementation",
+    source: {
+      kind: "message" as const,
+      label: "Assistant message",
+      sessionId: "session_1",
+      messageId: "progress",
+    },
+  }
+  const excerpt: ContextExcerpt =
+    kind === "annotation"
+      ? { ...details, kind, anchor: { startOffset: 0, endOffset: 27 } }
+      : { ...details, kind }
+  render(
+    <TooltipProvider>
+      <Transcript />
+      <ContextExcerptChips excerpts={[excerpt]} />
+    </TooltipProvider>,
+  )
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: kind === "annotation" ? "1 annotation" : "1 selected text snippet",
+    }),
+  )
+  fireEvent.click(screen.getByRole("button", { name: "Go to selected text 1" }))
+  const source = screen
+    .getByText("Checking the implementation")
+    .closest("[data-context-message-id]")
+  expect(source).not.toBeNull()
+  expect(scrollIntoView.mock.contexts).toContain(source)
+  expect(scrollIntoView).toHaveBeenCalledWith({
+    block: "center",
+    behavior: "smooth",
+  })
+  expect(screen.queryByRole("dialog")).toBeNull()
+})
+
+it("collapses completed process output and keeps the final answer visible", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -171,11 +282,8 @@ it("keeps intent updates visible and consolidates reasoning behind the turn summ
   })
   render(<Transcript />)
   expect(screen.getByText("Final answer")).toBeDefined()
-  expect(
-    screen
-      .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]"),
-  ).toBeNull()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  expect(screen.queryByRole("list", { name: "Agent activity" })).toBeNull()
   expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
   const toggles = screen.getAllByRole("button", { name: "Worked for 1m 49s" })
   expect(toggles).toHaveLength(1)
@@ -187,6 +295,13 @@ it("keeps intent updates visible and consolidates reasoning behind the turn summ
   )
   expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
   fireEvent.click(toggle)
+  expect(screen.getByText("Checking the implementation")).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: "Used tools · Read" }),
+  ).toBeDefined()
+  expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
+  for (const reasoning of screen.getAllByRole("button", { name: "Reasoning" }))
+    fireEvent.click(reasoning)
   expect(
     screen
       .getByText("Reasoning details", { selector: "p" })
@@ -200,6 +315,7 @@ it("keeps intent updates visible and consolidates reasoning behind the turn summ
       ?.getAttribute("aria-hidden"),
   ).toBe("false")
   fireEvent.click(toggle)
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
   expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
   expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
   expect(screen.getByText("Final answer")).toBeDefined()
@@ -209,6 +325,7 @@ it("groups adjacent tool actions behind a deterministic collapsed summary", () =
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
       entries: [
         ...entries.slice(0, 2),
         readTool("tool_1", "src/first.ts"),
@@ -222,11 +339,12 @@ it("groups adjacent tool actions behind a deterministic collapsed summary", () =
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]"),
+      .closest('[aria-hidden="true"]'),
   ).toBeNull()
   const tools = screen.getByRole("button", {
     name: "Used tools · Read 2",
   })
+  expect(tools.textContent).toBe("Read 2 files")
   expect(tools.getAttribute("aria-expanded")).toBe("false")
   expect(
     screen.queryByRole("button", { name: /Read src\/first\.ts/ }),
@@ -246,6 +364,7 @@ it("surfaces a failed action instead of hiding it in a closed tool group", () =>
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
       entries: [
         ...entries.slice(0, 2),
         readTool("tool_failed", "src/missing.ts", "failed"),
@@ -271,7 +390,7 @@ it("keeps live process history available until the turn has a final answer", () 
     execution: { ...useAppStore.getState().execution, activeTurnId: "turn_1" },
   })
   render(<Transcript />)
-  expect(screen.getByRole("button", { name: "Working" })).toBeDefined()
+  expect(screen.getByRole("button", { name: /^Working / })).toBeDefined()
   expect(screen.getByText("Final answer")).toBeDefined()
   act(() =>
     useAppStore.setState({
@@ -292,7 +411,181 @@ it("keeps live process history available until the turn has a final answer", () 
     }),
   )
   expect(screen.getByText("Latest output")).toBeDefined()
-  expect(screen.getByText("Final answer").closest("[aria-hidden]")).toBeNull()
+  expect(
+    screen.getByText("Final answer").closest('[aria-hidden="true"]'),
+  ).toBeNull()
+})
+
+it("updates elapsed work time and collapses an open live trace when the turn completes", () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date("2026-09-12T00:00:58Z"))
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
+      turnTimings: { turn_1: { startedAt: at } },
+    },
+  })
+  const { unmount } = render(<Transcript />)
+  expect(screen.getByRole("status").textContent).toBe("Working for 58s")
+  expect(screen.getByRole("button", { name: "Working for 58s" })).toBeDefined()
+  act(() => vi.advanceTimersByTime(3000))
+  expect(screen.getByRole("status").textContent).toBe("Working for 1m 1s")
+  expect(
+    screen
+      .getByRole("button", { name: "Working for 1m 1s" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  expect(screen.getByText("Reasoning details")).toBeDefined()
+  expect(screen.getByText("Checking the implementation")).toBeDefined()
+
+  act(() => {
+    useAppStore.setState({
+      execution: {
+        ...useAppStore.getState().execution,
+        activeTurnId: undefined,
+        turnTimings: {
+          turn_1: { startedAt: at, completedAt: "2026-09-12T00:01:02Z" },
+        },
+      },
+    })
+  })
+  expect(
+    screen
+      .getByRole("button", { name: "Worked for 1m 2s" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false")
+  expect(screen.getByText("Final answer")).toBeDefined()
+  expect(screen.queryByText("Reasoning details")).toBeNull()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  act(() => vi.advanceTimersByTime(5000))
+  expect(screen.getByText("Worked for", { exact: false }).textContent).toBe(
+    "Worked for 1m 2s",
+  )
+  unmount()
+})
+
+it("provides a completed activity disclosure when the turn has no reasoning", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.filter((entry) => entry.kind !== "reasoning").slice(0, 2),
+        readTool("read_only", "src/index.ts"),
+        entries[3] as ExecutionEntry,
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  expect(screen.queryByRole("button", { name: "Used tools · Read" })).toBeNull()
+  expect(screen.getByText("Final answer")).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(screen.getByText("Checking the implementation")).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Used tools · Read" }))
+  expect(
+    screen.getByRole("button", { name: /Read src\/index\.ts/ }),
+  ).toBeDefined()
+})
+
+it("uses summary-only reasoning for live status and keeps substantive reasoning behind a secondary disclosure", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
+      turnTimings: { turn_1: { startedAt: at } },
+      entries: [
+        ...entries.slice(0, 2),
+        {
+          kind: "reasoning",
+          itemId: "first_summary",
+          turnId: "turn_1",
+          text: "**Implementing favicon fallback**\n\n**Inspecting existing icons**",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "reasoning",
+          itemId: "second_summary",
+          turnId: "turn_1",
+          text: "### Reading rendering tests\n\nKeep **meaningful emphasis** in the details.",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "reasoning",
+          itemId: "live_summary",
+          turnId: "turn_1",
+          text: "**Checking dependencies**\n\n**Checking the",
+          status: "streaming",
+          at,
+        },
+        ...entries.slice(3),
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.getByTitle("Checking the").textContent).toBe("· Checking the")
+  expect(screen.queryByText("Implementing favicon fallback")).toBeNull()
+  expect(screen.queryByText("Reading rendering tests")).toBeNull()
+  expect(screen.getAllByRole("button", { name: "Reasoning" })).toHaveLength(1)
+  expect(screen.queryByText("meaningful emphasis")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  expect(screen.queryByText("Implementing favicon fallback")).toBeNull()
+  expect(screen.queryByText("Reading rendering tests")).toBeNull()
+  expect(screen.queryByText("Inspecting existing icons")).toBeNull()
+  expect(screen.queryByText("Checking dependencies")).toBeNull()
+  expect(screen.getByText("meaningful emphasis").tagName).toBe("STRONG")
+  expect(screen.queryByRole("heading")).toBeNull()
+  expect(screen.queryByText("Checking the", { selector: "p" })).toBeNull()
+})
+
+it("expands commentary, tools, and substantive reasoning in their original order", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        readTool("first_read", "src/first.ts"),
+        {
+          kind: "reasoning",
+          itemId: "summary_only",
+          turnId: "turn_1",
+          text: "**Inspecting files**\n\n**Comparing implementation**",
+          status: "completed",
+          at,
+        },
+        ...entries.slice(2, 3),
+        {
+          kind: "assistant",
+          itemId: "later_progress",
+          turnId: "turn_1",
+          text: "Now checking the second file",
+          status: "completed",
+          at,
+        },
+        readTool("second_read", "src/second.ts"),
+        ...entries.slice(3),
+      ],
+    },
+  })
+  render(<Transcript />)
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  const activity = screen.getByRole("list", { name: "Agent activity" })
+  expect(Array.from(activity.children, (child) => child.textContent)).toEqual([
+    "Checking the implementation",
+    "Read file",
+    "Reasoning",
+    "Now checking the second file",
+    "Read file",
+  ])
+  expect(screen.queryByText("Inspecting files")).toBeNull()
+  expect(screen.queryByText("Comparing implementation")).toBeNull()
+  expect(screen.queryByText("Reasoning details")).toBeNull()
+  fireEvent.click(within(activity).getByRole("button", { name: "Reasoning" }))
+  expect(activity.children[2]?.textContent).toContain("Reasoning details")
+  expect(screen.getByText("Final answer").closest("ol")).toBeNull()
 })
 
 it("shows retry activity before any output and restores the activity heading on recovery", () => {
@@ -414,7 +707,7 @@ it("shows the current retry once when steering input splits the turn", () => {
   )
 })
 
-it("keeps failures and intent updates visible while reasoning is collapsed", () => {
+it("keeps terminal failures visible while completed process output is collapsed", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -435,11 +728,7 @@ it("keeps failures and intent updates visible while reasoning is collapsed", () 
       .getByRole("button", { name: "Worked for 1m 49s" })
       .getAttribute("aria-expanded"),
   ).toBe("false")
-  expect(
-    screen
-      .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]"),
-  ).toBeNull()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
   expect(
     screen.getByText(/Provider disconnected/).closest("[aria-hidden]"),
   ).toBeNull()
@@ -709,6 +998,7 @@ it("keeps pending approvals visible alongside intent updates", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
       entries: [
         ...entries,
         {
@@ -726,7 +1016,7 @@ it("keeps pending approvals visible alongside intent updates", () => {
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]"),
+      .closest('[aria-hidden="true"]'),
   ).toBeNull()
   expect(
     screen.getByText("Permission · Write config").closest("[aria-hidden]"),
@@ -757,11 +1047,7 @@ it("promotes only the final answer of a completed turn split by another input", 
   expect(screen.getAllByRole("button", { name: "Copy response" })).toHaveLength(
     1,
   )
-  expect(
-    screen
-      .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]"),
-  ).toBeNull()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
   expect(
     screen
       .getByText("Final answer", { selector: "p" })
@@ -933,10 +1219,17 @@ it("keeps every fragment of a failed turn as activity", () => {
   })
   render(<Transcript />)
   expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
+  for (const toggle of screen.getAllByRole("button", {
+    name: "Worked for 1m 49s",
+  }))
+    fireEvent.click(toggle)
   for (const text of ["Checking the implementation", "Final answer"])
     expect(
-      screen.getByText(text, { selector: "p" }).closest("[aria-hidden]"),
-    ).toBeNull()
+      screen
+        .getByText(text, { selector: "p" })
+        .closest("[aria-hidden]")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("false")
   expect(screen.getByText(/Provider disconnected/)).toBeDefined()
 })
 
@@ -952,7 +1245,7 @@ it("does not promote inactive text until its turn has completed", () => {
   expect(
     screen
       .getByText("Final answer", { selector: "p" })
-      .closest("[aria-hidden]"),
+      .closest('[aria-hidden="true"]'),
   ).toBeNull()
 })
 

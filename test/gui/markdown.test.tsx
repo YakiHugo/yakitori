@@ -1,5 +1,11 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MarkdownView } from "../../src/gui/components/markdown.tsx"
@@ -20,6 +26,29 @@ afterEach(() => {
 })
 
 describe("links", () => {
+  it("loads site icons without changing link names and keeps failed icons actionable", async () => {
+    const user = userEvent.setup()
+    const { container } = render(
+      <MarkdownView text="[Documentation](https://example.com/docs)" />,
+    )
+    const link = screen.getByRole("link", { name: "Documentation" })
+    const image = container.querySelector("img")
+    expect(image?.getAttribute("src")).toBe("https://example.com/favicon.ico")
+    expect(image?.getAttribute("referrerpolicy")).toBe("no-referrer")
+    expect(image?.closest('[aria-hidden="true"]')).not.toBeNull()
+    if (!image) throw new Error("Missing site icon")
+    fireEvent.error(image)
+    expect(container.querySelector("img")).toBeNull()
+    expect(link.querySelector("svg")).not.toBeNull()
+    await user.click(link)
+    expect(useWorkspaceStore.getState().tabs).toEqual([
+      expect.objectContaining({
+        kind: "browser",
+        initialUrl: "https://example.com/docs",
+      }),
+    ])
+  })
+
   it("opens web links in workspace browser tabs", async () => {
     const openUrl = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {

@@ -1,3 +1,4 @@
+import { FileText, Globe } from "lucide-react"
 import type { MouseEvent, ReactNode } from "react"
 import {
   createContext,
@@ -19,6 +20,7 @@ import {
   normalizeLanguage,
   useHighlighter,
 } from "../lib/syntax-highlighter.ts"
+import { cn } from "../lib/utils.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { MarkdownImage } from "./markdown-image.tsx"
@@ -140,6 +142,41 @@ function markdownUrlTransform(url: string, key: string): string {
   return key === "href" && isLocalFileHref(url) ? url : defaultUrlTransform(url)
 }
 
+function WebLinkIcon({ href }: { href: string }) {
+  const [loaded, setLoaded] = useState(false)
+  const [failed, setFailed] = useState(false)
+  let origin: string
+  try {
+    origin = new URL(href).origin
+  } catch {
+    return (
+      <span className="markdown-link-icon" aria-hidden="true">
+        <Globe />
+      </span>
+    )
+  }
+  return (
+    <span className="markdown-link-icon" aria-hidden="true">
+      {!loaded && <Globe />}
+      {!failed && (
+        <img
+          src={`${origin}/favicon.ico`}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+          style={{ visibility: loaded ? "visible" : "hidden" }}
+          onLoad={() => setLoaded(true)}
+          onError={() => {
+            setLoaded(false)
+            setFailed(true)
+          }}
+        />
+      )}
+    </span>
+  )
+}
+
 function MarkdownLink({
   href,
   children,
@@ -156,7 +193,9 @@ function MarkdownLink({
   if (/^https?:\/\//i.test(href)) {
     return (
       <a
+        className="markdown-resource-link"
         href={href}
+        title={href}
         onClick={(event: MouseEvent) => {
           event.preventDefault()
           if (event.metaKey || event.ctrlKey)
@@ -164,7 +203,8 @@ function MarkdownLink({
           else useWorkspaceStore.getState().openBrowser(href)
         }}
       >
-        {children}
+        <WebLinkIcon key={href} href={href} />
+        <span className="markdown-link-label">{children}</span>
       </a>
     )
   }
@@ -198,6 +238,7 @@ function MarkdownLink({
   }
   return (
     <a
+      className="markdown-resource-link"
       href={href}
       title={openError ?? href}
       onClick={(event: MouseEvent) => {
@@ -233,7 +274,10 @@ function MarkdownLink({
         })
       }}
     >
-      {children}
+      <span className="markdown-link-icon" aria-hidden="true">
+        <FileText />
+      </span>
+      <span className="markdown-link-label">{children}</span>
     </a>
   )
 }
@@ -296,7 +340,7 @@ export const MarkdownView = memo(function MarkdownView({
     [useIncrementalParser],
   )
   return (
-    <div className={className}>
+    <div className={cn("markdown", className)}>
       <MarkdownStreamingContext value={streaming}>
         <Markdown
           remarkPlugins={remarkPlugins}

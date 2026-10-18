@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./foundations.css";
 @import "./conversation.css";
 @import "./composer.css";
 @import "./sidebar.css";
@@ -27,6 +28,7 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  --link: oklch(0.48 0.14 250);
 }
 
 .dark {
@@ -48,6 +50,7 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
+  --link: oklch(0.76 0.11 250);
 }
 
 @theme inline {
@@ -83,63 +86,81 @@
   }
 }
 
-/* Assistant markdown rendering. Proportions follow Codex's markdown module:
-   line-height 1.625, a spacing unit of 0.25em (--md-space), 1em between
-   paragraphs, heading scale 1.5/1.25/1.125em at semibold, plain monospace
-   inline code without a chip, blockquote as a rounded bar, tables with row
-   separators instead of a grid. Everything is em-based so a text-sm root
-   (reasoning, subagent answers) scales the whole system down. */
+/* Prose owns its internal rhythm; transcript/layout containers own the gaps
+   between messages. One-sided margins avoid collapsed sibling margins
+   cancelling a tighter heading/list relationship. */
 .markdown {
-  --md-space: 0.25em;
+  --prose-block-gap: calc(var(--spacing) * 3);
+  --prose-section-gap: calc(var(--spacing) * 6);
+  --prose-related-gap: calc(var(--spacing) * 2);
+  --prose-h1-size: var(--text-heading-lg);
+  --prose-h2-size: var(--text-heading-md);
+  --prose-h3-size: var(--text-heading-sm);
   min-width: 0;
   overflow-wrap: anywhere;
-  line-height: 1.625;
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  color: var(
+    --prose-color,
+    color-mix(in oklab, var(--foreground) 85%, var(--background))
+  );
 }
-.markdown > :first-child {
-  margin-top: 0;
+.markdown-compact {
+  --prose-color: var(--muted-foreground);
+  --prose-emphasis: color-mix(
+    in oklab,
+    var(--foreground) 35%,
+    var(--muted-foreground)
+  );
+  --prose-block-gap: calc(var(--spacing) * 2);
+  --prose-section-gap: calc(var(--spacing) * 4);
+  --prose-related-gap: var(--spacing);
+  --prose-h1-size: var(--text-heading-md);
+  --prose-h2-size: var(--text-heading-sm);
+  --prose-h3-size: var(--text-body);
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
 }
-.markdown > :last-child {
-  margin-bottom: 0;
+.markdown
+  :where(p, ul, ol, blockquote, pre, table, hr, h1, h2, h3, h4, h5, h6) {
+  margin: 0;
 }
-.markdown :where(p, ul, ol, blockquote, pre, table, hr) {
-  margin-top: var(--md-space);
-  margin-bottom: var(--md-space);
-}
-.markdown :where(p + p) {
-  margin-block: calc(var(--md-space) * 4);
+.markdown > * + *,
+.markdown :where(li, blockquote) > * + * {
+  margin-top: var(--prose-block-gap);
 }
 .markdown :where(p + ul, p + ol) {
-  margin-top: 0;
+  margin-top: var(--prose-related-gap);
 }
 .markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin-top: var(--prose-section-gap);
   font-weight: 600;
+  line-height: var(--text-heading-sm--line-height);
 }
 .markdown :where(h1) {
-  margin: 0 0 calc(var(--md-space) * 2);
-  font-size: 1.5em;
-  line-height: calc(var(--md-space) * 8);
+  font-size: var(--prose-h1-size);
+  line-height: var(--text-heading-lg--line-height);
 }
 .markdown :where(h2) {
-  margin: calc(var(--md-space) * 4) 0 var(--md-space);
-  font-size: 1.25em;
-  line-height: calc(var(--md-space) * 7);
+  font-size: var(--prose-h2-size);
+  line-height: var(--text-heading-md--line-height);
 }
 .markdown :where(h3) {
-  margin: calc(var(--md-space) * 4) 0 var(--md-space);
-  font-size: 1.125em;
-  line-height: calc(var(--md-space) * 7);
+  font-size: var(--prose-h3-size);
 }
-.markdown :where(h4) {
-  margin: calc(var(--md-space) * 4) 0 0;
+.markdown :where(h4, h5, h6) {
   font-size: 1em;
-  line-height: calc(var(--md-space) * 6);
 }
-.markdown :where(h5, h6) {
-  margin: 0;
-  font-size: 1em;
+.markdown :where(h1, h2, h3, h4, h5, h6) + * {
+  margin-top: var(--prose-related-gap);
+}
+.markdown :where(strong, b) {
+  font-size: inherit;
+  color: var(--prose-emphasis, var(--foreground));
+  font-weight: inherit;
 }
 .markdown :where(ul, ol) {
-  padding-inline-start: calc(var(--md-space) * 6.5);
+  padding-inline-start: calc(var(--spacing) * 6);
   list-style-position: outside;
 }
 .markdown :where(ul) {
@@ -155,29 +176,25 @@
   list-style-type: square;
 }
 .markdown :where(li) {
-  padding-inline-start: calc(var(--md-space) * 1.5);
+  padding-inline-start: var(--spacing);
 }
 .markdown :where(li + li) {
-  margin-top: 0;
+  margin-top: var(--spacing);
 }
-.markdown :where(li > p) {
-  margin: 0;
-}
-.markdown :where(li > p + p) {
-  margin-top: calc(var(--md-space) * 4);
+.markdown :where(li:has(> p) + li) {
+  margin-top: var(--prose-block-gap);
 }
 .markdown :where(li > ul, li > ol) {
-  margin: 0;
+  margin-top: var(--spacing);
 }
 .markdown :where(ul > li)::marker,
 .markdown :where(ol > li)::marker {
-  color: var(--foreground);
-  font-weight: 600;
+  color: inherit;
+  font-weight: 400;
 }
 .markdown :where(blockquote) {
   position: relative;
-  padding: calc(var(--md-space) * 2) 0 calc(var(--md-space) * 2)
-    calc(var(--md-space) * 6);
+  padding-inline-start: calc(var(--spacing) * 4);
   border: 0;
   color: inherit;
   font-style: normal;
@@ -186,26 +203,38 @@
   content: "";
   position: absolute;
   inset-inline-start: 0;
-  top: calc(var(--md-space) * 2);
-  bottom: calc(var(--md-space) * 2);
-  width: var(--md-space);
-  border-radius: calc(var(--md-space) / 2);
+  inset-block: 0;
+  width: var(--spacing);
+  border-radius: calc(var(--spacing) / 2);
   background: var(--border);
 }
 .markdown :where(hr) {
-  margin: calc(var(--md-space) * 7) 0;
+  margin-top: var(--prose-section-gap);
   border: 0;
   border-top: 1px solid var(--border);
 }
+.markdown :where(hr) + * {
+  margin-top: var(--prose-section-gap);
+}
+.markdown > :first-child,
+.markdown :where(li, blockquote) > :first-child {
+  margin-top: 0;
+}
 .markdown :where(code) {
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.875em;
+  font-size: 0.92em;
+}
+.markdown :where(:not(pre) > code) {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--prose-code-background, var(--muted));
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 .markdown :where(pre) {
-  margin-block: calc(var(--md-space) * 5);
   background: var(--muted);
   border-radius: 12px;
-  padding: calc(var(--md-space) * 4);
+  padding: calc(var(--spacing) * 4);
   overflow-x: auto;
   line-height: 1.45;
 }
@@ -224,9 +253,60 @@
   color: var(--shiki-dark);
 }
 .markdown a {
-  color: var(--primary);
+  color: color-mix(in oklab, var(--link) 80%, var(--foreground));
+  text-decoration: none;
+  border-radius: 4px;
+}
+.markdown a:hover {
   text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.markdown a:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 3px;
+}
+.markdown a :where(strong, b) {
+  color: inherit;
+}
+.markdown .markdown-resource-link {
+  display: inline;
+  white-space: nowrap;
+  font-size: inherit;
+  font-weight: 500;
+}
+.markdown-link-label {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.markdown .markdown-resource-link:hover {
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
   text-underline-offset: 2px;
+}
+.markdown-link-icon {
+  position: relative;
+  display: inline-block;
+  width: 1em;
+  height: 1lh;
+  margin-inline-end: 3px;
+  vertical-align: bottom;
+}
+.markdown-link-icon > :is(svg, img) {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1em;
+  transform: translateY(-50%);
+}
+.markdown-link-icon img {
+  object-fit: contain;
+  border-radius: 2px;
+}
+.markdown .markdown-resource-link code {
+  padding: 0;
+  background: none;
+  font: inherit;
 }
 .markdown table {
   display: block;
@@ -234,11 +314,11 @@
   overflow-x: auto;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 0.875em;
+  font-size: var(--text-detail);
 }
 .markdown :where(th, td) {
-  padding: calc(var(--md-space) * 2) calc(var(--md-space) * 6)
-    calc(var(--md-space) * 2) 0;
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 6)
+    calc(var(--spacing) * 2) 0;
   text-align: start;
   vertical-align: top;
 }

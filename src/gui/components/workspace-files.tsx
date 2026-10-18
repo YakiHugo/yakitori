@@ -446,7 +446,7 @@ function FilePreview({
                   text={preview.content}
                   workspaceRoot={cwd}
                   documentPath={absolutePath}
-                  className="markdown file-preview-markdown"
+                  className="file-preview-markdown"
                 />
               ) : rendered && html ? (
                 <HtmlPreview

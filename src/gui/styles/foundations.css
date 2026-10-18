@@ -1,0 +1,20 @@
+/* Shared reading and interface roles. Size and leading travel together;
+   inline emphasis stays on the surrounding text's scale.
+   Spacing follows Carbon's proximity principle: related elements stay closer
+   than separate groups. The 4px scale also backs Tailwind's gap/padding utilities.
+   https://www.carbondesignsystem.com/elements/spacing/overview/ */
+@theme {
+  --spacing: 0.25rem;
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.6;
+  --text-detail: 0.875rem;
+  --text-detail--line-height: 1.571429;
+  --text-caption: 0.75rem;
+  --text-caption--line-height: 1.333333;
+  --text-heading-sm: 1rem;
+  --text-heading-sm--line-height: 1.5;
+  --text-heading-md: 1.125rem;
+  --text-heading-md--line-height: 1.333333;
+  --text-heading-lg: 1.25rem;
+  --text-heading-lg--line-height: 1.4;
+}

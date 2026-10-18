@@ -1,9 +1,8 @@
-import { EngineConversation } from "./components/engine-session.tsx"
-import { useEngineStore } from "./store/engine-store.ts"
 import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
+import { EngineConversation } from "./components/engine-session.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { GoalBar, GoalEditor } from "./components/session-goal.tsx"
@@ -14,6 +13,7 @@ import { Transcript } from "./components/transcript.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
+import { useEngineStore } from "./store/engine-store.ts"
 
 export function App() {
   const externalSession = useEngineStore((state) => state.engineId)
@@ -25,6 +25,26 @@ export function App() {
       state.hydratingSessionId === state.selection.sessionId,
   )
   const hasSession = useAppStore((state) => state.selectedSession !== undefined)
+  const emptySession = useAppStore((state) => {
+    if (
+      state.execution.entries.length > 0 ||
+      state.execution.activeTurnId !== undefined
+    )
+      return false
+    if (state.selection.sessionId === undefined) return true
+    const session = state.selectedSession
+    // A snapshot can precede its history. Only a known empty session keeps
+    // the welcome layout while creation and initial replay finish.
+    return (
+      session?.id === state.selection.sessionId &&
+      !session.archived &&
+      !session.active &&
+      session.activeTurnId === undefined &&
+      session.counts.inputs === 0 &&
+      session.counts.turns === 0 &&
+      session.counts.items === 0
+    )
+  })
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
   )
@@ -49,12 +69,12 @@ export function App() {
           ) : (
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
-                {hasSession && !hydrating ? <SessionHeader /> : null}
+                {hasSession && !hydrating && !emptySession ? (
+                  <SessionHeader />
+                ) : null}
                 <Transcript
                   loading={hydrating}
-                  emptyState={
-                    !hasSession && !hydrating ? <EmptyState /> : undefined
-                  }
+                  emptyState={emptySession ? <EmptyState /> : undefined}
                 >
                   {hydrating ? null : <ApprovalBar />}
                   {hydrating ? null : <QueuedInputs />}
@@ -191,7 +211,14 @@ function SessionRename() {
 
 function EmptyState() {
   const projects = useAppStore((state) => state.projects)
-  const currentProject = useAppStore((state) => state.currentProject)
+  const currentProject = useAppStore((state) =>
+    state.selectedSession === undefined
+      ? state.currentProject
+      : state.selectedSession.projectId,
+  )
+  const hasSession = useAppStore(
+    (state) => state.selection.sessionId !== undefined,
+  )
   const project = projects.find((candidate) => candidate.id === currentProject)
   return (
     <div className="mx-auto w-full max-w-3xl">
@@ -203,6 +230,7 @@ function EmptyState() {
       <div className="mb-7 flex justify-center gap-3">
         <select
           aria-label="New session project"
+          disabled={hasSession}
           value={currentProject ?? ""}
           className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
           onChange={(event) =>
