@@ -1,6 +1,9 @@
 import { type Node, Schema } from "prosemirror-model"
 import type { EditorPart } from "../../gui/input-draft.ts"
-import type { UserAttachment } from "../../protocol/asset-types.ts"
+import type {
+  PdfAttachment,
+  UserAttachment,
+} from "../../protocol/asset-types.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { draftFromEditorParts, draftToEditorParts } from "../input-draft.ts"
 
@@ -16,8 +19,7 @@ export function fileMentionText(mention: FileMention): string {
 }
 
 function mentionText(node: Node): string {
-  if (node.type.name === "image" || node.type.name === "document")
-    return "\uFFFC"
+  if (node.type.name === "document") return "\uFFFC"
   return node.type.name === "skill"
     ? skillMentionText({ name: node.attrs.name, path: node.attrs.path })
     : fileMentionText({ name: node.attrs.name, path: node.attrs.path })
@@ -34,25 +36,8 @@ export const promptSchema = new Schema({
       parseDOM: [{ tag: "p" }],
     },
     text: { group: "inline" },
-    image: {
-      group: "inline",
-      inline: true,
-      atom: true,
-      selectable: true,
-      attrs: { image: {} },
-      // No parseDOM rule: pasted HTML must never mint a local asset reference.
-      toDOM: (node) => [
-        "button",
-        {
-          class: "prompt-skill prompt-image",
-          type: "button",
-          "data-prompt-image": "true",
-          "aria-label": `Preview attached image ${node.attrs.image.name}`,
-          contenteditable: "false",
-        },
-        `▧ ${node.attrs.image.name}`,
-      ],
-    },
+    // Images are deliberately absent: they are attachments, not content, so
+    // they live outside the text document and rejoin the draft at emission.
     document: {
       group: "inline",
       inline: true,
@@ -137,13 +122,16 @@ export function parsePrompt(text: string): Node {
   )
 }
 
-// Attachments are editor atoms. Cursor and suggestion offsets use a one-character
-// object representation; submission keeps readable markers in the authored text.
+// PDFs are editor atoms; images stay outside the document entirely (the
+// editor preserves and re-appends them at emission). Cursor and suggestion
+// offsets use a one-character object representation; submission keeps
+// readable markers in the authored text.
 export function parsePromptParts(draft: InputDraft): Node {
   const parts = draftToEditorParts(draft)
   const paragraphs: Node[] = []
   let content: Node[] = []
   for (const part of parts) {
+    if (part.type === "image") continue
     if (part.type !== "text") {
       content.push(promptSchema.node(part.type, { [part.type]: part }))
       continue
@@ -179,15 +167,11 @@ export function serializePromptParts(
   doc.forEach((paragraph, _offset, index) => {
     if (index > 0) appendText("\n")
     paragraph.forEach((node) => {
-      if (node.type.name === "image" || node.type.name === "document") {
+      if (node.type.name === "document") {
         const attachment = resolveAttachment(
-          node.attrs[node.type.name] as UserAttachment,
-        )
-        parts.push(
-          attachment.mediaType === "application/pdf"
-            ? { ...attachment, type: "document" }
-            : { ...attachment, type: "image" },
-        )
+          node.attrs.document as PdfAttachment,
+        ) as PdfAttachment
+        parts.push({ ...attachment, type: "document" })
       } else appendText(node.isText ? (node.text ?? "") : mentionText(node))
     })
   })
@@ -196,7 +180,9 @@ export function serializePromptParts(
 
 export function promptPartsText(draft: InputDraft): string {
   return draftToEditorParts(draft)
-    .map((part) => (part.type === "text" ? part.text : "\uFFFC"))
+    .map((part) =>
+      part.type === "text" ? part.text : part.type === "image" ? "" : "\uFFFC",
+    )
     .join("")
 }
 

@@ -928,15 +928,6 @@ export function ComposerSurface({
               )
             }}
             onPasteAttachments={(images) => void addFiles(images)}
-            onPreviewImage={(image) =>
-              setPreviewIndex(
-                attachments.findIndex(
-                  (candidate) =>
-                    assetSourceKey(candidate.file) ===
-                    assetSourceKey(image.file),
-                ),
-              )
-            }
             onDiscardAttachments={(images) => {
               void discardDraftAttachments(images).catch((error: unknown) =>
                 onAttachmentError(

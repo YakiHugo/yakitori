@@ -51,28 +51,37 @@ it("roundtrips inline file mentions and maps caret offsets across them", () => {
   expect(promptPosition(caret, 13)).toBe(8)
 })
 
-it("roundtrips text/PDF/image/text without textual placeholders in the submitted parts", () => {
-  const parts = [
-    { type: "text" as const, text: "a" },
-    {
-      type: "document" as const,
-      name: "x.pdf",
-      mediaType: "application/pdf" as const,
-      sizeBytes: 10,
-      file: { rolloutId: "r", path: "attachments/staging/x.pdf" },
-    },
-    {
-      type: "image" as const,
-      name: "x.png",
-      mediaType: "image/png" as const,
-      sizeBytes: 10,
-      file: { rolloutId: "r", path: "attachments/staging/x.png" },
-    },
-    { type: "text" as const, text: "b" },
-  ]
-  const doc = parsePromptParts(inputFixture(parts))
-  expect(serializePromptParts(doc)).toEqual(inputFixture(parts))
-  expect(serializePrompt(doc)).toBe("a\uFFFC\uFFFCb")
-  expect(promptPosition(doc, 3)).toBe(4)
-  expect(promptOffset(doc, 4)).toBe(3)
+it("keeps images out of the document while roundtripping text and an inline PDF", () => {
+  const pdf = {
+    type: "document" as const,
+    name: "x.pdf",
+    mediaType: "application/pdf" as const,
+    sizeBytes: 10,
+    file: { rolloutId: "r", path: "attachments/staging/x.pdf" },
+  }
+  const image = {
+    type: "image" as const,
+    name: "x.png",
+    mediaType: "image/png" as const,
+    sizeBytes: 10,
+    file: { rolloutId: "r", path: "attachments/staging/x.png" },
+  }
+  const doc = parsePromptParts(
+    inputFixture([
+      { type: "text", text: "a" },
+      pdf,
+      image,
+      { type: "text", text: "b" },
+    ]),
+  )
+  // The image rejoins the draft only through the editor's preserved
+  // attachments; the document itself roundtrips text and PDFs.
+  expect(serializePromptParts(doc)).toEqual(
+    inputFixture([
+      { type: "text", text: "a" },
+      pdf,
+      { type: "text", text: "b" },
+    ]),
+  )
+  expect(serializePrompt(doc)).toBe("a\uFFFCb")
 })

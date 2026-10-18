@@ -788,7 +788,7 @@ describe("side chat panel", () => {
     )
     await screen.findByRole("alert")
     expect(requests("sideChat/send")[0]).toMatchObject({
-      content: inputFixture(inputParts("Explain", [image])),
+      content: inputFixture(inputParts("Explain ", [image])),
     })
     expect(
       screen.getByRole("button", { name: "Preview diagram.png" }),

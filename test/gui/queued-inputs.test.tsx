@@ -63,7 +63,7 @@ describe("queued inputs", () => {
     expect(cancelQueuedInput).toHaveBeenCalledWith("input_1")
   })
 
-  it("preserves ordered images when reopening a canceled edit and saving new text", async () => {
+  it("preserves images when reopening a canceled edit and saving new text", async () => {
     const user = userEvent.setup()
     const image = {
       type: "image" as const,
@@ -107,9 +107,8 @@ describe("queued inputs", () => {
     expect(updateQueuedInput).toHaveBeenCalledExactlyOnceWith(
       "input_1",
       inputFixture([
-        { type: "text", text: "before" },
+        { type: "text", text: "beforeafter updated " },
         image,
-        { type: "text", text: "after updated" },
       ]),
     )
     expect(useAppStore.getState().queuedItems).toEqual(originalQueuedItems)

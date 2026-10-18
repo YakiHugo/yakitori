@@ -259,13 +259,11 @@ function OrderedFixture({
   initial,
   handle,
   discard,
-  preview,
   apiBase = "http://ordered-editor.test/",
 }: {
   initial: InputDraft
   handle: React.RefObject<PromptEditorHandle | null>
   discard?: (images: readonly UserAttachment[]) => void
-  preview?: (image: ImageAttachment) => void
   apiBase?: string
 }) {
   const [parts, setParts] = useState(initial)
@@ -278,7 +276,6 @@ function OrderedFixture({
         value={parts}
         onChange={setParts}
         {...(discard ? { onDiscardAttachments: discard } : {})}
-        {...(preview ? { onPreviewImage: preview } : {})}
       />
       <output data-testid="parts">{JSON.stringify(parts)}</output>
       <button type="button" onClick={() => setParts(inputFixture([]))}>
@@ -299,7 +296,7 @@ function pasteText(text: string) {
   })
 }
 
-it("inserts images between authored text and preserves mapped placement during asynchronous import", () => {
+it("appends imported images after the authored text during asynchronous import", () => {
   const handle = createRef<PromptEditorHandle>()
   render(
     <OrderedFixture
@@ -312,16 +309,15 @@ it("inserts images between authored text and preserves mapped placement during a
   act(() => {
     expect(insertion?.insert([stagedImage])).toBe(true)
   })
+  // Images bypass the document: the marker rejoins at the end of the text,
+  // wherever the cursor stood while bytes loaded.
   expect(editedParts()).toEqual(
     inputFixture([
-      { type: "text", text: "before" },
+      { type: "text", text: "before after " },
       { ...stagedImage, type: "image" },
-      { type: "text", text: " after" },
     ]),
   )
-  expect(
-    screen.getByRole("button", { name: "Preview attached image placed.png" }),
-  ).toBeTruthy()
+  expect(screen.getByRole("textbox").textContent).toBe("before after")
 })
 
 it("invalidates pending image insertion when the draft is externally replaced", () => {
@@ -340,7 +336,7 @@ it("invalidates pending image insertion when the draft is externally replaced", 
   expect(editedParts()).toEqual(inputFixture([]))
 })
 
-it("retains removed image bytes for Undo and releases only unused staging assets when history resets", () => {
+it("releases a removed image's staging bytes immediately, with no Undo path back", () => {
   const handle = createRef<PromptEditorHandle>()
   const discard = vi.fn()
   render(
@@ -358,71 +354,12 @@ it("retains removed image bytes for Undo and releases only unused staging assets
   expect(editedParts()).toEqual(
     inputFixture([{ type: "text", text: "beforeafter" }]),
   )
-  expect(discard).not.toHaveBeenCalled()
+  expect(discard).toHaveBeenCalledExactlyOnceWith([stagedImage])
+  // The removal was never a document transaction, so Undo cannot restore it.
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
   expect(editedParts()).toEqual(
-    inputFixture([
-      { type: "text", text: "before" },
-      { ...stagedImage, type: "image" },
-      { type: "text", text: "after" },
-    ]),
+    inputFixture([{ type: "text", text: "beforeafter" }]),
   )
-  act(() => handle.current?.removeAttachment(0))
-  fireEvent.click(screen.getByRole("button", { name: "clear ordered draft" }))
-  expect(discard).toHaveBeenCalledExactlyOnceWith([stagedImage])
-  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
-  expect(editedParts()).toEqual(inputFixture([]))
-})
-
-it("resolves image atoms restored by Undo after their staging bytes were promoted", () => {
-  const apiBase = "http://promoted-editor.test/"
-  const preview = vi.fn()
-  const handle = createRef<PromptEditorHandle>()
-  const original = [{ ...stagedImage, type: "image" as const }]
-  const accepted = [
-    {
-      ...stagedImage,
-      type: "image" as const,
-      file: {
-        rolloutId: "rollout_editor",
-        path: "attachments/requests/accepted/placed.png",
-      },
-    },
-  ]
-  render(
-    <OrderedFixture
-      handle={handle}
-      apiBase={apiBase}
-      initial={inputFixture(original)}
-      preview={preview}
-    />,
-  )
-  act(() => handle.current?.removeAttachment(0))
-  inputAttachmentOwnership.promote(
-    apiBase,
-    inputFixture(original),
-    inputFixture(accepted),
-  )
-  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
-  expect(editedParts()).toEqual(inputFixture(accepted))
-  const image = screen.getByRole("button", {
-    name: "Preview attached image placed.png",
-  })
-  fireEvent.click(image)
-  expect(preview).toHaveBeenLastCalledWith(
-    expect.objectContaining({ file: accepted[0]?.file }),
-  )
-  fireEvent.keyDown(image, { key: "Enter" })
-  expect(preview).toHaveBeenCalledTimes(2)
-  expect(preview).toHaveBeenLastCalledWith(
-    expect.objectContaining({ file: accepted[0]?.file }),
-  )
-  fireEvent.keyDown(screen.getByRole("textbox"), {
-    key: "z",
-    ctrlKey: true,
-    shiftKey: true,
-  })
-  expect(editedParts()).toEqual(inputFixture([]))
 })
 
 const stagedPdf: PdfAttachment = {
@@ -434,7 +371,7 @@ const stagedPdf: PdfAttachment = {
     path: "attachments/staging/pdf/manual.pdf",
   },
 }
-it("preserves mixed PDF/image placement, image detail indexing and PDF Undo ownership", () => {
+it("keeps PDFs inline, appends images after the text, and retains PDF Undo ownership", () => {
   const handle = createRef<PromptEditorHandle>()
   const discard = vi.fn()
   render(
@@ -453,8 +390,8 @@ it("preserves mixed PDF/image placement, image detail indexing and PDF Undo owne
     inputFixture([
       { type: "text", text: "before" },
       { ...stagedPdf, type: "document" },
+      { type: "text", text: "after " },
       { ...stagedImage, type: "image" },
-      { type: "text", text: "after" },
     ]),
   )
   act(() => handle.current?.setImageDetail(1, "high"))
@@ -462,8 +399,8 @@ it("preserves mixed PDF/image placement, image detail indexing and PDF Undo owne
     inputFixture([
       { type: "text", text: "before" },
       { ...stagedPdf, type: "document" },
+      { type: "text", text: "after " },
       { ...stagedImage, type: "image", detail: "high" },
-      { type: "text", text: "after" },
     ]),
   )
   act(() => handle.current?.removeAttachment(0))
