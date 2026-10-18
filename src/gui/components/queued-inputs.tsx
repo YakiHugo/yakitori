@@ -1,15 +1,12 @@
 import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
 import { useRef, useState } from "react"
-import type { ImageAttachment } from "../../protocol/asset-types.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import {
   inputContentAttachments,
   inputContentText,
 } from "../../protocol/user-input.ts"
-import { attachmentUrl } from "../composer-attachments.ts"
 import { textInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
-import { ImageLightbox } from "./image-lightbox.tsx"
 import { openPdfAttachment } from "./pdf-attachment.tsx"
 import { PromptEditor } from "./prompt-editor.tsx"
 import { Badge } from "./ui/badge.tsx"
@@ -26,7 +23,6 @@ export function QueuedInputs() {
   const startQueuedInput = useAppStore((state) => state.startQueuedInput)
   const [editingId, setEditingId] = useState<string>()
   const [openError, setOpenError] = useState<string>()
-  const [preview, setPreview] = useState<ImageAttachment>()
   const [editingParts, setEditingParts] = useState<InputDraft>(
     textInputDraft(""),
   )
@@ -61,13 +57,6 @@ export function QueuedInputs() {
   return (
     <div className="space-y-1 border-t bg-muted/40 px-4 py-2">
       {openError === undefined ? null : <p role="alert">{openError}</p>}
-      {preview ? (
-        <ImageLightbox
-          src={attachmentUrl(preview, apiBase)}
-          name={preview.name}
-          onClose={() => setPreview(undefined)}
-        />
-      ) : null}
       {queued.map((item, index) => (
         <div
           key={item.id}
@@ -89,7 +78,6 @@ export function QueuedInputs() {
                 value={editingParts}
                 disabled={saving}
                 onChange={setEditingParts}
-                onPreviewImage={setPreview}
                 onOpenDocument={(document) => {
                   void openPdfAttachment(document, apiBase).catch(
                     (error: unknown) =>

@@ -644,7 +644,7 @@ export async function runProviderFlow(
           detail: "high",
         },
       },
-      { type: "text", text: "Before attachment. [Image 1]After attachment." },
+      { type: "text", text: "Before attachment. After attachment. [Image 1]" },
     ])
 
     await runPdfInputFlow(page, testInfo, pdfOptions)
@@ -892,9 +892,12 @@ async function runOrderedInputFlow(
         }),
       )
     }, sourceUrl)
+    // Pasted images stay out of the text document; the attachment strip above
+    // the editor carries the thumbnail, and the marker joins the draft end.
     await expect(
-      editor.getByRole("button", {
-        name: "Preview attached image ordered-smoke.png",
+      page.getByRole("button", {
+        name: "Preview ordered-smoke.png",
+        exact: true,
       }),
     ).toBeVisible()
     await page.getByRole("button", { name: "Send", exact: true }).click()
@@ -926,7 +929,7 @@ async function runOrderedInputFlow(
               node.querySelector("img") ? "image" : node.textContent,
             ),
           ),
-      ).toEqual(["image", "Before attachment. [Image 1]After attachment."])
+      ).toEqual(["image", "Before attachment. After attachment. [Image 1]"])
       const image = message.getByRole("img", {
         name: "ordered-smoke.png",
         exact: true,

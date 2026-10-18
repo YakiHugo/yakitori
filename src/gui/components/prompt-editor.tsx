@@ -24,7 +24,7 @@ import type {
 import { assetSourceKey } from "../../protocol/asset-types.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
-import { sameInputDraft } from "../input-draft.ts"
+import { appendDraftImages, sameInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
@@ -38,7 +38,7 @@ import {
 export type PromptEditorHandle = Readonly<{
   focus(atEnd?: boolean): void
   captureAttachmentInsertion(): Readonly<{
-    insert(images: readonly UserAttachment[]): boolean
+    insert(attachments: readonly UserAttachment[]): boolean
     cancel(): void
   }>
   removeAttachment(index: number): void
@@ -50,6 +50,13 @@ export type PromptEditorHandle = Readonly<{
     cursorOffset?: number,
   ): void
 }>
+
+// Classification follows the draft layer's mediaType split; the strict
+// isImageAttachment validator would silently drop attachments carrying
+// extra metadata keys.
+const isDraftImage = (
+  attachment: UserAttachment,
+): attachment is ImageAttachment => attachment.mediaType !== "application/pdf"
 
 // A collapsed import bookmark stays before text typed while bytes are loading.
 // Positions are mapped through every ProseMirror transaction, not text offsets.
@@ -74,7 +81,6 @@ type Props = Readonly<{
   menuOpen?: boolean
   suggestionsId?: string
   onChange(parts: InputDraft): void
-  onPreviewImage?(image: ImageAttachment): void
   onOpenDocument?(document: PdfAttachment): void
   onDiscardAttachments?(images: readonly UserAttachment[]): void
   onSelection?(from: number, to: number): void
@@ -91,6 +97,9 @@ export function PromptEditor(props: Props) {
   const editor = useRef<EditorView | null>(null)
   const latest = useRef(props)
   const insertions = useRef(new Set<{ bookmark: SelectionBookmark }>())
+  // Images are attachments, not document content: they bypass the document and
+  // rejoin every emitted draft, so text edits can never move or delete them.
+  const preservedImages = useRef<readonly ImageAttachment[]>([])
   const retainedAttachments = useRef(new Map<string, UserAttachment>())
   const rememberAttachments = useCallback((parts: InputDraft) => {
     for (const part of parts.attachments)
@@ -132,6 +141,25 @@ export function PromptEditor(props: Props) {
     latest.current = props
   })
 
+  const currentDraft = useCallback(
+    (view: EditorView): InputDraft =>
+      appendDraftImages(
+        serializePromptParts(view.state.doc, (attachment) =>
+          inputAttachmentOwnership.resolve(latest.current.apiBase, attachment),
+        ),
+        preservedImages.current,
+      ),
+    [],
+  )
+  const emitChange = useCallback(
+    (view: EditorView) => {
+      const parts = currentDraft(view)
+      rememberAttachments(parts)
+      latest.current.onChange(parts)
+    },
+    [currentDraft, rememberAttachments],
+  )
+
   useImperativeHandle(
     props.ref,
     () => ({
@@ -154,24 +182,32 @@ export function PromptEditor(props: Props) {
         }
         insertions.current.add(pending)
         return {
-          insert(images) {
+          insert(attachments) {
             if (editor.current !== view || !insertions.current.delete(pending))
               return false
+            const images = attachments.filter(isDraftImage)
+            if (images.length > 0)
+              preservedImages.current = [...preservedImages.current, ...images]
             const selection = pending.bookmark.resolve(view.state.doc)
+            // Image parts are skipped by the schema, so only PDF atoms land
+            // in the document at the bookmark position.
             const content = parsePromptParts({
               kind: "input",
               text: "",
               elements: [],
-              attachments: images,
+              attachments,
             }).firstChild?.content
-            if (!content) return false
-            view.dispatch(
-              closeHistory(view.state.tr).replaceWith(
-                selection.from,
-                selection.to,
-                content,
-              ),
-            )
+            if (content && content.size > 0)
+              view.dispatch(
+                closeHistory(view.state.tr).replaceWith(
+                  selection.from,
+                  selection.to,
+                  content,
+                ),
+              )
+            // An image-only import leaves the document unchanged, so no
+            // transaction will report the new draft.
+            else emitChange(view)
             return true
           },
           cancel() {
@@ -183,32 +219,39 @@ export function PromptEditor(props: Props) {
         const view = editor.current
         if (!view) return
         let count = 0
+        let removedDocument = false
         view.state.doc.descendants((node, pos) => {
-          if (
-            (node.type.name === "image" || node.type.name === "document") &&
-            count++ === index
-          )
+          if (node.type.name !== "document") return
+          if (count++ === index) {
+            removedDocument = true
             view.dispatch(
               closeHistory(view.state.tr).delete(pos, pos + node.nodeSize),
             )
+          }
         })
+        if (removedDocument) return
+        const imageIndex = index - count
+        if (preservedImages.current[imageIndex] === undefined) return
+        preservedImages.current = preservedImages.current.filter(
+          (_, candidate) => candidate !== imageIndex,
+        )
+        emitChange(view)
+        // Images have no Undo path back, so removed staging bytes release now.
+        releaseUnusedAttachments(currentDraft(view))
       },
       setImageDetail(index, detail) {
         const view = editor.current
         if (!view) return
         let count = 0
-        view.state.doc.descendants((node, pos) => {
-          if (
-            (node.type.name === "image" || node.type.name === "document") &&
-            count++ === index &&
-            node.type.name === "image"
-          )
-            view.dispatch(
-              closeHistory(view.state.tr).setNodeMarkup(pos, undefined, {
-                image: { ...node.attrs.image, detail },
-              }),
-            )
+        view.state.doc.descendants((node) => {
+          if (node.type.name === "document") count++
         })
+        const imageIndex = index - count
+        if (preservedImages.current[imageIndex] === undefined) return
+        preservedImages.current = preservedImages.current.map((image, i) =>
+          i === imageIndex ? { ...image, detail } : image,
+        )
+        emitChange(view)
       },
       replaceRange(from, to, text, cursorOffset) {
         const view = editor.current
@@ -227,11 +270,13 @@ export function PromptEditor(props: Props) {
         view.focus()
       },
     }),
-    [],
+    [currentDraft, emitChange, releaseUnusedAttachments],
   )
 
   useLayoutEffect(() => {
     if (!host.current) return
+    preservedImages.current =
+      latest.current.value.attachments.filter(isDraftImage)
     rememberAttachments(latest.current.value)
     const doc = parsePromptParts(latest.current.value)
     const view = new EditorView(host.current, {
@@ -262,13 +307,7 @@ export function PromptEditor(props: Props) {
         for (const pending of insertions.current)
           pending.bookmark = pending.bookmark.map(tr.mapping)
         view.updateState(view.state.apply(tr))
-        if (tr.docChanged) {
-          const parts = serializePromptParts(view.state.doc, (image) =>
-            inputAttachmentOwnership.resolve(latest.current.apiBase, image),
-          )
-          rememberAttachments(parts)
-          latest.current.onChange(parts)
-        }
+        if (tr.docChanged) emitChange(view)
         if (tr.docChanged || tr.selectionSet) {
           const { from, to } = view.state.selection
           latest.current.onSelection?.(
@@ -312,11 +351,7 @@ export function PromptEditor(props: Props) {
             ? `[$${node.attrs.name}](${node.attrs.path})`
             : node.type.name === "file"
               ? `[@${node.attrs.name}](${node.attrs.path})`
-              : node.type.name === "image"
-                ? `[Image: ${node.attrs.image.name}]`
-                : node.type.name === "document"
-                  ? `[PDF: ${node.attrs.document.name}]`
-                  : "",
+              : `[PDF: ${node.attrs.document.name}]`,
         ),
       clipboardTextParser: (text) => new Slice(parsePrompt(text).content, 1, 1),
       handleDOMEvents: {
@@ -354,21 +389,6 @@ export function PromptEditor(props: Props) {
               )
             return true
           }
-          const image =
-            event.target instanceof Element
-              ? event.target.closest<HTMLElement>("[data-prompt-image]")
-              : null
-          if (image) {
-            const node = view.state.doc.nodeAt(view.posAtDOM(image, 0))
-            if (node?.type.name === "image")
-              latest.current.onPreviewImage?.(
-                inputAttachmentOwnership.resolve(
-                  latest.current.apiBase,
-                  node.attrs.image as ImageAttachment,
-                ) as ImageAttachment,
-              )
-            return true
-          }
           const chip =
             event.target instanceof Element
               ? event.target.closest<HTMLElement>("[data-skill-path]")
@@ -399,22 +419,6 @@ export function PromptEditor(props: Props) {
                   latest.current.apiBase,
                   node.attrs.document as PdfAttachment,
                 ) as PdfAttachment,
-              )
-            return true
-          }
-          const image =
-            event.target instanceof Element
-              ? event.target.closest<HTMLElement>("[data-prompt-image]")
-              : null
-          if (image && (event.key === "Enter" || event.key === " ")) {
-            event.preventDefault()
-            const node = view.state.doc.nodeAt(view.posAtDOM(image, 0))
-            if (node?.type.name === "image")
-              latest.current.onPreviewImage?.(
-                inputAttachmentOwnership.resolve(
-                  latest.current.apiBase,
-                  node.attrs.image as ImageAttachment,
-                ) as ImageAttachment,
               )
             return true
           }
@@ -449,28 +453,17 @@ export function PromptEditor(props: Props) {
     editor.current = view
     return () => {
       insertions.current.clear()
-      releaseUnusedAttachments(
-        serializePromptParts(view.state.doc, (image) =>
-          inputAttachmentOwnership.resolve(latest.current.apiBase, image),
-        ),
-      )
+      releaseUnusedAttachments(currentDraft(view))
       view.destroy()
       editor.current = null
     }
-  }, [rememberAttachments, releaseUnusedAttachments])
+  }, [currentDraft, emitChange, rememberAttachments, releaseUnusedAttachments])
 
   useLayoutEffect(() => {
     const view = editor.current
     if (!view) return
-    if (
-      !sameInputDraft(
-        serializePromptParts(view.state.doc, (image) =>
-          inputAttachmentOwnership.resolve(props.apiBase, image),
-        ),
-        props.value,
-      ) &&
-      !view.composing
-    ) {
+    preservedImages.current = props.value.attachments.filter(isDraftImage)
+    if (!sameInputDraft(currentDraft(view), props.value) && !view.composing) {
       insertions.current.clear()
       releaseUnusedAttachments(props.value)
       // External draft restoration/clear starts a fresh undo history, so Undo
@@ -504,7 +497,7 @@ export function PromptEditor(props: Props) {
     })
   }, [
     props.value,
-    props.apiBase,
+    currentDraft,
     releaseUnusedAttachments,
     props.disabled,
     props.menuOpen,

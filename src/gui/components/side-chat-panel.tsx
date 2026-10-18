@@ -594,7 +594,6 @@ export function SideChatPanel({
               value={tab.draft}
               disabled
               onChange={() => {}}
-              onPreviewImage={setPreviewImage}
               onOpenDocument={(document) => {
                 void openPdfAttachment(document, apiBase).catch(
                   (error: unknown) =>

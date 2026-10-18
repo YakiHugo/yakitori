@@ -7,6 +7,27 @@ export type EditorPart =
   | (Readonly<{ type: "image" }> & ImageAttachment)
   | (Readonly<{ type: "document" }> & PdfAttachment)
 
+// Images are attachments, not content: the editor keeps them out of the text
+// document and re-appends their markers after the authored text on every
+// emission, so text editing can never move or silently delete them.
+export function appendDraftImages(
+  draft: InputDraft,
+  images: readonly ImageAttachment[],
+): InputDraft {
+  if (images.length === 0) return draft
+  const parts = draftToEditorParts(draft)
+  const last = parts.at(-1)
+  const separator =
+    last === undefined || (last.type === "text" && /\s$/u.test(last.text))
+      ? []
+      : [{ type: "text" as const, text: " " }]
+  return draftFromEditorParts([
+    ...parts,
+    ...separator,
+    ...images.map((image): EditorPart => ({ type: "image", ...image })),
+  ])
+}
+
 export function draftFromEditorParts(
   parts: readonly EditorPart[],
   references?: readonly ContextExcerpt[],

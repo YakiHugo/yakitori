@@ -294,15 +294,6 @@ export function UserMessageCell({
                   ),
               )
             }}
-            onPreviewImage={(image) =>
-              setPreviewIndex(
-                attachments.findIndex(
-                  (candidate) =>
-                    assetSourceKey(candidate.file) ===
-                    assetSourceKey(image.file),
-                ),
-              )
-            }
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 setMode(undefined)

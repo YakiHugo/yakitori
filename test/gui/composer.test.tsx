@@ -705,7 +705,7 @@ describe("composer", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("retains a removed image for Undo and discards it when the editor closes", async () => {
+  it("releases a removed image immediately since images have no Undo path", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
@@ -713,7 +713,7 @@ describe("composer", () => {
       selection: { sessionId: "session_1" },
       promptDraft: inputParts("", [draftImage("high")]),
     })
-    const view = render(<Composer />)
+    render(<Composer />)
 
     await user.click(
       screen.getByRole("button", { name: "Remove screenshot.png" }),
@@ -724,20 +724,14 @@ describe("composer", () => {
         (attachment) => attachment.mediaType !== "application/pdf",
       ),
     ).toEqual(inputParts("").attachments)
-    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
-    await user.click(screen.getByRole("textbox"))
-    await user.keyboard("{Control>}z{/Control}")
-    expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("", [draftImage("high")]),
-    )
-    await user.click(
-      screen.getByRole("button", { name: "Remove screenshot.png" }),
-    )
-    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
-    view.unmount()
     expect(bridge.discardDraftAttachments).toHaveBeenCalledExactlyOnceWith([
       draftImage("high"),
     ])
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Control>}z{/Control}")
+    expect(
+      screen.queryByRole("button", { name: "Remove screenshot.png" }),
+    ).toBeNull()
   })
 
   it("explains request-only detail fallback and clears the unchanged original-detail draft", async () => {
@@ -1399,7 +1393,7 @@ describe("slash command menu", () => {
     await selectPrompt(editor, 4)
     await user.keyboard("{Enter}")
     expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("/model", [image]),
+      inputParts("/model ", [image]),
     )
     expect(openModelPicker).not.toHaveBeenCalled()
     expect(
@@ -1546,7 +1540,7 @@ describe("slash command menu", () => {
 
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("/compact", [draftImage("high")]),
+      inputParts("/compact ", [draftImage("high")]),
     )
     // The exact match stays listed, but executing again is still blocked.
     expect(screen.getByRole("listbox")).toBeDefined()
