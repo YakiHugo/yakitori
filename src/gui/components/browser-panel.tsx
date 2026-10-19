@@ -122,7 +122,7 @@ export function BrowserPanel({
       // Only overlapping renderer controls need the native page to yield.
       const overlay = [
         ...document.querySelectorAll(
-          'dialog[open], [role="dialog"], [role="alertdialog"], [role="menu"], [data-radix-popper-content-wrapper], .selection-actions, .annotation-editor, .context-excerpt-popover, .composer-control-popover, .composer-suggestion-panel',
+          'dialog[open], [role="dialog"], [role="alertdialog"], [role="menu"], [data-radix-popper-content-wrapper], .selection-actions, .context-excerpt-popover, .composer-control-popover, .composer-suggestion-panel',
         ),
       ].some((node) =>
         [...node.getClientRects()].some(

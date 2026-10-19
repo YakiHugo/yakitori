@@ -368,9 +368,14 @@ describe("side chat panel", () => {
       useWorkspaceStore.getState().askInSideChat(
         {
           id: "next-question",
-          kind: "selection",
+
           text: "Explain another detail",
-          source: { kind: "message", label: "Main response" },
+          source: {
+            sessionId: "session_1",
+            messageId: "response_1",
+            kind: "message",
+            label: "Main response",
+          },
         },
         "main-session",
       )
@@ -411,9 +416,14 @@ describe("side chat panel", () => {
       useWorkspaceStore.getState().askInSideChat(
         {
           id: "renewed-question",
-          kind: "selection",
+
           text: "Continue here",
-          source: { kind: "message", label: "Main response" },
+          source: {
+            sessionId: "session_1",
+            messageId: "response_1",
+            kind: "message",
+            label: "Main response",
+          },
         },
         "main-session",
       )
@@ -688,7 +698,7 @@ describe("side chat panel", () => {
     })
     const original = {
       id: "excerpt-1",
-      kind: "annotation" as const,
+
       anchor: { startOffset: 0, endOffset: 15 },
       text: "const value = 1",
       comment: "Why?",
@@ -716,9 +726,14 @@ describe("side chat panel", () => {
       useWorkspaceStore.getState().askInSideChat(
         {
           id: "excerpt-2",
-          kind: "selection",
+
           text: "new context",
-          source: { kind: "message", label: "New response" },
+          source: {
+            sessionId: "session_1",
+            messageId: "response_1",
+            kind: "message",
+            label: "New response",
+          },
         },
         "main-session",
       ),
@@ -924,9 +939,14 @@ describe("side chat panel", () => {
     const original = requests("sideChat/send")[0]
     const context = {
       id: "later-context",
-      kind: "selection" as const,
+
       text: "More context",
-      source: { kind: "message" as const, label: "Response" },
+      source: {
+        sessionId: "session_1",
+        messageId: "response_1",
+        kind: "message" as const,
+        label: "Response",
+      },
     }
     await act(async () =>
       useWorkspaceStore

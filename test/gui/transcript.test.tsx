@@ -9,10 +9,7 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
-import {
-  ContextExcerptChips,
-  SelectionActions,
-} from "../../src/gui/components/selection-actions.tsx"
+import { ContextExcerptCards } from "../../src/gui/components/context-excerpt-cards.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
 import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import {
@@ -24,10 +21,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import type {
-  ContextExcerpt,
-  ResponseAnnotation,
-} from "../../src/protocol/input-context.ts"
+import type { ContextExcerpt } from "../../src/protocol/input-context.ts"
 import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -159,18 +153,10 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it("reveals a collapsed commentary source and focuses its editor when opening an attached annotation", async () => {
-  const rect = new DOMRect(100, 100, 120, 20)
-  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
-    new DOMRect(0, 0, 1000, 800),
-  )
-  vi.spyOn(Range.prototype, "getClientRects").mockReturnValue(
-    Object.assign([rect], { item: () => rect }),
-  )
+it("reveals collapsed commentary when following a saved excerpt source", () => {
   const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
-  const annotation: ResponseAnnotation = {
-    id: "annotation_progress",
-    kind: "annotation",
+  const excerpt: ContextExcerpt = {
+    id: "excerpt_progress",
     text: "Checking the implementation",
     source: {
       kind: "message",
@@ -178,80 +164,21 @@ it("reveals a collapsed commentary source and focuses its editor when opening an
       sessionId: "session_1",
       messageId: "progress",
     },
-    anchor: { startOffset: 0, endOffset: 27 },
-    comment: "Keep this context",
   }
   render(
     <TooltipProvider>
       <Transcript />
-      <ContextExcerptChips excerpts={[annotation]} onChange={vi.fn()} />
-      <SelectionActions
-        annotations={[annotation]}
-        onAddToConversation={vi.fn()}
-        onUpdateAnnotation={vi.fn()}
-        onRemoveAnnotation={vi.fn()}
-        onAskInSideChat={vi.fn()}
-      />
+      <ContextExcerptCards excerpts={[excerpt]} />
     </TooltipProvider>,
   )
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
-  fireEvent.click(screen.getByRole("button", { name: "1 annotation" }))
-  await act(async () => {
-    fireEvent.click(
-      within(screen.getByRole("dialog", { name: "annotations" })).getByRole(
-        "button",
-        { name: "Edit annotation 1" },
-      ),
-    )
-  })
-  frame(16)
-  const source = screen
-    .getByText("Checking the implementation")
-    .closest("[data-context-message-id]")
-  expect(source).not.toBeNull()
-  expect(scrollIntoView.mock.contexts).toContain(source)
-  const comment = screen.getByRole("textbox", {
-    name: "Annotation comment (optional)",
-  })
-  expect(document.activeElement).toBe(comment)
-  expect((comment as HTMLTextAreaElement).value).toBe("Keep this context")
-})
-
-it.each([
-  "annotation",
-  "selection",
-] as const)("reveals collapsed commentary when navigating a read-only %s excerpt", (kind) => {
-  const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
-  const details = {
-    id: "excerpt_progress",
-    text: "Checking the implementation",
-    source: {
-      kind: "message" as const,
-      label: "Assistant message",
-      sessionId: "session_1",
-      messageId: "progress",
-    },
-  }
-  const excerpt: ContextExcerpt =
-    kind === "annotation"
-      ? { ...details, kind, anchor: { startOffset: 0, endOffset: 27 } }
-      : { ...details, kind }
-  render(
-    <TooltipProvider>
-      <Transcript />
-      <ContextExcerptChips excerpts={[excerpt]} />
-    </TooltipProvider>,
-  )
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  expect(
+    document.querySelector('[data-context-message-id="progress"]'),
+  ).toBeNull()
   fireEvent.click(
-    screen.getByRole("button", {
-      name: kind === "annotation" ? "1 annotation" : "1 selected text snippet",
-    }),
+    screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
   )
-  fireEvent.click(screen.getByRole("button", { name: "Go to selected text 1" }))
-  const source = screen
-    .getByText("Checking the implementation")
-    .closest("[data-context-message-id]")
+  fireEvent.click(screen.getByRole("button", { name: "Go to source" }))
+  const source = document.querySelector('[data-context-message-id="progress"]')
   expect(source).not.toBeNull()
   expect(scrollIntoView.mock.contexts).toContain(source)
   expect(scrollIntoView).toHaveBeenCalledWith({

@@ -43,6 +43,15 @@ export type WorkspaceTab = (
     }
 ) & { workspaceSessionId?: string | undefined }
 
+export function isSideChatExpired(
+  tab: Extract<WorkspaceTab, { kind: "chat" }>,
+): boolean {
+  return (
+    tab.expired === true ||
+    (tab.expiresAt !== undefined && Date.now() >= Date.parse(tab.expiresAt))
+  )
+}
+
 type WorkspaceStore = {
   open: boolean
   expanded: boolean
@@ -73,8 +82,8 @@ type WorkspaceStore = {
     sourceTabId?: string,
   ): void
   addChatExcerpt(id: string, excerpt: ContextExcerpt): void
-  updateChatExcerpt(excerpt: ContextExcerpt): void
-  removeChatExcerpt(id: string): void
+  updateChatExcerpt(tabId: string, excerpt: ContextExcerpt): void
+  removeChatExcerpt(tabId: string, id: string): void
   updateChatStatus(
     id: string,
     status: {
@@ -342,9 +351,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         tab.id !== sourceTabId &&
         tab.workspaceSessionId === state.sessionId &&
         !tab.activeTurnId &&
-        !tab.expired &&
-        (tab.expiresAt === undefined ||
-          Date.now() < Date.parse(tab.expiresAt)) &&
+        !isSideChatExpired(tab) &&
         tab.sourceSessionId === sourceSessionId,
     )
     const current =
@@ -360,6 +367,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         (tab) =>
           tab.id === id &&
           tab.kind === "chat" &&
+          !isSideChatExpired(tab) &&
           tab.workspaceSessionId === state.sessionId,
       )
     )
@@ -377,10 +385,13 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     })
     get().activate(id)
   },
-  updateChatExcerpt(excerpt) {
+  updateChatExcerpt(tabId, excerpt) {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+        tab.kind === "chat" &&
+        tab.id === tabId &&
+        !isSideChatExpired(tab) &&
+        tab.workspaceSessionId === state.sessionId
           ? {
               ...tab,
               excerpts: tab.excerpts.map((item) =>
@@ -391,10 +402,13 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       ),
     }))
   },
-  removeChatExcerpt(id) {
+  removeChatExcerpt(tabId, id) {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+        tab.kind === "chat" &&
+        tab.id === tabId &&
+        !isSideChatExpired(tab) &&
+        tab.workspaceSessionId === state.sessionId
           ? { ...tab, excerpts: tab.excerpts.filter((item) => item.id !== id) }
           : tab,
       ),

@@ -11,21 +11,19 @@ import {
 import { userEvent } from "@testing-library/user-event"
 import { useState } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import {
-  findContextSource,
-  resolveAnnotationRange,
-  selectionOffsets,
-} from "../../src/gui/components/annotation-layer.tsx"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
+import { ContextExcerptCards } from "../../src/gui/components/context-excerpt-cards.tsx"
 import {
-  AnnotationLayer,
-  ContextExcerptChips,
-  requestAnnotationEdit,
-  SelectionActions,
-} from "../../src/gui/components/selection-actions.tsx"
+  ExcerptSourceLayer,
+  findContextSource,
+  requestExcerptEdit,
+  resolveExcerptRange,
+  selectionOffsets,
+} from "../../src/gui/components/excerpt-source.tsx"
+import { SelectionActions } from "../../src/gui/components/selection-actions.tsx"
 import {
+  type ContextExcerpt,
   contextSourceAttributes,
-  type ResponseAnnotation,
 } from "../../src/gui/conversation-context.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
@@ -36,14 +34,12 @@ const source = {
   sessionId: "main",
   messageId: "answer",
 } as const
-const annotation: ResponseAnnotation = {
-  id: "annotation_one",
-  kind: "annotation",
+const excerpt: ContextExcerpt = {
+  id: "excerpt_one",
   text: "useful explanation",
   source,
   anchor: { startOffset: 2, endOffset: 20 },
 }
-
 beforeEach(() => {
   const rect = new DOMRect(100, 100, 120, 20)
   vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(rect)
@@ -57,7 +53,6 @@ afterEach(() => {
   cleanup()
   window.getSelection()?.removeAllRanges()
 })
-
 function selectText(element: HTMLElement) {
   const range = document.createRange()
   range.selectNodeContents(element)
@@ -65,18 +60,16 @@ function selectText(element: HTMLElement) {
   window.getSelection()?.addRange(range)
   fireEvent.pointerUp(element)
 }
-
-const defaultProps = () => ({
-  annotations: [],
+const actions = () => ({
   onAddToConversation: vi.fn(),
-  onUpdateAnnotation: vi.fn(),
-  onRemoveAnnotation: vi.fn(),
   onAskInSideChat: vi.fn(),
 })
 
-it("shows annotation and side chat actions above the selection and creates an annotation with source offsets", async () => {
-  const props = defaultProps()
-  const user = userEvent.setup()
+it.each([
+  "Quote in conversation",
+  "Ask in side chat",
+])("%s immediately attaches the same anchored excerpt without requiring a comment", async (action) => {
+  const props = actions()
   render(
     <>
       <p {...contextSourceAttributes(source)}>
@@ -92,132 +85,71 @@ it("shows annotation and side chat actions above the selection and creates an an
   const selected = screen.getByText("useful", { exact: false }).closest("span")
   if (!selected) throw new Error("Missing selected source")
   selectText(selected)
-  const toolbar = screen.getByRole("toolbar")
-  expect(
-    within(toolbar)
-      .getAllByRole("button")
-      .map((button) => button.textContent),
-  ).toEqual(["Add to conversation", "Ask in side chat"])
-  expect(toolbar.style.top).toBe("54px")
-  await user.click(
-    within(toolbar).getByRole("button", { name: "Add to conversation" }),
-  )
-  expect(props.onAddToConversation).not.toHaveBeenCalled()
-  expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
-  )
-  await user.click(screen.getByRole("button", { name: "Done" }))
-  expect(props.onAddToConversation).toHaveBeenCalledWith(
+  await userEvent.setup().click(screen.getByRole("button", { name: action }))
+  const callback =
+    action === "Quote in conversation"
+      ? props.onAddToConversation
+      : props.onAskInSideChat
+  expect(callback).toHaveBeenCalledWith(
     expect.objectContaining({
-      kind: "annotation",
       text: "useful explanation",
       source,
       anchor: { startOffset: 2, endOffset: 20 },
     }),
   )
-  expect(props.onAskInSideChat).not.toHaveBeenCalled()
-  expect(screen.queryByRole("toolbar")).toBeNull()
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(window.getSelection()?.isCollapsed).toBe(true)
 })
 
-it("carries a file selection to side chat without adding an annotation", async () => {
-  const props = defaultProps()
-  const user = userEvent.setup()
-  const file = {
-    kind: "file",
-    label: "main.ts",
-    path: "/repo/main.ts",
-  } as const
+it("dismisses an expired side chat's selection while keeping main chat selections available", async () => {
+  const props = actions()
+  const content = (readOnlySideChatIds: readonly string[]) => (
+    <>
+      <div data-side-chat-id="side-tab">
+        <p {...contextSourceAttributes(source)}>Side response</p>
+      </div>
+      <p {...contextSourceAttributes({ ...source, messageId: "main-answer" })}>
+        Main response
+      </p>
+      <SelectionActions {...props} readOnlySideChatIds={readOnlySideChatIds} />
+    </>
+  )
+  const { rerender } = render(content([]))
+  selectText(screen.getByText("Side response"))
+  expect(screen.getByRole("toolbar")).toBeDefined()
+  rerender(content(["side-tab"]))
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  selectText(screen.getByText("Side response"))
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(props.onAskInSideChat).not.toHaveBeenCalled()
+  selectText(screen.getByText("Main response"))
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Ask in side chat" }))
+  expect(props.onAskInSideChat).toHaveBeenCalledWith(
+    expect.objectContaining({ text: "Main response" }),
+  )
+})
+
+it("routes a side conversation selection by its owning tab rather than its source session", async () => {
+  const props = actions()
   render(
     <>
-      <pre {...contextSourceAttributes(file)}>const answer = 42</pre>
+      <div data-side-chat-id="side-tab">
+        <p {...contextSourceAttributes(source)}>Side response</p>
+      </div>
       <SelectionActions {...props} />
     </>,
   )
-  selectText(screen.getByText("const answer = 42"))
-  await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
-  expect(props.onAskInSideChat).toHaveBeenCalledWith(
-    expect.objectContaining({
-      kind: "selection",
-      text: "const answer = 42",
-      source: file,
-    }),
-  )
-  expect(props.onAddToConversation).not.toHaveBeenCalled()
-})
-
-it.each([
-  "Different first passage",
-  "Selected 😀 passage",
-])("anchors a selection to its user text part when the first part is %j", async (firstText) => {
-  useAppStore.setState({ selection: { sessionId: "session_1" } })
-  const onAddToConversation = vi.fn<(annotation: ResponseAnnotation) => void>()
-  const { container } = render(
-    <>
-      <UserMessageCell
-        queued={false}
-        entry={{
-          kind: "user_input",
-          inputId: "input_1",
-          at: "2026-10-08T00:00:00.000Z",
-          text: `${firstText}Selected 😀 passage`,
-          content: inputFixture([
-            { type: "text", text: firstText },
-            {
-              type: "image",
-              name: "image.png",
-              mediaType: "image/png",
-              sizeBytes: 9,
-              file: {
-                rolloutId: "session_1",
-                path: "attachments/requests/image/0.png",
-              },
-            },
-            { type: "text", text: "Selected 😀 passage" },
-          ]),
-        }}
-      />
-      <SelectionActions
-        {...defaultProps()}
-        onAddToConversation={onAddToConversation}
-      />
-    </>,
-  )
-  const selectedSource = container.querySelectorAll<HTMLElement>(
-    '[data-context-kind="message"]',
-  )[0]
-  if (!selectedSource) throw new Error("Missing user text")
-  const textNode = selectedSource.querySelector("p")?.firstChild
-  if (!textNode) throw new Error("Missing user text node")
-  const start = firstText.length + 9
-  const range = document.createRange()
-  range.setStart(textNode, start)
-  range.setEnd(textNode, start + 19)
-  window.getSelection()?.removeAllRanges()
-  window.getSelection()?.addRange(range)
-  fireEvent.pointerUp(selectedSource)
+  selectText(screen.getByText("Side response"))
   await userEvent
     .setup()
-    .click(screen.getByRole("button", { name: "Add to conversation" }))
-  await userEvent.setup().click(screen.getByRole("button", { name: "Done" }))
-  const captured = onAddToConversation.mock.calls[0]?.[0]
-  if (!captured) throw new Error("Missing captured annotation")
-  expect(captured).toMatchObject({
-    text: "Selected 😀 passage",
-    source: {
-      kind: "message",
-      label: "User message",
-      sessionId: "session_1",
-      messageId: "input_1",
-    },
-    anchor: {
-      startOffset: firstText.length + 9,
-      endOffset: firstText.length + 28,
-    },
-  })
-  expect(findContextSource(captured.source)).toBe(selectedSource)
-  const resolved = resolveAnnotationRange(selectedSource, captured)
-  expect(resolved?.toString()).toBe("Selected 😀 passage")
-  expect(selectedSource.contains(resolved?.startContainer ?? null)).toBe(true)
+    .click(screen.getByRole("button", { name: "Quote in conversation" }))
+  expect(props.onAddToConversation).toHaveBeenCalledWith(
+    expect.objectContaining({ source }),
+    "side-tab",
+  )
 })
 
 it("ignores editable text and selections spanning sources; Escape dismisses the toolbar", () => {
@@ -232,7 +164,7 @@ it("ignores editable text and selections spanning sources; Escape dismisses the 
       <p {...contextSourceAttributes({ ...source, messageId: "other" })}>
         Second message
       </p>
-      <SelectionActions {...defaultProps()} />
+      <SelectionActions {...actions()} />
     </>,
   )
   selectText(screen.getByText("Draft text"))
@@ -249,292 +181,245 @@ it("ignores editable text and selections spanning sources; Escape dismisses the 
   expect(screen.queryByRole("toolbar")).toBeNull()
 })
 
-it("resolves offsets across replacement text nodes and refuses a changed quote at those offsets", () => {
-  const element = document.createElement("p")
-  element.innerHTML = "A <span>useful <strong>explanation</strong></span>."
-  const selected = element.querySelector("span")
-  if (!selected) throw new Error("Missing selected source")
-  const range = document.createRange()
-  range.selectNodeContents(selected)
-  expect(selectionOffsets(element, range)).toEqual({
-    startOffset: 2,
-    endOffset: 20,
-  })
-  element.innerHTML = "<span>A useful</span><em> explanation.</em>"
-  expect(resolveAnnotationRange(element, annotation)?.toString()).toBe(
-    "useful explanation",
-  )
-  element.textContent = "A changed explanation."
-  expect(resolveAnnotationRange(element, annotation)).toBeUndefined()
-})
-
-function Draft() {
-  const [annotations, setAnnotations] = useState<ResponseAnnotation[]>([])
-  const update = (next: ResponseAnnotation) =>
-    setAnnotations((items) =>
-      items.map((item) => (item.id === next.id ? next : item)),
-    )
-  const remove = (id: string) =>
-    setAnnotations((items) => items.filter((item) => item.id !== id))
-  return (
-    <>
-      <p {...contextSourceAttributes(source)}>
-        A <span>useful explanation</span>.
-      </p>
-      <div data-composer-surface="">
-        <button type="button">Main composer</button>
-      </div>
-      <ContextExcerptChips
-        excerpts={annotations}
-        onChange={update}
-        onRemove={remove}
-      />
-      <SelectionActions
-        annotations={annotations}
-        onAddToConversation={(next) =>
-          setAnnotations((items) => [...items, next])
-        }
-        onUpdateAnnotation={update}
-        onRemoveAnnotation={remove}
-        onAskInSideChat={vi.fn()}
-      />
-    </>
-  )
-}
-
-it("keeps a new annotation at its source and preserves its note when returning to the main composer", async () => {
-  const user = userEvent.setup()
-  render(<Draft />)
-  selectText(screen.getByText("useful explanation"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 1" }).textContent,
-  ).toBe("1")
-  expect(document.querySelector(".annotation-highlight")).not.toBeNull()
-  const comment = screen.getByRole("textbox", {
-    name: "Annotation comment (optional)",
-  })
-  expect(document.activeElement).toBe(comment)
-  await user.type(comment, "Focus on correctness.")
-  await user.click(screen.getByRole("button", { name: "Done" }))
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
-  await user.click(screen.getByRole("button", { name: "Main composer" }))
-  expect(screen.queryByRole("textbox")).toBeNull()
-  await user.click(screen.getByRole("button", { name: "1 annotation" }))
-  await user.click(
-    within(screen.getByRole("dialog", { name: "annotations" })).getByRole(
-      "button",
-      { name: "Edit annotation 1" },
-    ),
-  )
-  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
-    "Focus on correctness.",
-  )
-})
-
-it("Escape preserves an attached annotation and restores the existing note during editing", async () => {
-  const user = userEvent.setup()
-  render(<Draft />)
-  selectText(screen.getByText("useful explanation"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.type(screen.getByRole("textbox"), "Saved note")
-  await user.keyboard("{Enter}")
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
-  await user.type(screen.getByRole("textbox"), " changed")
-  await user.keyboard("{Escape}")
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
-  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
-    "Saved note",
-  )
-})
-
 it.each([
-  "Escape",
-  "outside",
-  "remove",
-])("dismisses an unconfirmed annotation without attaching it through %s", async (action) => {
-  const user = userEvent.setup()
-  const props = defaultProps()
-  render(
-    <>
-      <p {...contextSourceAttributes(source)}>A useful explanation.</p>
-      <button type="button">Outside</button>
-      <SelectionActions {...props} />
-    </>,
-  )
-  selectText(screen.getByText("A useful explanation."))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.type(screen.getByRole("textbox"), "Unconfirmed")
-  if (action === "Escape") await user.keyboard("{Escape}")
-  else
-    await user.click(
-      screen.getByRole("button", {
-        name: action === "remove" ? "Remove annotation" : "Outside",
-      }),
-    )
-  expect(screen.queryByRole("dialog")).toBeNull()
-  expect(document.querySelector(".annotation-highlight")).toBeNull()
-  expect(props.onAddToConversation).not.toHaveBeenCalled()
-  expect(props.onUpdateAnnotation).not.toHaveBeenCalled()
-  expect(props.onRemoveAnnotation).not.toHaveBeenCalled()
-})
-
-it("numbers current annotations and removes highlights and editor when the main draft changes", () => {
-  const second = {
-    ...annotation,
-    id: "annotation_two",
-    text: "A",
-    anchor: { startOffset: 0, endOffset: 1 },
-  }
-  const view = render(
-    <>
-      <p {...contextSourceAttributes(source)}>A useful explanation.</p>
-      <AnnotationLayer
-        annotations={[annotation, second]}
-        onChange={vi.fn()}
-        onRemove={vi.fn()}
-      />
-    </>,
-  )
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 1" }).textContent,
-  ).toBe("1")
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 2" }).textContent,
-  ).toBe("2")
-  act(() => requestAnnotationEdit(annotation.id))
-  expect(screen.getByRole("textbox")).toBeDefined()
-  view.rerender(
-    <AnnotationLayer annotations={[]} onChange={vi.fn()} onRemove={vi.fn()} />,
-  )
-  expect(screen.queryByRole("textbox")).toBeNull()
-  expect(document.querySelector(".annotation-highlight")).toBeNull()
-})
-
-it("rechecks source mutations and hides an annotation when its saved text no longer matches", async () => {
-  render(
-    <>
-      <p {...contextSourceAttributes(source)}>A useful explanation.</p>
-      <AnnotationLayer
-        annotations={[annotation]}
-        onChange={vi.fn()}
-        onRemove={vi.fn()}
-      />
-    </>,
-  )
-  const element = screen.getByText("A useful explanation.")
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 1" }),
-  ).toBeDefined()
-  act(() => {
-    element.textContent = "A changed explanation."
-  })
-  await waitFor(() =>
-    expect(
-      screen.queryByRole("button", { name: "Edit annotation 1" }),
-    ).toBeNull(),
-  )
-  expect(document.querySelector(".annotation-highlight")).toBeNull()
-})
-
-it("aggregates annotations and selected text into compact read-only preview pills", async () => {
-  const user = userEvent.setup()
-  render(
-    <ContextExcerptChips
-      excerpts={[
-        annotation,
-        { ...annotation, id: "two" },
-        {
-          kind: "selection",
-          id: "selection",
-          source,
-          text: "Other selected text",
-        },
-      ]}
-    />,
-  )
-  expect(screen.getByRole("button", { name: "2 annotations" })).toBeDefined()
-  expect(
-    screen.getByRole("button", { name: "1 selected text snippet" }),
-  ).toBeDefined()
-  expect(screen.queryByRole("dialog")).toBeNull()
-  await user.click(screen.getByRole("button", { name: "2 annotations" }))
-  expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull()
-  expect(screen.queryByRole("button", { name: /Edit annotation/ })).toBeNull()
-  expect(screen.getAllByText("useful explanation")).toHaveLength(2)
-})
-
-it("removes a reference from its source editor without opening the composer chips", async () => {
-  const user = userEvent.setup()
-  render(<Draft />)
-  selectText(screen.getByText("useful explanation"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
-  await user.click(screen.getByRole("button", { name: "Remove annotation" }))
-  expect(screen.queryByRole("button", { name: "1 annotation" })).toBeNull()
-  expect(screen.queryByRole("dialog")).toBeNull()
-  expect(document.querySelector(".annotation-highlight")).toBeNull()
-})
-
-it("captures side conversation ownership and clears native selection after either action", async () => {
-  const user = userEvent.setup()
-  const props = defaultProps()
-  render(
-    <>
-      <div data-side-chat-id="side-tab">
-        <p {...contextSourceAttributes(source)}>Side response</p>
-      </div>
-      <SelectionActions {...props} />
-    </>,
-  )
-  selectText(screen.getByText("Side response"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.click(screen.getByRole("button", { name: "Done" }))
-  expect(props.onAddToConversation).toHaveBeenCalledWith(
-    expect.objectContaining({ text: "Side response" }),
-    "side-tab",
-  )
-  expect(window.getSelection()?.isCollapsed).toBe(true)
-  selectText(screen.getByText("Side response"))
-  await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
-  expect(props.onAskInSideChat).toHaveBeenCalledWith(
-    expect.objectContaining({ text: "Side response" }),
-    "side-tab",
-  )
-  expect(window.getSelection()?.isCollapsed).toBe(true)
-})
-
-it("refuses a captured selection after its source tab becomes hidden", async () => {
-  const props = defaultProps()
-  const user = userEvent.setup()
-  render(
-    <>
-      <div data-testid="tab">
-        <p {...contextSourceAttributes(source)}>Response</p>
-      </div>
-      <SelectionActions {...props} />
-    </>,
-  )
-  selectText(screen.getByText("Response"))
-  screen.getByTestId("tab").hidden = true
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  expect(props.onAddToConversation).not.toHaveBeenCalled()
-  expect(screen.queryByRole("toolbar")).toBeNull()
-})
-
-it("does not attach a selection whose source changed before the action", async () => {
-  const user = userEvent.setup()
-  const props = defaultProps()
+  "hidden",
+  "changed",
+])("rejects a captured selection after its source is %s", async (mutation) => {
+  const props = actions()
   render(
     <>
       <p {...contextSourceAttributes(source)}>Original response</p>
       <SelectionActions {...props} />
     </>,
   )
-  const sourceElement = screen.getByText("Original response")
-  selectText(sourceElement)
-  sourceElement.textContent = "Replaced response"
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  const element = screen.getByText("Original response")
+  selectText(element)
+  if (mutation === "hidden") element.hidden = true
+  else element.textContent = "Replaced response"
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Quote in conversation" }))
   expect(props.onAddToConversation).not.toHaveBeenCalled()
-  expect(screen.queryByRole("toolbar")).toBeNull()
+})
+
+it("resolves UTF-16 offsets across replacement nodes and refuses a changed quote", () => {
+  const element = document.createElement("p")
+  element.innerHTML = "A <span>useful <strong>explanation</strong></span>."
+  const range = document.createRange()
+  const selected = element.querySelector("span")
+  if (!selected) throw new Error("Missing selected source")
+  range.selectNodeContents(selected)
+  expect(selectionOffsets(element, range)).toEqual({
+    startOffset: 2,
+    endOffset: 20,
+  })
+  element.innerHTML = "<span>A useful</span><em> explanation.</em>"
+  expect(resolveExcerptRange(element, excerpt)?.toString()).toBe(
+    "useful explanation",
+  )
+  element.textContent = "A changed explanation."
+  expect(resolveExcerptRange(element, excerpt)).toBeUndefined()
+})
+
+it("finds a source by identity even when its display label changes", () => {
+  render(
+    <p {...contextSourceAttributes({ ...source, label: "Renamed response" })}>
+      Text
+    </p>,
+  )
+  expect(findContextSource(source)).toBe(screen.getByText("Text"))
+})
+
+function Draft({
+  ownerId = "main",
+  showSource = true,
+}: {
+  ownerId?: string
+  showSource?: boolean
+}) {
+  const [excerpts, setExcerpts] = useState<ContextExcerpt[]>([excerpt])
+  return (
+    <>
+      {showSource ? (
+        <p {...contextSourceAttributes(source)}>A useful explanation.</p>
+      ) : null}
+      <ContextExcerptCards
+        ownerId={ownerId}
+        excerpts={excerpts}
+        onChange={(next) =>
+          setExcerpts((items) =>
+            items.map((item) => (item.id === next.id ? next : item)),
+          )
+        }
+        onRemove={(id) =>
+          setExcerpts((items) => items.filter((item) => item.id !== id))
+        }
+      />
+      <ExcerptSourceLayer
+        items={excerpts.map((excerpt, index) => ({
+          excerpt,
+          ownerId,
+          number: index + 1,
+          conversation: "main conversation",
+        }))}
+      />
+    </>
+  )
+}
+
+it("edits and clears comments without a mounted source, and Escape discards an unsaved edit", async () => {
+  const user = userEvent.setup()
+  render(<Draft showSource={false} />)
+  const open = () =>
+    user.click(
+      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+    )
+  await open()
+  expect(screen.getByText(/cannot be located precisely/)).toBeDefined()
+  await user.type(screen.getByRole("textbox"), "Saved feedback")
+  await user.click(screen.getByRole("button", { name: "Save comment" }))
+  await open()
+  await user.type(screen.getByRole("textbox"), " discarded")
+  await user.keyboard("{Escape}")
+  await open()
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
+    "Saved feedback",
+  )
+  await user.clear(screen.getByRole("textbox"))
+  await user.keyboard("{Enter}")
+  expect(screen.queryByText("Saved feedback")).toBeNull()
+})
+
+it("opens the same editor from the source marker and removes its derived highlight with the excerpt", async () => {
+  render(<Draft />)
+  const user = userEvent.setup()
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1 in main conversation" }),
+  )
+  expect(document.activeElement).toBe(screen.getByRole("textbox"))
+  await user.type(screen.getByRole("textbox"), "Feedback")
+  await user.keyboard("{Enter}")
+  expect(document.querySelector(".excerpt-highlight")).not.toBeNull()
+  await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
+  await waitFor(() =>
+    expect(document.querySelector(".excerpt-highlight")).toBeNull(),
+  )
+})
+
+it("scopes source edit requests to one draft even when two drafts reference the same excerpt ID", async () => {
+  render(
+    <>
+      <Draft ownerId="main" showSource={false} />
+      <Draft ownerId="side" showSource={false} />
+    </>,
+  )
+  act(() => requestExcerptEdit({ ownerId: "side", excerptId: excerpt.id }))
+  expect(screen.getAllByRole("dialog")).toHaveLength(1)
+  await userEvent.setup().type(screen.getByRole("textbox"), "Side only")
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Save comment" }))
+  act(() => requestExcerptEdit({ ownerId: "main", excerptId: excerpt.id }))
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("")
+})
+
+it("stops highlighting a source that has changed without losing the editable snapshot", async () => {
+  render(<Draft />)
+  act(() => {
+    screen.getByText("A useful explanation.").textContent =
+      "A changed explanation."
+  })
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", {
+        name: "Open excerpt 1 in main conversation",
+      }),
+    ).toBeNull(),
+  )
+  await userEvent
+    .setup()
+    .click(
+      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+    )
+  expect(
+    within(screen.getByRole("dialog")).getByText("useful explanation"),
+  ).toBeDefined()
+})
+
+it("shows each saved excerpt in order with a read-only original comment", async () => {
+  render(
+    <ContextExcerptCards
+      excerpts={[
+        { ...excerpt, comment: "Saved" },
+        {
+          id: "browser",
+          text: "A page quote",
+          source: {
+            kind: "browser",
+            label: "Page",
+            url: "https://example.com",
+          },
+        },
+      ]}
+    />,
+  )
+  expect(
+    screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual(["Open excerpt 1: Assistant message", "Open excerpt 2: Page"])
+  await userEvent
+    .setup()
+    .click(
+      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+    )
+  expect(within(screen.getByRole("dialog")).getByText("Saved")).toBeDefined()
+  expect(screen.queryByRole("textbox")).toBeNull()
+  expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull()
+})
+
+it("captures UTF-16 offsets in user message text containing Unicode", async () => {
+  useAppStore.setState({ selection: { sessionId: "session_1" } })
+  const props = actions()
+  const { container } = render(
+    <>
+      <UserMessageCell
+        queued={false}
+        entry={{
+          kind: "user_input",
+          inputId: "input_1",
+          at: "2026-10-08T00:00:00Z",
+          text: "Before Selected 😀 passage",
+          content: inputFixture([
+            { type: "text", text: "Before Selected 😀 passage" },
+          ]),
+        }}
+      />
+      <SelectionActions {...props} />
+    </>,
+  )
+  const element = container.querySelector<HTMLElement>(
+    "[data-context-kind=message]",
+  )
+  const node = element?.querySelector("p")?.firstChild
+  if (!element || !node) throw new Error("Missing user text")
+  const range = document.createRange()
+  range.setStart(node, 7)
+  range.setEnd(node, 26)
+  window.getSelection()?.removeAllRanges()
+  window.getSelection()?.addRange(range)
+  fireEvent.pointerUp(element)
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Quote in conversation" }))
+  const captured = props.onAddToConversation.mock
+    .calls[0]?.[0] as ContextExcerpt
+  expect(captured).toMatchObject({
+    text: "Selected 😀 passage",
+    anchor: { startOffset: 7, endOffset: 26 },
+    source: { sessionId: "session_1", messageId: "input_1" },
+  })
+  expect(resolveExcerptRange(element, captured)?.toString()).toBe(
+    "Selected 😀 passage",
+  )
 })

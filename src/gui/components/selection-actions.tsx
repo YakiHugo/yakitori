@@ -1,55 +1,42 @@
-import { MessageSquare, Quote, X } from "lucide-react"
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import type {
-  ContextExcerpt,
-  ResponseAnnotation,
-  SelectedTextAttachment,
-} from "../../protocol/input-context.ts"
 import {
-  type AnnotationDetails,
-  AnnotationLayer,
-  requestAnnotationEdit,
-  scrollToContextSource,
-  selectionOffsets,
-} from "./annotation-layer.tsx"
-
-export { AnnotationLayer, requestAnnotationEdit } from "./annotation-layer.tsx"
+  type ContextExcerpt,
+  isContextSource,
+  type RenderedTextAnchor,
+} from "../../protocol/input-context.ts"
+import { selectionOffsets } from "./excerpt-source.tsx"
 
 type CapturedSelection = {
-  excerpt: SelectedTextAttachment
+  excerpt: ContextExcerpt
   source: HTMLElement
   range: Range
   sideChatId?: string
-  anchor: ResponseAnnotation["anchor"]
+  anchor: RenderedTextAnchor
 }
 
 export function SelectionActions({
-  annotations,
-  annotationDetails,
+  readOnlySideChatIds,
   onAddToConversation,
-  onUpdateAnnotation,
-  onRemoveAnnotation,
   onAskInSideChat,
 }: Readonly<{
-  annotations: readonly ResponseAnnotation[]
-  annotationDetails?: AnnotationDetails
-  onAddToConversation(annotation: ResponseAnnotation, sideChatId?: string): void
-  onUpdateAnnotation(annotation: ResponseAnnotation): void
-  onRemoveAnnotation(id: string): void
-  onAskInSideChat(excerpt: SelectedTextAttachment, sideChatId?: string): void
+  readOnlySideChatIds?: readonly string[]
+  onAddToConversation(excerpt: ContextExcerpt, sideChatId?: string): void
+  onAskInSideChat(excerpt: ContextExcerpt, sideChatId?: string): void
 }>) {
   const [captured, setCaptured] = useState<CapturedSelection>()
-  const [pending, setPending] = useState<{
-    annotation: ResponseAnnotation
-    sideChatId?: string
-  }>()
-  const visibleAnnotations = useMemo(
-    () => (pending ? [...annotations, pending.annotation] : annotations),
-    [annotations, pending],
-  )
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const menu = useRef<HTMLDivElement>(null)
+  const readOnlyIds = useRef(readOnlySideChatIds)
+  readOnlyIds.current = readOnlySideChatIds
+
+  useLayoutEffect(() => {
+    if (
+      captured?.sideChatId &&
+      readOnlySideChatIds?.includes(captured.sideChatId)
+    )
+      setCaptured(undefined)
+  }, [captured, readOnlySideChatIds])
 
   useEffect(() => {
     const capture = (event: Event) => {
@@ -61,7 +48,7 @@ export function SelectionActions({
         return
       if (
         event.target instanceof Element &&
-        event.target.closest("[data-annotation-ui], .selection-actions")
+        event.target.closest("[data-excerpt-ui], .selection-actions")
       )
         return
       const selection = window.getSelection()
@@ -108,24 +95,34 @@ export function SelectionActions({
       }
       const sideChatId = source.closest<HTMLElement>("[data-side-chat-id]")
         ?.dataset.sideChatId
+      if (sideChatId && readOnlyIds.current?.includes(sideChatId)) {
+        setCaptured(undefined)
+        return
+      }
+      const contextSource = {
+        kind,
+        label,
+        ...(contextSessionId ? { sessionId: contextSessionId } : {}),
+        ...(contextMessageId ? { messageId: contextMessageId } : {}),
+        ...(contextPath ? { path: contextPath } : {}),
+        ...(contextUrl ? { url: contextUrl } : {}),
+      }
+      if (!isContextSource(contextSource)) {
+        setCaptured(undefined)
+        return
+      }
+      const anchor = selectionOffsets(source, range)
       setCaptured({
         excerpt: {
-          id: `selection_${crypto.randomUUID()}`,
-          kind: "selection",
+          id: `excerpt_${crypto.randomUUID()}`,
           text,
-          source: {
-            kind,
-            label,
-            ...(contextSessionId ? { sessionId: contextSessionId } : {}),
-            ...(contextMessageId ? { messageId: contextMessageId } : {}),
-            ...(contextPath ? { path: contextPath } : {}),
-            ...(contextUrl ? { url: contextUrl } : {}),
-          },
+          source: contextSource,
+          anchor,
         },
         source,
         ...(sideChatId ? { sideChatId } : {}),
         range: range.cloneRange(),
-        anchor: selectionOffsets(source, range),
+        anchor,
       })
     }
     const close = (event: PointerEvent) => {
@@ -190,6 +187,8 @@ export function SelectionActions({
   const actOnSelection = (action: "conversation" | "side") => {
     if (
       !captured?.source.isConnected ||
+      (captured.sideChatId !== undefined &&
+        readOnlyIds.current?.includes(captured.sideChatId)) ||
       captured.source.closest("[hidden]") ||
       captured.source.textContent?.slice(
         captured.anchor.startOffset,
@@ -199,48 +198,16 @@ export function SelectionActions({
       setCaptured(undefined)
       return
     }
-    if (action === "conversation") {
-      const annotation: ResponseAnnotation = {
-        ...captured.excerpt,
-        id: `annotation_${crypto.randomUUID()}`,
-        kind: "annotation",
-        anchor: captured.anchor,
-      }
-      setPending({
-        annotation,
-        ...(captured.sideChatId ? { sideChatId: captured.sideChatId } : {}),
-      })
-    } else if (captured.sideChatId)
-      onAskInSideChat(captured.excerpt, captured.sideChatId)
-    else onAskInSideChat(captured.excerpt)
+    const add =
+      action === "conversation" ? onAddToConversation : onAskInSideChat
+    if (captured.sideChatId) add(captured.excerpt, captured.sideChatId)
+    else add(captured.excerpt)
     window.getSelection()?.removeAllRanges()
     setCaptured(undefined)
   }
 
   return (
     <>
-      <AnnotationLayer
-        annotations={visibleAnnotations}
-        details={annotationDetails}
-        pendingId={pending?.annotation.id}
-        onChange={(annotation) => {
-          if (pending?.annotation.id === annotation.id)
-            setPending({ ...pending, annotation })
-          else onUpdateAnnotation(annotation)
-        }}
-        onRemove={(id) => {
-          if (pending?.annotation.id === id) setPending(undefined)
-          else onRemoveAnnotation(id)
-        }}
-        onDismiss={() => setPending(undefined)}
-        onConfirm={(annotation) => {
-          if (pending?.annotation.id !== annotation.id) return
-          if (pending.sideChatId)
-            onAddToConversation(annotation, pending.sideChatId)
-          else onAddToConversation(annotation)
-          setPending(undefined)
-        }}
-      />
       {captured
         ? createPortal(
             <div
@@ -255,7 +222,7 @@ export function SelectionActions({
                 type="button"
                 onClick={() => actOnSelection("conversation")}
               >
-                Add to conversation
+                Quote in conversation
               </button>
               <span className="selection-actions-divider" />
               <button type="button" onClick={() => actOnSelection("side")}>
@@ -266,150 +233,5 @@ export function SelectionActions({
           )
         : null}
     </>
-  )
-}
-
-export function ContextExcerptChips({
-  excerpts,
-  onRemove,
-  onChange,
-}: Readonly<{
-  excerpts: readonly ContextExcerpt[]
-  onRemove?(id: string): void
-  onChange?(excerpt: ContextExcerpt): void
-}>) {
-  const [expanded, setExpanded] = useState<ContextExcerpt["kind"]>()
-  const [position, setPosition] = useState({ top: 0, left: 0 })
-  const container = useRef<HTMLDivElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
-  const popover = useRef<HTMLDivElement>(null)
-  const expandedCount = excerpts.filter(
-    (excerpt) => excerpt.kind === expanded,
-  ).length
-  useLayoutEffect(() => {
-    if (!expanded || !expandedCount) return
-    const place = () => {
-      if (!trigger.current || !popover.current) return
-      const rect = trigger.current.getBoundingClientRect()
-      const { width, height } = popover.current.getBoundingClientRect()
-      setPosition({
-        top: rect.top >= height + 16 ? rect.top - height - 8 : rect.bottom + 8,
-        left: Math.max(8, Math.min(window.innerWidth - width - 8, rect.left)),
-      })
-    }
-    place()
-    window.addEventListener("resize", place)
-    document.addEventListener("scroll", place, { capture: true, passive: true })
-    return () => {
-      window.removeEventListener("resize", place)
-      document.removeEventListener("scroll", place, true)
-    }
-  }, [expanded, expandedCount])
-  useEffect(() => {
-    if (!expanded) return
-    const dismiss = (event: PointerEvent) => {
-      if (
-        event.target instanceof Node &&
-        !container.current?.contains(event.target) &&
-        !popover.current?.contains(event.target)
-      )
-        setExpanded(undefined)
-    }
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpanded(undefined)
-    }
-    document.addEventListener("pointerdown", dismiss)
-    document.addEventListener("keydown", keydown)
-    return () => {
-      document.removeEventListener("pointerdown", dismiss)
-      document.removeEventListener("keydown", keydown)
-    }
-  }, [expanded])
-  if (!excerpts.length) return null
-  const groups = [
-    { kind: "annotation" as const, label: "annotation", icon: MessageSquare },
-    { kind: "selection" as const, label: "selected text snippet", icon: Quote },
-  ]
-  return (
-    <div
-      className={`context-excerpt-chips${onRemove ? "" : " context-excerpt-chips-readonly"}`}
-      ref={container}
-    >
-      {groups.map(({ kind, label, icon: Icon }) => {
-        const items = excerpts.filter((excerpt) => excerpt.kind === kind)
-        if (!items.length) return null
-        return (
-          <div className="context-excerpt-group" key={kind}>
-            <button
-              type="button"
-              className="context-excerpt-pill"
-              aria-expanded={expanded === kind}
-              onClick={(event) => {
-                trigger.current = event.currentTarget
-                setExpanded(expanded === kind ? undefined : kind)
-              }}
-            >
-              <Icon size={12} />
-              {items.length} {label}
-              {items.length === 1 ? "" : "s"}
-            </button>
-            {expanded === kind
-              ? createPortal(
-                  <div
-                    ref={popover}
-                    className="context-excerpt-popover"
-                    style={position}
-                    role="dialog"
-                    aria-label={`${label}s`}
-                  >
-                    {items.map((excerpt, index) => (
-                      <div key={excerpt.id} className="context-excerpt-row">
-                        <button
-                          type="button"
-                          className="context-excerpt-preview"
-                          aria-label={`${kind === "annotation" && onChange ? "Edit annotation" : "Go to selected text"} ${index + 1}`}
-                          onClick={() => {
-                            if (excerpt.kind === "annotation" && onChange)
-                              requestAnnotationEdit(excerpt.id)
-                            else
-                              scrollToContextSource(excerpt.source, {
-                                block: "center",
-                                behavior: "smooth",
-                              })
-                            setExpanded(undefined)
-                          }}
-                        >
-                          <span className="context-excerpt-source">
-                            {index + 1} · {excerpt.source.label}
-                          </span>
-                          <span className="context-excerpt-quote">
-                            {excerpt.text}
-                          </span>
-                          {excerpt.kind === "annotation" && excerpt.comment ? (
-                            <span className="context-excerpt-comment">
-                              {excerpt.comment}
-                            </span>
-                          ) : null}
-                        </button>
-                        {onRemove ? (
-                          <button
-                            type="button"
-                            className="context-excerpt-remove"
-                            aria-label={`Remove ${label} ${index + 1}`}
-                            onClick={() => onRemove(excerpt.id)}
-                          >
-                            <X size={13} />
-                          </button>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>,
-                  document.body,
-                )
-              : null}
-          </div>
-        )
-      })}
-    </div>
   )
 }

@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process"
+import { once } from "node:events"
 import { readFile, realpath } from "node:fs/promises"
+import { createServer } from "node:http"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
@@ -272,6 +274,102 @@ async function closeApplication(
     clearTimeout(timeout)
   }
 }
+
+test("embedded browser selections attach editable excerpts to main and side drafts", async ({
+  desktop,
+}, testInfo) => {
+  const { application, page, rendererErrors } = desktop
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" })
+    response.end(
+      "<!doctype html><title>Excerpt source</title><p id=quote>Frozen browser excerpt</p>",
+    )
+  })
+  server.listen(0, "127.0.0.1")
+  await once(server, "listening")
+  const address = server.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing source server")
+  const url = `http://127.0.0.1:${address.port}/`
+  try {
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("textbox", { name: "Browser address" }).fill(url)
+    await page.getByRole("textbox", { name: "Browser address" }).press("Enter")
+    await expect(
+      page.getByRole("tab", { name: "Excerpt source", exact: true }),
+    ).toBeVisible()
+    const selectPageText = () =>
+      application.evaluate(async ({ webContents }, sourceUrl) => {
+        const contents = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === sourceUrl)
+        if (!contents) throw new Error("Missing embedded browser")
+        await contents.executeJavaScript(
+          "(() => { const range = document.createRange(); range.selectNodeContents(document.getElementById('quote')); window.getSelection().removeAllRanges(); window.getSelection().addRange(range) })()",
+        )
+      }, url)
+    await selectPageText()
+    await page
+      .getByRole("button", {
+        name: "Add selected text to conversation",
+        exact: true,
+      })
+      .click()
+    const main = page
+      .locator("main")
+      .getByRole("button", { name: "Open excerpt 1: Excerpt source" })
+    await expect(main).toContainText("Frozen browser excerpt")
+    await expect(
+      page.getByRole("textbox", { name: "Message the Mate" }),
+    ).toBeFocused()
+    await main.click()
+    await page
+      .getByRole("textbox", { name: "Excerpt comment (optional)" })
+      .fill("Main feedback")
+    await page.getByRole("button", { name: "Save comment" }).click()
+    await expect(main).toContainText("Main feedback")
+    const showWorkspace = page.getByRole("button", {
+      name: "Show workspace",
+      exact: true,
+    })
+    if (await showWorkspace.isVisible()) await showWorkspace.click()
+    await page.getByRole("tab", { name: "Excerpt source", exact: true }).click()
+    await selectPageText()
+    await page
+      .getByRole("button", {
+        name: "Ask about selected text in side chat",
+        exact: true,
+      })
+      .click()
+    const side = page
+      .getByRole("tabpanel")
+      .getByRole("button", { name: "Open excerpt 1: Excerpt source" })
+    await expect(side).toContainText("Frozen browser excerpt")
+    await side.click()
+    await page
+      .getByRole("textbox", { name: "Excerpt comment (optional)" })
+      .fill("Side feedback")
+    await page.getByRole("button", { name: "Save comment" }).click()
+    await expect(side).toContainText("Side feedback")
+    await expect(main).toContainText("Main feedback")
+    await page.screenshot({
+      path: testInfo.outputPath("browser-excerpt-drafts.png"),
+      animations: "disabled",
+    })
+    expect(rendererErrors).toEqual([])
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    )
+  }
+})
 
 function killProcessGroup(pid: number): void {
   // Playwright 1.63 launches Electron detached on macOS. Its PID is the

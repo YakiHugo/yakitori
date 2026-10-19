@@ -87,6 +87,106 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
   }
 })
 
+test("expired side chats dismiss excerpt actions and leave main chat quoting available", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const logs: string[] = []
+  const errors: string[] = []
+  let server: ServerProcess | undefined
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+      onStdout: (line) => logs.push(line),
+      onStderr: (line) => logs.push(line),
+    })
+    await page.clock.install()
+    await page.goto(server.url)
+    await runFauxTurn(page)
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Side chat/ }).click()
+    const side = page.locator("[data-side-chat-id]")
+    await side
+      .getByRole("textbox", { name: "Message side chat" })
+      .fill("Explain the response")
+    await side.getByRole("button", { name: "Send side chat message" }).click()
+    const sideResponse = side.getByText("Hello from faux.", { exact: true })
+    await expect(sideResponse).toBeVisible()
+    await expect(side.getByText("Responding…", { exact: true })).toHaveCount(0)
+    const selectResponse = async (
+      response: ReturnType<typeof page.getByText>,
+    ) => {
+      await response.evaluate((element) => {
+        const range = document.createRange()
+        range.selectNodeContents(element)
+        window.getSelection()?.removeAllRanges()
+        window.getSelection()?.addRange(range)
+        element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
+      })
+    }
+    await selectResponse(sideResponse)
+    await expect(
+      page.getByRole("toolbar", { name: "Selected text actions" }),
+    ).toBeVisible()
+    // Advance the renderer past its received lease; the server and persistence
+    // remain real, and no process clock or product timeout is changed.
+    await page.clock.fastForward(25 * 60 * 60 * 1_000)
+    await expect(
+      side.getByText("Side chat expired. Start a new side chat to continue."),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("toolbar", { name: "Selected text actions" }),
+    ).toHaveCount(0)
+    await expect(
+      side.getByRole("textbox", { name: "Message side chat" }),
+    ).toHaveCount(0)
+    await selectResponse(sideResponse)
+    await expect(
+      page.getByRole("toolbar", { name: "Selected text actions" }),
+    ).toHaveCount(0)
+    const mainResponse = page
+      .getByRole("region", { name: "Response", exact: true })
+      .getByText("Hello from faux.", { exact: true })
+    await selectResponse(mainResponse)
+    await page
+      .getByRole("button", { name: "Quote in conversation", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+    ).toBeVisible()
+    await expect(
+      side.getByRole("button", { name: /^Open excerpt/ }),
+    ).toHaveCount(0)
+    expect(errors).toEqual([])
+  } finally {
+    try {
+      await testInfo.attach("expired-side-chat-server.log", {
+        body: logs.join("\n"),
+        contentType: "text/plain",
+      })
+    } finally {
+      const timer = setTimeout(() => void server?.forceStop(), 5_000)
+      try {
+        await server?.stop()
+      } finally {
+        clearTimeout(timer)
+        await environment.cleanup()
+      }
+    }
+  }
+})
+
 test("reconnect confirms a lost input acknowledgement without resending or clearing a later draft", async ({
   page,
 }, testInfo) => {

@@ -19,11 +19,12 @@ const attachment = {
 }
 const annotation = {
   id: "annotation-1",
-  kind: "annotation" as const,
+
   text: "Selected answer",
   comment: "Explain this",
   anchor: { startOffset: 0, endOffset: 15 },
   source: {
+    sessionId: "session_1",
     kind: "message" as const,
     label: "Assistant",
     messageId: "answer-1",

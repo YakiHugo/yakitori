@@ -1,4 +1,3 @@
-import { useEngineStore } from "../store/engine-store.ts"
 import {
   Files,
   GitCompareArrows,
@@ -23,13 +22,21 @@ import {
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { useEngineStore } from "../store/engine-store.ts"
 import {
+  isSideChatExpired,
   useWorkspaceStore,
   type WorkspaceTab,
 } from "../store/workspace-store.ts"
 import { BrowserPanel } from "./browser-panel.tsx"
 import { CloseSideChatDialog } from "./close-side-chat-dialog.tsx"
 import { ComputerPanel } from "./computer-panel.tsx"
+import {
+  type ContextSourceNavigation,
+  ExcerptSourceLayer,
+  findContextSource,
+  revealContextSourceEvent,
+} from "./excerpt-source.tsx"
 import { DiscardFileDialog } from "./file-editor.tsx"
 import { SelectionActions } from "./selection-actions.tsx"
 import { SideChatPanel } from "./side-chat-panel.tsx"
@@ -83,9 +90,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const closeTab = useWorkspaceStore((state) => state.closeTab)
   const openFile = useWorkspaceStore((state) => state.openFile)
   const askInSideChat = useWorkspaceStore((state) => state.askInSideChat)
+  const selectionRevision = useAppStore(
+    (state) => state.sessionSelectionIntentRevision,
+  )
   const excerpts = useAppStore((state) => state.promptExcerpts)
-  const updateExcerpt = useAppStore((state) => state.updatePromptExcerpt)
-  const removeExcerpt = useAppStore((state) => state.removePromptExcerpt)
   const addPromptExcerpt = useAppStore((state) => state.addPromptExcerpt)
   const shell = useRef<HTMLDivElement>(null)
   const [available, setAvailable] = useState(() =>
@@ -151,6 +159,37 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       setClosing(tab)
     else closeTab(tab.id)
   }
+
+  useEffect(() => {
+    if (external) return
+    const reveal = (event: Event) => {
+      const { source } = (event as CustomEvent<ContextSourceNavigation>).detail
+      const workspace = useWorkspaceStore.getState()
+      if (source.kind === "file")
+        workspace.openFile(
+          source.path,
+          cwd ?? (source.path.slice(0, source.path.lastIndexOf("/")) || "/"),
+        )
+      else if (source.kind === "browser") workspace.openBrowser(source.url)
+      else {
+        const element = findContextSource(source, true)
+        const tabId = element?.closest<HTMLElement>("[data-side-chat-id]")
+          ?.dataset.sideChatId
+        const tab = workspace.tabs.find(
+          (tab) =>
+            tab.id === tabId && tab.workspaceSessionId === workspace.sessionId,
+        )
+        if (tab) {
+          workspace.activate(tab.id)
+          requestAnimationFrame(() =>
+            element?.scrollIntoView({ block: "center", behavior: "smooth" }),
+          )
+        }
+      }
+    }
+    window.addEventListener(revealContextSourceEvent, reveal)
+    return () => window.removeEventListener(revealContextSourceEvent, reveal)
+  }, [external, cwd])
 
   useLayoutEffect(() => {
     useWorkspaceStore.getState().setSession(sessionId)
@@ -522,7 +561,6 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     )
                       return
                     const excerpt: ContextExcerpt = {
-                      kind: "selection",
                       id: `excerpt_${crypto.randomUUID()}`,
                       text: selection.text,
                       source: {
@@ -630,49 +668,57 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
         />
       ) : null}
       {!external && (
-        <SelectionActions
-          key={`${apiBase}:${sessionId ?? "draft"}:${open}:${activeId}`}
-          annotations={[
-            ...excerpts,
-            ...visibleTabs.flatMap((tab) =>
-              tab.kind === "chat" ? tab.excerpts : [],
-            ),
-          ].filter((excerpt) => excerpt.kind === "annotation")}
-          annotationDetails={Object.fromEntries([
-            ...excerpts
-              .filter((excerpt) => excerpt.kind === "annotation")
-              .map((excerpt, index) => [
-                excerpt.id,
-                { number: index + 1, conversation: "main conversation" },
-              ]),
-            ...visibleTabs.flatMap((tab) =>
-              tab.kind === "chat"
-                ? tab.excerpts
-                    .filter((excerpt) => excerpt.kind === "annotation")
-                    .map((excerpt, index) => [
-                      excerpt.id,
-                      { number: index + 1, conversation: tabLabel(tab) },
-                    ])
-                : [],
-            ),
-          ])}
-          onAddToConversation={(excerpt, sideChatId) => {
-            if (sideChatId)
-              useWorkspaceStore.getState().addChatExcerpt(sideChatId, excerpt)
-            else addToMain(excerpt)
-          }}
-          onUpdateAnnotation={(excerpt) => {
-            updateExcerpt(excerpt)
-            useWorkspaceStore.getState().updateChatExcerpt(excerpt)
-          }}
-          onRemoveAnnotation={(id) => {
-            removeExcerpt(id)
-            useWorkspaceStore.getState().removeChatExcerpt(id)
-          }}
-          onAskInSideChat={(excerpt, sideChatId) =>
-            askInSideChat(excerpt, sessionId, sideChatId)
-          }
-        />
+        <>
+          <ExcerptSourceLayer
+            items={[
+              ...excerpts.map((excerpt, index) => ({
+                excerpt,
+                number: index + 1,
+                ownerId: `main:${selectionRevision}`,
+                conversation: "main conversation",
+              })),
+              ...visibleTabs.flatMap((tab) =>
+                tab.kind === "chat" &&
+                !isSideChatExpired(tab) &&
+                open &&
+                tab.id === activeId
+                  ? tab.excerpts.map((excerpt, index) => ({
+                      excerpt,
+                      number: index + 1,
+                      ownerId: `side:${tab.id}`,
+                      conversation: tabLabel(tab),
+                    }))
+                  : [],
+              ),
+            ]}
+          />
+          <SelectionActions
+            readOnlySideChatIds={visibleTabs.flatMap((tab) =>
+              tab.kind === "chat" && isSideChatExpired(tab) ? [tab.id] : [],
+            )}
+            key={`${apiBase}:${selectionRevision}:${open}:${activeId}`}
+            onAddToConversation={(excerpt, sideChatId) => {
+              const app = useAppStore.getState()
+              if (
+                app.apiBase !== apiBase ||
+                app.sessionSelectionIntentRevision !== selectionRevision
+              )
+                return
+              if (sideChatId)
+                useWorkspaceStore.getState().addChatExcerpt(sideChatId, excerpt)
+              else addToMain(excerpt)
+            }}
+            onAskInSideChat={(excerpt, sideChatId) => {
+              const app = useAppStore.getState()
+              if (
+                app.apiBase !== apiBase ||
+                app.sessionSelectionIntentRevision !== selectionRevision
+              )
+                return
+              askInSideChat(excerpt, sessionId, sideChatId)
+            }}
+          />
+        </>
       )}
       {closing && (
         <CloseSideChatDialog

@@ -104,7 +104,7 @@ describe("attachments", () => {
     ).toBeDefined()
   })
 
-  it("groups submitted references behind one entry while preserving their full text", async () => {
+  it("shows saved excerpt cards with read-only original feedback", async () => {
     const user = userEvent.setup()
     render(
       <UserMessageCell
@@ -113,7 +113,7 @@ describe("attachments", () => {
           contextAttachments: [
             {
               id: "excerpt_1",
-              kind: "selection",
+
               text: "The original source excerpt.",
               source: {
                 kind: "file",
@@ -123,10 +123,15 @@ describe("attachments", () => {
             },
             {
               id: "excerpt_2",
-              kind: "annotation",
+
               text: "A previous response.",
               comment: "Please check this.",
-              source: { kind: "message", label: "Assistant message" },
+              source: {
+                sessionId: "session_1",
+                messageId: "response_1",
+                kind: "message",
+                label: "Assistant message",
+              },
               anchor: { startOffset: 0, endOffset: 20 },
             },
           ],
@@ -134,14 +139,19 @@ describe("attachments", () => {
         queued={false}
       />,
     )
-    expect(screen.getByRole("button", { name: "2 references" })).toBeDefined()
-    expect(screen.queryByText("The original source excerpt.")).toBeNull()
-    await user.click(screen.getByRole("button", { name: "2 references" }))
-    const popover = screen.getByRole("dialog", { name: "2 references" })
-    expect(popover.textContent).toContain("The original source excerpt.")
-    expect(popover.textContent).toContain("/workspace/notes.md")
+    expect(
+      screen.getByRole("button", { name: "Open excerpt 1: notes.md" }),
+    ).toBeDefined()
+    expect(
+      screen.getByRole("button", { name: "Open excerpt 2: Assistant message" }),
+    ).toBeDefined()
+    await user.click(
+      screen.getByRole("button", { name: "Open excerpt 2: Assistant message" }),
+    )
+    const popover = screen.getByRole("dialog", { name: "Excerpt details" })
     expect(popover.textContent).toContain("A previous response.")
     expect(popover.textContent).toContain("Please check this.")
+    expect(screen.queryByRole("textbox")).toBeNull()
   })
 })
 

@@ -93,9 +93,10 @@ describe("user input", () => {
   it("keeps quote and annotation references separate from authored text", () => {
     const reference = {
       id: "quote_1",
-      kind: "selection" as const,
+
       text: "quoted text",
       source: {
+        sessionId: "session_1",
         kind: "message" as const,
         label: "Assistant",
         messageId: "item_1",

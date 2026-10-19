@@ -362,7 +362,7 @@ describe("temporary side conversations", () => {
       )
       const attachment = {
         id: "selected_context",
-        kind: "selection",
+
         text: "quoted source text",
         source: {
           kind: "message",
@@ -399,7 +399,7 @@ describe("temporary side conversations", () => {
               references: [
                 {
                   ...attachment,
-                  kind: "annotation",
+
                   anchor: { startOffset: 8, endOffset: 2 },
                 },
               ],

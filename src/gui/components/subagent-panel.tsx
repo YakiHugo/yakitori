@@ -484,9 +484,7 @@ function TraceEntry({
             <blockquote key={excerpt.id}>
               <cite>{excerpt.source.label}</cite>
               <p>{excerpt.text}</p>
-              {excerpt.kind === "annotation" && excerpt.comment ? (
-                <p>{excerpt.comment}</p>
-              ) : null}
+              {excerpt.comment ? <p>{excerpt.comment}</p> : null}
             </blockquote>
           ))}
         </article>

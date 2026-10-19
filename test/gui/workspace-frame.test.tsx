@@ -594,14 +594,13 @@ it("queues selected text in a side chat draft without sending it", async () => {
   expect(
     screen.getByRole("tab", { name: "Side chat", selected: true }),
   ).toBeDefined()
-  expect(screen.getByText("1 selected text snippet")).toBeDefined()
   await user.click(
     screen.getByRole("button", {
-      name: "1 selected text snippet",
+      name: "Open excerpt 1: Assistant message",
     }),
   )
   expect(
-    screen.getByRole("dialog", { name: "selected text snippets" }).textContent,
+    screen.getByRole("dialog", { name: "Excerpt details" }).textContent,
   ).toContain("Consider this explanation.")
   expect(useAppStore.getState().promptExcerpts).toEqual([])
   expect(
@@ -618,7 +617,7 @@ it("reuses an idle side discussion after browsing and confirms closing a draft",
   )
   const excerpt = {
     id: "selection-1",
-    kind: "selection" as const,
+
     text: "First quote",
     source: {
       kind: "file" as const,
@@ -637,7 +636,7 @@ it("reuses an idle side discussion after browsing and confirms closing a draft",
   })
   expect(screen.getAllByRole("tab", { name: "Side chat" })).toHaveLength(1)
   expect(
-    screen.getByRole("button", { name: "2 selected text snippets" }),
+    screen.getByRole("button", { name: "Open excerpt 2: file.ts" }),
   ).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Close Side chat" }))
   expect(screen.getByRole("dialog", { name: "Close Side chat?" })).toBeDefined()
@@ -656,7 +655,7 @@ function selectQuote(element: HTMLElement) {
   fireEvent.pointerUp(element)
 }
 
-it("focuses the side annotation comment before confirmation, then attaches it and focuses its composer", async () => {
+it("attaches side excerpts immediately and edits their comments without changing the main draft", async () => {
   const user = userEvent.setup()
   const rect = new DOMRect(100, 100, 120, 20)
   vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(rect)
@@ -694,70 +693,72 @@ it("focuses the side annotation comment before confirmation, then attaches it an
   const response = await screen.findByText("Side explanation")
   const mainDraft = useAppStore.getState().promptDraft
   selectQuote(response)
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(useAppStore.getState().promptDraft).toEqual(mainDraft)
+  await user.click(
+    screen.getByRole("button", { name: "Quote in conversation" }),
+  )
   const side = () =>
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === tabId)
-  expect(side()).toMatchObject({ excerpts: [] })
-  const comment = screen.getByRole("textbox", {
-    name: "Annotation comment (optional)",
-  })
-  expect(document.activeElement).toBe(comment)
-  await user.type(comment, "A note")
-  expect(side()).toMatchObject({ excerpts: [] })
-  await user.click(screen.getByRole("button", { name: "Done" }))
-  expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Message side chat" }),
-  )
-  expect(
-    screen.queryByRole("dialog", { name: "Annotation comment" }),
-  ).toBeNull()
   expect(side()).toMatchObject({
     excerpts: [
       expect.objectContaining({
         text: "Side explanation",
-        comment: "A note",
-        source: expect.objectContaining({
+        source: {
+          kind: "message",
+          label: "Side chat response",
           sessionId: "side-source",
           messageId: "response",
-        }),
+        },
       }),
     ],
   })
-  await user.click(
-    screen.getByRole("button", { name: "Edit annotation 1 in Side chat" }),
-  )
-  await user.click(screen.getByRole("button", { name: "Remove annotation" }))
-  expect(side()).toMatchObject({ excerpts: [] })
-  expect(screen.getByText("Side explanation")).toBeDefined()
-  selectQuote(response)
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  await user.keyboard("{Enter}")
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message side chat" }),
   )
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1: Side chat response" }),
+  )
+  await user.type(
+    screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
+    "A note",
+  )
+  await user.click(screen.getByRole("button", { name: "Save comment" }))
+  expect(side()).toMatchObject({
+    excerpts: [expect.objectContaining({ comment: "A note" })],
+  })
+  expect(useAppStore.getState().promptDraft).toEqual(mainDraft)
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  // Source session IDs belong to the server; navigation resolves the owning local tab.
+  act(() => {
+    useAppStore.getState().addPromptExcerpt({
+      id: "main-copy",
+      text: "Side explanation",
+      source: {
+        kind: "message",
+        label: "Saved side source",
+        sessionId: "side-source",
+        messageId: "response",
+      },
+    })
+    useWorkspaceStore.getState().addTab("browser")
+  })
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1: Saved side source" }),
+  )
+  await user.click(screen.getByRole("button", { name: "Go to source" }))
+  expect(useWorkspaceStore.getState().activeId).toBe(tabId)
+  act(() => useAppStore.getState().removePromptExcerpt("main-copy"))
+  await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
+  expect(side()).toMatchObject({ excerpts: [] })
   selectQuote(response)
   await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
   expect(useWorkspaceStore.getState().activeId).not.toBe(tabId)
-  expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Message side chat" }),
-  )
   expect(
     rpc.request.mock.calls.filter(([method]) => method === "sideChat/send"),
   ).toEqual([])
 })
 
-it("focuses the main annotation comment before Enter confirms it and focuses the main composer", async () => {
+it("adds a main excerpt directly and focuses the main composer while a side chat is open", async () => {
   const user = userEvent.setup()
-  vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
-    new DOMRect(100, 100, 120, 20),
-  )
-  const rect = new DOMRect(100, 100, 120, 20)
-  vi.spyOn(Range.prototype, "getClientRects").mockReturnValue(
-    Object.assign([rect], { item: () => rect }),
-  )
   useWorkspaceStore.getState().addTab("chat")
   render(
     <WorkspaceFrame>
@@ -777,19 +778,11 @@ it("focuses the main annotation comment before Enter confirms it and focuses the
     </WorkspaceFrame>,
   )
   selectQuote(screen.getByText("Main explanation"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
-  expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
+  await user.click(
+    screen.getByRole("button", { name: "Quote in conversation" }),
   )
-  await user.keyboard("Main note{Shift>}{Enter}{/Shift}More detail")
-  expect(useAppStore.getState().promptExcerpts).toEqual([])
-  await user.keyboard("{Enter}")
   expect(useAppStore.getState().promptExcerpts).toEqual([
-    expect.objectContaining({
-      text: "Main explanation",
-      comment: "Main note\nMore detail",
-    }),
+    expect.objectContaining({ text: "Main explanation" }),
   ])
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message the Mate" }),

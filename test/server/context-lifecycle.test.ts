@@ -93,7 +93,7 @@ async function admit(
 const excerpts: readonly ContextExcerpt[] = [
   {
     id: "selection_1",
-    kind: "selection",
+
     text: "frozen quoted passage",
     source: {
       kind: "message",
@@ -104,7 +104,7 @@ const excerpts: readonly ContextExcerpt[] = [
   },
   {
     id: "annotation_1",
-    kind: "annotation",
+
     text: "other passage",
     comment: "explain this",
     source: { kind: "file", label: "index.ts", path: "/project/index.ts" },

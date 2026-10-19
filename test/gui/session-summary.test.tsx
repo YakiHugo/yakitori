@@ -182,7 +182,7 @@ it("keeps the session branch stable and shows current and historical PRs", async
 it("shows submitted sources once and expands their original content", async () => {
   const excerpt = {
     id: "excerpt-1",
-    kind: "selection" as const,
+
     text: "export const answer = 42",
     source: {
       kind: "file" as const,

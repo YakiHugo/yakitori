@@ -13,7 +13,7 @@ export function formatInputContext(
         text: excerpt.text,
         source: excerpt.source,
       })}`,
-      ...(excerpt.kind === "annotation" && excerpt.comment?.trim()
+      ...(excerpt.comment?.trim()
         ? [
             `User feedback:\n${JSON.stringify({
               referenceId: excerpt.id,
