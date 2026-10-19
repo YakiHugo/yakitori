@@ -227,7 +227,12 @@
 .markdown :where(:not(pre) > code) {
   padding: 1px 6px;
   border-radius: 6px;
-  background: var(--prose-code-background, var(--muted));
+  background: color-mix(
+    in oklab,
+    var(--prose-code-background, var(--muted)),
+    var(--foreground) 8%
+  );
+  color: var(--prose-emphasis, var(--foreground));
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
@@ -270,6 +275,7 @@
 }
 .markdown .markdown-resource-link {
   display: inline;
+  margin-inline: 2px;
   white-space: nowrap;
   font-size: inherit;
   font-weight: 500;
@@ -277,6 +283,11 @@
 .markdown-link-label {
   white-space: normal;
   overflow-wrap: anywhere;
+}
+.markdown-link-line {
+  color: var(--muted-foreground);
+  font-size: 0.85em;
+  font-weight: 400;
 }
 .markdown .markdown-resource-link:hover {
   text-decoration-style: dashed;
@@ -288,7 +299,7 @@
   display: inline-block;
   width: 1em;
   height: 1lh;
-  margin-inline-end: 3px;
+  margin-inline-end: 4px;
   vertical-align: bottom;
 }
 .markdown-link-icon > :is(svg, img) {
@@ -307,6 +318,44 @@
   padding: 0;
   background: none;
   font: inherit;
+}
+/* Shared file-type glyph colors (file tree, markdown file links). */
+.file-glyph {
+  color: var(--muted-foreground);
+}
+.file-glyph:is([data-language="typescript"], [data-language="tsx"]) {
+  color: #4b98d2;
+}
+.file-glyph:is(
+  [data-language="javascript"],
+  [data-language="jsx"],
+  [data-language="json"],
+  [data-language="jsonc"]
+) {
+  color: #b79437;
+}
+.file-glyph:is(
+  [data-language="css"],
+  [data-language="html"],
+  [data-language="vue"],
+  [data-language="svelte"]
+) {
+  color: #bc7da2;
+}
+.file-glyph:is(
+  [data-language="markdown"],
+  [data-language="python"],
+  [data-language="go"]
+) {
+  color: #5b9dab;
+}
+.file-glyph:is(
+  [data-language="image"],
+  [data-language="shellscript"],
+  [data-language="yaml"],
+  [data-language="toml"]
+) {
+  color: #7e9a63;
 }
 .markdown table {
   display: block;

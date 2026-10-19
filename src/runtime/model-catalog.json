@@ -186,11 +186,13 @@
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": false,
-      "displayName": "K2.7 Coding",
-      "effortStyle": "none",
+      "displayName": "K2.8 Preview",
+      "effortStyle": "levels",
       "inputModalities": ["text", "image", "video"],
-      "contextWindowTokens": 262144,
-      "maxContextWindowTokens": 262144,
+      "efforts": ["low", "high", "max"],
+      "defaultEffort": "max",
+      "contextWindowTokens": 1048576,
+      "maxContextWindowTokens": 1048576,
       "effectiveContextWindowPercent": 100
     },
     {
@@ -218,7 +220,7 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image", "video"],
       "efforts": ["low", "high", "max"],
-      "defaultEffort": "max",
+      "defaultEffort": "high",
       "contextWindowTokens": 1048576,
       "maxContextWindowTokens": 1048576,
       "effectiveContextWindowPercent": 100
@@ -234,7 +236,7 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image"],
       "efforts": ["low", "high", "max"],
-      "defaultEffort": "max",
+      "defaultEffort": "high",
       "contextWindowTokens": 262144,
       "maxContextWindowTokens": 262144,
       "effectiveContextWindowPercent": 100

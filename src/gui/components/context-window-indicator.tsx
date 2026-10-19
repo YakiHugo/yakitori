@@ -3,7 +3,16 @@ const compactTokens = new Intl.NumberFormat("en", {
   maximumFractionDigits: 0,
 })
 
+// Model windows come in decimal (272000) and binary (262144 = 256K) sizes.
+// Format binary-round values on a 1024 base so a 256K window reads "256k",
+// not the decimal-compact "262k".
 function formatTokens(tokens: number): string {
+  if (tokens >= 1024 * 1024 && tokens % (1024 * 1024) === 0) {
+    return `${tokens / (1024 * 1024)}m`
+  }
+  if (tokens >= 1024 && tokens % 1024 === 0) {
+    return `${tokens / 1024}k`
+  }
   return compactTokens.format(tokens).toLowerCase()
 }
 

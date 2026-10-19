@@ -18,6 +18,14 @@ it("shows the latest context use against the effective model window", () => {
   )
 })
 
+it("formats binary-sized windows on a 1024 base", () => {
+  render(<ContextWindowIndicator usedTokens={40_960} capacity={262_144} />)
+
+  expect(screen.getByRole("tooltip").textContent).toContain(
+    "40k tokens used, 256k total",
+  )
+})
+
 it("does not claim a percentage before the model has reported context use", () => {
   render(<ContextWindowIndicator capacity={258_000} />)
 

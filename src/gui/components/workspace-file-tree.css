@@ -120,43 +120,6 @@
 .file-tree-file {
   padding-left: 24px;
 }
-.file-tree-file-icon {
-  color: var(--muted-foreground);
-}
-.file-tree-file-icon:is([data-language="typescript"], [data-language="tsx"]) {
-  color: #4b98d2;
-}
-.file-tree-file-icon:is(
-  [data-language="javascript"],
-  [data-language="jsx"],
-  [data-language="json"],
-  [data-language="jsonc"]
-) {
-  color: #b79437;
-}
-.file-tree-file-icon:is(
-  [data-language="css"],
-  [data-language="html"],
-  [data-language="vue"],
-  [data-language="svelte"]
-) {
-  color: #bc7da2;
-}
-.file-tree-file-icon:is(
-  [data-language="markdown"],
-  [data-language="python"],
-  [data-language="go"]
-) {
-  color: #5b9dab;
-}
-.file-tree-file-icon:is(
-  [data-language="image"],
-  [data-language="shellscript"],
-  [data-language="yaml"],
-  [data-language="toml"]
-) {
-  color: #7e9a63;
-}
 .file-tree-match {
   display: flex;
   flex: 1;

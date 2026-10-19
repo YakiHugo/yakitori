@@ -151,7 +151,7 @@ describe("model catalog context windows", () => {
         provider: "kimi",
         model: "kimi-for-coding",
       })?.contextWindowTokens,
-    ).toBe(262_144)
+    ).toBe(1_048_576)
   })
 
   it("validates the explicit Grok effort sets without inference", () => {
@@ -292,10 +292,10 @@ describe("model catalog context windows", () => {
       }),
     ).toBe("medium")
     expect(resolveModelWireEffort({ provider: "kimi", model: "k3" })).toBe(
-      "max",
+      "high",
     )
     expect(resolveModelWireEffort({ provider: "kimi", model: "k3-256k" })).toBe(
-      "max",
+      "high",
     )
     expect(
       resolveModelWireEffort({ provider: "openai", model: "gpt-6-astra" }),

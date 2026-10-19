@@ -102,7 +102,7 @@ export const providerPresets: readonly ProviderPreset[] = [
     models: [
       {
         id: "kimi-k3",
-        contextWindowTokens: 1_000_000,
+        contextWindowTokens: 1_048_576,
         // The Chat Completions adapter currently sends still images only.
         inputModalities: ["text", "image"],
         efforts: ["low", "high", "max"],
