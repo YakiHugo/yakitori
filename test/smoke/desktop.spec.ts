@@ -311,7 +311,7 @@ test("embedded browser selections attach editable excerpts to main and side draf
           .find((contents) => contents.getURL() === sourceUrl)
         if (!contents) throw new Error("Missing embedded browser")
         await contents.executeJavaScript(
-          "const range = document.createRange(); range.selectNodeContents(document.getElementById('quote')); window.getSelection().removeAllRanges(); window.getSelection().addRange(range)",
+          "(() => { const range = document.createRange(); range.selectNodeContents(document.getElementById('quote')); window.getSelection().removeAllRanges(); window.getSelection().addRange(range) })()",
         )
       }, url)
     await selectPageText()
