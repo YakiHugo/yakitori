@@ -1,4 +1,4 @@
-import { FileText, Globe } from "lucide-react"
+import { Globe } from "lucide-react"
 import type { MouseEvent, ReactNode } from "react"
 import {
   createContext,
@@ -23,6 +23,7 @@ import {
 import { cn } from "../lib/utils.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { FileGlyph } from "./file-glyph.tsx"
 import { MarkdownImage } from "./markdown-image.tsx"
 import { MermaidDiagram } from "./mermaid-diagram.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
@@ -225,6 +226,15 @@ function MarkdownLink({
   }
   const file = parseFileHref(href.replace(/^file:\/\//i, ""))
   if (file.path === "") return <span>{children}</span>
+  // Codex-style file chip: language glyph plus a line suffix. The suffix is
+  // skipped when the authored label already ends with the line, and hidden
+  // from the accessible name either way.
+  const labelText = typeof children === "string" ? children.trim() : undefined
+  const lineSuffix =
+    file.line !== undefined &&
+    !(labelText !== undefined && /:\d+(?::\d+)?$/.test(labelText))
+      ? file.line
+      : undefined
   // File documents resolve links from their directory; conversation links
   // continue to resolve from the workspace. Normalize before opening a tab so
   // parent links don't become a path outside that tab's filesystem root.
@@ -275,9 +285,14 @@ function MarkdownLink({
       }}
     >
       <span className="markdown-link-icon" aria-hidden="true">
-        <FileText />
+        <FileGlyph path={file.path} />
       </span>
       <span className="markdown-link-label">{children}</span>
+      {lineSuffix === undefined ? null : (
+        <span className="markdown-link-line" aria-hidden="true">
+          :{lineSuffix}
+        </span>
+      )}
     </a>
   )
 }

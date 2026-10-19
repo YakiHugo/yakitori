@@ -1,13 +1,7 @@
 import {
   ChevronRight,
-  File,
-  FileCode2,
-  FileImage,
-  FileJson2,
-  FileText,
   Folder,
   FolderOpen,
-  Link,
   RefreshCw,
   Search,
   X,
@@ -18,8 +12,8 @@ import type {
   WorkspaceListResponse,
 } from "../../protocol/workspace.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
-import { languageForPath } from "../lib/syntax-highlighter.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { FileGlyph } from "./file-glyph.tsx"
 import "./workspace-file-tree.css"
 
 type TreeProps = Readonly<{
@@ -279,30 +273,3 @@ const Directory = memo(function Directory({
     </li>
   )
 })
-
-function FileGlyph({
-  path,
-  symlink,
-}: Readonly<{ path: string; symlink?: boolean }>) {
-  const language = languageForPath(path)
-  const image = /\.(png|jpe?g|gif|webp|ico|svg)$/i.test(path)
-  const Icon = symlink
-    ? Link
-    : image
-      ? FileImage
-      : language === "markdown"
-        ? FileText
-        : language === "json" || language === "jsonc"
-          ? FileJson2
-          : language
-            ? FileCode2
-            : File
-  return (
-    <Icon
-      size={15}
-      aria-hidden="true"
-      className="file-tree-file-icon"
-      data-language={image ? "image" : (language ?? "text")}
-    />
-  )
-}

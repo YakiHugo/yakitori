@@ -150,6 +150,44 @@ describe("links", () => {
     })
   })
 
+  it("marks file links with a language glyph and a line suffix", () => {
+    render(
+      <MarkdownView
+        text="See [the store](src/core/session.ts:1037)."
+        workspaceRoot="/repo"
+      />,
+    )
+    const link = screen.getByRole("link", { name: "the store" })
+    expect(link.querySelector("[data-language='typescript']")).not.toBeNull()
+    expect(link.textContent).toContain(":1037")
+  })
+
+  it("renders the official language logo for known file types", () => {
+    render(
+      <MarkdownView
+        text="See [the store](src/core/session.ts:1037)."
+        workspaceRoot="/repo"
+      />,
+    )
+    const link = screen.getByRole("link", { name: "the store" })
+    expect(link.querySelector("svg path")?.getAttribute("fill")).toBe(
+      "#3178C6",
+    )
+  })
+
+  it("does not repeat the line when the link label already carries it", () => {
+    render(
+      <MarkdownView
+        text="See [src/core/session.ts:1037](src/core/session.ts:1037)."
+        workspaceRoot="/repo"
+      />,
+    )
+    const link = screen.getByRole("link", {
+      name: "src/core/session.ts:1037",
+    })
+    expect(link.textContent?.match(/:1037/g)).toHaveLength(1)
+  })
+
   it.each([
     ["README.md:12", "README.md", "/repo", 12],
     ["README.md:12:3", "README.md", "/repo", 12],
