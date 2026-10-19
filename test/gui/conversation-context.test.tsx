@@ -3,7 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
-import type { ResponseAnnotation } from "../../src/gui/conversation-context.ts"
+import type { ContextExcerpt } from "../../src/gui/conversation-context.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -27,9 +27,9 @@ vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
   getAppRpcClient: () => fakeRef.current,
 }))
 
-const excerpt: ResponseAnnotation = {
+const excerpt: ContextExcerpt = {
   id: "excerpt-first",
-  kind: "annotation",
+
   text: "const result = await run()",
   comment: "Check the error handling.",
   anchor: { startOffset: 0, endOffset: 25 },
@@ -106,7 +106,9 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
   useAppStore.getState().addPromptExcerpt(excerpt)
   const user = userEvent.setup()
   render(<Composer />)
-  expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
+  ).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
@@ -123,13 +125,17 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
   expect(useAppStore.getState().promptDraft).toEqual(
     inputParts("Please review"),
   )
-  expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
+  ).toBeDefined()
   await act(async () => held.acknowledge())
   await waitFor(() =>
     expect(useAppStore.getState().promptDraft).toBeUndefined(),
   )
   expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(screen.queryByRole("button", { name: "1 annotation" })).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: "Open excerpt 1: main.ts" }),
+  ).toBeNull()
 })
 
 it("retains the draft and annotations when admission fails", async () => {
@@ -167,6 +173,30 @@ it("preserves annotations edited or added while the submitted snapshot is pendin
   ])
 })
 
+it("preserves a comment being typed in the excerpt card while its earlier snapshot is acknowledged", async () => {
+  const held = holdAdmission()
+  useAppStore.getState().addPromptExcerpt(excerpt)
+  const user = userEvent.setup()
+  render(<Composer />)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() =>
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
+  )
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
+  )
+  const comment = screen.getByRole("textbox", {
+    name: "Excerpt comment (optional)",
+  })
+  await user.clear(comment)
+  await user.type(comment, "Still editing")
+  await act(async () => held.acknowledge())
+  expect((comment as HTMLTextAreaElement).value).toBe("Still editing")
+  expect(useAppStore.getState().promptExcerpts[0]?.comment).toBe(
+    "Still editing",
+  )
+})
+
 it("keeps annotations with their session when another session is selected during admission", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
@@ -198,15 +228,15 @@ it("lets the composer preview and remove annotations without expanding an inline
     (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)
       .disabled,
   ).toBe(false)
-  await user.click(screen.getByRole("button", { name: "1 annotation" }))
-  expect(screen.getByText("const result = await run()")).toBeDefined()
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
+  )
+  expect(screen.getAllByText("const result = await run()")).toHaveLength(2)
   expect(
-    screen.queryByRole("textbox", { name: "Annotation comment (optional)" }),
-  ).toBeNull()
-  expect(
-    screen.getByRole("button", { name: "Edit annotation 1" }),
+    screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
   ).toBeDefined()
-  await user.click(screen.getByRole("button", { name: "Remove annotation 1" }))
+  expect(screen.getByRole("button", { name: "Save comment" })).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
   expect(
     (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)
       .disabled,

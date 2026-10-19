@@ -3,6 +3,5 @@ export {
   type ContextSource,
   isContextExcerpt,
   isContextExcerpts,
-  type ResponseAnnotation,
-  type SelectedTextAttachment,
+  type RenderedTextAnchor,
 } from "../protocol/input-context.ts"

@@ -506,13 +506,17 @@ function SummaryPopover({
                           <span>{excerpt.source.label}</span>
                           <ChevronDown size={12} aria-hidden="true" />
                         </summary>
-                        {excerpt.source.path || excerpt.source.url ? (
+                        {excerpt.source.kind !== "message" ? (
                           <p className="session-summary-source-location">
-                            {excerpt.source.path ?? excerpt.source.url}
+                            {excerpt.source.kind === "file"
+                              ? excerpt.source.path
+                              : excerpt.source.kind === "browser"
+                                ? excerpt.source.url
+                                : ""}
                           </p>
                         ) : null}
                         <blockquote>{excerpt.text}</blockquote>
-                        {excerpt.kind === "annotation" && excerpt.comment ? (
+                        {excerpt.comment ? (
                           <p className="session-summary-annotation">
                             {excerpt.comment}
                           </p>

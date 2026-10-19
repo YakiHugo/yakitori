@@ -56,6 +56,7 @@ import {
   type ComposerSuggestion,
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
+import { ContextExcerptCards } from "./context-excerpt-cards.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
@@ -64,7 +65,6 @@ import {
   skillMentionText,
 } from "./prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
-import { ContextExcerptChips } from "./selection-actions.tsx"
 import { Button } from "./ui/button.tsx"
 
 type SlashCommand = Readonly<{
@@ -141,6 +141,7 @@ export function ComposerSurface({
   sessionId,
   editorKey,
   draft: parts,
+  excerptOwnerId,
   excerpts,
   sessionSkills,
   sessionSkillsError,
@@ -178,6 +179,7 @@ export function ComposerSurface({
   sessionId?: string | undefined
   editorKey?: string | number | undefined
   draft: InputDraft
+  excerptOwnerId?: string
   excerpts: readonly ContextExcerpt[]
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError?: string | undefined
@@ -792,7 +794,9 @@ export function ComposerSurface({
               commandPanel
             )}
           </div>
-          <ContextExcerptChips
+          <ContextExcerptCards
+            key={excerptOwnerId}
+            ownerId={excerptOwnerId}
             excerpts={excerpts}
             onRemove={removePromptExcerpt}
             onChange={updatePromptExcerpt}

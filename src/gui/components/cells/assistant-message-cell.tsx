@@ -17,12 +17,16 @@ export function AssistantMessageCell({
   const sessionId = useAppStore((state) => state.selection.sessionId)
   return (
     <div
-      {...contextSourceAttributes({
-        kind: "message",
-        label: "Assistant message",
-        messageId: entry.itemId,
-        ...(sessionId ? { sessionId } : {}),
-      })}
+      {...contextSourceAttributes(
+        sessionId
+          ? {
+              kind: "message",
+              label: "Assistant message",
+              messageId: entry.itemId,
+              sessionId,
+            }
+          : undefined,
+      )}
     >
       <LiveTextNotice entry={entry} />
       <MarkdownView

@@ -28,11 +28,6 @@ import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
-import {
-  type ContextSourceNavigation,
-  findContextSource,
-  revealContextSourceEvent,
-} from "./annotation-layer.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -41,7 +36,14 @@ import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import { ConversationFind } from "./conversation-find.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
-import { reasoningSections } from "./reasoning-trace.tsx"
+import {
+  type ContextSourceNavigation,
+  findContextSource,
+  revealContextSourceEvent,
+} from "./excerpt-source.tsx"
+import {
+  reasoningSections,
+} from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"

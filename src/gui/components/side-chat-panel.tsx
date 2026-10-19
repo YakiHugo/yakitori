@@ -37,12 +37,12 @@ import {
   type ComposerAttachmentImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
+import { ContextExcerptCards } from "./context-excerpt-cards.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { ModelSelector } from "./model-selector.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
 import { PromptEditor } from "./prompt-editor.tsx"
-import { ContextExcerptChips } from "./selection-actions.tsx"
 
 export function SideChatPanel({
   tab,
@@ -504,7 +504,7 @@ export function SideChatPanel({
               {message.role === "user" ? (
                 <>
                   {message.content.references?.length ? (
-                    <ContextExcerptChips
+                    <ContextExcerptCards
                       excerpts={message.content.references}
                     />
                   ) : null}
@@ -645,6 +645,7 @@ export function SideChatPanel({
         <ComposerSurface
           sessionId={tab.id}
           editorKey={tab.id}
+          excerptOwnerId={`side:${tab.id}`}
           draft={tab.draft}
           excerpts={tab.excerpts}
           sessionSkills={sessionSkills}
@@ -669,20 +670,10 @@ export function SideChatPanel({
           }
           setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}
           removePromptExcerpt={(id) =>
-            updateDraft(
-              tab.id,
-              tab.draft,
-              tab.excerpts.filter((entry) => entry.id !== id),
-            )
+            useWorkspaceStore.getState().removeChatExcerpt(tab.id, id)
           }
           updatePromptExcerpt={(excerpt) =>
-            updateDraft(
-              tab.id,
-              tab.draft,
-              tab.excerpts.map((entry) =>
-                entry.id === excerpt.id ? excerpt : entry,
-              ),
-            )
+            useWorkspaceStore.getState().updateChatExcerpt(tab.id, excerpt)
           }
           onSubmit={(parts) => void send(parts)}
           onCancel={() => void cancel()}

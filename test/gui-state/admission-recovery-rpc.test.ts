@@ -1,8 +1,8 @@
-import { bindExecution } from "../support/session-execution.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
+import { bindExecution } from "../support/session-execution.ts"
 import "./setup-store-environment.ts"
 import { afterEach, expect, it, vi } from "vitest"
-import type { ResponseAnnotation } from "../../src/core/input-context.ts"
+import type { ContextExcerpt } from "../../src/core/input-context.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createExecutionViewState } from "../../src/gui/execution-view.ts"
 import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
@@ -125,13 +125,18 @@ it("reconciles a committed queued input by ID without resending after its RPC ac
       }
       return response.result
     }
-    const annotation: ResponseAnnotation = {
+    const annotation: ContextExcerpt = {
       id: "annotation_one",
-      kind: "annotation",
+
       text: "Selected answer",
       comment: "Check this",
       anchor: { startOffset: 0, endOffset: 15 },
-      source: { kind: "message", label: "Assistant", messageId: "answer_one" },
+      source: {
+        sessionId: "session_1",
+        kind: "message",
+        label: "Assistant",
+        messageId: "answer_one",
+      },
     }
     useAppStore.setState({
       ...createInitialAppState(),

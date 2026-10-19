@@ -1,69 +1,90 @@
-export type ContextSource = Readonly<{
-  kind: "message" | "file" | "browser"
-  label: string
-  sessionId?: string
-  messageId?: string
-  path?: string
-  url?: string
+export type ContextSource =
+  | Readonly<{
+      kind: "message"
+      label: string
+      sessionId: string
+      messageId: string
+    }>
+  | Readonly<{
+      kind: "file"
+      label: string
+      path: string
+      sessionId?: string
+    }>
+  | Readonly<{
+      kind: "browser"
+      label: string
+      url: string
+    }>
+
+// Coordinates address rendered DOM text, never Markdown or file byte offsets.
+export type RenderedTextAnchor = Readonly<{
+  startOffset: number
+  endOffset: number
 }>
 
-export type SelectedTextAttachment = Readonly<{
+export type ContextExcerpt = Readonly<{
   id: string
-  kind: "selection"
   text: string
   source: ContextSource
-}>
-
-export type ResponseAnnotation = Readonly<{
-  id: string
-  kind: "annotation"
-  text: string
   comment?: string
-  source: ContextSource
-  // UTF-16 offsets in the rendered source text, independent of provider citations.
-  anchor: Readonly<{ startOffset: number; endOffset: number }>
+  anchor?: RenderedTextAnchor
 }>
 
-export type ContextExcerpt = SelectedTextAttachment | ResponseAnnotation
+export function isContextSource(value: unknown): value is ContextSource {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false
+  const source = value as Record<string, unknown>
+  const required =
+    source.kind === "message"
+      ? ["sessionId", "messageId"]
+      : source.kind === "file"
+        ? ["path"]
+        : source.kind === "browser"
+          ? ["url"]
+          : undefined
+  if (!required) return false
+  const allowed = ["kind", "label", ...required]
+  if (source.kind === "file") allowed.push("sessionId")
+  return (
+    ["label", ...required].every(
+      (key) => typeof source[key] === "string" && source[key].trim().length > 0,
+    ) &&
+    Object.keys(source).every((key) => allowed.includes(key)) &&
+    (source.kind !== "file" ||
+      source.sessionId === undefined ||
+      (typeof source.sessionId === "string" && !!source.sessionId.trim()))
+  )
+}
 
 export function isContextExcerpt(value: unknown): value is ContextExcerpt {
-  if (typeof value !== "object" || value === null) return false
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false
   const entry = value as Record<string, unknown>
   if (
     typeof entry.id !== "string" ||
     !entry.id.trim() ||
     typeof entry.text !== "string" ||
     !entry.text.trim() ||
-    typeof entry.source !== "object" ||
-    entry.source === null
-  )
-    return false
-  const source = entry.source as Record<string, unknown>
-  if (
-    !["message", "file", "browser"].includes(String(source.kind)) ||
-    typeof source.label !== "string" ||
-    !source.label.trim() ||
-    Object.keys(source).some(
-      (key) =>
-        !["kind", "label", "sessionId", "messageId", "path", "url"].includes(
-          key,
-        ),
-    ) ||
-    !["sessionId", "messageId", "path", "url"].every(
-      (key) => source[key] === undefined || typeof source[key] === "string",
+    !isContextSource(entry.source) ||
+    (entry.comment !== undefined && typeof entry.comment !== "string") ||
+    Object.keys(entry).some(
+      (key) => !["id", "text", "source", "comment", "anchor"].includes(key),
     )
   )
     return false
-  if (entry.kind === "selection") return true
+  if (entry.anchor === undefined) return true
   if (
-    entry.kind !== "annotation" ||
-    (entry.comment !== undefined && typeof entry.comment !== "string") ||
     typeof entry.anchor !== "object" ||
-    entry.anchor === null
+    entry.anchor === null ||
+    Array.isArray(entry.anchor)
   )
     return false
   const anchor = entry.anchor as Record<string, unknown>
   return (
+    Object.keys(anchor).every((key) =>
+      ["startOffset", "endOffset"].includes(key),
+    ) &&
     Number.isSafeInteger(anchor.startOffset) &&
     Number.isSafeInteger(anchor.endOffset) &&
     (anchor.startOffset as number) >= 0 &&

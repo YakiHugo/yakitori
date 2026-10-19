@@ -7,8 +7,8 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
 import { createThreadCollaboration } from "../../src/runtime/thread-collaboration.ts"
-import { createThreadCollaborationTools } from "../../src/runtime/tools/thread-collaboration.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createThreadCollaborationTools } from "../../src/runtime/tools/thread-collaboration.ts"
 import { canonicalToolName } from "../../src/runtime/tools/tool-name.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import {
@@ -75,7 +75,7 @@ describe("independent session collaboration", () => {
         contextAttachments: [
           {
             id: "selection",
-            kind: "selection" as const,
+
             text: "Important selected paragraph",
             source: {
               kind: "message" as const,

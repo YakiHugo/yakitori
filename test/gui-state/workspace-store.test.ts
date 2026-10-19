@@ -179,9 +179,14 @@ it("opens a fresh side chat when the previous one has expired", async () => {
   store.askInSideChat(
     {
       id: "quote",
-      kind: "selection",
+
       text: "Explain this",
-      source: { kind: "message", label: "Main response" },
+      source: {
+        sessionId: "session_1",
+        messageId: "response_1",
+        kind: "message",
+        label: "Main response",
+      },
     },
     "parent",
   )
@@ -208,7 +213,6 @@ it("keeps selected context in its explicit side draft and advances focus only wh
   const first = store.addTab("chat", "main")
   const second = store.addTab("chat", "main")
   const excerpt = {
-    kind: "selection" as const,
     id: "quote",
     text: "Answer",
     source: {
@@ -246,10 +250,14 @@ it("asks in a distinct side chat and does not choose between unrelated idle draf
   store.setSession("main")
   const first = store.addTab("chat", "main")
   const excerpt = {
-    kind: "selection" as const,
     id: "quote",
     text: "Answer",
-    source: { kind: "message" as const, label: "Response" },
+    source: {
+      sessionId: "session_1",
+      messageId: "response_1",
+      kind: "message" as const,
+      label: "Response",
+    },
   }
   store.askInSideChat(excerpt, "main", first)
   const second = useWorkspaceStore.getState().activeId
@@ -297,9 +305,14 @@ it("cannot activate or add excerpts to a tab owned by another session", async ()
   store.activate(first)
   store.addChatExcerpt(first, {
     id: "quote",
-    kind: "selection",
+
     text: "Text",
-    source: { kind: "message", label: "Response" },
+    source: {
+      sessionId: "session_1",
+      messageId: "response_1",
+      kind: "message",
+      label: "Response",
+    },
   })
   expect(useWorkspaceStore.getState().activeId).toBe(second)
   expect(
@@ -328,4 +341,32 @@ it("replaces background chat status without retaining ended turns or old errors"
   expect(tab).not.toHaveProperty("error")
   expect(tab).toMatchObject({ hasMessages: true, expired: false })
   expect(useWorkspaceStore.getState().activeId).toBe(second)
+})
+
+it("edits and removes an excerpt only in the named side draft", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("parent")
+  const first = store.addTab("chat", "parent")
+  const second = store.addTab("chat", "parent")
+  const excerpt = {
+    id: "shared_source",
+    text: "Original",
+    source: { kind: "file" as const, label: "File", path: "/repo/file.ts" },
+  }
+  store.addChatExcerpt(first, excerpt)
+  store.addChatExcerpt(second, excerpt)
+  store.updateChatExcerpt(first, { ...excerpt, comment: "First only" })
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === second),
+  ).toMatchObject({ excerpts: [excerpt] })
+  store.removeChatExcerpt(first, excerpt.id)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ excerpts: [] })
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === second),
+  ).toMatchObject({ excerpts: [excerpt] })
 })

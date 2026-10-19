@@ -3588,7 +3588,7 @@ describe("new session drafts", () => {
     }
     const excerpt = {
       id: "excerpt_1",
-      kind: "selection" as const,
+
       text: "selected context",
       source: { kind: "file" as const, label: "README", path: "/p/README" },
     }

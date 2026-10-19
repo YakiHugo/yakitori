@@ -1,4 +1,3 @@
-import { bindExecution } from "../support/session-execution.ts"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -13,6 +12,7 @@ import { fingerprintOperation } from "../../src/kernel/operation.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
+import { bindExecution } from "../support/session-execution.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -230,10 +230,11 @@ async function recoveryFixture(
   const references = [
     {
       id: "annotation_saved",
-      kind: "annotation" as const,
+
       text: "selected answer",
       comment: "my feedback",
       source: {
+        sessionId: "session_1",
         kind: "message" as const,
         label: "Assistant",
         messageId: "item_previous",

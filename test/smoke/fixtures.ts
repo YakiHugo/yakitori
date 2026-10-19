@@ -987,23 +987,25 @@ async function runOrderedInputFlow(
       selection?.addRange(range)
       node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
     })
-    await page.getByRole("button", { name: "Add to conversation" }).click()
-    const marker = page.getByRole("button", { name: "Edit annotation 1" })
+    await page.getByRole("button", { name: "Quote in conversation" }).click()
+    const marker = page.getByRole("button", {
+      name: "Open excerpt 1 in main conversation",
+    })
     await expect(marker).toBeVisible()
     await expect
       .poll(() =>
         page.evaluate(() =>
-          Array.from(
-            CSS.highlights.get("yakitori-response-annotations") ?? [],
-          ).map((range) => ({
-            text: range.toString(),
-          })),
+          Array.from(CSS.highlights.get("yakitori-excerpts") ?? []).map(
+            (range) => ({
+              text: range.toString(),
+            }),
+          ),
         ),
       )
       .toEqual([{ text: "After attachment." }])
     await marker.click()
     await page
-      .getByRole("textbox", { name: "Annotation comment (optional)" })
+      .getByRole("textbox", { name: "Excerpt comment (optional)" })
       .fill("Explain the text after the attachment.")
     const screenshot = testInfo.outputPath("ordered-user-input.png")
     await page.screenshot({ path: screenshot, animations: "disabled" })
@@ -1011,7 +1013,7 @@ async function runOrderedInputFlow(
       path: screenshot,
       contentType: "image/png",
     })
-    await page.getByRole("button", { name: "Remove annotation" }).click()
+    await page.getByRole("button", { name: "Remove excerpt 1" }).click()
     await expect(marker).toHaveCount(0)
   } finally {
     if (!usesDesktop)

@@ -238,6 +238,7 @@ export function Composer() {
     <ComposerSurface
       sessionId={sessionId}
       editorKey={selectionRevision}
+      excerptOwnerId={`main:${selectionRevision}`}
       draft={draft}
       excerpts={excerpts}
       sessionSkills={sessionSkills}
@@ -270,8 +271,20 @@ export function Composer() {
         entry.kind === "user_input" ? [entry.content] : [],
       )}
       setPromptDraft={setPromptDraft}
-      removePromptExcerpt={removePromptExcerpt}
-      updatePromptExcerpt={updatePromptExcerpt}
+      removePromptExcerpt={(id) => {
+        if (
+          useAppStore.getState().sessionSelectionIntentRevision ===
+          selectionRevision
+        )
+          removePromptExcerpt(id)
+      }}
+      updatePromptExcerpt={(excerpt) => {
+        if (
+          useAppStore.getState().sessionSelectionIntentRevision ===
+          selectionRevision
+        )
+          updatePromptExcerpt(excerpt)
+      }}
       onSubmit={(parts, mode) => {
         const text = inputContentText(inputContent(parts))
         const images = inputContentAttachments(inputContent(parts))

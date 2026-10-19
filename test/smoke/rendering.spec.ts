@@ -343,11 +343,11 @@ test("new session composer stays centered through creation and docks after the f
   await renderingApp.finish(prompt)
 })
 
-test("selected text focuses its annotation comment until confirmation focuses the composer", async ({
+test("selected text attaches immediately and its card edits optional comments", async ({
   page,
   renderingApp,
-}) => {
-  const prompt = "Explain the annotation focus order."
+}, testInfo) => {
+  const prompt = "Explain the excerpt focus order."
   const explanation = "Review this explanation before adding it to the draft."
   await renderingApp.send(prompt)
   await renderingApp.append(prompt, explanation)
@@ -356,11 +356,7 @@ test("selected text focuses its annotation comment until confirmation focuses th
     .getByRole("region", { name: "Response", exact: true })
     .getByText(explanation, { exact: true })
   const composer = page.getByRole("textbox", { name: "Message the Mate" })
-  const annotations = page
-    .locator("[data-composer-surface]")
-    .getByRole("button", { name: /^\d+ annotations?$/ })
-
-  for (const [index, confirmation] of ["Done", "Enter"].entries()) {
+  for (const [index, confirmation] of ["Save comment", "Enter"].entries()) {
     await response.evaluate((element) => {
       const range = document.createRange()
       range.selectNodeContents(element)
@@ -368,26 +364,29 @@ test("selected text focuses its annotation comment until confirmation focuses th
       window.getSelection()?.addRange(range)
       element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
     })
-    await page.getByRole("button", { name: "Add to conversation" }).click()
+    await page.getByRole("button", { name: "Quote in conversation" }).click()
+    await expect(composer).toBeFocused()
+    const card = page.locator("[data-composer-surface]").getByRole("button", {
+      name: `Open excerpt ${index + 1}: Assistant message`,
+    })
+    await card.click()
     const comment = page.getByRole("textbox", {
-      name: "Annotation comment (optional)",
+      name: "Excerpt comment (optional)",
     })
     await expect(comment).toBeFocused()
-    await expect(composer).not.toBeFocused()
-    if (index === 0) await expect(annotations).toHaveCount(0)
-    else await expect(annotations).toHaveText("1 annotation")
-
     await comment.fill(`Confirmed with ${confirmation}`)
-    await expect(comment).toBeFocused()
-    if (confirmation === "Done")
-      await page.getByRole("button", { name: "Done", exact: true }).click()
-    else await comment.press("Enter")
-
+    if (index === 0)
+      await page.screenshot({
+        path: testInfo.outputPath("excerpt-cards.png"),
+        animations: "disabled",
+      })
+    if (confirmation === "Enter") await comment.press("Enter")
+    else
+      await page
+        .getByRole("button", { name: "Save comment", exact: true })
+        .click()
     await expect(comment).toHaveCount(0)
-    await expect(composer).toBeFocused()
-    await expect(annotations).toHaveText(
-      index === 0 ? "1 annotation" : "2 annotations",
-    )
+    await expect(card).toContainText(`Confirmed with ${confirmation}`)
   }
 })
 

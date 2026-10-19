@@ -73,8 +73,8 @@ type WorkspaceStore = {
     sourceTabId?: string,
   ): void
   addChatExcerpt(id: string, excerpt: ContextExcerpt): void
-  updateChatExcerpt(excerpt: ContextExcerpt): void
-  removeChatExcerpt(id: string): void
+  updateChatExcerpt(tabId: string, excerpt: ContextExcerpt): void
+  removeChatExcerpt(tabId: string, id: string): void
   updateChatStatus(
     id: string,
     status: {
@@ -377,10 +377,12 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     })
     get().activate(id)
   },
-  updateChatExcerpt(excerpt) {
+  updateChatExcerpt(tabId, excerpt) {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+        tab.kind === "chat" &&
+        tab.id === tabId &&
+        tab.workspaceSessionId === state.sessionId
           ? {
               ...tab,
               excerpts: tab.excerpts.map((item) =>
@@ -391,10 +393,12 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       ),
     }))
   },
-  removeChatExcerpt(id) {
+  removeChatExcerpt(tabId, id) {
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+        tab.kind === "chat" &&
+        tab.id === tabId &&
+        tab.workspaceSessionId === state.sessionId
           ? { ...tab, excerpts: tab.excerpts.filter((item) => item.id !== id) }
           : tab,
       ),
