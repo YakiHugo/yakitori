@@ -101,6 +101,37 @@ it.each([
   expect(window.getSelection()?.isCollapsed).toBe(true)
 })
 
+it("dismisses an expired side chat's selection while keeping main chat selections available", async () => {
+  const props = actions()
+  const content = (readOnlySideChatIds: readonly string[]) => (
+    <>
+      <div data-side-chat-id="side-tab">
+        <p {...contextSourceAttributes(source)}>Side response</p>
+      </div>
+      <p {...contextSourceAttributes({ ...source, messageId: "main-answer" })}>
+        Main response
+      </p>
+      <SelectionActions {...props} readOnlySideChatIds={readOnlySideChatIds} />
+    </>
+  )
+  const { rerender } = render(content([]))
+  selectText(screen.getByText("Side response"))
+  expect(screen.getByRole("toolbar")).toBeDefined()
+  rerender(content(["side-tab"]))
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  selectText(screen.getByText("Side response"))
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(props.onAskInSideChat).not.toHaveBeenCalled()
+  selectText(screen.getByText("Main response"))
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Ask in side chat" }))
+  expect(props.onAskInSideChat).toHaveBeenCalledWith(
+    expect.objectContaining({ text: "Main response" }),
+  )
+})
+
 it("routes a side conversation selection by its owning tab rather than its source session", async () => {
   const props = actions()
   render(

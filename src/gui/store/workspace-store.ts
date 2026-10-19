@@ -43,6 +43,15 @@ export type WorkspaceTab = (
     }
 ) & { workspaceSessionId?: string | undefined }
 
+export function isSideChatExpired(
+  tab: Extract<WorkspaceTab, { kind: "chat" }>,
+): boolean {
+  return (
+    tab.expired === true ||
+    (tab.expiresAt !== undefined && Date.now() >= Date.parse(tab.expiresAt))
+  )
+}
+
 type WorkspaceStore = {
   open: boolean
   expanded: boolean
@@ -342,9 +351,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         tab.id !== sourceTabId &&
         tab.workspaceSessionId === state.sessionId &&
         !tab.activeTurnId &&
-        !tab.expired &&
-        (tab.expiresAt === undefined ||
-          Date.now() < Date.parse(tab.expiresAt)) &&
+        !isSideChatExpired(tab) &&
         tab.sourceSessionId === sourceSessionId,
     )
     const current =
@@ -360,6 +367,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         (tab) =>
           tab.id === id &&
           tab.kind === "chat" &&
+          !isSideChatExpired(tab) &&
           tab.workspaceSessionId === state.sessionId,
       )
     )
@@ -382,6 +390,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.kind === "chat" &&
         tab.id === tabId &&
+        !isSideChatExpired(tab) &&
         tab.workspaceSessionId === state.sessionId
           ? {
               ...tab,
@@ -398,6 +407,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.kind === "chat" &&
         tab.id === tabId &&
+        !isSideChatExpired(tab) &&
         tab.workspaceSessionId === state.sessionId
           ? { ...tab, excerpts: tab.excerpts.filter((item) => item.id !== id) }
           : tab,

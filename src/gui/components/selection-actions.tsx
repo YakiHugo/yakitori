@@ -16,15 +16,27 @@ type CapturedSelection = {
 }
 
 export function SelectionActions({
+  readOnlySideChatIds,
   onAddToConversation,
   onAskInSideChat,
 }: Readonly<{
+  readOnlySideChatIds?: readonly string[]
   onAddToConversation(excerpt: ContextExcerpt, sideChatId?: string): void
   onAskInSideChat(excerpt: ContextExcerpt, sideChatId?: string): void
 }>) {
   const [captured, setCaptured] = useState<CapturedSelection>()
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const menu = useRef<HTMLDivElement>(null)
+  const readOnlyIds = useRef(readOnlySideChatIds)
+  readOnlyIds.current = readOnlySideChatIds
+
+  useLayoutEffect(() => {
+    if (
+      captured?.sideChatId &&
+      readOnlySideChatIds?.includes(captured.sideChatId)
+    )
+      setCaptured(undefined)
+  }, [captured, readOnlySideChatIds])
 
   useEffect(() => {
     const capture = (event: Event) => {
@@ -83,6 +95,10 @@ export function SelectionActions({
       }
       const sideChatId = source.closest<HTMLElement>("[data-side-chat-id]")
         ?.dataset.sideChatId
+      if (sideChatId && readOnlyIds.current?.includes(sideChatId)) {
+        setCaptured(undefined)
+        return
+      }
       const contextSource = {
         kind,
         label,
@@ -171,6 +187,8 @@ export function SelectionActions({
   const actOnSelection = (action: "conversation" | "side") => {
     if (
       !captured?.source.isConnected ||
+      (captured.sideChatId !== undefined &&
+        readOnlyIds.current?.includes(captured.sideChatId)) ||
       captured.source.closest("[hidden]") ||
       captured.source.textContent?.slice(
         captured.anchor.startOffset,

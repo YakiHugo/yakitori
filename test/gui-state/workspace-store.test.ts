@@ -242,6 +242,60 @@ it("keeps selected context in its explicit side draft and advances focus only wh
   ).toMatchObject({ composerFocusRevision: 2 })
 })
 
+it.each([
+  { expired: true, expiresAt: "2099-01-01T00:00:00.000Z" },
+  { expired: false, expiresAt: "2020-01-01T00:00:00.000Z" },
+])("keeps an expired side draft frozen even before its UI updates: %j", async (expiry) => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("main")
+  const id = store.addTab("chat", "main")
+  const excerpt = {
+    id: "quote",
+    text: "Answer",
+    source: {
+      kind: "message" as const,
+      label: "Response",
+      sessionId: "side",
+      messageId: "answer",
+    },
+    anchor: { startOffset: 0, endOffset: 6 },
+  }
+  store.addChatExcerpt(id, excerpt)
+  store.updateChatDraft(id, inputParts("Unsent question"), [excerpt])
+  const other = store.addTab("chat", "main")
+  store.updateChatStatus(id, { hasMessages: true, ...expiry })
+
+  store.addChatExcerpt(id, { ...excerpt, id: "late" })
+  store.updateChatExcerpt(id, { ...excerpt, comment: "Late edit" })
+  store.removeChatExcerpt(id, excerpt.id)
+
+  expect(useWorkspaceStore.getState().activeId).toBe(other)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === id),
+  ).toMatchObject({
+    draft: inputParts("Unsent question"),
+    excerpts: [excerpt],
+    composerFocusRevision: 1,
+  })
+
+  store.updateChatStatus(id, {
+    hasMessages: true,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    expired: false,
+  })
+  store.addChatExcerpt(id, { ...excerpt, id: "renewed" })
+  expect(useWorkspaceStore.getState().activeId).toBe(id)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === id),
+  ).toMatchObject({
+    excerpts: [excerpt, { ...excerpt, id: "renewed" }],
+    composerFocusRevision: 2,
+  })
+})
+
 it("asks in a distinct side chat and does not choose between unrelated idle drafts", async () => {
   const { useWorkspaceStore } = await import(
     "../../src/gui/store/workspace-store.ts"

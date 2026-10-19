@@ -24,6 +24,7 @@ import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useEngineStore } from "../store/engine-store.ts"
 import {
+  isSideChatExpired,
   useWorkspaceStore,
   type WorkspaceTab,
 } from "../store/workspace-store.ts"
@@ -677,7 +678,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 conversation: "main conversation",
               })),
               ...visibleTabs.flatMap((tab) =>
-                tab.kind === "chat" && open && tab.id === activeId
+                tab.kind === "chat" &&
+                !isSideChatExpired(tab) &&
+                open &&
+                tab.id === activeId
                   ? tab.excerpts.map((excerpt, index) => ({
                       excerpt,
                       number: index + 1,
@@ -689,6 +693,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
             ]}
           />
           <SelectionActions
+            readOnlySideChatIds={visibleTabs.flatMap((tab) =>
+              tab.kind === "chat" && isSideChatExpired(tab) ? [tab.id] : [],
+            )}
             key={`${apiBase}:${selectionRevision}:${open}:${activeId}`}
             onAddToConversation={(excerpt, sideChatId) => {
               const app = useAppStore.getState()
