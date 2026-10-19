@@ -321,8 +321,8 @@ describe("session configuration", () => {
     {
       provider: "kimi",
       model: "kimi-for-coding",
-      window: 262144,
-      limit: 235929,
+      window: 1048576,
+      limit: 943718,
     },
     {
       provider: "kimi",

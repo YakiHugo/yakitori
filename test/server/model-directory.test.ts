@@ -12,7 +12,7 @@ describe("model directory", () => {
     const kimi = await directory.listModels("KIMI")
     expect(kimi).toHaveLength(4)
     expect(kimi.map((model) => model.effortStyle)).toEqual([
-      "none",
+      "levels",
       "none",
       "levels",
       "levels",
