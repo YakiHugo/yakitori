@@ -3,6 +3,13 @@ import type {
   ProviderWriteInput,
 } from "./providers.ts"
 export type ProviderRpcParams = {
+  "provider/models/read": Readonly<{ provider: string }>
+  "provider/models/write": Readonly<{
+    provider: string
+    settings: import("./providers.ts").ProviderModelSettings
+    version: string
+  }>
+  "provider/models/refresh": Readonly<{ provider: string }>
   "provider/configuration/read": Record<string, never>
   "provider/configuration/write": ProviderWriteInput
   "provider/configuration/delete": Readonly<{ id: string }>
@@ -17,6 +24,9 @@ export type ProviderRpcParams = {
 }
 
 export type ProviderRpcResponses = {
+  "provider/models/read": import("./providers.ts").ModelCatalogResponse
+  "provider/models/write": import("./providers.ts").ModelCatalogResponse
+  "provider/models/refresh": import("./providers.ts").ModelCatalogResponse
   "provider/configuration/read": ProviderConfigurationResponse
   "provider/configuration/write": ProviderConfigurationResponse
   "provider/configuration/delete": ProviderConfigurationResponse

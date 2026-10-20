@@ -269,7 +269,7 @@ describe("provider configuration", () => {
     }
   })
 
-  it("discovers all authenticated Messages catalog pages and excludes reported non-chat models", async () => {
+  it("discovers all authenticated Messages catalog pages and retains non-chat visibility defaults", async () => {
     const seen: {
       path: string | undefined
       key: string | string[] | undefined
@@ -317,7 +317,11 @@ describe("provider configuration", () => {
           },
           "catalog-key",
         ),
-      ).toEqual([{ id: "coder-a" }, { id: "coder-b", displayName: "Coder B" }])
+      ).toEqual([
+        { id: "coder-a", defaultVisible: true },
+        { id: "embedding", defaultVisible: false },
+        { id: "coder-b", displayName: "Coder B", defaultVisible: true },
+      ])
       expect(seen).toEqual([
         { path: "/v1/models", key: "catalog-key", version: "2023-06-01" },
         {
@@ -603,6 +607,7 @@ it("reads model capacities, modalities and token prices from the OpenRouter cata
   ).toEqual([
     {
       id: "vendor/coder",
+      defaultVisible: true,
       contextWindowTokens: 128000,
       maxOutputTokens: 16000,
       inputModalities: ["text", "image"],
@@ -613,5 +618,6 @@ it("reads model capacities, modalities and token prices from the OpenRouter cata
         cacheReadPerMillion: 0.25,
       },
     },
+    { id: "image-generator", defaultVisible: false },
   ])
 })

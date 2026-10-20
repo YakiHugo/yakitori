@@ -50,6 +50,9 @@ it("routes verified ChatGPT accounts through live RPC/model selection and remove
       models: [{ id: "fixture-model", displayName: "Fixture model" }],
     })
     modelsUnavailable = true
+    await rpc
+      .request("provider/models/refresh", { provider: account.providerId })
+      .catch(() => undefined)
     const partial = await rpc.request("provider/list", {})
     expect(
       partial.providers.find((p) => p.name === "faux")?.models.length,

@@ -71,6 +71,57 @@ function isDiscoveredModel(value: unknown): value is DiscoveredModel {
   ]) {
     if (value[key] !== undefined && !positiveInteger(value[key])) return false
   }
+  if (
+    value.defaultVisible !== undefined &&
+    typeof value.defaultVisible !== "boolean"
+  )
+    return false
+  if (
+    value.defaultEffort !== undefined &&
+    typeof value.defaultEffort !== "string"
+  )
+    return false
+  if (value.speeds !== undefined && !stringArray(value.speeds)) return false
+  if (
+    value.maxOutputTokens !== undefined &&
+    !positiveInteger(value.maxOutputTokens)
+  )
+    return false
+  if (value.visible !== undefined && typeof value.visible !== "boolean")
+    return false
+  if (
+    value.contextWindowScope !== undefined &&
+    value.contextWindowScope !== "input" &&
+    value.contextWindowScope !== "total"
+  )
+    return false
+  if (
+    value.imageDetailModes !== undefined &&
+    (!stringArray(value.imageDetailModes) ||
+      value.imageDetailModes.some(
+        (mode) => mode !== "high" && mode !== "original",
+      ))
+  )
+    return false
+  if (value.pricing !== undefined) {
+    if (!isRecord(value.pricing)) return false
+    for (const key of [
+      "inputPerMillion",
+      "outputPerMillion",
+      "cacheReadPerMillion",
+      "cacheWritePerMillion",
+    ]) {
+      const amount = value.pricing[key]
+      if (
+        amount === undefined &&
+        key !== "inputPerMillion" &&
+        key !== "outputPerMillion"
+      )
+        continue
+      if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0)
+        return false
+    }
+  }
   const percent = value.effectiveContextWindowPercent
   if (
     percent !== undefined &&

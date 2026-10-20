@@ -20,7 +20,8 @@ export function createConfiguredProvider(
   configuration: ProviderConfiguration,
   apiKey: string,
   dynamic?: Readonly<{
-    loadModels(): Promise<readonly ConfiguredModel[]>
+    loadModels(force?: boolean): Promise<readonly ConfiguredModel[]>
+    status?(): Readonly<{ fetchedAt?: number; error?: string }>
     result(state: "ready" | "error", message?: string): void
   }>,
 ): ModelProvider {
@@ -38,17 +39,31 @@ export function createConfiguredProvider(
     createConfiguredModelsManager({
       provider: id,
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
-      models: configured,
+      models: configured.map((model) => ({
+        ...preset?.models.find((known) => known.id === model.id),
+        ...model,
+      })),
       wireApi: configuration.wireApi,
     })
+  const listeners = new Set<() => void>()
   let currentModels = buildModels(configuration.models)
   const models: ModelsManager = dynamic
     ? {
         provider: id,
-        async refresh() {
-          currentModels = buildModels(await dynamic.loadModels())
+        async refresh(options) {
+          const before = JSON.stringify(await currentModels.listModels())
+          currentModels = buildModels(await dynamic.loadModels(options?.force))
+          if (before !== JSON.stringify(await currentModels.listModels()))
+            for (const listener of listeners) listener()
         },
-        listModels: () => currentModels.listModels(),
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => {
+            listeners.delete(listener)
+          }
+        },
+        ...(dynamic.status ? { status: dynamic.status } : {}),
+        listModels: (options) => currentModels.listModels(options),
         resolve: (selection) => currentModels.resolve(selection),
         validate: (selection) => currentModels.validate(selection),
         capacity: (selection) => currentModels.capacity(selection),

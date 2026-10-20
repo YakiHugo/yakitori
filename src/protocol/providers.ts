@@ -12,7 +12,6 @@ export type ProviderConfiguration = Readonly<{
   enabled?: boolean
   // Explicit opt-in: request preparation may have provider-reported usage.
   requestWarmup?: boolean
-  modelSelection?: "all" | "selected"
   models: readonly ConfiguredModel[]
 }>
 
@@ -57,14 +56,19 @@ export type ProviderWriteInput = Readonly<{
 }>
 
 export type ConfiguredModel = Readonly<{
+  defaultVisible?: boolean
+  visible?: boolean
   id: string
   displayName?: string
   contextWindowTokens?: number
   contextWindowScope?: "input" | "total"
+  maxContextWindowTokens?: number
   maxOutputTokens?: number
   inputModalities?: readonly ("text" | "image" | "video")[]
   efforts?: readonly string[]
   defaultEffort?: string
+  speeds?: readonly string[]
+  imageDetailModes?: readonly ("high" | "original")[]
   instructionProfileId?: string
   pricing?: Readonly<{
     inputPerMillion: number
@@ -90,4 +94,19 @@ export type ProviderPreset = Readonly<{
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string
+}>
+
+// User overrides are separate from the provider's discovered catalog.
+export type ModelSettings = Omit<ConfiguredModel, "id" | "defaultVisible">
+export type ProviderModelSettings = Readonly<Record<string, ModelSettings>>
+export type ModelSettingsConfiguration = Readonly<
+  Record<string, ProviderModelSettings>
+>
+export type ModelCatalogResponse = Readonly<{
+  provider: string
+  models: readonly (ConfiguredModel & { visible: boolean })[]
+  settings: ProviderModelSettings
+  version: string
+  fetchedAt?: number
+  error?: string
 }>

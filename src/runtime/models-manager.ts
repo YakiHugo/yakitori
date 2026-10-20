@@ -1,3 +1,5 @@
+import type { ConfiguredModel } from "../protocol/providers.ts"
+import { modelVisibleByDefault } from "./model-policy.ts"
 import {
   catalogModelCapacity,
   type CatalogModel,
@@ -5,7 +7,6 @@ import {
   type ModelCapacity,
   type ModelCapabilities,
   type ModelToolOutputTruncation,
-  type ModelInputModality,
   type ResolvedModel,
   resolveModel,
   validateModelSelection,
@@ -20,38 +21,38 @@ export type ModelSelectionInput = Readonly<{
 
 // Mirrors Codex's ModelsManager boundary: callers read one provider-scoped
 // catalog owner instead of consulting the bundled catalog independently.
-// refresh() revalidates an expired cache in the background and never blocks a
-// Turn on the network for it. Static managers are the fallback for providers
-// without a discovery API.
+// Cached catalogs revalidate in the background; cold or explicitly forced
+// refreshes wait for discovery. Static managers need no network refresh.
 export type ModelsManager = {
   readonly provider: string
-  refresh(): Promise<void>
-  listModels(): Promise<readonly CatalogModel[]>
+  refresh(options?: Readonly<{ force?: boolean }>): Promise<void>
+  listModels(
+    options?: Readonly<{ includeHidden?: boolean }>,
+  ): Promise<readonly CatalogModel[]>
+  subscribe?(listener: () => void): () => void
+  status?(): Readonly<{ fetchedAt?: number; error?: string }>
   resolve(selection: ModelSelectionInput): ResolvedModel
   validate(selection: ModelSelectionInput): void
   capacity(selection: ModelSelectionInput): ModelCapacity | undefined
 }
 
-export type DiscoveredModel = Readonly<{
-  toolOutputTruncation?: ModelToolOutputTruncation
-  capabilities?: ModelCapabilities
-  instructions?: string
-  efforts?: readonly string[]
-  defaultEffort?: string
-  inputModalities?: readonly ModelInputModality[]
-  id: string
-  displayName?: string
-  autoCompactTokenLimit?: number
-  compactionHash?: string
-  contextWindowTokens?: number
-  maxContextWindowTokens?: number
-  effectiveContextWindowPercent?: number
-}>
+export type DiscoveredModel = Omit<
+  ConfiguredModel,
+  "visible" | "instructionProfileId"
+> &
+  Readonly<{
+    toolOutputTruncation?: ModelToolOutputTruncation
+    capabilities?: ModelCapabilities
+    instructions?: string
+    autoCompactTokenLimit?: number
+    compactionHash?: string
+    effectiveContextWindowPercent?: number
+  }>
 
 // The persisted form of a discovery result, written after each successful
 // refresh so a cold process starts with the last good catalog (codex-rs keeps
-// the same models_cache.json per identity). Entries older than the manager
-// TTL are treated as absent, and identity mismatches are evicted on load.
+// the same models_cache.json per identity). Expired entries can serve while
+// revalidating; entries for a different identity are evicted before use.
 export type PersistedModelsCache = Readonly<{
   identity: string | undefined
   fetchedAt: number
@@ -81,6 +82,8 @@ export function createDiscoveringModelsManager(input: {
   ttlMs?: number
 }): ModelsManager {
   const fallback = createStaticModelsManager(input.provider)
+  const listeners = new Set<() => void>()
+  let error: string | undefined
   const now = input.now ?? Date.now
   const ttlMs = input.ttlMs ?? 5 * 60 * 1_000
   let cache:
@@ -112,8 +115,7 @@ export function createDiscoveringModelsManager(input: {
       // A cache that cannot be read degrades to a cold fetch. All first
       // readers await the same load before any of them can refresh.
       const persisted = await input.cacheStore.load().catch(() => undefined)
-      if (persisted === undefined || now() - persisted.fetchedAt >= ttlMs)
-        return
+      if (persisted === undefined) return
       cache = {
         identity: persisted.identity,
         fetchedAt: persisted.fetchedAt,
@@ -125,8 +127,9 @@ export function createDiscoveringModelsManager(input: {
     let models: readonly DiscoveredModel[]
     try {
       models = await input.discover()
-    } catch {
-      // The last good cache and the bundled catalog keep serving offline.
+    } catch (cause) {
+      if (!(cause instanceof Error)) throw cause
+      error = cause.message
       return
     }
     const after = await currentIdentity()
@@ -135,12 +138,16 @@ export function createDiscoveringModelsManager(input: {
       if (cache !== undefined && cache.identity !== after) cache = undefined
       return
     }
+    const previous = JSON.stringify([...(cache?.models.values() ?? [])])
+    error = undefined
     const fetchedAt = now()
     cache = {
       identity: before,
       fetchedAt,
       models: indexModels(models),
     }
+    if (previous !== JSON.stringify(models))
+      for (const listener of listeners) listener()
     // Account-specific fetches may overlap. Serialize writes to their shared
     // cache file so the later result cannot be overwritten by an older save.
     saveTask = saveTask
@@ -157,11 +164,16 @@ export function createDiscoveringModelsManager(input: {
     return { saveTask }
   }
 
-  const ensureFresh = async () => {
+  const ensureFresh = async (options?: Readonly<{ force?: boolean }>) => {
     await loadDiskCache()
     const identity = await currentIdentity()
     if (cache !== undefined && cache.identity !== identity) cache = undefined
-    if (cache !== undefined && now() - cache.fetchedAt < ttlMs) return
+    if (
+      !options?.force &&
+      cache !== undefined &&
+      now() - cache.fetchedAt < ttlMs
+    )
+      return
     let task = refreshTasks.get(identity)
     if (task === undefined) {
       task = refreshRemotely(identity).finally(() => {
@@ -169,75 +181,99 @@ export function createDiscoveringModelsManager(input: {
       })
       refreshTasks.set(identity, task)
     }
-    if (cache === undefined) await (await task)?.saveTask
+    if (cache === undefined || options?.force) await (await task)?.saveTask
   }
   const discovered = (model: string) => cache?.models.get(model.toLowerCase())
 
   return {
     provider: input.provider,
     refresh: ensureFresh,
-    async listModels() {
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    status: () => ({
+      ...(cache ? { fetchedAt: cache.fetchedAt } : {}),
+      ...(error ? { error } : {}),
+    }),
+    async listModels(options) {
       await ensureFresh()
-      const staticModels = await fallback.listModels()
+      const staticModels = await fallback.listModels({ includeHidden: true })
       const staticById = new Map(
         staticModels.map((model) => [model.model.toLowerCase(), model]),
       )
       return [
-        ...[...(cache?.models.values() ?? [])]
-          .filter(
-            (model) =>
-              staticById.has(model.id.toLowerCase()) ||
-              model.instructions !== undefined,
+        ...[...(cache?.models.values() ?? [])].map((model) => {
+          const base = staticById.get(model.id.toLowerCase())
+          const resolved = {
+            ...(base ??
+              fallback.resolve({
+                provider: input.provider,
+                model: model.id,
+              })),
+            model: model.id,
+            visible: modelVisibleByDefault(
+              input.provider,
+              model.id,
+              model.defaultVisible,
+            ),
+            ...(model.contextWindowScope === undefined
+              ? {}
+              : { contextWindowScope: model.contextWindowScope }),
+            ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
+            ...(model.imageDetailModes === undefined
+              ? {}
+              : { imageDetailModes: model.imageDetailModes }),
+            ...(model.contextWindowTokens === undefined
+              ? {}
+              : { contextWindowTokens: model.contextWindowTokens }),
+            ...(model.maxContextWindowTokens === undefined
+              ? {}
+              : { maxContextWindowTokens: model.maxContextWindowTokens }),
+            ...(model.maxOutputTokens === undefined
+              ? {}
+              : { maxOutputTokens: model.maxOutputTokens }),
+            ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
+            ...(model.efforts === undefined
+              ? {}
+              : model.efforts.length === 0
+                ? { effortStyle: "none" as const, efforts: [] }
+                : {
+                    efforts: model.efforts,
+                    effortStyle: "levels" as const,
+                    ...(model.defaultEffort !== undefined &&
+                    model.efforts.includes(model.defaultEffort)
+                      ? { defaultEffort: model.defaultEffort }
+                      : {}),
+                  }),
+            ...(model.inputModalities === undefined
+              ? {}
+              : { inputModalities: model.inputModalities }),
+            ...model.capabilities,
+            ...(model.toolOutputTruncation === undefined
+              ? {}
+              : { toolOutputTruncation: model.toolOutputTruncation }),
+            ...(model.displayName === undefined
+              ? {}
+              : { displayName: model.displayName }),
+            ...(model.autoCompactTokenLimit === undefined
+              ? {}
+              : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+            ...(model.compactionHash === undefined
+              ? {}
+              : { compactionHash: model.compactionHash }),
+          }
+          if (
+            model.capabilities !== undefined &&
+            model.capabilities.applyPatchToolType === undefined
           )
-          .map((model) => {
-            const base = staticById.get(model.id.toLowerCase())
-            const resolved = {
-              ...(base ??
-                fallback.resolve({
-                  provider: input.provider,
-                  model: model.id,
-                })),
-              model: model.id,
-              ...(model.efforts === undefined
-                ? {}
-                : model.efforts.length === 0
-                  ? { effortStyle: "none" as const, efforts: [] }
-                  : {
-                      efforts: model.efforts,
-                      effortStyle: "levels" as const,
-                      ...(model.defaultEffort !== undefined &&
-                      model.efforts.includes(model.defaultEffort)
-                        ? { defaultEffort: model.defaultEffort }
-                        : {}),
-                    }),
-              ...(model.inputModalities === undefined
-                ? {}
-                : { inputModalities: model.inputModalities }),
-              ...model.capabilities,
-              ...(model.toolOutputTruncation === undefined
-                ? {}
-                : { toolOutputTruncation: model.toolOutputTruncation }),
-              ...(model.displayName === undefined
-                ? {}
-                : { displayName: model.displayName }),
-              ...(model.autoCompactTokenLimit === undefined
-                ? {}
-                : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
-              ...(model.compactionHash === undefined
-                ? {}
-                : { compactionHash: model.compactionHash }),
-            }
-            if (
-              model.capabilities !== undefined &&
-              model.capabilities.applyPatchToolType === undefined
-            )
-              delete resolved.applyPatchToolType
-            return resolved
-          }),
-        ...staticModels.filter(
-          (model) => !(cache?.models.has(model.model.toLowerCase()) ?? false),
-        ),
-      ]
+            delete resolved.applyPatchToolType
+          return resolved
+        }),
+        ...(cache === undefined ? staticModels : []),
+      ].filter((model) => options?.includeHidden || model.visible !== false)
     },
     resolve(selection) {
       requireProvider(input.provider, selection.provider)
@@ -246,6 +282,13 @@ export function createDiscoveringModelsManager(input: {
       if (model === undefined) return base
       const resolved = {
         ...base,
+        ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
+        ...(model.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: model.defaultEffort }),
+        ...(model.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: model.maxOutputTokens }),
         ...(model.inputModalities === undefined
           ? {}
           : { inputModalities: model.inputModalities }),
@@ -265,6 +308,12 @@ export function createDiscoveringModelsManager(input: {
         usedFallbackModelMetadata:
           model.capabilities === undefined && base.usedFallbackModelMetadata,
       }
+      if (
+        resolved.defaultEffort !== undefined &&
+        resolved.efforts !== undefined &&
+        !resolved.efforts.includes(resolved.defaultEffort)
+      )
+        delete resolved.defaultEffort
       if (
         model.capabilities !== undefined &&
         model.capabilities.applyPatchToolType === undefined
@@ -296,7 +345,9 @@ export function createDiscoveringModelsManager(input: {
           model.maxContextWindowTokens ?? model.contextWindowTokens,
         effectiveContextWindowPercent:
           model.effectiveContextWindowPercent ?? 100,
-        contextWindowScope: input.provider === "codex" ? "input" : "total",
+        contextWindowScope:
+          model.contextWindowScope ??
+          (input.provider === "codex" ? "input" : "total"),
       }
     },
   }
@@ -306,8 +357,13 @@ export function createStaticModelsManager(provider: string): ModelsManager {
   return {
     provider,
     async refresh() {},
-    async listModels() {
+    async listModels(options) {
       return listCatalogModels(provider)
+        .map((model) => ({
+          ...model,
+          visible: modelVisibleByDefault(provider, model.model),
+        }))
+        .filter((model) => options?.includeHidden || model.visible)
     },
     resolve(selection) {
       requireProvider(provider, selection.provider)

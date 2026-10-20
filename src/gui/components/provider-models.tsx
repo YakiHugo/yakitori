@@ -1,11 +1,10 @@
 import { Plus } from "lucide-react"
 import { useState } from "react"
-import type {
-  ConfiguredModel,
-  ProviderConfiguration,
-} from "../../protocol/providers.ts"
+import type { ConfiguredModel } from "../../protocol/providers.ts"
 import { Button } from "./ui/button.tsx"
 import { Field, FieldGroup, FieldLabel, Input } from "./ui/field.tsx"
+
+type ModelConfiguration = Readonly<{ models: readonly ConfiguredModel[] }>
 
 export function ProviderModels({
   configuration,
@@ -13,100 +12,59 @@ export function ProviderModels({
   onChange,
   fetchingModels,
 }: Readonly<{
-  configuration: ProviderConfiguration
+  configuration: ModelConfiguration
   available: readonly ConfiguredModel[]
-  onChange(patch: Partial<ProviderConfiguration>): void
+  onChange(patch: ModelConfiguration): void
   fetchingModels: boolean
 }>) {
   const [query, setQuery] = useState("")
   const [typed, setTyped] = useState("")
-  const [extras, setExtras] = useState<ConfiguredModel[]>([])
-  const all =
-    configuration.modelSelection === "all" ||
-    (configuration.modelSelection !== "selected" &&
-      !configuration.models.length)
-  const indexed = new Map(available.map((model) => [model.id, model]))
-  for (const model of [...configuration.models, ...extras])
-    indexed.set(model.id, { ...indexed.get(model.id), ...model })
-  const choices = [...indexed.values()]
-  const selected = (model: ConfiguredModel) =>
-    all || configuration.models.some((entry) => entry.id === model.id)
-  const toggle = (model: ConfiguredModel, enabled: boolean) =>
-    onChange({
-      modelSelection: "selected",
-      models: enabled
-        ? [...configuration.models, { id: model.id }]
-        : (all
-            ? choices.map(
-                (entry) =>
-                  configuration.models.find(
-                    (override) => override.id === entry.id,
-                  ) ?? { id: entry.id },
-              )
-            : configuration.models
-          ).filter((entry) => entry.id !== model.id),
+  const indexed = new Map(
+    available.map((model) => [model.id.toLowerCase(), model]),
+  )
+  for (const model of configuration.models)
+    indexed.set(model.id.toLowerCase(), {
+      ...indexed.get(model.id.toLowerCase()),
+      ...model,
     })
+  const choices = [...indexed.values()]
   const edit = (id: string, patch: Partial<ConfiguredModel>) => {
-    const before = configuration.models.find((model) => model.id === id) ?? {
-      id,
-    }
+    const before = configuration.models.find(
+      (model) => model.id.toLowerCase() === id.toLowerCase(),
+    ) ?? { id }
     onChange({
-      ...(all ? { modelSelection: "all" } : {}),
       models: [
-        ...configuration.models.filter((model) => model.id !== id),
+        ...configuration.models.filter(
+          (model) => model.id.toLowerCase() !== id.toLowerCase(),
+        ),
         { ...before, ...patch },
       ],
     })
   }
   const reset = (id: string, key: keyof ConfiguredModel) => {
-    const next = {
-      ...(configuration.models.find((model) => model.id === id) ?? { id }),
+    const model = {
+      ...(configuration.models.find(
+        (model) => model.id.toLowerCase() === id.toLowerCase(),
+      ) ?? { id }),
     }
-    delete next[key]
+    delete model[key]
     onChange({
-      ...(all ? { modelSelection: "all" } : {}),
       models: [
-        ...configuration.models.filter((model) => model.id !== id),
-        next,
+        ...configuration.models.filter(
+          (model) => model.id.toLowerCase() !== id.toLowerCase(),
+        ),
+        model,
       ],
     })
   }
   const add = () => {
-    const typedId = typed.trim()
-    if (!typedId) return
-    // Match the connection validator's case-insensitive ID uniqueness.
-    const existing =
-      configuration.models.find(
-        (entry) => entry.id.toLowerCase() === typedId.toLowerCase(),
-      ) ??
-      choices.find((entry) => entry.id.toLowerCase() === typedId.toLowerCase())
-    const id = existing?.id ?? typedId
-    if (existing && selected(existing)) {
-      setTyped("")
-      setQuery("")
-      return
-    }
-    const model = existing ?? { id }
-    // Keep identity only; configuration edits and live catalog facts own metadata.
-    setExtras((previous) => [
-      ...previous.filter((entry) => entry.id !== id),
-      { id },
-    ])
-    if (!configuration.models.some((entry) => entry.id === id))
-      onChange({
-        models: [
-          ...(all
-            ? choices.map(
-                (entry) =>
-                  configuration.models.find(
-                    (override) => override.id === entry.id,
-                  ) ?? { id: entry.id },
-              )
-            : configuration.models),
-          model,
-        ],
-        modelSelection: "selected",
-      })
+    const id = typed.trim()
+    if (!id) return
+    const existing = choices.find(
+      (model) => model.id.toLowerCase() === id.toLowerCase(),
+    )
+    if (!existing || existing.visible === false)
+      edit(existing?.id ?? id, { visible: true })
     setTyped("")
     setQuery("")
   }
@@ -118,34 +76,11 @@ export function ProviderModels({
   return (
     <fieldset className="provider-models">
       <legend className="sr-only">Exposed models</legend>
-      <label className="provider-model-option provider-model-all">
-        <input
-          type="checkbox"
-          checked={all}
-          onChange={(event) =>
-            onChange({
-              modelSelection: event.target.checked ? "all" : "selected",
-              models: event.target.checked
-                ? configuration.models
-                : choices.map(
-                    (entry) =>
-                      configuration.models.find(
-                        (override) => override.id === entry.id,
-                      ) ?? { id: entry.id },
-                  ),
-            })
-          }
-        />
-        <span>
-          Show all models automatically
-          <small>New models appear as the catalog updates.</small>
-        </span>
-      </label>
-      {fetchingModels ? (
-        <p role="status" className="provider-field-hint">
-          Loading models…
-        </p>
-      ) : null}
+      <p className="provider-field-hint">
+        New models follow the provider and app defaults. Your changes are kept
+        when the catalog updates.
+      </p>
+      {fetchingModels ? <p role="status">Loading models…</p> : null}
       {choices.length > 4 ? (
         <Input
           type="search"
@@ -166,8 +101,10 @@ export function ProviderModels({
                     ? `${model.displayName} ${model.id}`
                     : model.id
                 }
-                checked={selected(model)}
-                onChange={(event) => toggle(model, event.target.checked)}
+                checked={model.visible !== false}
+                onChange={(event) =>
+                  edit(model.id, { visible: event.target.checked })
+                }
               />
               <span>
                 {model.displayName ?? model.id}
@@ -189,118 +126,198 @@ export function ProviderModels({
               <summary aria-label={`Settings for ${model.id}`}>
                 Model settings
               </summary>
-              <fieldset disabled={!selected(model)}>
-                <FieldGroup>
-                  <Field>
-                    <FieldLabel htmlFor={`model-name-${model.id}`}>
-                      Display name
-                    </FieldLabel>
-                    <Input
-                      id={`model-name-${model.id}`}
-                      value={model.displayName ?? ""}
-                      placeholder={model.id}
-                      onChange={(event) =>
-                        edit(model.id, {
-                          displayName: event.target.value || model.id,
-                        })
-                      }
-                    />
-                  </Field>
-                  {(["contextWindowTokens", "maxOutputTokens"] as const).map(
-                    (key) => (
-                      <Field key={key}>
-                        <FieldLabel htmlFor={`${key}-${model.id}`}>
-                          {key === "contextWindowTokens"
-                            ? model.contextWindowScope === "input"
-                              ? "Input token limit"
-                              : "Context window"
-                            : "Maximum output"}
-                        </FieldLabel>
-                        <Input
-                          id={`${key}-${model.id}`}
-                          type="number"
-                          min="1"
-                          placeholder="Unknown"
-                          value={model[key] ?? ""}
-                          onChange={(event) => {
-                            const value = event.target.valueAsNumber
-                            if (Number.isSafeInteger(value) && value > 0)
-                              edit(model.id, { [key]: value })
-                            else if (!event.target.value) reset(model.id, key)
-                          }}
-                        />
-                      </Field>
-                    ),
-                  )}
-                  {model.efforts?.length ? (
-                    <Field>
-                      <FieldLabel htmlFor={`model-effort-${model.id}`}>
-                        Default reasoning effort
-                      </FieldLabel>
-                      <select
-                        id={`model-effort-${model.id}`}
-                        value={model.defaultEffort ?? ""}
-                        onChange={(event) => {
-                          if (event.target.value)
-                            edit(model.id, {
-                              defaultEffort: event.target.value,
-                              ...(model.efforts
-                                ? { efforts: model.efforts }
-                                : {}),
-                            })
-                          else reset(model.id, "defaultEffort")
-                        }}
-                      >
-                        <option value="">Provider default</option>
-                        {model.efforts.map((effort) => (
-                          <option key={effort} value={effort}>
-                            {effort}
-                          </option>
-                        ))}
-                      </select>
-                    </Field>
-                  ) : null}
-                  <label className="provider-model-option">
-                    <input
-                      type="checkbox"
-                      checked={
-                        model.inputModalities?.includes("image") ?? false
-                      }
-                      onChange={(event) =>
-                        edit(model.id, {
-                          inputModalities: event.target.checked
-                            ? ["text", "image"]
-                            : ["text"],
-                        })
-                      }
-                    />
-                    Image input
-                  </label>
-                  <ModelPricing
-                    key={JSON.stringify(model.pricing)}
-                    pricing={model.pricing}
-                    onApply={(pricing) => edit(model.id, { pricing })}
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor={`model-name-${model.id}`}>
+                    Display name
+                  </FieldLabel>
+                  <Input
+                    id={`model-name-${model.id}`}
+                    value={model.displayName ?? ""}
+                    placeholder={model.id}
+                    onChange={(event) =>
+                      event.target.value
+                        ? edit(model.id, { displayName: event.target.value })
+                        : reset(model.id, "displayName")
+                    }
                   />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
+                </Field>
+                {(["contextWindowTokens", "maxOutputTokens"] as const).map(
+                  (key) => (
+                    <Field key={key}>
+                      <FieldLabel htmlFor={`${key}-${model.id}`}>
+                        {key === "contextWindowTokens"
+                          ? "Context window"
+                          : "Maximum output"}
+                      </FieldLabel>
+                      <Input
+                        id={`${key}-${model.id}`}
+                        type="number"
+                        min="1"
+                        placeholder="Unknown"
+                        value={model[key] ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.valueAsNumber
+                          if (Number.isSafeInteger(value) && value > 0)
+                            edit(model.id, { [key]: value })
+                          else if (!event.target.value) reset(model.id, key)
+                        }}
+                      />
+                    </Field>
+                  ),
+                )}
+                <Field>
+                  <FieldLabel htmlFor={`context-scope-${model.id}`}>
+                    Context window scope
+                  </FieldLabel>
+                  <select
+                    id={`context-scope-${model.id}`}
+                    value={model.contextWindowScope ?? ""}
+                    onChange={(event) =>
+                      event.target.value
+                        ? edit(model.id, {
+                            contextWindowScope: event.target.value as
+                              | "input"
+                              | "total",
+                          })
+                        : reset(model.id, "contextWindowScope")
+                    }
+                  >
+                    <option value="">Source default</option>
+                    <option value="input">Input tokens</option>
+                    <option value="total">Input and output tokens</option>
+                  </select>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor={`model-efforts-${model.id}`}>
+                    Reasoning levels
+                  </FieldLabel>
+                  <Input
+                    id={`model-efforts-${model.id}`}
+                    key={JSON.stringify(model.efforts)}
+                    defaultValue={model.efforts?.join(", ") ?? ""}
+                    placeholder="Unknown · enter comma-separated levels"
+                    onBlur={(event) => {
+                      const efforts = event.target.value
+                        .split(",")
+                        .map((value) => value.trim())
+                        .filter(Boolean)
+                      if (
+                        JSON.stringify(efforts) ===
+                        JSON.stringify(model.efforts ?? [])
+                      )
+                        return
+                      const previous = configuration.models.find(
+                        (entry) => entry.id === model.id,
+                      )
+                      const { defaultEffort: _, ...rest } = previous ?? {
+                        id: model.id,
+                      }
                       onChange({
-                        models: all
-                          ? configuration.models.filter(
-                              (entry) => entry.id !== model.id,
-                            )
-                          : configuration.models.map((entry) =>
-                              entry.id === model.id ? { id: model.id } : entry,
+                        models: [
+                          ...configuration.models.filter(
+                            (entry) => entry.id !== model.id,
+                          ),
+                          {
+                            ...rest,
+                            efforts,
+                            ...(previous?.defaultEffort &&
+                            efforts.includes(previous.defaultEffort)
+                              ? { defaultEffort: previous.defaultEffort }
+                              : {}),
+                          },
+                        ],
+                      })
+                    }}
+                  />
+                </Field>
+                {model.efforts?.length ? (
+                  <Field>
+                    <FieldLabel htmlFor={`model-effort-${model.id}`}>
+                      Default reasoning effort
+                    </FieldLabel>
+                    <select
+                      id={`model-effort-${model.id}`}
+                      value={model.defaultEffort ?? ""}
+                      onChange={(event) =>
+                        event.target.value
+                          ? edit(model.id, {
+                              defaultEffort: event.target.value,
+                            })
+                          : reset(model.id, "defaultEffort")
+                      }
+                    >
+                      <option value="">Source default</option>
+                      {model.efforts.map((effort) => (
+                        <option key={effort} value={effort}>
+                          {effort}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                ) : null}
+                <label className="provider-model-option">
+                  <input
+                    type="checkbox"
+                    checked={model.inputModalities?.includes("image") ?? false}
+                    onChange={(event) =>
+                      edit(model.id, {
+                        inputModalities: event.target.checked
+                          ? [
+                              ...new Set<"text" | "image" | "video">([
+                                ...(model.inputModalities ?? ["text"]),
+                                "image",
+                              ]),
+                            ]
+                          : (model.inputModalities ?? ["text"]).filter(
+                              (value) => value !== "image",
                             ),
                       })
                     }
-                  >
-                    Restore model defaults
-                  </Button>
-                </FieldGroup>
-              </fieldset>
+                  />
+                  Image input
+                </label>
+                <label className="provider-model-option">
+                  <input
+                    type="checkbox"
+                    checked={model.inputModalities?.includes("video") ?? false}
+                    onChange={(event) =>
+                      edit(model.id, {
+                        inputModalities: event.target.checked
+                          ? [
+                              ...new Set<"text" | "image" | "video">([
+                                ...(model.inputModalities ?? ["text"]),
+                                "video",
+                              ]),
+                            ]
+                          : (model.inputModalities ?? ["text"]).filter(
+                              (value) => value !== "video",
+                            ),
+                      })
+                    }
+                  />
+                  Video input
+                </label>
+                <ModelPricing
+                  key={JSON.stringify(model.pricing)}
+                  pricing={model.pricing}
+                  onApply={(pricing) => edit(model.id, { pricing })}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    onChange({
+                      models: configuration.models.filter(
+                        (entry) => entry.id !== model.id,
+                      ),
+                    })
+                  }
+                >
+                  Restore model defaults
+                </Button>
+              </FieldGroup>
             </details>
           </div>
         ))}
@@ -308,7 +325,7 @@ export function ProviderModels({
           <p className="provider-field-hint">
             {query
               ? "No matching models."
-              : "Models are discovered when the connection is saved."}
+              : "No models listed. Refresh the catalog or add a model ID."}
           </p>
         ) : null}
       </div>

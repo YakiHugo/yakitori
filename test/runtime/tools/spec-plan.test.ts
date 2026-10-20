@@ -412,7 +412,7 @@ describe("Step tool planning", () => {
     expect(step.toolWireProtocol).toBe(protocol)
   })
 
-  it("keeps unknown model capabilities conservative and falls back to meta-dispatch", () => {
+  it("uses generic coding tools and meta-dispatch for unknown models", () => {
     const registry = createToolRegistry()
     const deferred = externalDeferredTool()
     registry.replaceExternalSource("calendar", [deferred])
@@ -427,7 +427,7 @@ describe("Step tool planning", () => {
 
     expect(names).toContain("exec_command")
     expect(names).not.toContain("apply_patch")
-    expect(names).not.toContain("edit_file")
+    expect(names).toContain("edit_file")
     expect(names).toEqual(expect.arrayContaining(["tool_search", "use_tool"]))
     expect(names).not.toContain("calendar__search_events")
     expect(step.toolRouter.search("calendar events")).toMatchObject([

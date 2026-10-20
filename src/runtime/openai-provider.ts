@@ -286,7 +286,7 @@ async function* streamOpenAI(
       throw new ModelRequestControlsError(
         "compaction_trigger belongs to the Codex backend, not the public Responses API.",
       )
-    const effort = resolveModelWireEffort(request.target)
+    const effort = resolveModelWireEffort(request.target, request.reasoning)
     let body: ResponseCreateParamsStreaming = {
       model: request.target.model || defaultModel,
       instructions: flattenModelSystem(request.system),

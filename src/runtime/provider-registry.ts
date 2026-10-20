@@ -1,3 +1,6 @@
+import { ModelNotConfiguredError } from "./configured-models-manager.ts"
+import type { ProviderModelSettings } from "../protocol/providers.ts"
+import { createModelSettingsManager } from "./model-settings-manager.ts"
 import type { ModelRequest, StreamFn } from "./model.ts"
 import {
   createInjectedModelProvider,
@@ -23,7 +26,10 @@ export type ProviderRegistry = {
   readonly providers: readonly string[]
   register(owner: string, providers: ProviderDefinitions): ProviderRegistration
   createClient(): ModelClient
-  models(provider: string): ModelsManager
+  models(
+    provider: string,
+    options?: Readonly<{ defaults?: boolean }>,
+  ): ModelsManager
   readonly stream: StreamFn
   close(): Promise<void>
 }
@@ -37,10 +43,15 @@ type ProviderEntry = {
   errors: unknown[]
   settled: Promise<void>
   finish(): void
+  unsubscribe?: (() => void) | undefined
 }
 
 export function createProviderRegistry(
   initial: ProviderDefinitions = {},
+  options: Readonly<{
+    settings?(provider: string): ProviderModelSettings
+    changed?(): void
+  }> = {},
 ): ProviderRegistry {
   const byId = new Map<string, ProviderEntry>()
   const sources = new Map<string, ProviderRegistration>()
@@ -73,6 +84,7 @@ export function createProviderRegistry(
   const settle = (entry: ProviderEntry) => {
     if (!entry.retired || entry.uses !== 0 || entry.closing) return
     entry.closing = true
+    entry.unsubscribe?.()
     // A failed Turn close leaves resource ownership unresolved. Do not dispose
     // shared provider resources under that Turn; retain the failure for shutdown.
     void Promise.resolve()
@@ -95,30 +107,42 @@ export function createProviderRegistry(
     if (errors.length > 0)
       throw new AggregateError(errors, "Failed to retire model providers.")
   }
-  const models = (entry: ProviderEntry): ModelsManager => ({
-    provider: entry.provider.info.id,
-    // Pure metadata reads stay usable for a catalog result already returned to
-    // the caller, even if retirement follows that asynchronous read immediately.
-    resolve: (selection) => entry.provider.models.resolve(selection),
-    validate: (selection) => entry.provider.models.validate(selection),
-    capacity: (selection) => entry.provider.models.capacity(selection),
-    async refresh() {
-      const release = acquire(entry)
-      try {
-        await entry.provider.models.refresh()
-      } finally {
-        release()
-      }
-    },
-    async listModels() {
-      const release = acquire(entry)
-      try {
-        return await entry.provider.models.listModels()
-      } finally {
-        release()
-      }
-    },
-  })
+  const configuredModels = (entry: ProviderEntry, capture = false) => {
+    const provider = entry.provider.info.id
+    const captured = capture ? (options.settings?.(provider) ?? {}) : undefined
+    return createModelSettingsManager(
+      entry.provider.models,
+      () => captured ?? options.settings?.(provider) ?? {},
+    )
+  }
+  const models = (entry: ProviderEntry, defaults = false): ModelsManager => {
+    const manager = defaults ? entry.provider.models : configuredModels(entry)
+    return {
+      provider: entry.provider.info.id,
+      // Pure metadata reads stay usable for a catalog result already returned to
+      // the caller, even if retirement follows that asynchronous read immediately.
+      resolve: (selection) => manager.resolve(selection),
+      validate: (selection) => manager.validate(selection),
+      capacity: (selection) => manager.capacity(selection),
+      ...(manager.status ? { status: manager.status } : {}),
+      async refresh(options) {
+        const release = acquire(entry)
+        try {
+          await manager.refresh(options)
+        } finally {
+          release()
+        }
+      },
+      async listModels(options) {
+        const release = acquire(entry)
+        try {
+          return await manager.listModels(options)
+        } finally {
+          release()
+        }
+      },
+    }
+  }
   const startTurn = (
     entry: ProviderEntry,
     policy?: ModelRequestPolicy,
@@ -159,15 +183,37 @@ export function createProviderRegistry(
         })()
       }
     const warmup = session.warmup
+    const turnModels = configuredModels(entry, true)
+    const requestWithPolicy = (request: ModelRequest): ModelRequest => {
+      let model: ReturnType<ModelsManager["resolve"]>
+      try {
+        model = turnModels.resolve(request.target)
+      } catch (error) {
+        if (!(error instanceof ModelNotConfiguredError)) throw error
+        return { ...request, reasoning: {} }
+      }
+      return {
+        ...request,
+        reasoning: {
+          ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
+          ...(model.defaultEffort === undefined
+            ? {}
+            : { defaultEffort: model.defaultEffort }),
+          ...(model.multiAgentReasoningEffort === undefined
+            ? {}
+            : { multiAgentReasoningEffort: model.multiAgentReasoningEffort }),
+        },
+      }
+    }
     return {
-      models: entry.provider.models,
+      models: turnModels,
       wireApi: entry.provider.info.wireApi,
       remoteCompaction: session.remoteCompaction ?? false,
       nativePdf: entry.provider.info.capabilities.nativePdf === true,
-      stream: guarded((request) => session.stream(request)),
+      stream: guarded((request) => session.stream(requestWithPolicy(request))),
       ...(warmup === undefined
         ? {}
-        : { warmup: guarded((request) => warmup(request)) }),
+        : { warmup: guarded((request) => warmup(requestWithPolicy(request))) }),
       close() {
         closing ??= Promise.resolve()
           .then(() => session.close())
@@ -242,6 +288,9 @@ export function createProviderRegistry(
       for (const [id, entry] of next) {
         byId.set(id, entry)
         owned.add(entry)
+        entry.unsubscribe ??= entry.provider.models.subscribe?.(() => {
+          if (byId.get(id) === entry) options.changed?.()
+        })
       }
       publishNames()
       for (const entry of removed) retire(entry)
@@ -274,8 +323,8 @@ export function createProviderRegistry(
   return {
     providers: names,
     register,
-    models(id) {
-      return models(requireEntry(id))
+    models(id, options) {
+      return models(requireEntry(id), options?.defaults)
     },
     createClient() {
       requireOpen()

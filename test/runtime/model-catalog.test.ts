@@ -85,7 +85,7 @@ describe("model catalog context windows", () => {
       catalogModelCapabilities({ provider: "unknown", model: "future" }),
     ).toMatchObject({
       shellToolType: "unified_exec",
-      fileEditingToolType: "none",
+      fileEditingToolType: "edit_write",
       supportsNativeToolSearch: false,
     })
   })
@@ -213,7 +213,7 @@ describe("model catalog context windows", () => {
     )
     expect(resolveModel({ provider: "kimi", model: "k30" })).toMatchObject({
       instructionProfileId: "default",
-      fileEditingToolType: "none",
+      fileEditingToolType: "edit_write",
       usedFallbackModelMetadata: true,
     })
     expect(

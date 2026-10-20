@@ -93,7 +93,6 @@ describe("ChatGPT model connections", () => {
     ])
     expect(listed[1]).toMatchObject({
       instructionProfileId: "default",
-      efforts: [],
       inputModalities: ["text"],
       imageDetailModes: [],
     })
@@ -105,7 +104,7 @@ describe("ChatGPT model connections", () => {
     expect(provider.models.capacity(target)).toBeUndefined()
     expect(() =>
       provider.models.validate({ ...target, effort: "high" }),
-    ).toThrow("not supported")
+    ).not.toThrow()
     expect(() =>
       provider.models.resolve({ ...target, model: "hidden" }),
     ).toThrow("not configured")
@@ -135,6 +134,9 @@ describe("ChatGPT model connections", () => {
     await Promise.all([first, second])
     expect(fetchFn).toHaveBeenCalledTimes(1)
     failed = true
+    await expect(provider.models.refresh({ force: true })).rejects.toThrow(
+      "ChatGPT model catalog failed",
+    )
     await expect(provider.models.listModels()).rejects.toThrow(
       "ChatGPT models are unavailable",
     )

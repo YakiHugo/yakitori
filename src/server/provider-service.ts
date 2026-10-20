@@ -1,4 +1,14 @@
 import type {
+  ModelCatalogResponse,
+  ModelSettingsConfiguration,
+  ProviderModelSettings,
+} from "../protocol/providers.ts"
+import type { ProviderRegistry } from "../runtime/provider-registry.ts"
+import {
+  requireModelSettingsProvider,
+  requireProviderModelSettings,
+} from "./model-settings.ts"
+import type {
   ProviderConfigurationResponse,
   ProviderWriteInput,
 } from "../protocol/providers.ts"
@@ -36,6 +46,13 @@ import type {
 import type { UserConfigStore } from "./user-config.ts"
 
 export type ProviderService = {
+  readModels(provider: string): Promise<ModelCatalogResponse>
+  writeModels(
+    provider: string,
+    settings: ProviderModelSettings,
+    version: string,
+  ): Promise<ModelCatalogResponse>
+  refreshCatalog(provider: string): Promise<ModelCatalogResponse>
   read(): Promise<ProviderConfigurationResponse>
   write(input: ProviderWriteInput): Promise<ProviderConfigurationResponse>
   delete(id: string): Promise<ProviderConfigurationResponse>
@@ -68,6 +85,8 @@ export function createProviderService(
   input: Readonly<{
     userConfig: UserConfigStore
     credentialDirectory: string
+    registry?: () => ProviderRegistry | undefined
+    modelSettingsChanged?(settings: ModelSettingsConfiguration): void
     now?: () => number
     catalogTtlMs?: number
     changed?(): void
@@ -164,8 +183,16 @@ export function createProviderService(
           [
             id,
             createConfiguredProvider(id, resolved, key, {
-              async loadModels() {
-                await catalog.revalidate()
+              status: () => {
+                const { fetchedAt, error } = catalog.snapshot()
+                return {
+                  ...(fetchedAt === undefined ? {} : { fetchedAt }),
+                  ...(error === undefined ? {} : { error }),
+                }
+              },
+              async loadModels(force) {
+                if (force) await catalog.refresh()
+                else await catalog.revalidate()
                 return exposedModels(configuration, await catalog.models())
               },
               result(state, message) {
@@ -294,17 +321,95 @@ export function createProviderService(
     configuration: ProviderConfiguration,
     key: string,
   ) => {
-    const found = await discoverProviderModels(configuration, key)
-    const preset = providerPresets.find(
-      (entry) => entry.id === configuration.preset,
-    )
-    return found.map((model) => ({
-      ...preset?.models.find((known) => known.id === model.id),
-      ...model,
-    }))
+    return discoverProviderModels(configuration, key)
+  }
+  const modelManager = (provider: string) => {
+    requireModelSettingsProvider(provider)
+    const registry = input.registry?.()
+    if (!registry?.providers.includes(provider))
+      throw new ConfigurationError("Provider is not connected.")
+    return registry.models(provider, { defaults: true })
+  }
+  const readModels = async (
+    provider: string,
+  ): Promise<ModelCatalogResponse> => {
+    const manager = modelManager(provider)
+    const [snapshot, listed] = await Promise.all([
+      input.userConfig.readSnapshot(),
+      manager.listModels({ includeHidden: true }),
+    ])
+    const models = listed.map((model) => {
+      const capacity = manager.capacity({ provider, model: model.model })
+      return {
+        id: model.model,
+        ...(model.displayName === undefined
+          ? {}
+          : { displayName: model.displayName }),
+        ...(capacity === undefined
+          ? {}
+          : {
+              contextWindowTokens: capacity.contextWindowTokens,
+              maxContextWindowTokens: capacity.maxContextWindowTokens,
+              contextWindowScope: capacity.contextWindowScope,
+            }),
+        ...(model.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: model.maxOutputTokens }),
+        inputModalities: model.inputModalities,
+        imageDetailModes: model.imageDetailModes,
+        ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
+        ...(model.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: model.defaultEffort }),
+        ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
+        ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
+        visible: model.visible ?? true,
+      }
+    })
+    return {
+      provider,
+      models,
+      settings: snapshot.configuration.models?.[provider] ?? {},
+      version:
+        snapshot.layers.find((layer) => layer.source === "user")?.version ?? "",
+      ...manager.status?.(),
+    }
   }
   return {
     read,
+    readModels,
+    async writeModels(provider, value, version) {
+      const manager = modelManager(provider)
+      const settings = requireProviderModelSettings(value)
+      const models = await manager.listModels({ includeHidden: true })
+      for (const [id, override] of Object.entries(settings)) {
+        const base = models.find(
+          (model) => model.model.toLowerCase() === id.toLowerCase(),
+        )
+        const efforts = override.efforts ?? base?.efforts
+        if (
+          override.defaultEffort !== undefined &&
+          efforts !== undefined &&
+          !efforts.includes(override.defaultEffort)
+        )
+          throw new ConfigurationError(
+            `Default effort ${override.defaultEffort} is not supported by ${provider}/${id}.`,
+          )
+      }
+      const snapshot = await input.userConfig.writeValue({
+        keyPath: ["models", provider],
+        value: settings,
+        expectedVersion: version,
+      })
+      input.modelSettingsChanged?.(snapshot.configuration.models ?? {})
+      input.changed?.()
+      return readModels(provider)
+    },
+    async refreshCatalog(provider) {
+      await modelManager(provider).refresh({ force: true })
+      input.changed?.()
+      return readModels(provider)
+    },
     reload,
     discover: discoverInput,
     async move(id, beforeId) {
@@ -590,14 +695,13 @@ function exposedModels(
   configuration: ProviderConfiguration,
   catalog: readonly ConfiguredModel[],
 ): readonly ConfiguredModel[] {
-  const all =
-    configuration.modelSelection === "all" ||
-    (configuration.modelSelection !== "selected" &&
-      !configuration.models.length)
-  const entries = all ? catalog : configuration.models
-  return entries.map((model) => ({
-    ...catalog.find((entry) => entry.id === model.id),
-    ...model,
-    ...configuration.models.find((entry) => entry.id === model.id),
-  }))
+  const models = new Map(
+    catalog.map((model) => [model.id.toLowerCase(), model]),
+  )
+  for (const model of configuration.models)
+    models.set(model.id.toLowerCase(), {
+      ...models.get(model.id.toLowerCase()),
+      ...model,
+    })
+  return [...models.values()]
 }

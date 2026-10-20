@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto"
+import { providerPresets } from "../runtime/provider-presets.ts"
+import { discoverProviderModels } from "./provider-model-discovery.ts"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -176,9 +177,8 @@ const defaultMateProfile = {
 const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
-// codex-rs refreshes the model catalog every 4.5 min, just under the 5 min
-// manager TTL, so OnlineIfUncached effectively never waits on the network.
-const MODELS_REFRESH_INTERVAL_MS = 270_000
+// Sources own cache freshness; this worker revalidates idle connections too.
+const MODELS_REFRESH_INTERVAL_MS = 300_000
 
 // The C8-D1 initialize handshake identifies the host as name/version, read
 // from the package manifest (bundled into the desktop build at build time).
@@ -391,6 +391,7 @@ export async function createYakitoriApplication(
       })
     }
     const userConfiguration = await userConfig.readConfiguration()
+    let modelSettings = userConfiguration.models ?? {}
     const configuredShellEnvironmentPolicy =
       options.shellEnvironmentPolicy ?? userConfiguration.shellEnvironmentPolicy
     const defaultUserShellEnv =
@@ -489,6 +490,10 @@ export async function createYakitoriApplication(
     const providerConfiguration = createProviderService({
       userConfig,
       credentialDirectory,
+      registry: () => providerRegistryForCleanup,
+      modelSettingsChanged(settings) {
+        modelSettings = settings
+      },
       subscriptions: () => subscriptionConnections,
       changed() {
         broadcastNotification?.("provider/configuration/changed", {})
@@ -500,7 +505,15 @@ export async function createYakitoriApplication(
       },
     })
     await providerConfiguration.reload()
-    const providerRegistry = createProviderRegistry()
+    const providerRegistry = createProviderRegistry(
+      {},
+      {
+        settings: (provider) => modelSettings[provider] ?? {},
+        changed() {
+          broadcastNotification?.("provider/configuration/changed", {})
+        },
+      },
+    )
     providerRegistryForCleanup = providerRegistry
     await registerProviderPlugins(
       providerRegistry,
@@ -615,6 +628,13 @@ export async function createYakitoriApplication(
         .then(async (configuration) => {
           await refreshChatGPTProviders()
           if (
+            JSON.stringify(configuration.models ?? {}) !==
+            JSON.stringify(modelSettings)
+          ) {
+            modelSettings = configuration.models ?? {}
+            broadcastNotification?.("provider/configuration/changed", {})
+          }
+          if (
             JSON.stringify(configuration.modelProviders ?? {}) !==
             JSON.stringify(providerConfigurations)
           )
@@ -632,9 +652,6 @@ export async function createYakitoriApplication(
         })
     }, 1_000)
     providerConfigTimer.unref()
-    // Mirror the codex-rs models refresh worker: keep discovered catalogs warm
-    // so turn admission rarely meets a cold cache. The interval stays just
-    // below the manager TTL (5 min).
     const refreshModelsCatalogs = () => {
       for (const name of providerRegistry.providers) {
         void providerRegistry
@@ -1561,6 +1578,7 @@ async function providerSummary(
   const models: ApiProviderModel[] = (await directory.listModels(name)).map(
     (entry) => ({
       id: entry.id,
+      ...(entry.visible === false ? { visible: false } : {}),
       displayName: entry.displayName,
       instructionProfileId: entry.instructionProfileId as string,
       ...(entry.effectiveContextWindowTokens === undefined
@@ -1881,8 +1899,30 @@ function createApiKeyProvider(
   model: string,
   modelsCacheDir: string,
 ): ModelProvider {
+  const preset = providerPresets.find(
+    (preset) => preset.id === (provider === "kimi" ? "kimi-code" : provider),
+  )
+  if (!preset) throw new Error(`Missing API provider preset for ${provider}.`)
+  const models = createDiscoveringModelsManager({
+    provider,
+    identity: async () =>
+      createProviderContinuationScope(provider, preset.baseURL, apiKey),
+    discover: () =>
+      provider === "kimi"
+        ? discoverOpenAiCompatibleModels({
+            provider: "kimi",
+            baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
+            accessToken: apiKey,
+          })
+        : discoverProviderModels({ ...preset, models: [] }, apiKey),
+    cacheStore: createFileModelsCacheStore({
+      provider,
+      directory: modelsCacheDir,
+    }),
+  })
   if (provider === "openai") {
     return createModelProvider({
+      models,
       info: {
         id: provider,
         wireApi: "openai_responses",
@@ -1924,27 +1964,7 @@ function createApiKeyProvider(
       baseURL,
       apiKey,
     ),
-    ...(provider === "kimi"
-      ? {
-          models: createDiscoveringModelsManager({
-            provider,
-            identity: () =>
-              Promise.resolve(
-                createHash("sha256").update(apiKey).digest("hex"),
-              ),
-            discover: () =>
-              discoverOpenAiCompatibleModels({
-                provider: "kimi",
-                baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
-                accessToken: apiKey,
-              }),
-            cacheStore: createFileModelsCacheStore({
-              provider,
-              directory: modelsCacheDir,
-            }),
-          }),
-        }
-      : {}),
+    models,
   })
 }
 
@@ -1999,25 +2019,12 @@ async function registerCodexLogin(
     return
   }
   if (providers.openai === undefined) {
-    providers.openai = createModelProvider({
-      info: {
-        id: "openai",
-        wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false, nativePdf: true },
-      },
-      createTurnTransport: () =>
-        createOpenAITurnTransport({
-          warmup: false,
-          apiKey: login.apiKey,
-          model: "selected-at-request-time",
-          baseURL: OPENAI_API_BASE_URL,
-        }),
-      continuationScope: createProviderContinuationScope(
-        "openai",
-        OPENAI_API_BASE_URL,
-        login.apiKey,
-      ),
-    })
+    providers.openai = createApiKeyProvider(
+      "openai",
+      login.apiKey,
+      "selected-at-request-time",
+      modelsCacheDir,
+    )
   }
 }
 
