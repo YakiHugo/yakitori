@@ -36,18 +36,14 @@ export async function discoverOpenAiCompatibleModels(input: {
   return payload.data.flatMap((entry) => {
     if (!isRecord(entry) || typeof entry.id !== "string") return []
     const contextWindowTokens = positiveInteger(entry.context_length)
-    const displayName = stringValue(entry.display_name)
-    const efforts =
-      input.provider === "kimi" &&
-      isRecord(entry.think_efforts) &&
-      entry.think_efforts.support === true &&
-      Array.isArray(entry.think_efforts.valid_efforts) &&
-      entry.think_efforts.valid_efforts.length > 0 &&
-      entry.think_efforts.valid_efforts.every(
-        (effort) => typeof effort === "string" && effort.length > 0,
-      )
-        ? (entry.think_efforts.valid_efforts as string[])
-        : undefined
+    const displayName =
+      stringValue(entry.display_name) ?? grokDisplayName(entry.id)
+    const efforts = discoverOpenAiCompatibleEfforts(input.provider, entry)
+    const defaultEffort = discoverOpenAiCompatibleDefaultEffort(
+      input.provider,
+      entry,
+      efforts,
+    )
     const inputModalities: ("text" | "image" | "video")[] = ["text"]
     if (input.provider === "kimi") {
       if (entry.supports_image_in === true) inputModalities.push("image")
@@ -59,6 +55,7 @@ export async function discoverOpenAiCompatibleModels(input: {
         ...(displayName === undefined ? {} : { displayName }),
         ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
         ...(efforts === undefined ? {} : { efforts }),
+        ...(defaultEffort === undefined ? {} : { defaultEffort }),
         ...(input.provider === "kimi" &&
         typeof entry.supports_image_in === "boolean" &&
         typeof entry.supports_video_in === "boolean"
@@ -67,6 +64,85 @@ export async function discoverOpenAiCompatibleModels(input: {
       },
     ]
   })
+}
+
+function discoverOpenAiCompatibleEfforts(
+  provider: "grok" | "kimi",
+  entry: Readonly<Record<string, unknown>>,
+): readonly string[] | undefined {
+  if (
+    provider === "kimi" &&
+    isRecord(entry.think_efforts) &&
+    entry.think_efforts.support === true &&
+    Array.isArray(entry.think_efforts.valid_efforts) &&
+    entry.think_efforts.valid_efforts.length > 0 &&
+    entry.think_efforts.valid_efforts.every(
+      (effort) => typeof effort === "string" && effort.length > 0,
+    )
+  ) {
+    return entry.think_efforts.valid_efforts as string[]
+  }
+  if (provider !== "grok") return undefined
+  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined
+  const values = capabilities?.reasoning_effort
+  if (
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((effort) => typeof effort === "string" && effort.length > 0)
+  ) {
+    return values as string[]
+  }
+  // Present capabilities object without reasoning_effort means the SKU rejects
+  // the parameter (grok-4.20 non-reasoning / fixed-reasoning variants).
+  if (capabilities !== undefined && !("reasoning_effort" in capabilities)) {
+    return []
+  }
+  // grok-4.20 ids omit capabilities entirely and still reject reasoningEffort.
+  if (/^grok-4\.20(?:-|$)/i.test(entry.id)) return []
+  return undefined
+}
+
+function discoverOpenAiCompatibleDefaultEffort(
+  provider: "grok" | "kimi",
+  entry: Readonly<Record<string, unknown>>,
+  efforts: readonly string[] | undefined,
+): string | undefined {
+  if (provider !== "grok" || efforts === undefined || efforts.length === 0) {
+    return undefined
+  }
+  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined
+  const defaultEffort = stringValue(capabilities?.default_reasoning_effort)
+  if (defaultEffort !== undefined && efforts.includes(defaultEffort)) {
+    return defaultEffort
+  }
+  return undefined
+}
+
+function grokDisplayName(modelId: string): string | undefined {
+  if (!/^grok-/i.test(modelId)) return undefined
+  // grok-4.20-0309-non-reasoning → Grok 4.20 Non-Reasoning
+  const withoutDate = modelId.replace(/-\d{4}(?=-|$)/g, "")
+  const words = withoutDate.split("-").filter(Boolean)
+  if (words.length === 0) return undefined
+  const parts: string[] = []
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index]!
+    if (/^\d+(?:\.\d+)*$/.test(word)) {
+      parts.push(word)
+      continue
+    }
+    // Keep "non-reasoning" as one hyphenated title token.
+    if (word.toLowerCase() === "non" && index + 1 < words.length) {
+      const next = words[index + 1]!
+      parts.push(
+        `Non-${next.slice(0, 1).toUpperCase()}${next.slice(1)}`,
+      )
+      index += 1
+      continue
+    }
+    parts.push(`${word.slice(0, 1).toUpperCase()}${word.slice(1)}`)
+  }
+  return parts.join(" ")
 }
 
 export async function discoverCodexModels(input: {

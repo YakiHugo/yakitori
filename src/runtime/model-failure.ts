@@ -14,17 +14,28 @@ const disconnectedCodes = new Set([
 
 // Inspect only a structured provider payload. SDK Error.message can contain
 // headers or the whole response body and is not a durable diagnostic source.
+// xAI often returns `{ code, error: "<reason>" }` with a string `error` field
+// instead of OpenAI's `{ error: { message } }` object.
 export function providerErrorMessage(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined
+  if (typeof payload.error === "string" && payload.error.trim() !== "") {
+    return payload.error
+  }
   const error =
     "error" in payload &&
     typeof payload.error === "object" &&
     payload.error !== null
       ? payload.error
       : payload
-  return "message" in error && typeof error.message === "string"
-    ? error.message
-    : undefined
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message
+  }
+  return undefined
 }
 
 export function modelFailureFromUnknown(

@@ -278,7 +278,56 @@ describe("provider model discovery", () => {
         accessToken: "xai-token",
         fetchFn,
       }),
-    ).resolves.toEqual([{ id: "grok-4.6" }, { id: "future-model" }])
+    ).resolves.toEqual([
+      { id: "grok-4.6", displayName: "Grok 4.6" },
+      { id: "future-model" },
+    ])
+  })
+
+  it("reads Grok reasoning effort capabilities from the authenticated catalog", async () => {
+    await expect(
+      discoverOpenAiCompatibleModels({
+        provider: "grok",
+        baseUrl: "https://api.x.ai/v1",
+        accessToken: "test",
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: "grok-4.7",
+                  capabilities: {
+                    reasoning_effort: ["low", "medium", "high", "xhigh"],
+                    default_reasoning_effort: "high",
+                  },
+                },
+                {
+                  id: "grok-4.20-0309-non-reasoning",
+                  capabilities: {},
+                },
+                { id: "grok-4.20-0309-reasoning" },
+              ],
+            }),
+          ),
+      }),
+    ).resolves.toEqual([
+      {
+        id: "grok-4.7",
+        displayName: "Grok 4.7",
+        efforts: ["low", "medium", "high", "xhigh"],
+        defaultEffort: "high",
+      },
+      {
+        id: "grok-4.20-0309-non-reasoning",
+        displayName: "Grok 4.20 Non-Reasoning",
+        efforts: [],
+      },
+      {
+        id: "grok-4.20-0309-reasoning",
+        displayName: "Grok 4.20 Reasoning",
+        efforts: [],
+      },
+    ])
   })
 
   it("uses Kimi's returned capacities, modalities and effort levels throughout the model manager", async () => {
@@ -357,7 +406,11 @@ describe("provider model discovery", () => {
           ),
       }),
     ).resolves.toEqual([
-      { id: "grok-4.6", contextWindowTokens: 500000 },
+      {
+        id: "grok-4.6",
+        displayName: "Grok 4.6",
+        contextWindowTokens: 500000,
+      },
       { id: "invalid-metadata" },
     ])
   })
@@ -429,6 +482,9 @@ it("advertises discovered coding models only with a bundled or provider-supplied
     "grok-4.6",
     "grok-4.7",
     "grok-4.5",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-multi-agent-0309",
   ])
   const codex = createDiscoveringModelsManager({
     provider: "codex",

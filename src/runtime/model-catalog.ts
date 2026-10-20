@@ -292,9 +292,19 @@ export function resolveModelWireEffort(target: {
   readonly model: string
   readonly effort?: string
 }): string | undefined {
+  // xAI's grok-4.20 SKUs reject `reasoning.effort` entirely — both the
+  // non-reasoning and reasoning variants return HTTP 400 when it is set.
+  if (
+    target.provider.toLowerCase() === "grok" &&
+    /^grok-4\.20(?:-|$)/i.test(target.model)
+  ) {
+    return undefined
+  }
   const entry = findCatalogEntry(target)
   if (entry === undefined) return target.effort
+  if (entry.effortStyle === "none") return undefined
   const efforts = "efforts" in entry ? entry.efforts : undefined
+  if (efforts !== undefined && efforts.length === 0) return undefined
   if (target.effort === "ultra" && efforts?.includes("ultra")) {
     const multiAgent =
       "multiAgentReasoningEffort" in entry

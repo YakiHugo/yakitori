@@ -37,6 +37,7 @@ export type DiscoveredModel = Readonly<{
   capabilities?: ModelCapabilities
   instructions?: string
   efforts?: readonly string[]
+  defaultEffort?: string
   inputModalities?: readonly ModelInputModality[]
   id: string
   displayName?: string
@@ -199,7 +200,16 @@ export function createDiscoveringModelsManager(input: {
               model: model.id,
               ...(model.efforts === undefined
                 ? {}
-                : { efforts: model.efforts, effortStyle: "levels" as const }),
+                : model.efforts.length === 0
+                  ? { effortStyle: "none" as const, efforts: [] }
+                  : {
+                      efforts: model.efforts,
+                      effortStyle: "levels" as const,
+                      ...(model.defaultEffort !== undefined &&
+                      model.efforts.includes(model.defaultEffort)
+                        ? { defaultEffort: model.defaultEffort }
+                        : {}),
+                    }),
               ...(model.inputModalities === undefined
                 ? {}
                 : { inputModalities: model.inputModalities }),

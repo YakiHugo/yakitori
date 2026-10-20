@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { modelFailureFromUnknown } from "../../src/runtime/model-failure.ts"
+import {
+  modelFailureFromUnknown,
+  providerErrorMessage,
+} from "../../src/runtime/model-failure.ts"
 
 const input = {
   provider: "kimi",
@@ -44,5 +47,22 @@ describe("model failure diagnostics", () => {
     expect(failure.details).toBeUndefined()
     expect(JSON.stringify(failure)).not.toContain("secret")
     expect(JSON.stringify(failure)).not.toContain("private prompt")
+  })
+
+  it("reads xAI string error payloads used for invalid reasoningEffort", () => {
+    expect(
+      providerErrorMessage({
+        code: "invalid-argument",
+        error:
+          "Model grok-4.20-0309-non-reasoning does not support parameter reasoningEffort.",
+      }),
+    ).toBe(
+      "Model grok-4.20-0309-non-reasoning does not support parameter reasoningEffort.",
+    )
+    expect(
+      providerErrorMessage({
+        error: { message: "OpenAI-shaped reason", type: "invalid_request_error" },
+      }),
+    ).toBe("OpenAI-shaped reason")
   })
 })
