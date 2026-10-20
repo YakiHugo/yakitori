@@ -6,6 +6,7 @@ import {
 } from "../runtime/index.ts"
 
 export type DirectoryModel = {
+  readonly visible?: boolean
   readonly id: string
   readonly displayName: string
   readonly instructionProfileId: InstructionProfileId
@@ -31,7 +32,7 @@ export function createModelDirectory(
       const models =
         manager === undefined
           ? listCatalogModels(provider)
-          : await manager.listModels()
+          : await manager.listModels({ includeHidden: true })
       return models.map((entry) => {
         const capacity = (manager?.capacity ?? catalogModelCapacity)({
           provider,
@@ -39,6 +40,7 @@ export function createModelDirectory(
         })
         return {
           id: entry.model,
+          ...(entry.visible === false ? { visible: false } : {}),
           displayName: entry.displayName ?? entry.model,
           instructionProfileId: entry.instructionProfileId,
           ...(capacity === undefined

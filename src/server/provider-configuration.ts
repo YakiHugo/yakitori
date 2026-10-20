@@ -86,12 +86,6 @@ export function requireProviderConfiguration(
   if (record.enabled !== undefined && typeof record.enabled !== "boolean")
     throw new ConfigurationError("enabled must be a boolean.")
   if (
-    record.modelSelection !== undefined &&
-    record.modelSelection !== "all" &&
-    record.modelSelection !== "selected"
-  )
-    throw new ConfigurationError("modelSelection must be all or selected.")
-  if (
     record.requestWarmup !== undefined &&
     typeof record.requestWarmup !== "boolean"
   )
@@ -116,20 +110,25 @@ export function requireProviderConfiguration(
     ...(record.requestWarmup === undefined
       ? {}
       : { requestWarmup: record.requestWarmup }),
-    ...(record.modelSelection === undefined
-      ? {}
-      : { modelSelection: record.modelSelection }),
   }
 }
 
 export function requireConfiguredModels(
   value: unknown,
+  options: Readonly<{ inheritEfforts?: boolean }> = {},
 ): readonly ConfiguredModel[] {
   if (!Array.isArray(value))
     throw new ConfigurationError("models must be an array.")
   const models = value.map((value): ConfiguredModel => {
     const model = requireRecord(value, "Model")
     const id = requireString(model.id, "Model id")
+    if (
+      model.defaultVisible !== undefined &&
+      typeof model.defaultVisible !== "boolean"
+    )
+      throw new ConfigurationError("Model defaultVisible must be a boolean.")
+    if (model.visible !== undefined && typeof model.visible !== "boolean")
+      throw new ConfigurationError("Model visible must be a boolean.")
     const displayName =
       model.displayName === undefined
         ? undefined
@@ -160,6 +159,30 @@ export function requireConfiguredModels(
       model.contextWindowTokens,
       "contextWindowTokens",
     )
+    const maxContextWindowTokens = optionalPositiveInteger(
+      model.maxContextWindowTokens,
+      "maxContextWindowTokens",
+    )
+    const speeds = model.speeds
+    if (
+      speeds !== undefined &&
+      (!Array.isArray(speeds) ||
+        speeds.some((value) => typeof value !== "string" || !value.trim()))
+    )
+      throw new ConfigurationError(
+        "speeds must be an array of non-empty strings.",
+      )
+    const imageDetailModes = model.imageDetailModes
+    if (
+      imageDetailModes !== undefined &&
+      (!Array.isArray(imageDetailModes) ||
+        imageDetailModes.some(
+          (value) => value !== "high" && value !== "original",
+        ))
+    )
+      throw new ConfigurationError(
+        "imageDetailModes must contain high or original.",
+      )
     const maxOutputTokens = optionalPositiveInteger(
       model.maxOutputTokens,
       "maxOutputTokens",
@@ -207,7 +230,9 @@ export function requireConfiguredModels(
         : requireString(model.defaultEffort, "defaultEffort")
     if (
       defaultEffort !== undefined &&
-      (!Array.isArray(efforts) || !efforts.includes(defaultEffort))
+      (efforts === undefined
+        ? !options.inheritEfforts
+        : !efforts.includes(defaultEffort))
     )
       throw new ConfigurationError("defaultEffort must appear in efforts.")
     let instructionProfileId: ConfiguredModel["instructionProfileId"]
@@ -229,7 +254,20 @@ export function requireConfiguredModels(
     }
     return {
       id,
+      ...(model.defaultVisible === undefined
+        ? {}
+        : { defaultVisible: model.defaultVisible as boolean }),
+      ...(model.visible === undefined
+        ? {}
+        : { visible: model.visible as boolean }),
       ...(pricing ? { pricing } : {}),
+      ...(maxContextWindowTokens === undefined
+        ? {}
+        : { maxContextWindowTokens }),
+      ...(speeds === undefined ? {} : { speeds: speeds as string[] }),
+      ...(imageDetailModes === undefined
+        ? {}
+        : { imageDetailModes: imageDetailModes as ("high" | "original")[] }),
       ...(displayName === undefined ? {} : { displayName }),
       ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
       ...(contextWindowScope === undefined ? {} : { contextWindowScope }),
@@ -288,7 +326,6 @@ export function providersFromConfig(
         noKey: record.no_key,
         enabled: record.enabled,
         requestWarmup: record.request_warmup,
-        modelSelection: record.model_selection,
       })
       const credentialRef =
         record.credential_ref === undefined
@@ -329,9 +366,6 @@ export function providerConfigValue(
             ? "generate_content"
             : "chat_completions",
     models: configuration.models,
-    ...(configuration.modelSelection === undefined
-      ? {}
-      : { model_selection: configuration.modelSelection }),
     ...(configuration.noKey === undefined
       ? {}
       : { no_key: configuration.noKey }),

@@ -179,6 +179,7 @@ export class SessionConfiguration {
       this.snapshot.modelContextWindowTokens,
       models,
     )
+    const effort = selection.effort ?? model.defaultEffort
     const prompt = getModelInstructions(model)
     const requestedOutputTokens = resolveModelRequestMaxOutputTokens(
       model.provider,
@@ -206,7 +207,7 @@ export class SessionConfiguration {
         provider: model.provider,
         model: model.model,
         instructionProfileId: model.instructionProfileId,
-        ...(selection.effort === undefined ? {} : { effort: selection.effort }),
+        ...(effort === undefined ? {} : { effort }),
         ...(selection.speed === undefined ? {} : { speed: selection.speed }),
       },
       modelInfo: model,

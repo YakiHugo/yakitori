@@ -8,6 +8,9 @@ export type ResolvedModel = Readonly<{
   instructions?: string
   autoCompactTokenLimit?: number
   compactionHash?: string
+  defaultEffort?: string
+  efforts?: readonly string[]
+  multiAgentReasoningEffort?: string
   // Requested budget and API capability are distinct. The curated Claude
   // request default is Yakitori policy, not an Anthropic API default.
   defaultOutputTokens?: number
@@ -26,6 +29,11 @@ export type ResolvedModel = Readonly<{
 }>
 
 export type CatalogModel = Readonly<{
+  visible?: boolean
+  contextWindowTokens?: number
+  maxContextWindowTokens?: number
+  contextWindowScope?: "input" | "total"
+  pricing?: import("../protocol/providers.ts").ConfiguredModel["pricing"]
   toolOutputTruncation?: ModelToolOutputTruncation
   autoCompactTokenLimit?: number
   compactionHash?: string
@@ -186,6 +194,13 @@ export function resolveModel(input: {
   if (entry !== undefined) {
     return {
       ...input,
+      ...("efforts" in entry ? { efforts: entry.efforts } : {}),
+      ...("defaultEffort" in entry
+        ? { defaultEffort: entry.defaultEffort }
+        : {}),
+      ...("multiAgentReasoningEffort" in entry
+        ? { multiAgentReasoningEffort: entry.multiAgentReasoningEffort }
+        : {}),
       ...catalogOutputTokens(entry),
       ...("toolOutputTruncation" in entry
         ? {
@@ -228,7 +243,7 @@ export function resolveModel(input: {
     inputModalities: ["text"],
     imageDetailModes: [],
     shellToolType: "unified_exec",
-    fileEditingToolType: "none",
+    fileEditingToolType: "edit_write",
     supportsNativeToolSearch: false,
     supportsCustomTools: false,
     usedFallbackModelMetadata: true,
@@ -287,22 +302,29 @@ export function validateModelSelection(input: {
 // model's multi-agent effort when declared, then to "max", then to the last
 // listed non-ultra stop. An unset effort resolves to the catalog default so
 // codex requests always carry the model's default reasoning level.
-export function resolveModelWireEffort(target: {
-  readonly provider: string
-  readonly model: string
-  readonly effort?: string
-}): string | undefined {
+export function resolveModelWireEffort(
+  target: {
+    readonly provider: string
+    readonly model: string
+    readonly effort?: string
+  },
+  metadata?: Pick<
+    ResolvedModel,
+    "efforts" | "defaultEffort" | "multiAgentReasoningEffort"
+  >,
+): string | undefined {
   // xAI's grok-4.20 SKUs reject `reasoning.effort` entirely — both the
   // non-reasoning and reasoning variants return HTTP 400 when it is set.
   if (
+    metadata === undefined &&
     target.provider.toLowerCase() === "grok" &&
     /^grok-4\.20(?:-|$)/i.test(target.model)
   ) {
     return undefined
   }
-  const entry = findCatalogEntry(target)
+  const entry = metadata ?? findCatalogEntry(target)
   if (entry === undefined) return target.effort
-  if (entry.effortStyle === "none") return undefined
+  if ("effortStyle" in entry && entry.effortStyle === "none") return undefined
   const efforts = "efforts" in entry ? entry.efforts : undefined
   if (efforts !== undefined && efforts.length === 0) return undefined
   if (target.effort === "ultra" && efforts?.includes("ultra")) {

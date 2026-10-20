@@ -60,8 +60,17 @@ export function createChatGPTModelConnections(input: {
         wireApi: "openai_responses",
         models: [],
       })
+      const listeners = new Set<() => void>()
+      let fetchedAt: number | undefined
       let refreshing: Promise<void> | undefined
-      const refresh = () => {
+      const refresh = async (policy?: Readonly<{ force?: boolean }>) => {
+        await auth.resolve()
+        if (
+          !policy?.force &&
+          fetchedAt !== undefined &&
+          Date.now() - fetchedAt < 300_000
+        )
+          return
         refreshing ??= (async () => {
           const access = await auth.resolve()
           const catalog = await discoverChatGPTPlanModels({
@@ -74,23 +83,39 @@ export function createChatGPTModelConnections(input: {
           // SIWC documents model identity/order, not the Codex capability
           // catalog. Keep unknown modalities, efforts and capacity conservative.
           // https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference
+          const previous = JSON.stringify(await current.listModels())
           current = createConfiguredModelsManager({
             provider: providerId,
             wireApi: "openai_responses",
             models: catalog.models,
           })
-        })().finally(() => {
-          refreshing = undefined
-        })
+          fetchedAt = Date.now()
+          if (previous !== JSON.stringify(await current.listModels()))
+            for (const listener of listeners) listener()
+        })()
+          .catch((error: unknown) => {
+            fetchedAt = undefined
+            throw error
+          })
+          .finally(() => {
+            refreshing = undefined
+          })
         return refreshing
       }
       const models: ModelsManager = {
         provider: providerId,
         refresh,
-        async listModels() {
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => {
+            listeners.delete(listener)
+          }
+        },
+        status: () => (fetchedAt === undefined ? {} : { fetchedAt }),
+        async listModels(options) {
           try {
             await refresh()
-            return await current.listModels()
+            return await current.listModels(options)
           } catch (error) {
             // Expected account/auth/network failures stay local to this catalog.
             // Never replace it with another account or a bundled API-key catalog.

@@ -83,9 +83,9 @@ describe("configured models manager", () => {
         usedFallbackModelMetadata: true,
       })
       expect(manager.capacity(selection)).toBeUndefined()
-      expect(() => manager.validate({ ...selection, effort: "high" })).toThrow(
-        "Reasoning effort high is not supported",
-      )
+      expect(() =>
+        manager.validate({ ...selection, effort: "high" }),
+      ).not.toThrow()
       expect(() => manager.validate({ ...selection, speed: "fast" })).toThrow(
         "Speed fast is not supported",
       )

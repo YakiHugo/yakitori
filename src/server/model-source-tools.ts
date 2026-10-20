@@ -14,7 +14,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
   return {
     toolName: plainToolName("configure_model_sources"),
     description:
-      "Inspect and configure Yakitori's model sources. Start with list for presets and saved connections; keys are never returned. Preview validates a change without saving. Save accepts preset, env_key or api_key, and base_url for custom/local services. Omit id to generate a connection ID. Omit model_ids to expose all upstream models automatically; model_selection controls all/selected, model_settings supplies metadata overrides. Discover lists upstream IDs, never aliases. Refresh with id updates that source's catalog. Successful save/remove returns undoId; restore with undo_id reverses it only if no later change replaced it. Changes persist and update the GUI and subsequent turns. Only change connections at the user's request. Subscription sign-in is completed by the user in Providers.",
+      "Inspect and configure Yakitori's model sources. Start with list for presets and saved connections; keys are never returned. Preview validates a change without saving. Save accepts preset, env_key or api_key, and base_url for custom/local services. Omit id to generate a connection ID. Omit model_ids to expose all upstream models automatically; model_settings supplies visibility and metadata overrides. Discover lists upstream IDs, never aliases. Refresh with id updates that source's catalog. Successful save/remove returns undoId; restore with undo_id reverses it only if no later change replaced it. Changes persist and update the GUI and subsequent turns. Only change connections at the user's request. Subscription sign-in is completed by the user in Providers.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -77,7 +77,6 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
           description:
             "For move: put this connection before another ID; omit to place it last.",
         },
-        model_selection: { type: "string", enum: ["all", "selected"] },
         model_settings: {
           type: "array",
           items: { type: "object" },
@@ -195,11 +194,6 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
             envKey: record.env_key ?? previous?.envKey ?? preset?.envKey,
             noKey: record.no_key ?? previous?.noKey ?? preset?.noKey,
             enabled: record.enabled ?? previous?.enabled,
-            modelSelection:
-              record.model_selection ??
-              (record.model_ids === undefined
-                ? previous?.modelSelection
-                : "selected"),
             models:
               record.model_settings !== undefined
                 ? record.model_settings

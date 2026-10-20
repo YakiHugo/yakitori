@@ -1,3 +1,7 @@
+import {
+  requireModelSettingsProvider,
+  requireProviderModelSettings,
+} from "../model-settings.ts"
 export type {
   ProviderRpcParams,
   ProviderRpcResponses,
@@ -12,6 +16,46 @@ import {
 import type { RpcMethodDefinition } from "./methods.ts"
 
 export const providerMethods: readonly RpcMethodDefinition[] = [
+  {
+    method: "provider/models/read",
+    scope: () => undefined,
+    async invoke(params, context) {
+      const record = requireRecord(params)
+      return {
+        result: await requireService(context.providerConfiguration).readModels(
+          requireModelSettingsProvider(record.provider),
+        ),
+      }
+    },
+  },
+  {
+    method: "provider/models/refresh",
+    scope: () => undefined,
+    async invoke(params, context) {
+      const record = requireRecord(params)
+      return {
+        result: await requireService(
+          context.providerConfiguration,
+        ).refreshCatalog(requireModelSettingsProvider(record.provider)),
+      }
+    },
+  },
+  {
+    method: "provider/models/write",
+    scope: () => ({ kind: "global", name: "config" }),
+    async invoke(params, context) {
+      const record = requireRecord(params)
+      if (typeof record.version !== "string")
+        throw new ConfigurationError("Model settings version is required.")
+      return {
+        result: await requireService(context.providerConfiguration).writeModels(
+          requireModelSettingsProvider(record.provider),
+          requireProviderModelSettings(record.settings),
+          record.version,
+        ),
+      }
+    },
+  },
   {
     method: "provider/subscription/import",
     scope: () => ({ kind: "global", name: "config" }),

@@ -166,11 +166,12 @@ export function ProviderEditor({
               }}
             >
               <summary>
-                {draft.existing ? "Models" : "Choose models (optional)"}
+                {draft.existing ? "Models" : "Model defaults (optional)"}
               </summary>
               <p className="provider-field-hint">
                 The service's models are discovered automatically when you
-                connect. Choose which ones to show, or keep the full catalog.
+                connect. Set connection defaults here, or manage all connections
+                in the Models tab.
               </p>
               {catalog?.error ? (
                 <p role="alert" className="provider-message">

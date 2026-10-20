@@ -365,7 +365,7 @@ describe("persisted models cache", () => {
     ).toMatchObject({ contextWindowTokens: 222_000 })
   })
 
-  it("ignores a persisted catalog older than the TTL", async () => {
+  it("serves an expired persisted catalog while revalidating", async () => {
     root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
     const store = createFileModelsCacheStore({
       provider: "codex",
@@ -377,9 +377,10 @@ describe("persisted models cache", () => {
       models: [{ id: "gpt-persisted", contextWindowTokens: 321_000 }],
     })
 
+    const revalidation = deferred<readonly DiscoveredModel[]>()
     const discover = vi
       .fn<() => Promise<readonly DiscoveredModel[]>>()
-      .mockResolvedValue([])
+      .mockImplementation(() => revalidation.promise)
     const manager = createDiscoveringModelsManager({
       provider: "codex",
       identity: async () => "account",
@@ -389,10 +390,16 @@ describe("persisted models cache", () => {
       ttlMs: 5 * 60 * 1_000,
     })
     await manager.refresh()
-
     expect(
-      manager.capacity({ provider: "codex", model: "gpt-persisted" }),
-    ).toBeUndefined()
+      manager.capacity({ provider: "codex", model: "gpt-persisted" })
+        ?.contextWindowTokens,
+    ).toBe(321_000)
+    revalidation.resolve([])
+    await vi.waitFor(() =>
+      expect(
+        manager.capacity({ provider: "codex", model: "gpt-persisted" }),
+      ).toBeUndefined(),
+    )
     expect(discover).toHaveBeenCalledTimes(1)
   })
 

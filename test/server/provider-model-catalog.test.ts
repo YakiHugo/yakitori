@@ -135,7 +135,7 @@ it("refreshes automatic models without copying discovery into the user's configu
     ).toBe(0o600)
 })
 
-it("keeps selected model overrides through refresh and preserves an explicitly empty selection", async () => {
+it("keeps model overrides and individual visibility through discovery and restart", async () => {
   const f = await fixture()
   await f.service.write({
     id: "personal",
@@ -146,7 +146,6 @@ it("keeps selected model overrides through refresh and preserves an explicitly e
     id: "personal",
     configuration: {
       ...f.configuration,
-      modelSelection: "selected",
       models: [
         { id: "coder", displayName: "My coder", contextWindowTokens: 16000 },
       ],
@@ -162,7 +161,10 @@ it("keeps selected model overrides through refresh and preserves an explicitly e
       model.model,
       model.displayName,
     ]),
-  ).toEqual([["coder", "My coder"]])
+  ).toEqual([
+    ["coder", "My coder"],
+    ["new-coder", undefined],
+  ])
   expect(
     f.registry
       .models("personal")
@@ -172,8 +174,10 @@ it("keeps selected model overrides through refresh and preserves an explicitly e
     id: "personal",
     configuration: {
       ...f.configuration,
-      modelSelection: "selected",
-      models: [],
+      models: [
+        { id: "coder", visible: false },
+        { id: "new-coder", visible: false },
+      ],
     },
   })
   expect(await f.registry.models("personal").listModels()).toEqual([])

@@ -98,17 +98,16 @@ export async function discoverProviderModels(
           throw new ConfigurationError(
             "A model catalog entry has no model resource name.",
           )
-        if (
-          !Array.isArray(entry.supportedGenerationMethods) ||
-          !entry.supportedGenerationMethods.includes("generateContent")
-        )
-          continue
+        const defaultVisible =
+          Array.isArray(entry.supportedGenerationMethods) &&
+          entry.supportedGenerationMethods.includes("generateContent")
         const id = entry.name.slice("models/".length)
         const known = officialPreset?.models.find((model) => model.id === id)
         const capacity = entry.inputTokenLimit
         const output = entry.outputTokenLimit
         models.set(id, {
           id,
+          defaultVisible,
           ...(typeof entry.displayName === "string" && entry.displayName.trim()
             ? { displayName: entry.displayName }
             : {}),
@@ -137,7 +136,7 @@ export async function discoverProviderModels(
         ? entry.architecture
         : undefined
       const supportedEndpoints = entry.supported_endpoints
-      if (
+      const defaultVisible = !(
         capabilities?.completion_chat === false ||
         (Array.isArray(supportedEndpoints) &&
           !supportedEndpoints.includes(
@@ -150,15 +149,6 @@ export async function discoverProviderModels(
         (Array.isArray(architecture?.output_modalities) &&
           !architecture.output_modalities.includes("text"))
       )
-        continue
-      // OpenAI's catalog also contains image, speech and embedding models,
-      // while this harness sends text responses with function tools.
-      if (
-        officialPreset?.id === "openai" &&
-        (!/^(gpt-|chatgpt-|o[1-9](?:-|$)|codex-)/.test(entry.id) ||
-          /-(audio|realtime|image|transcribe|tts)(-|$)/.test(entry.id))
-      )
-        continue
       const name =
         typeof entry.display_name === "string"
           ? entry.display_name
@@ -186,7 +176,6 @@ export async function discoverProviderModels(
           : undefined)
       const efforts =
         Array.isArray(effortValues) &&
-        effortValues.length &&
         effortValues.every((value) => typeof value === "string" && value.length)
           ? (effortValues as string[])
           : undefined
@@ -211,6 +200,7 @@ export async function discoverProviderModels(
         cacheWrite = price(prices?.input_cache_write)
       models.set(entry.id, {
         id: entry.id,
+        defaultVisible,
         ...(name ? { displayName: name } : {}),
         ...(typeof capacity === "number" &&
         Number.isSafeInteger(capacity) &&

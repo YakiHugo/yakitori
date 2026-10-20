@@ -182,7 +182,7 @@ describe("provider model discovery", () => {
     )
   })
 
-  it("omits retired Codex models from the authenticated catalog", async () => {
+  it("preserves provider models before applying app visibility policy", async () => {
     const models = await discoverCodexModels({
       baseUrl: "https://chatgpt.example/backend-api/codex",
       accessToken: "test",
@@ -215,7 +215,13 @@ describe("provider model discovery", () => {
         ),
     })
 
-    expect(models.map((model) => model.id)).toEqual(["gpt-5.5"])
+    expect(models.map((model) => model.id)).toEqual([
+      "gpt-reserve",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+      "gpt-5.5",
+    ])
   })
 
   it.each([
@@ -468,7 +474,7 @@ describe("provider model discovery", () => {
   })
 })
 
-it("advertises discovered coding models only with a bundled or provider-supplied instruction source", async () => {
+it("exposes new coding models with generic app defaults and keeps other models inspectable", async () => {
   const grok = createDiscoveringModelsManager({
     provider: "grok",
     identity: async () => "account",
@@ -480,12 +486,13 @@ it("advertises discovered coding models only with a bundled or provider-supplied
   })
   expect((await grok.listModels()).map((model) => model.model)).toEqual([
     "grok-4.6",
-    "grok-4.7",
-    "grok-4.5",
-    "grok-4.20-0309-non-reasoning",
-    "grok-4.20-0309-reasoning",
-    "grok-4.20-multi-agent-0309",
+    "unknown-model",
   ])
+  expect(
+    (await grok.listModels({ includeHidden: true })).map(
+      (model) => model.model,
+    ),
+  ).toEqual(["grok-4.6", "grok-imagine-image", "unknown-model"])
   const codex = createDiscoveringModelsManager({
     provider: "codex",
     identity: async () => "account",

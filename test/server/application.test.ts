@@ -324,6 +324,12 @@ describe("application composition", () => {
         .spyOn(globalThis, "fetch")
         .mockImplementation(async (input) => {
           requests.push(input instanceof Request ? input.url : String(input))
+          if (
+            (input instanceof Request ? input.url : String(input)).endsWith(
+              "/models",
+            )
+          )
+            return Response.json({ data: [{ id: connection.model }] })
           const events =
             connection.provider === "anthropic"
               ? [
@@ -422,7 +428,10 @@ describe("application composition", () => {
             () => application?.threadManager.getThread(sessionId)?.agentStatus,
           )
           .toEqual({ completed: "Endpoint verified" })
-        expect(requests).toEqual([connection.endpoint])
+        expect(requests).toEqual([
+          connection.endpoint.replace(/\/(responses|messages)$/, "/models"),
+          connection.endpoint,
+        ])
       } finally {
         await application?.close()
         fetchMock.mockRestore()
@@ -3048,6 +3057,13 @@ describe("application composition", () => {
 
   it("lets configured definitions shadow environment transports until the definitions are deleted", async () => {
     process.env.OPENAI_API_KEY = "baseline-environment-key"
+    const realFetch = globalThis.fetch
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = input instanceof Request ? input.url : String(input)
+      return url === "https://api.openai.com/v1/models"
+        ? Promise.resolve(Response.json({ data: [{ id: "gpt-6-sol" }] }))
+        : realFetch(input, init)
+    })
     await withApplicationRoot(async (rootDir, workspace) => {
       const configPath = join(rootDir, "config.toml")
       await writeFile(
@@ -3251,6 +3267,7 @@ describe("application composition", () => {
           provider: "openai",
           model: "gpt-6-astra",
           instructionProfileId: "gpt-6-astra",
+          effort: "low",
         })
       } finally {
         await application.close()

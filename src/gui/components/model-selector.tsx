@@ -147,9 +147,12 @@ export function ModelSelector({
 
   if (providers.length === 0) return null
 
-  const availableProviders = providers.filter(
-    (provider) => provider.availability !== "requires_login",
-  )
+  const availableProviders = providers
+    .filter((provider) => provider.availability !== "requires_login")
+    .map((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.visible !== false),
+    }))
   const effective = normalizeKimiModelSelection(
     resolveEffectiveModel({
       sessionCurrent: current,

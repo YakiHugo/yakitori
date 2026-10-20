@@ -1,3 +1,4 @@
+import { modelVisibleByDefault } from "./model-policy.ts"
 import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
 import {
   type CatalogModel,
@@ -76,6 +77,19 @@ export function createConfiguredModelsManager(input: {
       ...(configured.inputModalities === undefined
         ? {}
         : { inputModalities: [...configured.inputModalities] }),
+      ...(configured.efforts === undefined
+        ? known?.efforts === undefined
+          ? {}
+          : { efforts: known.efforts }
+        : { efforts: configured.efforts }),
+      ...(configured.defaultEffort === undefined
+        ? known?.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: known.defaultEffort }
+        : { defaultEffort: configured.defaultEffort }),
+      ...(configured.imageDetailModes === undefined
+        ? {}
+        : { imageDetailModes: configured.imageDetailModes }),
       ...(configured.maxOutputTokens === undefined
         ? {}
         : { maxOutputTokens: configured.maxOutputTokens }),
@@ -119,33 +133,71 @@ export function createConfiguredModelsManager(input: {
         ),
       }
     }
-    const efforts = configured.efforts ?? known?.efforts ?? []
+    const efforts = configured.efforts ?? known?.efforts
     const defaultEffort =
       configured.defaultEffort ??
       (known?.defaultEffort !== undefined &&
-      efforts.includes(known.defaultEffort)
+      efforts?.includes(known.defaultEffort)
         ? known.defaultEffort
         : undefined)
-    if (defaultEffort !== undefined && !efforts.includes(defaultEffort)) {
+    if (
+      defaultEffort !== undefined &&
+      efforts !== undefined &&
+      !efforts.includes(defaultEffort)
+    ) {
       throw new Error(
         `Default effort ${defaultEffort} is not supported by ${input.provider}/${configured.id}.`,
       )
     }
+    const {
+      defaultEffort: previousDefault,
+      efforts: previousEfforts,
+      ...resolvedBase
+    } = resolved
+    resolved = {
+      ...resolvedBase,
+      ...(efforts === undefined ? {} : { efforts }),
+      ...(defaultEffort === undefined ? {} : { defaultEffort }),
+    }
     const { provider: _, usedFallbackModelMetadata: __, ...metadata } = resolved
     const listed: CatalogModel = {
       ...metadata,
+      visible:
+        configured.visible ??
+        modelVisibleByDefault(
+          input.catalogProvider ?? input.provider,
+          configured.id,
+          configured.defaultVisible,
+        ),
       ...(configured.displayName === undefined
         ? known?.displayName === undefined
           ? {}
           : { displayName: known.displayName }
         : { displayName: configured.displayName }),
-      efforts: [...efforts],
-      effortStyle: efforts.length === 0 ? "none" : "levels",
-      ...(defaultEffort === undefined ? {} : { defaultEffort }),
-      ...(known?.speeds === undefined ||
-      (input.wireApi !== undefined && input.wireApi !== "openai_responses")
+      ...(efforts === undefined
         ? {}
-        : { speeds: [...known.speeds] }),
+        : {
+            efforts: [...efforts],
+            effortStyle:
+              efforts.length === 0 ? ("none" as const) : ("levels" as const),
+          }),
+      ...(configured.contextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: configured.contextWindowTokens }),
+      ...(configured.contextWindowScope === undefined
+        ? {}
+        : { contextWindowScope: configured.contextWindowScope }),
+      ...(configured.pricing === undefined
+        ? {}
+        : { pricing: configured.pricing }),
+      ...(defaultEffort === undefined ? {} : { defaultEffort }),
+      ...(configured.speeds !== undefined
+        ? { speeds: configured.speeds }
+        : known?.speeds === undefined ||
+            (input.wireApi !== undefined &&
+              input.wireApi !== "openai_responses")
+          ? {}
+          : { speeds: [...known.speeds] }),
     }
     const capacity =
       configured.contextWindowTokens === undefined
@@ -157,7 +209,9 @@ export function createConfiguredModelsManager(input: {
             })
         : {
             contextWindowTokens: configured.contextWindowTokens,
-            maxContextWindowTokens: configured.contextWindowTokens,
+            maxContextWindowTokens:
+              configured.maxContextWindowTokens ??
+              configured.contextWindowTokens,
             effectiveContextWindowPercent: 100,
             contextWindowScope: configured.contextWindowScope ?? "total",
           }
@@ -180,8 +234,10 @@ export function createConfiguredModelsManager(input: {
   return {
     provider: input.provider,
     async refresh() {},
-    async listModels() {
-      return [...models.values()].map((model) => model.listed)
+    async listModels(options) {
+      return [...models.values()]
+        .map((model) => model.listed)
+        .filter((model) => options?.includeHidden || model.visible !== false)
     },
     resolve(selection) {
       return requireModel(selection).resolved
@@ -190,7 +246,8 @@ export function createConfiguredModelsManager(input: {
       const model = requireModel(selection).listed
       if (
         selection.effort !== undefined &&
-        !model.efforts?.includes(selection.effort)
+        model.efforts !== undefined &&
+        !model.efforts.includes(selection.effort)
       ) {
         throw new Error(
           `Reasoning effort ${selection.effort} is not supported by ${input.provider}/${selection.model}.`,

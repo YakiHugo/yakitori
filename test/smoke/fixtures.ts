@@ -145,6 +145,9 @@ export async function runProviderFlow(
     authorization: string | undefined
     body: string
   }[] = []
+  let catalogModels = [
+    { id: "smoke-model", input_modalities: ["text", "image"] },
+  ]
   let interruptedStreamClosed = false
   let approvedCommandResults = 0
   const endpoint = createServer((request, response) => {
@@ -152,7 +155,7 @@ export async function runProviderFlow(
       response.writeHead(200, { "content-type": "application/json" })
       response.end(
         JSON.stringify({
-          data: [{ id: "smoke-model", input_modalities: ["text", "image"] }],
+          data: catalogModels,
         }),
       )
       return
@@ -524,6 +527,72 @@ export async function runProviderFlow(
     await expect(enabled).toHaveAttribute("aria-checked", "false")
     await page.getByRole("button", { name: "Undo", exact: true }).click()
     await expect(enabled).toHaveAttribute("aria-checked", "true")
+    await page.getByRole("tab", { name: "Models", exact: true }).click()
+    await page
+      .getByLabel("Provider connection", { exact: true })
+      .selectOption("smoke-api")
+    await expect(
+      page.getByRole("checkbox", { name: "smoke-model", exact: true }),
+    ).toBeChecked()
+    await page.getByText("Add an unlisted model", { exact: true }).click()
+    await page.getByLabel("Model ID", { exact: true }).fill("manual-coding")
+    await page.getByRole("button", { name: "Add model", exact: true }).click()
+    const manual = page.locator(".provider-model-item").filter({
+      has: page.getByRole("checkbox", { name: "manual-coding", exact: true }),
+    })
+    await manual.getByText("Model settings", { exact: true }).click()
+    await manual.getByLabel("Context window", { exact: true }).fill("64000")
+    await page
+      .getByRole("button", { name: "Save model settings", exact: true })
+      .click()
+    await expect(
+      page.getByRole("status").filter({ hasText: "Model settings saved." }),
+    ).toBeVisible()
+    await page.reload()
+    await openProviderSettings(page)
+    await page.getByRole("tab", { name: "Models", exact: true }).click()
+    await page
+      .getByLabel("Provider connection", { exact: true })
+      .selectOption("smoke-api")
+    await expect(
+      page.getByRole("checkbox", { name: "manual-coding", exact: true }),
+    ).toBeChecked()
+    await manual.getByText("Model settings", { exact: true }).click()
+    await expect(
+      manual.getByLabel("Context window", { exact: true }),
+    ).toHaveValue("64000")
+    catalogModels = [
+      ...catalogModels,
+      { id: "future-coding", input_modalities: ["text"] },
+    ]
+    await page
+      .getByRole("button", { name: "Refresh models", exact: true })
+      .click()
+    await expect(
+      page.getByRole("checkbox", { name: "future-coding", exact: true }),
+    ).toBeChecked()
+    await page
+      .getByRole("checkbox", { name: "future-coding", exact: true })
+      .uncheck()
+    await page
+      .getByRole("checkbox", { name: "manual-coding", exact: true })
+      .uncheck()
+    await page
+      .getByRole("button", { name: "Save model settings", exact: true })
+      .click()
+    await expect(
+      page.getByRole("status").filter({ hasText: "Model settings saved." }),
+    ).toBeVisible()
+    await page
+      .getByRole("heading", { name: "Models", exact: true })
+      .scrollIntoViewIfNeeded()
+    const modelsScreenshot = testInfo.outputPath("provider-model-settings.png")
+    await page.screenshot({ path: modelsScreenshot, animations: "disabled" })
+    await testInfo.attach("provider-model-settings", {
+      path: modelsScreenshot,
+      contentType: "image/png",
+    })
+    await page.getByRole("tab", { name: "Providers", exact: true }).click()
     const screenshotPath = testInfo.outputPath("provider-connection.png")
     await page.screenshot({ path: screenshotPath })
     await testInfo.attach("provider-connection", {
@@ -539,6 +608,12 @@ export async function runProviderFlow(
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()
+    await expect(
+      page.getByRole("button", { name: "future-coding", exact: true }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole("button", { name: "manual-coding", exact: true }),
+    ).toHaveCount(0)
     await page.getByRole("button", { name: "smoke-model", exact: true }).click()
     await page
       .getByRole("textbox", { name: "Message the Mate", exact: true })

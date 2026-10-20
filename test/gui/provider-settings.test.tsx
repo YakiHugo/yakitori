@@ -254,8 +254,11 @@ it("retains existing model metadata and the stored key while editing model IDs",
     id: connection.id,
     configuration: {
       ...connection.configuration,
-      modelSelection: "selected",
-      models: [preset.models[1], { id: "new-model" }],
+      models: [
+        preset.models[1],
+        { ...preset.models[0], visible: false },
+        { id: "new-model", visible: true },
+      ],
     },
   })
 })
@@ -490,7 +493,7 @@ it("loads the catalog when choosing models and persists a selection without copy
   render(<ProviderSettings />)
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
-  await user.click(screen.getByText("Choose models (optional)"))
+  await user.click(screen.getByText("Model defaults (optional)"))
   await user.click(await screen.findByLabelText("DeepSeek Chat deepseek-chat"))
   await user.click(screen.getByLabelText("deepseek-reasoner"))
   await user.click(screen.getByLabelText("deepseek-reasoner"))
@@ -503,8 +506,10 @@ it("loads the catalog when choosing models and persists a selection without copy
       baseURL: preset.baseURL,
       envKey: preset.envKey,
       preset: preset.id,
-      modelSelection: "selected",
-      models: [{ id: "deepseek-reasoner" }],
+      models: [
+        { id: "deepseek-chat", visible: false },
+        { id: "deepseek-reasoner", visible: true },
+      ],
     },
     apiKey: "catalog-key",
   })
@@ -705,7 +710,7 @@ it("does not reopen a closed editor when its model catalog request completes", a
   render(<ProviderSettings />)
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
-  await user.click(screen.getByText("Choose models (optional)"))
+  await user.click(screen.getByText("Model defaults (optional)"))
   await screen.findByText("Loading models…")
   await user.click(screen.getByRole("button", { name: "Close" }))
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
@@ -736,7 +741,7 @@ it("keeps a new editor locked to its own model request after an older request co
   render(<ProviderSettings />)
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
-  await user.click(screen.getByText("Choose models (optional)"))
+  await user.click(screen.getByText("Model defaults (optional)"))
   await screen.findByText("Loading models…")
   await user.click(screen.getByRole("button", { name: "Close" }))
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
@@ -744,7 +749,7 @@ it("keeps a new editor locked to its own model request after an older request co
   expect(
     screen.getByLabelText("API base URL").closest("fieldset"),
   ).toHaveProperty("disabled", false)
-  await user.click(screen.getByText("Choose models (optional)"))
+  await user.click(screen.getByText("Model defaults (optional)"))
   await waitFor(() => expect(completions).toHaveLength(2))
   await act(async () => completions[0]?.([{ id: "stale-model" }]))
   expect(screen.getByText("Loading models…")).toBeDefined()
@@ -802,7 +807,7 @@ it.each([
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   await user.click(screen.getByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "new-source-key")
-  await user.click(screen.getByText("Choose models (optional)"))
+  await user.click(screen.getByText("Model defaults (optional)"))
   await screen.findByText("Loading models…")
   const completion = finishImport
   if (!completion) throw new Error("Missing import completion")

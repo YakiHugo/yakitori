@@ -1386,7 +1386,31 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
-  it("passes a pinned reasoning effort through to the request params", async () => {
+  it.each([
+    {
+      model: "gpt-request",
+      pinned: "high",
+      policy: undefined,
+      expected: "high",
+    },
+    {
+      model: "gpt-6-sol",
+      pinned: undefined,
+      policy: { efforts: ["low", "high"], defaultEffort: "high" },
+      expected: "high",
+    },
+    {
+      model: "gpt-6-sol",
+      pinned: undefined,
+      policy: { efforts: [] },
+      expected: undefined,
+    },
+  ])("uses the resolved reasoning policy on the wire for $model/$expected", async ({
+    model,
+    pinned,
+    policy,
+    expected,
+  }) => {
     let body: unknown
     const client = withSDKResponse({
       responses: {
@@ -1411,19 +1435,20 @@ describe("OpenAI Responses provider", () => {
       requestFixture({
         target: {
           provider: "openai",
-          model: "gpt-request",
+          model,
           instructionProfileId: "codex",
-          effort: "high",
+          ...(pinned === undefined ? {} : { effort: pinned }),
         },
+        ...(policy === undefined ? {} : { reasoning: policy }),
       }),
     )) {
       // Drain the stream.
     }
 
-    expect(body).toMatchObject({
-      model: "gpt-request",
-      reasoning: { effort: "high" },
-    })
+    expect(body).toMatchObject({ model })
+    if (expected === undefined)
+      expect(body).not.toHaveProperty("reasoning.effort")
+    else expect(body).toMatchObject({ reasoning: { effort: expected } })
   })
 
   it("resolves the codex ultra alias and catalog defaults on the wire", async () => {

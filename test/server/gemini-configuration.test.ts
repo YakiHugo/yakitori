@@ -176,8 +176,8 @@ it("discovers native pages using header authentication and persists input-only l
         inputModalities: model.inputModalities,
       })),
     ).toEqual([
-      { id: "native-a", efforts: [], inputModalities: ["text"] },
-      { id: "native-b", efforts: [], inputModalities: ["text"] },
+      { id: "native-a", efforts: undefined, inputModalities: ["text"] },
+      { id: "native-b", efforts: undefined, inputModalities: ["text"] },
     ])
     expect(
       manager.capacity({ provider: "native-gemini", model: "native-b" }),
@@ -219,8 +219,12 @@ it("keeps only confirmed image metadata and does not invent native effort levels
     ),
   )
   expect(await discoverProviderModels(configuration, "key")).toEqual([
-    { id: "gemini-3.8-flash", inputModalities: ["text", "image"] },
-    { id: "unknown-model" },
+    {
+      id: "gemini-3.8-flash",
+      inputModalities: ["text", "image"],
+      defaultVisible: true,
+    },
+    { id: "unknown-model", defaultVisible: true },
   ])
 })
 
@@ -229,17 +233,6 @@ it.each([
   [{ models: [{ name: "gemini-model" }] }, "model resource name"],
   [{ models: [], nextPageToken: 42 }, "invalid nextPageToken"],
   [{ models: [], nextPageToken: "repeat" }, "repeated a page"],
-  [
-    {
-      models: [
-        {
-          name: "models/embedding",
-          supportedGenerationMethods: ["embedContent"],
-        },
-      ],
-    },
-    "no chat models",
-  ],
 ] as const)("rejects malformed or unusable native catalogs: %j", async (body, message) => {
   vi.stubGlobal(
     "fetch",
@@ -260,4 +253,23 @@ it.each([
   await expect(discoverProviderModels(configuration, "key")).rejects.toThrow(
     `HTTP ${status}`,
   )
+})
+
+it("retains native non-generation models with a hidden default", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json({
+        models: [
+          {
+            name: "models/embedding",
+            supportedGenerationMethods: ["embedContent"],
+          },
+        ],
+      }),
+    ),
+  )
+  expect(await discoverProviderModels(configuration, "key")).toEqual([
+    { id: "embedding", defaultVisible: false },
+  ])
 })

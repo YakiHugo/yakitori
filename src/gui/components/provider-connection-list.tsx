@@ -46,12 +46,11 @@ export function ProviderConnectionList({
         ))}
       {providers.map((provider, index) => {
         const config = provider.configuration
-        const all =
-          config.modelSelection === "all" ||
-          (config.modelSelection !== "selected" && !config.models.length)
-        const count = all
-          ? (provider.catalog?.models.length ?? 0)
-          : config.models.length
+        const count = new Set(
+          [...(provider.catalog?.models ?? []), ...config.models]
+            .filter((model) => model.visible !== false)
+            .map((model) => model.id),
+        ).size
         const error =
           provider.connection?.state === "error"
             ? provider.connection.message

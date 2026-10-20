@@ -30,17 +30,12 @@ it.each([
   fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: id } })
   fireEvent.click(screen.getByRole("button", { name: "Add model" }))
   expect(onChange).not.toHaveBeenCalled()
-  expect(screen.getByLabelText(/Show all models automatically/)).toHaveProperty(
-    "checked",
-    true,
-  )
 })
 
 it("shows edits to a catalog model selected through its typed ID", () => {
   function Editor() {
     const [configuration, setConfiguration] = useState<ProviderConfiguration>({
       ...base,
-      modelSelection: "selected",
     })
     return (
       <ProviderModels
@@ -81,10 +76,6 @@ it("preserves automatic selection when a discovered model receives an override",
   const name = document.getElementById("model-name-model-a")
   if (!name) throw new Error("Missing model editor")
   fireEvent.change(name, { target: { value: "My model" } })
-  expect(screen.getByLabelText(/Show all models automatically/)).toHaveProperty(
-    "checked",
-    true,
-  )
   expect(screen.getByRole("checkbox", { name: "model-b" })).toHaveProperty(
     "checked",
     true,
@@ -97,7 +88,6 @@ it("typing an already configured differently-cased catalog ID stays idempotent",
     <ProviderModels
       configuration={{
         ...base,
-        modelSelection: "selected",
         models: [{ id: "MODEL-A", displayName: "Custom A" }],
       }}
       available={available}
@@ -110,4 +100,58 @@ it("typing an already configured differently-cased catalog ID stays idempotent",
   })
   fireEvent.click(screen.getByRole("button", { name: "Add model" }))
   expect(onChange).not.toHaveBeenCalled()
+})
+
+it("hides one model without freezing later discoveries", () => {
+  function Editor() {
+    const [configuration, setConfiguration] = useState(base)
+    const [models, setModels] = useState(available)
+    return (
+      <>
+        <ProviderModels
+          configuration={configuration}
+          available={models}
+          fetchingModels={false}
+          onChange={(patch) => setConfiguration({ ...configuration, ...patch })}
+        />
+        <button
+          type="button"
+          onClick={() => setModels([...available, { id: "new-model" }])}
+        >
+          Discover
+        </button>
+      </>
+    )
+  }
+  render(<Editor />)
+  fireEvent.click(screen.getByRole("checkbox", { name: "Model A model-a" }))
+  fireEvent.click(screen.getByRole("button", { name: "Discover" }))
+  expect(
+    screen.getByRole("checkbox", { name: "Model A model-a" }),
+  ).toHaveProperty("checked", false)
+  expect(screen.getByRole("checkbox", { name: "new-model" })).toHaveProperty(
+    "checked",
+    true,
+  )
+})
+
+it("does not pin provider reasoning defaults while editing the supported levels", () => {
+  const onChange = vi.fn()
+  render(
+    <ProviderModels
+      configuration={base}
+      available={[
+        { id: "coder", efforts: ["low", "high"], defaultEffort: "high" },
+      ]}
+      onChange={onChange}
+      fetchingModels={false}
+    />,
+  )
+  const input = screen.getByLabelText("Reasoning levels")
+  fireEvent.blur(input, { target: { value: "low, high" } })
+  expect(onChange).not.toHaveBeenCalled()
+  fireEvent.blur(input, { target: { value: "low, high, xhigh" } })
+  expect(onChange).toHaveBeenCalledWith({
+    models: [{ id: "coder", efforts: ["low", "high", "xhigh"] }],
+  })
 })

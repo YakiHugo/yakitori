@@ -1,3 +1,5 @@
+import type { ModelSettingsConfiguration } from "../protocol/providers.ts"
+import { modelSettingsFromConfig } from "./model-settings.ts"
 import type { ConfigurationSnapshot as WireConfigurationSnapshot } from "../protocol/configuration.ts"
 export type ConfigurationSnapshot = WireConfigurationSnapshot<UserConfiguration>
 
@@ -84,6 +86,7 @@ export class ConfigVersionConflictError extends Error {
 }
 
 export type UserConfiguration = Readonly<{
+  models?: ModelSettingsConfiguration
   modelProviders?: Readonly<Record<string, StoredProviderConfiguration>>
   rolloutBudget?: RolloutBudgetConfig
   preference?: ApiUserModelPreference
@@ -682,6 +685,9 @@ async function configurationFromConfig(
   }
   return {
     ...instructionConfiguration,
+    ...(value.models === undefined
+      ? {}
+      : { models: modelSettingsFromConfig(value.models) }),
     ...(Object.keys(modelProviders).length === 0 ? {} : { modelProviders }),
     ...(preference === undefined ? {} : { preference }),
     ...(rolloutBudget === undefined ? {} : { rolloutBudget }),

@@ -1,3 +1,4 @@
+import { ModelCatalogSettings } from "./model-catalog-settings.tsx"
 import { ArrowLeft, Plus } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type {
@@ -22,7 +23,9 @@ import "./provider-settings.css"
 
 export function ProviderSettings() {
   const apiBase = useAppStore((state) => state.apiBase)
-  const [view, setView] = useState<"providers" | "usage">("providers")
+  const [view, setView] = useState<"providers" | "models" | "usage">(
+    "providers",
+  )
   return (
     <div className="provider-workspace">
       <header className="provider-workspace-header">
@@ -40,7 +43,7 @@ export function ProviderSettings() {
           role="tablist"
           aria-label="Model sources"
         >
-          {(["providers", "usage"] as const).map((tab) => (
+          {(["providers", "models", "usage"] as const).map((tab) => (
             <button
               type="button"
               role="tab"
@@ -57,19 +60,28 @@ export function ProviderSettings() {
                 )
                   return
                 event.preventDefault()
+                const tabs = ["providers", "models", "usage"] as const
+                const index = tabs.indexOf(view)
                 const next =
-                  event.key === "Home"
-                    ? "providers"
-                    : event.key === "End"
-                      ? "usage"
-                      : view === "providers"
-                        ? "usage"
-                        : "providers"
+                  tabs[
+                    event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? tabs.length - 1
+                        : (index +
+                            (event.key === "ArrowLeft" ? -1 : 1) +
+                            tabs.length) %
+                          tabs.length
+                  ] ?? "providers"
                 setView(next)
                 document.getElementById(`provider-tab-${next}`)?.focus()
               }}
             >
-              {tab === "providers" ? "Providers" : "Usage"}
+              {tab === "providers"
+                ? "Providers"
+                : tab === "models"
+                  ? "Models"
+                  : "Usage"}
             </button>
           ))}
         </div>
@@ -83,7 +95,11 @@ export function ProviderSettings() {
           role="tabpanel"
           aria-labelledby={`provider-tab-${view}`}
         >
-          <ProviderConnections key={apiBase} apiBase={apiBase} view={view} />
+          {view === "models" ? (
+            <ModelCatalogSettings key={apiBase} apiBase={apiBase} />
+          ) : (
+            <ProviderConnections key={apiBase} apiBase={apiBase} view={view} />
+          )}
         </div>
       </section>
     </div>
