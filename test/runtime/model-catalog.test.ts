@@ -275,6 +275,35 @@ describe("model catalog context windows", () => {
     ).toBe("ultra")
   })
 
+  it("omits reasoning effort for Grok 4.20 SKUs that reject the parameter", () => {
+    expect(
+      resolveModelWireEffort({
+        provider: "grok",
+        model: "grok-4.20-0309-non-reasoning",
+        effort: "high",
+      }),
+    ).toBeUndefined()
+    expect(
+      resolveModelWireEffort({
+        provider: "grok",
+        model: "grok-4.20-0309-reasoning",
+        effort: "high",
+      }),
+    ).toBeUndefined()
+    expect(
+      resolveModelWireEffort({
+        provider: "grok",
+        model: "grok-4.20-multi-agent-0309",
+      }),
+    ).toBeUndefined()
+    expect(
+      resolveModelWireEffort({
+        provider: "grok",
+        model: "grok-4.5",
+      }),
+    ).toBe("high")
+  })
+
   it("resolves an unset effort to the catalog default", () => {
     expect(
       resolveModelWireEffort({ provider: "codex", model: "gpt-6-astra" }),
