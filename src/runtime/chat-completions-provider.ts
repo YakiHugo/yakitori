@@ -361,7 +361,7 @@ async function* streamChatCompletions(
               text: fragment,
               ...(request.streamOutputItems && completionId !== undefined
                 ? {
-                    itemId: `${completionId}_0${type === "reasoning_delta" ? "_reasoning" : ""}`,
+                    itemId: `${completionId}_0`,
                   }
                 : {}),
             }

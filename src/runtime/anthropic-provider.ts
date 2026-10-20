@@ -133,6 +133,12 @@ async function* streamAnthropic(
     return
   }
 
+  const thinking = request.providerOptions?.body.thinking
+  const thinkingDisplay =
+    isJsonObject(thinking) &&
+    (thinking.display === "updates" || thinking.display === "summarized")
+      ? thinking.display
+      : undefined
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let providerRequestId: string | undefined
   let failureStage: "connect" | "response_body" = "connect"
@@ -446,8 +452,13 @@ async function* streamAnthropic(
           pending.block.thinking =
             String(pending.block.thinking ?? "") + event.delta.thinking
           yield {
-            type: "reasoning_delta",
+            type: thinkingDisplay === "updates" ? "delta" : "reasoning_delta",
             text: event.delta.thinking,
+            ...(thinkingDisplay === "updates"
+              ? { purpose: "commentary" as const }
+              : thinkingDisplay === "summarized"
+                ? { representation: "summary" as const }
+                : {}),
             ...(request.streamOutputItems ? { itemId } : {}),
           }
         } else if (event.delta.type === "signature_delta") {
@@ -499,6 +510,7 @@ async function* streamAnthropic(
             customFallbackKeys,
             request.target.provider,
             request.continuationScope,
+            thinkingDisplay,
           ).content
         if (request.streamOutputItems && request.compaction === undefined) {
           for (;;) {
@@ -568,6 +580,7 @@ async function* streamAnthropic(
           customFallbackKeys,
           request.target.provider,
           request.continuationScope,
+          thinkingDisplay,
         )
         if (
           incompleteToolCalls &&
@@ -911,6 +924,7 @@ export function fromAnthropicMessage(
   customFallbackKeys: ReadonlyMap<string, string> = new Map(),
   provider = "anthropic",
   continuationScope?: string,
+  thinkingDisplay?: "summarized" | "updates",
 ): ModelResponse {
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
@@ -918,8 +932,13 @@ export function fromAnthropicMessage(
       throw new AnthropicProtocolError("Invalid Anthropic content block.")
     if (block.type === "thinking" && typeof block.thinking === "string") {
       content.push({
-        type: "reasoning",
+        type: thinkingDisplay === "updates" ? "text" : "reasoning",
         text: block.thinking,
+        ...(thinkingDisplay === "updates"
+          ? { purpose: "commentary" as const }
+          : thinkingDisplay === "summarized"
+            ? { representation: "summary" as const }
+            : {}),
         ...(typeof block.signature === "string" && block.signature.length > 0
           ? {
               providerMetadata: {

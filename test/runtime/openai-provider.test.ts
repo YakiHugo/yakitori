@@ -1145,6 +1145,7 @@ describe("OpenAI Responses provider", () => {
       {
         type: "reasoning",
         text: "Inspect the repository.",
+        representation: "summary",
         providerMetadata: {
           openai: {
             provider: "openai",
@@ -1379,8 +1380,8 @@ describe("OpenAI Responses provider", () => {
     for await (const event of stream(requestFixture())) events.push(event)
 
     expect(events).toEqual([
-      { type: "reasoning_delta", text: "Inspect" },
-      { type: "reasoning_delta", text: " files" },
+      { type: "reasoning_delta", text: "Inspect", representation: "summary" },
+      { type: "reasoning_delta", text: " files", representation: "summary" },
       expect.objectContaining({ type: "response" }),
     ])
   })

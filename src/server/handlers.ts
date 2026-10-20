@@ -517,10 +517,8 @@ export function createThreadServerHandlers(
           }
           if (event.type === "model.stream") {
             const reasoning = event.kind === "reasoning"
-            const displayItemId = reasoning
-              ? `${event.itemId}_reasoning`
-              : event.itemId
-            const key = `${event.itemId}:${event.kind}`
+            const displayItemId = event.itemId
+            const key = displayItemId
             let publisher = streams.get(key)
             if (publisher === undefined) {
               options.eventHub?.publishTransient({
@@ -530,6 +528,15 @@ export function createThreadServerHandlers(
                 item: {
                   type: reasoning ? "reasoning" : "agent_message",
                   itemId: displayItemId,
+                  ...(event.source === undefined
+                    ? {}
+                    : { source: event.source }),
+                  ...(event.purpose === undefined
+                    ? {}
+                    : { purpose: event.purpose }),
+                  ...(event.representation === undefined
+                    ? {}
+                    : { representation: event.representation }),
                 },
                 createdAt: new Date().toISOString(),
               })
@@ -546,6 +553,13 @@ export function createThreadServerHandlers(
               turnId: event.turnId,
               itemId: displayItemId,
               delta: event.delta,
+              ...(event.source === undefined ? {} : { source: event.source }),
+              ...(event.purpose === undefined
+                ? {}
+                : { purpose: event.purpose }),
+              ...(event.representation === undefined
+                ? {}
+                : { representation: event.representation }),
             })
             continue
           }
@@ -635,17 +649,14 @@ export function createThreadServerHandlers(
                 ? itemIds.filter((id): id is string => typeof id === "string")
                 : []
               for (const itemId of discarded) {
-                for (const kind of ["assistant", "reasoning"] as const) {
-                  streams.delete(`${itemId}:${kind}`)
-                  options.eventHub?.publishTransient({
-                    type: "item.discarded",
-                    sessionId: event.threadId,
-                    turnId: event.turnId,
-                    itemId:
-                      kind === "reasoning" ? `${itemId}_reasoning` : itemId,
-                    createdAt: new Date().toISOString(),
-                  })
-                }
+                streams.delete(itemId)
+                options.eventHub?.publishTransient({
+                  type: "item.discarded",
+                  sessionId: event.threadId,
+                  turnId: event.turnId,
+                  itemId,
+                  createdAt: new Date().toISOString(),
+                })
               }
             }
             options.eventHub?.publishTransient({

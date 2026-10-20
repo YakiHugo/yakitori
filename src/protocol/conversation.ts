@@ -4,6 +4,7 @@ import type {
   ImageDetail,
 } from "./asset-types.ts"
 import type { JsonObject } from "./events.ts"
+import type { AssistantTextPurpose } from "./model-output.ts"
 
 // Portable conversation records belong to Session persistence. Providers adapt
 // them at the wire boundary without replacing stored sources with native IDs.
@@ -12,6 +13,11 @@ export type ModelTextBlock = Readonly<{
   text: string
   providerMetadata?: JsonObject
 }>
+
+export type ModelAssistantTextBlock = ModelTextBlock &
+  Readonly<{
+    purpose?: AssistantTextPurpose
+  }>
 
 export type ModelImageBlock =
   | Readonly<{

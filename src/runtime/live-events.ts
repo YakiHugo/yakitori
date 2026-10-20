@@ -1,3 +1,4 @@
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type {
   LiveAssistantDelta,
   LiveReasoningDelta,
@@ -21,12 +22,14 @@ export type LiveEventPublisher = {
 }
 
 export type DeltaPublisher = {
-  publish(input: {
-    readonly sessionId: string
-    readonly turnId: string
-    readonly itemId: string
-    readonly delta: string
-  }): void
+  publish(
+    input: ModelOutputPresentation & {
+      readonly sessionId: string
+      readonly turnId: string
+      readonly itemId: string
+      readonly delta: string
+    },
+  ): void
   flush(): void
 }
 
@@ -41,12 +44,12 @@ export function createCoalescingDeltaPublisher(
 ): DeltaPublisher {
   const minIntervalMs = Math.max(1, Math.floor(1000 / publicationsPerSecond))
   let pending:
-    | {
+    | (ModelOutputPresentation & {
         readonly sessionId: string
         readonly turnId: string
         readonly itemId: string
         readonly deltas: string[]
-      }
+      })
     | undefined
   const streamId = crypto.randomUUID()
   let offset = 0
@@ -61,6 +64,11 @@ export function createCoalescingDeltaPublisher(
       sessionId: input.sessionId,
       turnId: input.turnId,
       itemId: input.itemId,
+      ...(input.source === undefined ? {} : { source: input.source }),
+      ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+      ...(input.representation === undefined
+        ? {}
+        : { representation: input.representation }),
       streamId,
       offset,
       delta,

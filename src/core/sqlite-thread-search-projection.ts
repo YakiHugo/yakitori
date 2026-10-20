@@ -1,3 +1,4 @@
+import { answerTextParts } from "../protocol/model-output.ts"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -66,7 +67,7 @@ type OccurrenceCursor = Readonly<{
 }>
 
 // Rebuild disposable text projections after preserving user message source text.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -462,8 +463,9 @@ function applyEntries(
           `)
           .run(threadId, envelope.turnId, record.seq)
       } else if (message.role === "assistant") {
-        const rawText = message.content
-          .filter((block) => block.type === "text")
+        const rawText = answerTextParts(
+          message.content.filter((block) => block.type === "text"),
+        )
           .map((block) => block.text)
           .join("")
         database

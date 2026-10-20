@@ -1,3 +1,4 @@
+import { answerTextParts, modelOutputItemId } from "../protocol/model-output.ts"
 import { isDeepStrictEqual } from "node:util"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type { TurnCompletion, Session } from "../core/session.ts"
@@ -1339,6 +1340,7 @@ async function executeTurnModelLoop(
       const dispatchedCallIds = new Set<string>()
       const startCalls = (calls: readonly ModelToolCallBlock[]) => {
         if (calls.length === 0) return
+        const modelCallId = attempt.origin.callId
         for (const call of calls) {
           if (dispatchedCallIds.has(call.id))
             throw new Error("Model repeated an executed tool call id.")
@@ -1372,7 +1374,10 @@ async function executeTurnModelLoop(
               permissionGate: input.permissionGate,
               recordToolStarted: async (item) => {
                 latency.firstToolMs ??= elapsed()
-                await input.session.recordToolStarted(input.execution, item)
+                await input.session.recordToolStarted(input.execution, {
+                  ...item,
+                  modelCallId,
+                })
               },
               publishPermissionEvent: (event) =>
                 input.session.emitPermissionEvent(input.execution, event),
@@ -1454,7 +1459,7 @@ async function executeTurnModelLoop(
                 resultItem,
                 completeToolItem(
                   toolPlan,
-                  item,
+                  { ...item, modelCallId },
                   resultItem.id,
                   result,
                   modelContent,
@@ -1478,7 +1483,9 @@ async function executeTurnModelLoop(
       const committedNative: ModelNativeItem[] = []
       const committedCallIds = new Set<string>()
       let committedBytes = 0
+      if (!continuingAnswer) answerItemIds.length = 0
       let answerStartIndex = answerItemIds.length
+      let explicitAnswer = false
       const recordOutput = async (
         content: readonly ModelContentBlock[],
         itemId: string,
@@ -1520,12 +1527,19 @@ async function executeTurnModelLoop(
           answerItemIds.length = 0
           answerStartIndex = 0
           continuationReminderNeeded = true
-        } else if (
-          content.some(
-            (block) => block.type === "text" && block.text.length > 0,
+        } else {
+          const text = content
+            .filter((block) => block.type === "text")
+            .filter((block) => block.text.length > 0)
+          const hasFinal = text.some(
+            (block) => block.purpose === "final_answer",
           )
-        ) {
-          answerItemIds.push(item.id)
+          if (hasFinal && !explicitAnswer) {
+            answerItemIds.length = answerStartIndex
+            explicitAnswer = true
+          }
+          if (answerTextParts(text).length > 0 && (!explicitAnswer || hasFinal))
+            answerItemIds.push(item.id)
         }
       }
       const response = await consumeModelStream({
@@ -1588,6 +1602,7 @@ async function executeTurnModelLoop(
             committedNative.length = 0
             committedBytes = 0
             sampledContext = undefined
+            explicitAnswer = false
             responseItemId = `message_${globalThis.crypto.randomUUID()}`
           }
         },
@@ -2221,7 +2236,14 @@ async function consumeModelStream(input: {
         if (itemId === undefined)
           throw new Error("Committed output requires a display item id.")
         await input.onOutputItem(event.content, itemId, event.native)
-        provisionalItems.delete(itemId)
+        const indexes = { assistant: 0, reasoning: 0 }
+        for (const block of event.content) {
+          if (block.type !== "text" && block.type !== "reasoning") continue
+          const kind = block.type === "text" ? "assistant" : "reasoning"
+          provisionalItems.delete(
+            modelOutputItemId(itemId, kind, indexes[kind]++),
+          )
+        }
         continue
       }
       if (event.type !== "response") {
@@ -2242,13 +2264,29 @@ async function consumeModelStream(input: {
             "Model stream update exceeded the configured byte limit.",
           )
         }
-        const itemId = displayItemId(event.itemId)
-        if (itemId !== undefined) {
+        const parentItemId = displayItemId(event.itemId)
+        if (parentItemId !== undefined) {
+          const itemId = modelOutputItemId(parentItemId, kind, event.partIndex)
           provisionalItems.add(itemId)
           input.emitModelStream?.({
             itemId,
             kind,
             delta: event.text,
+            ...(attempt === undefined
+              ? {}
+              : {
+                  source: {
+                    callId: attempt.origin.callId,
+                    itemId: parentItemId,
+                  },
+                }),
+            ...(event.type === "delta" && event.purpose !== undefined
+              ? { purpose: event.purpose }
+              : {}),
+            ...(event.type === "reasoning_delta" &&
+            event.representation !== undefined
+              ? { representation: event.representation }
+              : {}),
           })
         }
         continue
@@ -2919,33 +2957,35 @@ function completedResponseItems(
 ): readonly CompletedExecutionItem[] {
   if (response.item.role !== "assistant") return []
   const providerMetadata = response.providerMetadata
-  const reasoning = response.item.content
-    .filter((block) => block.type === "reasoning")
-    .map((block) => block.text)
-    .join("")
-  const content = response.item.content.filter((block) => block.type === "text")
-  return [
-    ...(reasoning.length === 0
-      ? []
-      : [
-          {
-            type: "reasoning" as const,
-            itemId: `${response.id}_reasoning`,
-            text: reasoning,
-            ...(providerMetadata === undefined ? {} : { providerMetadata }),
-          },
-        ]),
-    ...(content.every((block) => block.text.length === 0)
-      ? []
-      : [
-          {
-            type: "agent_message" as const,
-            itemId: response.id,
-            content,
-            ...(providerMetadata === undefined ? {} : { providerMetadata }),
-          },
-        ]),
-  ]
+  const source =
+    response.item.response === undefined
+      ? undefined
+      : {
+          callId: response.item.response.callId,
+          itemId: response.id,
+        }
+  const indexes = { assistant: 0, reasoning: 0 }
+  return response.item.content.flatMap<CompletedExecutionItem>((block) => {
+    if (block.type !== "text" && block.type !== "reasoning") return []
+    const kind = block.type === "text" ? "assistant" : "reasoning"
+    const itemId = modelOutputItemId(response.id, kind, indexes[kind]++)
+    return [
+      {
+        ...(block.type === "text"
+          ? { type: "agent_message" as const, content: [block] }
+          : {
+              type: "reasoning" as const,
+              text: block.text,
+              ...(block.representation === undefined
+                ? {}
+                : { representation: block.representation }),
+            }),
+        itemId,
+        ...(source === undefined ? {} : { source }),
+        ...(providerMetadata === undefined ? {} : { providerMetadata }),
+      },
+    ]
+  })
 }
 
 function completeToolItem(

@@ -558,7 +558,7 @@ export async function runProviderFlow(
       await expect(activity).toHaveAttribute("aria-expanded", "false")
       await activity.click()
       await page
-        .getByRole("button", { name: "Used tools · View image", exact: true })
+        .getByRole("button", { name: "View image", exact: true })
         .click()
       await page.getByRole("button", { name: /^View image smoke\.png/ }).click()
       const parts = page.getByRole("region", {

@@ -1,3 +1,5 @@
+import { answerTextParts } from "../protocol/model-output.ts"
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import {
   TaskCleanupError,
   type ExecutionContext,
@@ -1208,13 +1210,15 @@ export class Session {
     this.#contextManager.setContextTokens(next)
   }
 
+  // itemId already identifies the display part, including its reasoning/part suffix.
   emitModelStream(
     execution: ExecutionContext,
-    input: Readonly<{
-      itemId: string
-      kind: "assistant" | "reasoning"
-      delta: string
-    }>,
+    input: ModelOutputPresentation &
+      Readonly<{
+        itemId: string
+        kind: "assistant" | "reasoning"
+        delta: string
+      }>,
   ): void {
     const active = this.#requireExecution(execution)
 
@@ -1873,9 +1877,12 @@ function answerText(
         })
   const text = answer
     .flatMap((item) =>
-      item.item.role === "assistant" ? item.item.content : [],
+      item.item.role === "assistant"
+        ? answerTextParts(
+            item.item.content.filter((block) => block.type === "text"),
+          )
+        : [],
     )
-    .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("")
   return text.length === 0 ? null : text

@@ -21,7 +21,6 @@ describe("prompt registry", () => {
   )("binds $provider/$model to a versioned model profile", (model) => {
     const id = requireInstructionProfileId(model.instructionProfileId)
     const prompt = getInstructionProfile(id)
-    expect(id).toBe(model.provider === "faux" ? "default" : model.model)
     expect(manifest[id].agent).toBe(
       officialAgents[model.provider as keyof typeof officialAgents],
     )

@@ -236,7 +236,10 @@ describe("Turn processor", () => {
     }
   })
 
-  it("persists each answer fragment before continuing and returns the whole answer", async () => {
+  it.each([
+    undefined,
+    "final_answer",
+  ] as const)("persists answer continuations with a declared or unspecified final purpose (%s)", async (purpose) => {
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.Length,
@@ -246,7 +249,15 @@ describe("Turn processor", () => {
         stopReason: ModelStopReason.Length,
         content: [{ type: "text", text: "second " }],
       },
-      { content: [{ type: "text", text: "third." }] },
+      {
+        content: [
+          {
+            type: "text",
+            text: "third.",
+            ...(purpose === undefined ? {} : { purpose }),
+          },
+        ],
+      },
     ])
     const runtime = await createRuntime(provider.stream)
     const thread = await runtime.createThread()

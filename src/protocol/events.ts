@@ -1,7 +1,11 @@
 import type { ImageAttachment } from "./asset-types.ts"
-import type { ModelTextBlock, ModelToolContentBlock } from "./conversation.ts"
+import type {
+  ModelAssistantTextBlock,
+  ModelToolContentBlock,
+} from "./conversation.ts"
 import type { ContextExcerpt } from "./input-context.ts"
 import type { InputContent } from "./user-input.ts"
+import type { ModelOutputSource } from "./model-output.ts"
 export const EventType = {
   SessionCreated: "session.created",
   InputAdmitted: "input.admitted",
@@ -290,7 +294,8 @@ export type McpToolCallResult = Readonly<{
 export type AgentMessageExecutionItem = Readonly<{
   type: "agent_message"
   itemId: string
-  content: ReadonlyArray<ModelTextBlock>
+  content: ReadonlyArray<ModelAssistantTextBlock>
+  source?: ModelOutputSource
   providerMetadata?: EventMetadata
 }>
 
@@ -298,6 +303,8 @@ export type ReasoningExecutionItem = Readonly<{
   type: "reasoning"
   itemId: string
   text: string
+  source?: ModelOutputSource
+  representation?: "summary"
   providerMetadata?: EventMetadata
 }>
 
@@ -317,6 +324,7 @@ export type ContextCompactionCompletedItem = Readonly<{
 export type ToolExecutionItemBase = Readonly<{
   itemId: string
   toolCallId: string
+  modelCallId?: string
   name: string
   input: JsonValue
   requiresPermission: boolean

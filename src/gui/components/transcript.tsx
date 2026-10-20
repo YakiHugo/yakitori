@@ -1,3 +1,4 @@
+import { answerTextParts } from "../../protocol/model-output.ts"
 import {
   ArrowDown,
   BookOpen,
@@ -28,6 +29,7 @@ import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
+import { ActivityGroup } from "./activity-group.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -41,9 +43,7 @@ import {
   findContextSource,
   revealContextSourceEvent,
 } from "./excerpt-source.tsx"
-import {
-  reasoningSections,
-} from "./reasoning-trace.tsx"
+import { reasoningSections } from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"
@@ -155,7 +155,7 @@ export function Transcript({
     >()
     const assistants = new Map<
       string,
-      Extract<ExecutionEntry, { kind: "assistant" }>
+      Extract<ExecutionEntry, { kind: "assistant" }>[]
     >()
     for (const entry of view.entries) {
       if (!("turnId" in entry)) continue
@@ -165,7 +165,10 @@ export function Transcript({
           entry.state,
         )
       } else if (entry.kind !== "permission") turn.last = entry
-      if (entry.kind === "assistant") assistants.set(entry.itemId, entry)
+      if (entry.kind === "assistant") {
+        const id = entry.source?.itemId ?? entry.itemId
+        assistants.set(id, [...(assistants.get(id) ?? []), entry])
+      }
       turns.set(entry.turnId, turn)
     }
     const answers = new Map<string, FinalAnswer>()
@@ -182,14 +185,14 @@ export function Transcript({
         timing.outcome.answerItemIds !== undefined
           ? timing.outcome.answerItemIds
           : turn.last?.kind === "assistant"
-            ? [turn.last.itemId]
+            ? [turn.last.source?.itemId ?? turn.last.itemId]
             : []
-      const pieces = itemIds.flatMap((id) => {
-        const entry = assistants.get(id)
-        return entry?.turnId === turnId ? [entry] : []
-      })
+      if (itemIds.some((id) => !assistants.has(id))) continue
+      const pieces = itemIds
+        .flatMap((id) => answerTextParts(assistants.get(id) ?? []))
+        .filter((entry) => entry.turnId === turnId)
       const last = pieces.at(-1)
-      if (last === undefined || pieces.length !== itemIds.length) continue
+      if (last === undefined) continue
       const text = pieces.map((entry) => entry.text).join("")
       const incomplete = pieces.some((entry) => entry.incomplete)
       const sources = pieces.flatMap((piece) =>
@@ -205,7 +208,11 @@ export function Transcript({
         previous?.pieces.length === pieces.length &&
           previous.pieces.every((entry, index) => entry === pieces[index])
           ? previous
-          : { itemIds, pieces, entry: { ...last, text, incomplete, sources } },
+          : {
+              itemIds: pieces.map((piece) => piece.itemId),
+              pieces,
+              entry: { ...last, text, incomplete, sources },
+            },
       )
     }
     previousAnswers.current = answers
@@ -425,6 +432,9 @@ const TurnBlock = memo(
   }>) {
     const [liveActivityCollapsed, setLiveActivityCollapsed] = useState(false)
     const [activityExpanded, setActivityExpanded] = useState(false)
+    const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>(
+      {},
+    )
     const [sourceNavigation, setSourceNavigation] =
       useState<ContextSourceNavigation>()
     useEffect(() => {
@@ -484,9 +494,7 @@ const TurnBlock = memo(
           !persistent.includes(entry) &&
           (entry.kind !== "reasoning" ||
             entry.incomplete ||
-            reasoningSections(entry.text).some((section) =>
-              section.body.trim(),
-            )) &&
+            entry.text.trim().length > 0) &&
           !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
       ),
     )
@@ -514,14 +522,44 @@ const TurnBlock = memo(
         <ol className="agent-timeline" aria-label="Agent activity">
           {timeline.map((item) => (
             <li
-              key={entryKey(
-                item.kind === "entry" ? item.entry : item.entries[0],
-              )}
+              key={
+                item.kind === "activity"
+                  ? item.id
+                  : entryKey(
+                      item.kind === "entry" ? item.entry : item.entries[0],
+                    )
+              }
               className="agent-timeline-item"
               data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
             >
               {item.kind === "entry" ? (
                 <EntryCell entry={item.entry} />
+              ) : item.kind === "activity" ? (
+                <ActivityGroup
+                  entries={item.entries}
+                  active={active && item === timeline.at(-1)}
+                  expanded={groupExpanded[item.id]}
+                  onExpandedChange={(expanded) =>
+                    setGroupExpanded((previous) => ({
+                      ...previous,
+                      [item.id]: expanded,
+                    }))
+                  }
+                  pendingApproval={entries.some(
+                    (entry) =>
+                      entry.kind === "permission" &&
+                      entry.state !== "resolved" &&
+                      item.entries.some(
+                        (candidate) =>
+                          candidate.kind === "tool" &&
+                          candidate.toolCallId === entry.toolCallId,
+                      ),
+                  )}
+                >
+                  {item.entries.map((entry) => (
+                    <EntryCell key={entryKey(entry)} entry={entry} />
+                  ))}
+                </ActivityGroup>
               ) : (
                 <ActionGroup entries={item.entries} />
               )}
@@ -627,6 +665,11 @@ const TurnBlock = memo(
 )
 
 type TurnTimelineItem =
+  | {
+      readonly kind: "activity"
+      readonly id: string
+      readonly entries: readonly [ExecutionEntry, ...ExecutionEntry[]]
+    }
   | { readonly kind: "entry"; readonly entry: ExecutionEntry }
   | {
       readonly kind: "actions"
@@ -636,6 +679,37 @@ type TurnTimelineItem =
 function groupTurnTimeline(
   entries: readonly ExecutionEntry[],
 ): readonly TurnTimelineItem[] {
+  const toolCalls = new Map(
+    entries.flatMap((entry) =>
+      entry.kind === "tool" && entry.execution.modelCallId !== undefined
+        ? [[entry.toolCallId, entry.execution.modelCallId] as const]
+        : [],
+    ),
+  )
+  const callIdOf = (entry: ExecutionEntry): string | undefined => {
+    switch (entry.kind) {
+      case "assistant":
+      case "reasoning":
+        return entry.source?.callId
+      case "tool":
+        return entry.execution.type === "collaboration_tool_call" ||
+          entry.execution.name === "request_user_input_async"
+          ? undefined
+          : entry.execution.modelCallId
+      case "permission":
+        return toolCalls.get(entry.toolCallId)
+      default:
+        return undefined
+    }
+  }
+  const runs: { callId: string | undefined; entries: ExecutionEntry[] }[] = []
+  for (const entry of entries) {
+    const callId = callIdOf(entry)
+    const previous = runs.at(-1)
+    if (callId !== undefined && previous?.callId === callId)
+      previous.entries.push(entry)
+    else runs.push({ callId, entries: [entry] })
+  }
   const timeline: TurnTimelineItem[] = []
   let actions: ExecutionEntry[] = []
   const flushActions = () => {
@@ -644,18 +718,34 @@ function groupTurnTimeline(
     timeline.push({ kind: "actions", entries: [first, ...rest] })
     actions = []
   }
-  for (const entry of entries) {
+  for (const run of runs) {
+    const [entry, ...rest] = run.entries
+    if (entry === undefined) continue
     if (
-      (entry.kind === "tool" &&
-        entry.execution.type !== "collaboration_tool_call" &&
-        entry.execution.name !== "request_user_input_async") ||
-      entry.kind === "permission"
+      run.callId !== undefined &&
+      run.entries.some((item) => item.kind === "tool")
     ) {
-      actions.push(entry)
+      flushActions()
+      timeline.push({
+        kind: "activity",
+        id: `${run.callId}:${entryKey(entry)}`,
+        entries: [entry, ...rest],
+      })
       continue
     }
-    flushActions()
-    timeline.push({ kind: "entry", entry })
+    for (const entry of run.entries) {
+      if (
+        (entry.kind === "tool" &&
+          entry.execution.type !== "collaboration_tool_call" &&
+          entry.execution.name !== "request_user_input_async") ||
+        entry.kind === "permission"
+      ) {
+        actions.push(entry)
+        continue
+      }
+      flushActions()
+      timeline.push({ kind: "entry", entry })
+    }
   }
   flushActions()
   return timeline

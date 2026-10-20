@@ -15,6 +15,116 @@ import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 
 describe("provider output completeness", () => {
+  it("keeps reasoning summary parts distinct through streaming and completion", async () => {
+    const item = {
+      type: "reasoning",
+      id: "thought",
+      summary: [
+        { type: "summary_text", text: "**Inspecting output**" },
+        { type: "summary_text", text: "**Checking persistence**" },
+      ],
+    }
+    const events = await collect(
+      openaiStream([
+        {
+          type: "response.reasoning_summary_text.delta",
+          item_id: "thought",
+          output_index: 0,
+          summary_index: 0,
+          delta: "**Inspecting output**",
+        },
+        {
+          type: "response.reasoning_summary_text.delta",
+          item_id: "thought",
+          output_index: 0,
+          summary_index: 1,
+          delta: "**Checking persistence**",
+        },
+        { type: "response.output_item.done", output_index: 0, item },
+        openaiFinish(undefined, [item]),
+      ]),
+      request("openai"),
+    )
+    expect(
+      events.filter((event) => event.type === "reasoning_delta"),
+    ).toMatchObject([
+      { itemId: "thought", partIndex: 0, representation: "summary" },
+      { itemId: "thought", partIndex: 1, representation: "summary" },
+    ])
+    expect(events.find((event) => event.type === "output_item")).toMatchObject({
+      content: [
+        {
+          type: "reasoning",
+          text: "**Inspecting output**",
+          representation: "summary",
+        },
+        {
+          type: "reasoning",
+          text: "**Checking persistence**",
+          representation: "summary",
+        },
+      ],
+    })
+  })
+
+  it("recognizes explicit progress-update thinking without changing its native replay", async () => {
+    const events = await collect(
+      anthropicStream([
+        anthropicStart(),
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "thinking_delta",
+            thinking: "Checking persistence next.",
+          },
+        },
+        {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "signature_delta", signature: "opaque" },
+        },
+        { type: "content_block_stop", index: 0 },
+        ...anthropicFinish("end_turn"),
+      ]),
+      {
+        ...request("anthropic"),
+        providerOptions: {
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          body: { thinking: { type: "adaptive", display: "updates" } },
+        },
+      },
+    )
+    expect(events.find((event) => event.type === "delta")).toMatchObject({
+      purpose: "commentary",
+      text: "Checking persistence next.",
+    })
+    expect(events.find((event) => event.type === "output_item")).toMatchObject({
+      content: [
+        {
+          type: "text",
+          purpose: "commentary",
+          text: "Checking persistence next.",
+        },
+      ],
+      native: [
+        {
+          value: {
+            type: "thinking",
+            thinking: "Checking persistence next.",
+            signature: "opaque",
+          },
+        },
+      ],
+    })
+  })
+
   it.each([
     '{"path":"b.txt","content":"hello"',
     '{"path":"b.txt","content":"hel',

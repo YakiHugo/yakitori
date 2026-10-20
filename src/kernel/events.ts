@@ -371,21 +371,33 @@ function isToolExecutionItem(value: unknown): value is ToolExecutionItem {
   return isRecord(value) && isToolExecutionItemWithLifecycle(value, false)
 }
 
+function isModelOutputSource(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      onlyKeys(value, ["callId", "itemId"]) &&
+      isString(value.callId) &&
+      isString(value.itemId))
+  )
+}
+
 function isAgentMessageItem(
   value: Record<string, unknown>,
 ): value is AgentMessageExecutionItem {
   return (
-    onlyKeys(value, ["type", "itemId", "content", "providerMetadata"]) &&
+    onlyKeys(value, [
+      "type",
+      "itemId",
+      "content",
+      "providerMetadata",
+      "source",
+    ]) &&
     isString(value.itemId) &&
+    isModelOutputSource(value.source) &&
     Array.isArray(value.content) &&
     value.content.every(
       (block) =>
-        isRecord(block) &&
-        onlyKeys(block, ["type", "text", "providerMetadata"]) &&
-        block.type === "text" &&
-        isString(block.text) &&
-        (block.providerMetadata === undefined ||
-          isJsonObject(block.providerMetadata)),
+        isRecord(block) && block.type === "text" && isModelContentBlock(block),
     ) &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata))
@@ -396,9 +408,19 @@ function isReasoningItem(
   value: Record<string, unknown>,
 ): value is ReasoningExecutionItem {
   return (
-    onlyKeys(value, ["type", "itemId", "text", "providerMetadata"]) &&
+    onlyKeys(value, [
+      "type",
+      "itemId",
+      "text",
+      "providerMetadata",
+      "source",
+      "representation",
+    ]) &&
     isString(value.itemId) &&
     isString(value.text) &&
+    isModelOutputSource(value.source) &&
+    (value.representation === undefined ||
+      value.representation === "summary") &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata))
   )
@@ -453,11 +475,13 @@ function isToolExecutionItemWithLifecycle(
     "name",
     "input",
     "requiresPermission",
+    "modelCallId",
     ...lifecycleKeys,
   ]
   if (
     !isString(value.itemId) ||
     !isString(value.toolCallId) ||
+    (value.modelCallId !== undefined && !isString(value.modelCallId)) ||
     !isString(value.name) ||
     !isJsonValue(value.input) ||
     typeof value.requiresPermission !== "boolean"
@@ -939,16 +963,21 @@ function isModelContentBlock(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.type)) return false
   if (value.type === "text") {
     return (
-      onlyKeys(value, ["type", "text", "providerMetadata"]) &&
+      onlyKeys(value, ["type", "text", "providerMetadata", "purpose"]) &&
       isString(value.text) &&
+      (value.purpose === undefined ||
+        value.purpose === "commentary" ||
+        value.purpose === "final_answer") &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata))
     )
   }
   if (value.type === "reasoning") {
     return (
-      onlyKeys(value, ["type", "text", "providerMetadata"]) &&
+      onlyKeys(value, ["type", "text", "providerMetadata", "representation"]) &&
       isString(value.text) &&
+      (value.representation === undefined ||
+        value.representation === "summary") &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata))
     )
