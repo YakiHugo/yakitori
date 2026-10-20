@@ -64,7 +64,7 @@ function readTool(
   toolCallId: string,
   path: string,
   state = "completed",
-): ExecutionEntry {
+): Extract<ExecutionEntry, { kind: "tool" }> {
   return {
     kind: "tool",
     toolCallId,
@@ -416,7 +416,7 @@ it("provides a completed activity disclosure when the turn has no reasoning", ()
   ).toBeDefined()
 })
 
-it("uses summary-only reasoning for live status and keeps substantive reasoning behind a secondary disclosure", () => {
+it("retains title-only reasoning and preserves headings when expanding full reasoning", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -454,18 +454,20 @@ it("uses summary-only reasoning for live status and keeps substantive reasoning 
   })
   render(<Transcript />)
   expect(screen.getByTitle("Checking the").textContent).toBe("· Checking the")
-  expect(screen.queryByText("Implementing favicon fallback")).toBeNull()
+  expect(screen.getByText("Implementing favicon fallback")).toBeDefined()
   expect(screen.queryByText("Reading rendering tests")).toBeNull()
   expect(screen.getAllByRole("button", { name: "Reasoning" })).toHaveLength(1)
   expect(screen.queryByText("meaningful emphasis")).toBeNull()
   fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
-  expect(screen.queryByText("Implementing favicon fallback")).toBeNull()
-  expect(screen.queryByText("Reading rendering tests")).toBeNull()
-  expect(screen.queryByText("Inspecting existing icons")).toBeNull()
-  expect(screen.queryByText("Checking dependencies")).toBeNull()
+  expect(screen.getByText("Implementing favicon fallback")).toBeDefined()
+  expect(
+    screen.getByRole("heading", { name: "Reading rendering tests" }),
+  ).toBeDefined()
+  expect(screen.getByText("Inspecting existing icons")).toBeDefined()
+  expect(screen.getByText("Checking dependencies")).toBeDefined()
   expect(screen.getByText("meaningful emphasis").tagName).toBe("STRONG")
-  expect(screen.queryByRole("heading")).toBeNull()
-  expect(screen.queryByText("Checking the", { selector: "p" })).toBeNull()
+  expect(screen.getAllByRole("heading")).toHaveLength(1)
+  expect(screen.getByText("Checking the", { selector: "p" })).toBeDefined()
 })
 
 it("expands commentary, tools, and substantive reasoning in their original order", () => {
@@ -503,16 +505,132 @@ it("expands commentary, tools, and substantive reasoning in their original order
   expect(Array.from(activity.children, (child) => child.textContent)).toEqual([
     "Checking the implementation",
     "Read file",
+    "Inspecting filesComparing implementation",
     "Reasoning",
     "Now checking the second file",
     "Read file",
   ])
-  expect(screen.queryByText("Inspecting files")).toBeNull()
-  expect(screen.queryByText("Comparing implementation")).toBeNull()
+  expect(screen.getByText("Inspecting files")).toBeDefined()
+  expect(screen.getByText("Comparing implementation")).toBeDefined()
   expect(screen.queryByText("Reasoning details")).toBeNull()
   fireEvent.click(within(activity).getByRole("button", { name: "Reasoning" }))
-  expect(activity.children[2]?.textContent).toContain("Reasoning details")
+  expect(activity.children[3]?.textContent).toContain("Reasoning details")
   expect(screen.getByText("Final answer").closest("ol")).toBeNull()
+})
+
+it("groups model actions under a reasoning title or deterministic action preview", () => {
+  const first = readTool("first", "src/one.ts")
+  const second = readTool("second", "src/two.ts")
+  const third = readTool("third", "src/three.ts")
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 1),
+        {
+          kind: "reasoning",
+          itemId: "thought_one",
+          turnId: "turn_1",
+          source: { callId: "call_one", itemId: "thought_one" },
+          text: "**Inspecting output**",
+          status: "completed",
+          at,
+        },
+        {
+          ...first,
+          execution: { ...first.execution, modelCallId: "call_one" },
+        },
+        {
+          kind: "reasoning",
+          itemId: "thought_two",
+          turnId: "turn_1",
+          source: { callId: "call_two", itemId: "thought_two" },
+          text: "The user wants a change. I need to inspect the implementation and verify the result.",
+          status: "completed",
+          at,
+        },
+        {
+          ...second,
+          execution: { ...second.execution, modelCallId: "call_two" },
+        },
+        {
+          ...third,
+          execution: { ...third.execution, modelCallId: "call_two" },
+        },
+        ...entries.slice(3),
+      ],
+    },
+  })
+  render(<Transcript />)
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  const titled = screen.getByRole("button", {
+    name: "Inspecting output 1 action",
+  })
+  const fallback = screen.getByRole("button", { name: "Read 2" })
+  expect(titled.getAttribute("aria-expanded")).toBe("false")
+  expect(fallback.getAttribute("aria-expanded")).toBe("false")
+  expect(screen.queryByRole("button", { name: /The user wants/ })).toBeNull()
+  fireEvent.click(fallback)
+  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  expect(
+    screen.getByText(
+      "The user wants a change. I need to inspect the implementation and verify the result.",
+    ),
+  ).toBeDefined()
+  expect(screen.getByText("Final answer").closest("ol")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(
+    screen
+      .getByRole("button", { name: "Read 2" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+})
+
+it("selects final parts without hiding commentary from the same conversation item", () => {
+  const source = { callId: "final_call", itemId: "answer_source" }
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      turnTimings: {
+        turn_1: {
+          startedAt: at,
+          completedAt: at,
+          outcome: { status: "completed", answerItemIds: ["answer_source"] },
+        },
+      },
+      entries: [
+        ...entries.slice(0, 1),
+        {
+          kind: "assistant",
+          itemId: "progress_part",
+          turnId: "turn_1",
+          text: "I have checked the result.",
+          purpose: "commentary",
+          source,
+          status: "completed",
+          at,
+        },
+        {
+          kind: "assistant",
+          itemId: "final_part",
+          turnId: "turn_1",
+          text: "Only the final answer.",
+          purpose: "final_answer",
+          source,
+          status: "completed",
+          at,
+        },
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.getByText("Only the final answer.").closest("ol")).toBeNull()
+  expect(screen.queryByText("I have checked the result.")).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 0s" }))
+  expect(
+    screen.getByText("I have checked the result.").closest("ol"),
+  ).toBeDefined()
 })
 
 it("shows retry activity before any output and restores the activity heading on recovery", () => {

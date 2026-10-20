@@ -37,6 +37,39 @@ const signedParts = [
 ]
 
 describe("native Gemini provider", () => {
+  it("coalesces display fragments without changing signed replay parts", async () => {
+    const parts = [
+      { text: "Hello " },
+      { text: "world", thoughtSignature: "text-signature" },
+    ]
+    await withServer(
+      async (_incoming, outgoing) => {
+        send(outgoing, [chunk([parts[0]]), chunk([parts[1]], "STOP")])
+      },
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(request({ streamOutputItems: true })),
+        )
+        const result = terminal(events)
+        expect(result.content).toMatchObject([
+          { type: "text", text: "Hello world" },
+        ])
+        expect(events.filter((event) => event.type === "delta")).toMatchObject([
+          { text: "Hello ", partIndex: 0 },
+          { text: "world", partIndex: 0 },
+        ])
+        expect(
+          toGeminiContents(
+            [{ role: "assistant", content: result.content }],
+            "custom_gemini",
+            "scope_a",
+            "gemini-test",
+          ),
+        ).toEqual([{ role: "model", parts }])
+      },
+    )
+  })
+
   it("uses header credentials and native text/image/system/tools with scoped exact parts", async () => {
     let body: Record<string, unknown> | undefined
     await withServer(

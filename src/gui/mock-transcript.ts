@@ -122,6 +122,7 @@ function entries(): ExecutionEntry[] {
     {
       kind: "reasoning",
       itemId: "item_reason_1",
+      source: { callId: "mock_inspect", itemId: "item_reason_1" },
       turnId: "turn_1",
       text: REASONING_1,
       status: "completed",
@@ -130,6 +131,7 @@ function entries(): ExecutionEntry[] {
     {
       kind: "assistant",
       itemId: "item_msg_1",
+      source: { callId: "mock_inspect", itemId: "item_msg_1" },
       turnId: "turn_1",
       text: "我先读当前的样式实现，再对照 Codex 的排版体系逐项改。",
       status: "completed",
@@ -144,6 +146,7 @@ function entries(): ExecutionEntry[] {
         type: "file_read",
         itemId: "item_read",
         toolCallId: "call_read",
+        modelCallId: "mock_inspect",
         name: "read_file",
         input: { path: "src/gui/styles/globals.css", offset: 86, limit: 20 },
         requiresPermission: false,
@@ -169,6 +172,7 @@ function entries(): ExecutionEntry[] {
         type: "command_execution",
         itemId: "item_run",
         toolCallId: "call_run",
+        modelCallId: "mock_inspect",
         name: "exec_command",
         input: { cmd: "pnpm typecheck" },
         requiresPermission: false,
@@ -188,6 +192,16 @@ function entries(): ExecutionEntry[] {
       resultText: "$ tsc --noEmit\n",
     },
     {
+      kind: "reasoning",
+      itemId: "item_reason_verify",
+      source: { callId: "mock_verify", itemId: "item_reason_verify" },
+      turnId: "turn_1",
+      text: "**检查排版变更与参考资料**",
+      representation: "summary",
+      status: "completed",
+      at: at("11:01:00"),
+    },
+    {
       kind: "tool",
       toolCallId: "call_edit",
       turnId: "turn_1",
@@ -196,6 +210,7 @@ function entries(): ExecutionEntry[] {
         type: "file_change",
         itemId: "item_edit",
         toolCallId: "call_edit",
+        modelCallId: "mock_verify",
         name: "edit_file",
         input: {
           path: "src/gui/styles/globals.css",
@@ -222,6 +237,7 @@ function entries(): ExecutionEntry[] {
         type: "web_search",
         itemId: "item_search",
         toolCallId: "call_search",
+        modelCallId: "mock_verify",
         name: "web_search",
         input: { query: "codex markdown typography" },
         requiresPermission: false,
@@ -244,6 +260,8 @@ function entries(): ExecutionEntry[] {
     {
       kind: "assistant",
       itemId: "item_final_1",
+      source: { callId: "mock_answer_1", itemId: "item_final_1" },
+      purpose: "final_answer",
       turnId: "turn_1",
       text: TURN_1_ANSWER,
       status: "completed",
@@ -264,6 +282,8 @@ function entries(): ExecutionEntry[] {
     {
       kind: "assistant",
       itemId: "item_msg_2",
+      source: { callId: "mock_fix", itemId: "item_msg_2" },
+      purpose: "commentary",
       turnId: "turn_2",
       text: "好——这轮带上失败编辑、一条权限记录和一组测试结果。",
       status: "completed",
@@ -281,6 +301,7 @@ function entries(): ExecutionEntry[] {
         type: "file_change",
         itemId: "item_edit_2",
         toolCallId: "call_edit_2",
+        modelCallId: "mock_fix",
         name: "edit_file",
         input: {
           path: "test/gui/composer.test.tsx",
@@ -313,6 +334,7 @@ function entries(): ExecutionEntry[] {
         type: "command_execution",
         itemId: "item_run_2",
         toolCallId: "call_run_2",
+        modelCallId: "mock_fix",
         name: "exec_command",
         input: { cmd: "pnpm test" },
         requiresPermission: true,
@@ -336,6 +358,8 @@ function entries(): ExecutionEntry[] {
     {
       kind: "assistant",
       itemId: "item_final_2",
+      source: { callId: "mock_answer_2", itemId: "item_final_2" },
+      purpose: "final_answer",
       turnId: "turn_2",
       text: TURN_2_ANSWER,
       status: "completed",

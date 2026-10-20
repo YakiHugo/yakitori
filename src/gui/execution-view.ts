@@ -1,3 +1,4 @@
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type {
   ApiPendingInput,
   ApiPendingPermission,
@@ -32,6 +33,8 @@ export type ExecutionEntry =
     }
   | {
       readonly kind: "assistant"
+      readonly source?: ModelOutputPresentation["source"]
+      readonly purpose?: ModelOutputPresentation["purpose"]
       readonly sources?: readonly CitationSource[]
       readonly itemId: string
       readonly turnId: string
@@ -44,6 +47,8 @@ export type ExecutionEntry =
     }
   | {
       readonly kind: "reasoning"
+      readonly source?: ModelOutputPresentation["source"]
+      readonly representation?: "summary"
       readonly itemId: string
       readonly turnId: string
       readonly text: string
@@ -353,6 +358,13 @@ function applySnapshot(
   state: ExecutionViewState,
   session: ApiSessionDetail,
 ): ExecutionViewState {
+  // Runtime cleanup can outlive the terminal event already included in replay.
+  // Such a snapshot must not revive that completed turn.
+  const activeTurnId =
+    session.activeTurnId !== undefined &&
+    state.turnTimings[session.activeTurnId]?.completedAt === undefined
+      ? session.activeTurnId
+      : undefined
   const queuedInputs = Object.fromEntries(
     session.pendingInputs.map((input) => [input.id, input]),
   )
@@ -360,15 +372,15 @@ function applySnapshot(
     ...state,
     lastSeq: Math.max(state.lastSeq, session.seq),
     queuedInputs,
-    activeTurnId: session.activeTurnId,
+    activeTurnId,
     activeRetry:
-      session.activeTurnId === state.activeRetry?.turnId
+      activeTurnId === state.activeRetry?.turnId
         ? state.activeRetry
         : undefined,
     activeTurnStartedAt:
-      session.activeTurnId === undefined
+      activeTurnId === undefined
         ? undefined
-        : state.turnTimings[session.activeTurnId]?.startedAt,
+        : state.turnTimings[activeTurnId]?.startedAt,
     ...(session.mateId === undefined ? {} : { mateId: session.mateId }),
     ...(session.mateRevisionId === undefined
       ? {}
@@ -589,6 +601,13 @@ function applyTransient(
         itemId: item.itemId,
         turnId: event.turnId,
         text: "",
+        ...(item.source === undefined ? {} : { source: item.source }),
+        ...(item.type === "agent_message" && item.purpose !== undefined
+          ? { purpose: item.purpose }
+          : {}),
+        ...(item.type === "reasoning" && item.representation !== undefined
+          ? { representation: item.representation }
+          : {}),
         status: "streaming",
         at: event.createdAt,
       })
@@ -620,6 +639,11 @@ function applyTransient(
           itemId: event.itemId,
           turnId: event.turnId,
           text: event.delta,
+          ...(event.source === undefined ? {} : { source: event.source }),
+          ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+          ...(event.representation === undefined
+            ? {}
+            : { representation: event.representation }),
           streamId: event.streamId,
           textOffset: event.offset,
           incomplete: event.offset > 0,
@@ -673,6 +697,11 @@ function applyTransient(
       entries: replaceAt(state.entries, index, {
         ...current,
         text,
+        ...(event.source === undefined ? {} : { source: event.source }),
+        ...(event.purpose === undefined ? {} : { purpose: event.purpose }),
+        ...(event.representation === undefined
+          ? {}
+          : { representation: event.representation }),
         streamId: event.streamId,
         textOffset,
         incomplete: textOffset > 0,
@@ -870,6 +899,10 @@ function applyDurable(
           item.type === "agent_message"
             ? {
                 kind: "assistant",
+                ...(item.source === undefined ? {} : { source: item.source }),
+                ...(item.content[0]?.purpose === undefined
+                  ? {}
+                  : { purpose: item.content[0].purpose }),
                 ...(sources.length === 0 ? {} : { sources }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,
@@ -879,6 +912,10 @@ function applyDurable(
               }
             : {
                 kind: "reasoning",
+                ...(item.source === undefined ? {} : { source: item.source }),
+                ...(item.representation === undefined
+                  ? {}
+                  : { representation: item.representation }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,
                 text,

@@ -17,6 +17,7 @@ type RenderingApp = {
   imageDataURL: string
   send(prompt: string): Promise<void>
   append(prompt: string, text: string): Promise<void>
+  think(prompt: string, text: string): Promise<void>
   finish(prompt: string): Promise<void>
 }
 
@@ -35,7 +36,12 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
     const logs: string[] = []
     let server: ServerProcess | undefined
     page.on("pageerror", (error) => errors.push(error.message))
-    const chunk = (completionId: string, text: string, finish = false) =>
+    const chunk = (
+      completionId: string,
+      text: string,
+      finish = false,
+      field = "content",
+    ) =>
       `data: ${JSON.stringify({
         id: completionId,
         object: "chat.completion.chunk",
@@ -44,7 +50,7 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
         choices: [
           {
             index: 0,
-            delta: finish ? {} : { role: "assistant", content: text },
+            delta: finish ? {} : { role: "assistant", [field]: text },
             finish_reason: finish ? "stop" : null,
           },
         ],
@@ -172,6 +178,14 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
           const stream = streams.get(prompt)
           if (!stream) throw new Error("Rendering stream disappeared.")
           stream.response.write(chunk(stream.completionId, text))
+        },
+        async think(prompt, text) {
+          await expect.poll(() => streams.has(prompt)).toBe(true)
+          const stream = streams.get(prompt)
+          if (!stream) throw new Error("Rendering stream disappeared.")
+          stream.response.write(
+            chunk(stream.completionId, text, false, "reasoning_content"),
+          )
         },
         async finish(prompt) {
           await expect
@@ -713,4 +727,54 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
     .getByRole("button", { name: "Close preview", exact: true })
     .click()
   await expect(preview).toHaveCount(0)
+})
+
+test("preserves streamed reasoning and the final answer through completion and reload", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Check reasoning display identity"
+  await renderingApp.send(prompt)
+  await renderingApp.think(
+    prompt,
+    "**Inspecting output**\n\nChecking the complete reasoning body.",
+  )
+  await expect(
+    page.getByRole("button", { name: "Reasoning…", exact: true }),
+  ).toHaveCount(1)
+  await page.getByRole("button", { name: "Reasoning…", exact: true }).click()
+  await expect(
+    page.getByText("Inspecting output", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Checking the complete reasoning body.", { exact: true }),
+  ).toBeVisible()
+  await renderingApp.append(prompt, "The final answer is ready.")
+  await renderingApp.finish(prompt)
+  await expect(
+    page.getByText("The final answer is ready.", { exact: true }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(
+    page.getByRole("button", { name: "Reasoning", exact: true }),
+  ).toHaveCount(1)
+  await page.getByRole("button", { name: "Reasoning", exact: true }).click()
+  await expect(
+    page.getByText("Inspecting output", { exact: true }),
+  ).toBeVisible()
+  await page.reload()
+  await expect(
+    page.getByText("The final answer is ready.", { exact: true }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(
+    page.getByRole("button", { name: "Reasoning", exact: true }),
+  ).toHaveCount(1)
+  await page.getByRole("button", { name: "Reasoning", exact: true }).click()
+  await expect(
+    page.getByText("Inspecting output", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Checking the complete reasoning body.", { exact: true }),
+  ).toBeVisible()
 })

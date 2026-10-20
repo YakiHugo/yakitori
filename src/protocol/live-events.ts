@@ -5,8 +5,9 @@ import type {
   TurnOutcome,
 } from "./events.ts"
 import type { RuntimePermissionEvent } from "./permission-events.ts"
+import type { ModelOutputPresentation } from "./model-output.ts"
 
-export type LiveAssistantDelta = {
+export type LiveAssistantDelta = ModelOutputPresentation & {
   readonly type: "assistant.delta"
   readonly sessionId: string
   readonly turnId: string
@@ -20,7 +21,7 @@ export type LiveAssistantDelta = {
   readonly createdAt: string
 }
 
-export type LiveReasoningDelta = {
+export type LiveReasoningDelta = ModelOutputPresentation & {
   readonly type: "reasoning.delta"
   readonly sessionId: string
   readonly turnId: string
@@ -42,10 +43,14 @@ export type LiveDisplayItemStarted = {
     | {
         readonly type: "agent_message"
         readonly itemId: string
+        readonly source?: ModelOutputPresentation["source"]
+        readonly purpose?: ModelOutputPresentation["purpose"]
       }
     | {
         readonly type: "reasoning"
         readonly itemId: string
+        readonly source?: ModelOutputPresentation["source"]
+        readonly representation?: "summary"
       }
     | StartedExecutionItem
   readonly createdAt: string

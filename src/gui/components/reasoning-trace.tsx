@@ -62,23 +62,17 @@ export function ReasoningTrace({
   return (
     <div className="flex flex-col gap-3 text-detail text-muted-foreground">
       {entries.map((entry) => {
-        const sections = reasoningSections(entry.text).filter((section) =>
-          section.body.trim(),
-        )
-        if (sections.length === 0 && !entry.incomplete) return null
+        if (!entry.text.trim() && !entry.incomplete) return null
         return (
           <div key={entry.itemId} className="flex flex-col gap-2">
             <LiveTextNotice entry={entry} />
-            {sections.map(({ line, body }) => (
-              <MarkdownView
-                key={line}
-                text={body}
-                streaming={active && entry.status === "streaming"}
-                className="markdown-compact max-w-2xl text-muted-foreground"
-                workspaceRoot={workspaceRoot}
-                apiBase={apiBase}
-              />
-            ))}
+            <MarkdownView
+              text={entry.text}
+              streaming={active && entry.status === "streaming"}
+              className="markdown-compact max-w-2xl text-muted-foreground"
+              workspaceRoot={workspaceRoot}
+              apiBase={apiBase}
+            />
           </div>
         )
       })}

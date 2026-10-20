@@ -310,15 +310,52 @@ async function* streamGemini(
               part.functionCall === undefined
             ) {
               const type = part.thought === true ? "reasoning" : "text"
-              content.push({
-                type,
-                text: part.text,
-                providerMetadata: metadata,
-              })
+              const previous = content.at(-1)
+              const continuation = previous?.type === type
+              const partIndex =
+                content.filter((block) => block.type === type).length -
+                (continuation ? 1 : 0)
+              if (
+                continuation &&
+                (previous.type === "text" || previous.type === "reasoning")
+              ) {
+                const owner = previous.providerMetadata?.gemini
+                if (!isJsonObject(owner))
+                  throw new GeminiProtocolError(
+                    "Missing Gemini text provenance.",
+                  )
+                const priorParts = Array.isArray(owner.parts)
+                  ? owner.parts
+                  : [owner.part]
+                if (!priorParts.every(isJsonObject))
+                  throw new GeminiProtocolError(
+                    "Invalid Gemini text provenance.",
+                  )
+                const { part: _part, parts: _parts, ...identity } = owner
+                content[content.length - 1] = {
+                  ...previous,
+                  text: previous.text + part.text,
+                  providerMetadata: {
+                    gemini: { ...identity, parts: [...priorParts, part] },
+                  },
+                }
+              } else
+                content.push({
+                  type,
+                  text: part.text,
+                  ...(type === "reasoning"
+                    ? { representation: "summary" as const }
+                    : {}),
+                  providerMetadata: metadata,
+                })
               if (part.text !== "")
                 yield {
                   type: type === "text" ? "delta" : "reasoning_delta",
                   text: part.text,
+                  partIndex,
+                  ...(type === "reasoning"
+                    ? { representation: "summary" as const }
+                    : {}),
                   ...(request.streamOutputItems ? { itemId } : {}),
                 }
             } else if (
@@ -663,10 +700,10 @@ export function toGeminiContents(
           metadata.provider === provider &&
           scope !== undefined &&
           metadata.scope === scope &&
-          metadata.model === model &&
-          isJsonObject(metadata.part)
-            ? metadata.part
+          metadata.model === model
+            ? metadata
             : undefined
+        const ownedPart = isJsonObject(owned?.part) ? owned.part : undefined
         if (block.type === "tool_call") {
           if (calls.has(block.id))
             throw new GeminiProtocolError("Duplicate tool history ID.")
@@ -682,7 +719,7 @@ export function toGeminiContents(
           const nativeCall = (
             native?.filter((part) => part.functionCall !== undefined)[
               nativeCallIndex++
-            ] ?? owned
+            ] ?? ownedPart
           )?.functionCall
           calls.set(block.id, {
             name: block.name,
@@ -693,12 +730,17 @@ export function toGeminiContents(
           // Google documents this sentinel for foreign function-call traces.
           // Never reuse a real signature across credential/model boundaries.
           parts.push(
-            owned ?? {
+            ownedPart ?? {
               functionCall: { name: block.name, args: input },
               thoughtSignature: "skip_thought_signature_validator",
             },
           )
-        } else if (owned !== undefined) parts.push(owned)
+        } else if (
+          Array.isArray(owned?.parts) &&
+          owned.parts.every(isJsonObject)
+        )
+          parts.push(...owned.parts)
+        else if (ownedPart !== undefined) parts.push(ownedPart)
         else if (block.type === "text") parts.push({ text: block.text })
       }
       const replay = native ?? parts

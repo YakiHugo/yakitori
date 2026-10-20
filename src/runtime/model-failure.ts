@@ -18,7 +18,11 @@ const disconnectedCodes = new Set([
 // instead of OpenAI's `{ error: { message } }` object.
 export function providerErrorMessage(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined
-  if (typeof payload.error === "string" && payload.error.trim() !== "") {
+  if (
+    "error" in payload &&
+    typeof payload.error === "string" &&
+    payload.error.trim() !== ""
+  ) {
     return payload.error
   }
   const error =

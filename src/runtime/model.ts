@@ -1,4 +1,5 @@
 import type { ModelFailureKind } from "../protocol/model-failure.ts"
+import type { AssistantTextPurpose } from "../protocol/model-output.ts"
 
 export type { ModelFailureKind } from "../protocol/model-failure.ts"
 
@@ -220,12 +221,16 @@ export type ModelStreamDeltaEvent = Readonly<{
   type: "delta"
   text: string
   itemId?: string
+  partIndex?: number
+  purpose?: AssistantTextPurpose
 }>
 
 export type ModelStreamReasoningDeltaEvent = Readonly<{
   type: "reasoning_delta"
   text: string
   itemId?: string
+  partIndex?: number
+  representation?: "summary"
 }>
 
 export type ModelStreamOutputItemEvent = Readonly<{

@@ -510,9 +510,25 @@ async function* streamOpenAI(
           })
           fragments.set(event.item_id, item)
         }
+        const started =
+          event.output_index === undefined
+            ? undefined
+            : startedItems.get(event.output_index)
+        const purpose =
+          started?.type === "message" &&
+          (started.phase === "commentary" || started.phase === "final_answer")
+            ? started.phase
+            : undefined
+        const partIndex = reasoning ? event.summary_index : event.content_index
         yield {
           type: reasoning ? "reasoning_delta" : "delta",
           text: event.delta,
+          ...(partIndex === undefined ? {} : { partIndex }),
+          ...(reasoning
+            ? { representation: "summary" as const }
+            : purpose === undefined
+              ? {}
+              : { purpose }),
           ...(request.streamOutputItems && event.item_id !== undefined
             ? { itemId: event.item_id }
             : {}),
@@ -1321,24 +1337,35 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "reasoning") {
-      const text = item.summary.map((summary) => summary.text).join("\n\n")
-      content.push({
-        type: "reasoning",
-        text,
-        providerMetadata: {
-          openai: {
-            provider,
-            ...(continuationScope === undefined
-              ? {}
-              : { scope: continuationScope }),
-            id: item.id,
-            ...(item.encrypted_content === undefined
-              ? {}
-              : { encryptedContent: item.encrypted_content }),
-            ...(item.status === undefined ? {} : { status: item.status }),
-          },
-        },
-      })
+      for (const [index, summary] of (item.summary.length > 0
+        ? item.summary
+        : [{ text: "" }]
+      ).entries()) {
+        content.push({
+          type: "reasoning",
+          text: summary.text,
+          representation: "summary",
+          ...(index === 0
+            ? {
+                providerMetadata: {
+                  openai: {
+                    provider,
+                    ...(continuationScope === undefined
+                      ? {}
+                      : { scope: continuationScope }),
+                    id: item.id,
+                    ...(item.encrypted_content === undefined
+                      ? {}
+                      : { encryptedContent: item.encrypted_content }),
+                    ...(item.status === undefined
+                      ? {}
+                      : { status: item.status }),
+                  },
+                },
+              }
+            : {}),
+        })
+      }
       continue
     }
     if (item.type === "message") {
@@ -1379,6 +1406,9 @@ function fromOpenAIOutput(
         content.push({
           type: "text",
           text: part.type === "output_text" ? part.text : part.refusal,
+          ...(item.phase === "commentary" || item.phase === "final_answer"
+            ? { purpose: item.phase }
+            : {}),
           ...(preserveParts
             ? {
                 providerMetadata: {

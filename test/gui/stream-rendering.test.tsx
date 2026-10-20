@@ -174,17 +174,23 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
 
   fireEvent.click(toggle)
   expect(toggle.getAttribute("aria-expanded")).toBe("true")
-  expect(disclosure()?.textContent).toBe("Checking the latest result")
-  expect(disclosure()?.querySelector("strong")?.textContent).toBe("latest")
+  expect(disclosure()?.textContent).toContain("Inspecting source")
+  expect(disclosure()?.textContent).toContain("Checking the latest result")
+  expect(
+    Array.from(
+      disclosure()?.querySelectorAll("strong") ?? [],
+      (node) => node.textContent,
+    ),
+  ).toContain("latest")
   expect(
     vi
       .mocked(Markdown)
       .mock.calls.some(([props]) =>
         String(props.children).includes("Inspecting source"),
       ),
-  ).toBe(false)
+  ).toBe(true)
   appendReasoning(" now")
-  expect(disclosure()?.textContent).toBe("Checking the latest result now")
+  expect(disclosure()?.textContent).toContain("Checking the latest result now")
 
   fireEvent.click(toggle)
   vi.mocked(Markdown).mockClear()
@@ -193,5 +199,7 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
   expect(disclosure()?.textContent ?? "").toBe("")
   expect(Markdown).not.toHaveBeenCalled()
   fireEvent.click(toggle)
-  expect(disclosure()?.textContent).toBe("Checking the latest result now again")
+  expect(disclosure()?.textContent).toContain(
+    "Checking the latest result now again",
+  )
 })

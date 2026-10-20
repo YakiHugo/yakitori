@@ -83,7 +83,9 @@ function discoverOpenAiCompatibleEfforts(
     return entry.think_efforts.valid_efforts as string[]
   }
   if (provider !== "grok") return undefined
-  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined
+  const capabilities = isRecord(entry.capabilities)
+    ? entry.capabilities
+    : undefined
   const values = capabilities?.reasoning_effort
   if (
     Array.isArray(values) &&
@@ -98,7 +100,8 @@ function discoverOpenAiCompatibleEfforts(
     return []
   }
   // grok-4.20 ids omit capabilities entirely and still reject reasoningEffort.
-  if (/^grok-4\.20(?:-|$)/i.test(entry.id)) return []
+  if (typeof entry.id === "string" && /^grok-4\.20(?:-|$)/i.test(entry.id))
+    return []
   return undefined
 }
 
@@ -110,7 +113,9 @@ function discoverOpenAiCompatibleDefaultEffort(
   if (provider !== "grok" || efforts === undefined || efforts.length === 0) {
     return undefined
   }
-  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined
+  const capabilities = isRecord(entry.capabilities)
+    ? entry.capabilities
+    : undefined
   const defaultEffort = stringValue(capabilities?.default_reasoning_effort)
   if (defaultEffort !== undefined && efforts.includes(defaultEffort)) {
     return defaultEffort
@@ -134,9 +139,7 @@ function grokDisplayName(modelId: string): string | undefined {
     // Keep "non-reasoning" as one hyphenated title token.
     if (word.toLowerCase() === "non" && index + 1 < words.length) {
       const next = words[index + 1]!
-      parts.push(
-        `Non-${next.slice(0, 1).toUpperCase()}${next.slice(1)}`,
-      )
+      parts.push(`Non-${next.slice(0, 1).toUpperCase()}${next.slice(1)}`)
       index += 1
       continue
     }

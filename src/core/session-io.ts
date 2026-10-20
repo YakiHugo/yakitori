@@ -1,3 +1,4 @@
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type { TurnInput } from "../protocol/input-queue.ts"
 
 export type {
@@ -128,14 +129,15 @@ export type SessionEvent =
       throughSeq: number
       records: readonly StoredRolloutItem[]
     }>
-  | Readonly<{
-      type: "model.stream"
-      threadId: string
-      turnId: string
-      itemId: string
-      kind: "assistant" | "reasoning"
-      delta: string
-    }>
+  | (ModelOutputPresentation &
+      Readonly<{
+        type: "model.stream"
+        threadId: string
+        turnId: string
+        itemId: string
+        kind: "assistant" | "reasoning"
+        delta: string
+      }>)
   | Readonly<{
       type: "item.started"
       threadId: string

@@ -46,6 +46,53 @@ function runningState() {
 }
 
 describe("execution recovery", () => {
+  it.each([
+    "durable",
+    "transient",
+  ] as const)("does not revive a terminal turn from a cleanup snapshot after its %s completion", (delivery) => {
+    let state = runningState()
+    const outcome = { status: "interrupted" as const }
+    state = reduceExecutionView(
+      state,
+      delivery === "durable"
+        ? {
+            type: "durable",
+            event: createEventEnvelope({
+              sessionId: session.id,
+              seq: 2,
+              event: {
+                type: "turn.completed",
+                data: { turnId: "turn_1", outcome },
+              },
+            }),
+          }
+        : {
+            type: "transient",
+            event: {
+              type: "turn.finished",
+              sessionId: session.id,
+              turnId: "turn_1",
+              outcome,
+              createdAt: "2026-09-17T00:00:01.000Z",
+            },
+          },
+    )
+    const snapshot = { ...session, seq: state.lastSeq, activeTurnId: "turn_1" }
+    state = reduceExecutionView(state, { type: "snapshot", session: snapshot })
+    state = reduceExecutionView(state, {
+      type: "replay_completed",
+      session: snapshot,
+    })
+    expect(projectExecutionView(state).activeTurnId).toBeUndefined()
+    expect(projectExecutionView(state).activeActivity).toBeUndefined()
+    expect(state.turnTimings.turn_1?.outcome).toEqual(outcome)
+    state = reduceExecutionView(state, {
+      type: "snapshot",
+      session: { ...snapshot, activeTurnId: "turn_2" },
+    })
+    expect(projectExecutionView(state).activeTurnId).toBe("turn_2")
+  })
+
   it("retains the steering distinction when rebuilding request navigation from history", () => {
     let state = createExecutionViewState()
     for (const [index, steered] of [false, true, false].entries()) {

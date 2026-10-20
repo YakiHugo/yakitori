@@ -425,12 +425,14 @@ describe("runtime terminal delivery", () => {
               const task = (() => {
                 for (const kind of ["assistant", "reasoning"] as const) {
                   runtime.emitModelStream({
-                    itemId: "answer",
+                    itemId:
+                      kind === "reasoning" ? "answer_reasoning" : "answer",
                     kind,
                     delta: "first",
                   })
                   runtime.emitModelStream({
-                    itemId: "answer",
+                    itemId:
+                      kind === "reasoning" ? "answer_reasoning" : "answer",
                     kind,
                     delta: " last",
                   })
@@ -439,7 +441,7 @@ describe("runtime terminal delivery", () => {
                   code: "model.retry",
                   message: "Stream disconnected",
                   details: {
-                    discardedResponseItemIds: ["answer"],
+                    discardedResponseItemIds: ["answer", "answer_reasoning"],
                     kind: "stream_disconnected",
                     nextAttempt: 2,
                     maxAttempts: 3,
@@ -450,7 +452,8 @@ describe("runtime terminal delivery", () => {
                   completion: mayResume.promise.then(async () => {
                     for (const kind of ["assistant", "reasoning"] as const) {
                       runtime.emitModelStream({
-                        itemId: "answer",
+                        itemId:
+                          kind === "reasoning" ? "answer_reasoning" : "answer",
                         kind,
                         delta: " resumed",
                       })

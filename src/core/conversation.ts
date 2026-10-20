@@ -1,4 +1,5 @@
 import type {
+  ModelAssistantTextBlock,
   ModelDocumentBlock,
   ModelImageBlock,
   ModelTextBlock,
@@ -17,6 +18,7 @@ import type { ContextExcerpt } from "./input-context.ts"
 export type ModelReasoningBlock = Readonly<{
   type: "reasoning"
   text: string
+  representation?: "summary"
   providerMetadata?: JsonObject
 }>
 // Opaque history owned by one provider/account. Convert it through that owner
@@ -55,7 +57,7 @@ export type ModelToolCallBlock = Readonly<{
   providerMetadata?: JsonObject
 }>
 export type ModelContentBlock =
-  | ModelTextBlock
+  | ModelAssistantTextBlock
   | ModelReasoningBlock
   | ModelCompactionBlock
   | ModelToolCallBlock
