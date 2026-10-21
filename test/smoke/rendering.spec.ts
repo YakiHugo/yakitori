@@ -18,6 +18,12 @@ type RenderingApp = {
   send(prompt: string): Promise<void>
   append(prompt: string, text: string): Promise<void>
   think(prompt: string, text: string): Promise<void>
+  callTool(
+    prompt: string,
+    name: string,
+    input: Record<string, unknown>,
+    count?: number,
+  ): Promise<void>
   finish(prompt: string): Promise<void>
 }
 
@@ -187,6 +193,34 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
             chunk(stream.completionId, text, false, "reasoning_content"),
           )
         },
+        async callTool(prompt, name, input, count = 1) {
+          await expect.poll(() => streams.has(prompt)).toBe(true)
+          const stream = streams.get(prompt)
+          if (!stream) throw new Error("Rendering stream disappeared.")
+          streams.delete(prompt)
+          stream.response.end(
+            `data: ${JSON.stringify({
+              id: stream.completionId,
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "rendering-model",
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: Array.from({ length: count }, (_, index) => ({
+                      index,
+                      id: `call-${stream.completionId}-${index}`,
+                      type: "function",
+                      function: { name, arguments: JSON.stringify(input) },
+                    })),
+                  },
+                  finish_reason: "tool_calls",
+                },
+              ],
+            })}\n\ndata: [DONE]\n\n`,
+          )
+        },
         async finish(prompt) {
           await expect
             .poll(() => ({ received: streams.has(prompt), errors }))
@@ -277,6 +311,39 @@ async function expectMermaidDiagram(
   if (expectedNodeCount !== undefined)
     expect(nodeLabels).toHaveLength(expectedNodeCount)
 }
+
+test("user messages expose only copy and edit actions", async ({
+  page,
+  context,
+  renderingApp,
+}, testInfo) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"])
+  const prompt = "Keep only the message actions."
+  await renderingApp.send(prompt)
+  await renderingApp.append(prompt, "Message actions checked.")
+  await renderingApp.finish(prompt)
+  const message = page
+    .locator(".group")
+    .filter({ has: page.getByText(prompt, { exact: true }) })
+  await message.hover()
+  await expect(message.getByRole("button")).toHaveCount(2)
+  await message
+    .getByRole("button", { name: "Copy message", exact: true })
+    .click()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(prompt)
+  await message
+    .getByRole("button", { name: "Edit & resubmit", exact: true })
+    .click()
+  await expect(
+    message.getByRole("textbox", { name: "Edit message", exact: true }),
+  ).toHaveText(prompt)
+  await message.getByRole("button", { name: "Cancel", exact: true }).click()
+  await expect(message.getByRole("button")).toHaveCount(2)
+  await message.hover()
+  await message.screenshot({
+    path: testInfo.outputPath("user-message-actions.png"),
+  })
+})
 
 test("new session composer stays centered through creation and docks after the first input", async ({
   page,
@@ -728,6 +795,287 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
     .click()
   await expect(preview).toHaveCount(0)
 })
+
+test("tool rows expose file actions without opening output and keep narrow layouts readable", async ({
+  page,
+  context,
+  renderingApp,
+}, testInfo) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"])
+  const path = "src/nested-directory/another-directory/long-source-file-name.ts"
+  await mkdir(
+    join(renderingApp.workspace, "src/nested-directory/another-directory"),
+    { recursive: true },
+  )
+  await writeFile(
+    join(renderingApp.workspace, path),
+    Array.from({ length: 30 }, (_, index) => `Source line ${index + 1}`).join(
+      "\n",
+    ),
+  )
+  const prompt = "Read the source file."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "read_file", {
+    path,
+    offset: 12,
+    limit: 3,
+  })
+  await renderingApp.append(prompt, "The source file has been checked.")
+  await renderingApp.finish(prompt)
+  const response = page.getByRole("region", { name: "Response", exact: true })
+  await response.getByRole("button", { name: /^Worked for/ }).click()
+  const row = response.locator(".tool-cell")
+  await expect(row).toHaveCount(1)
+  const trigger = row.getByRole("button", { name: /Read src\// })
+  const copy = row.getByRole("button", { name: "Copy path", exact: true })
+  await copy.scrollIntoViewIfNeeded()
+  await page.mouse.move(0, 0)
+  await expect(copy).toBeVisible()
+  await expect(copy).toHaveCSS("opacity", "1")
+  await copy.click()
+  await expect(row.getByText("Copied", { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    `${renderingApp.workspace}/${path}:12`,
+  )
+  await expect(trigger).toHaveAttribute("aria-expanded", "false")
+  await trigger.focus()
+  await page.keyboard.press("Enter")
+  await expect(row.getByText(/Source line 12/)).toBeVisible()
+  await trigger.press("Enter")
+  await expect(trigger).toHaveAttribute("aria-expanded", "false")
+  await page.setViewportSize({ width: 600, height: 700 })
+  await expect(copy).toBeVisible()
+  const overflow = await row.evaluate(
+    (node) => node.scrollWidth > node.clientWidth,
+  )
+  expect(overflow).toBe(false)
+  await row.scrollIntoViewIfNeeded()
+  await page.screenshot({
+    path: testInfo.outputPath("tool-row-narrow.png"),
+    animations: "disabled",
+  })
+})
+
+test("failed tools show their full error on narrow screens and command output stays bounded", async ({
+  page,
+  renderingApp,
+}, testInfo) => {
+  const prompt = "Check a missing file."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "read_file", { path: "missing-file.ts" })
+  await renderingApp.append(prompt, "The requested file is missing.")
+  await renderingApp.finish(prompt)
+  await page.setViewportSize({ width: 600, height: 700 })
+  const response = page
+    .getByRole("region", { name: "Response", exact: true })
+    .first()
+  await response.getByRole("button", { name: /^Worked for/ }).click()
+  const failed = response.locator('.tool-cell[data-status="failed"]')
+  await expect(failed.getByText("Failed", { exact: true })).toBeVisible()
+  await expect(
+    failed.getByRole("button", { name: /Read missing-file.ts/ }),
+  ).toHaveAttribute("aria-expanded", "true")
+  await expect(failed.locator(".tool-detail-surface")).toContainText(
+    /not found|ENOENT|does not exist/i,
+  )
+  await expect(failed.locator(".tool-detail-surface")).toHaveCSS(
+    "border-top-width",
+    "0px",
+  )
+  expect(
+    await failed.evaluate((node) => node.scrollWidth > node.clientWidth),
+  ).toBe(false)
+  await page.screenshot({
+    path: testInfo.outputPath("tool-error-narrow.png"),
+    animations: "disabled",
+  })
+
+  const commandPrompt = "Print the output fixture."
+  await renderingApp.send(commandPrompt)
+  await renderingApp.callTool(commandPrompt, "exec_command", {
+    cmd: "printf 'output line\\n%.0s' {1..150}",
+  })
+  await page.getByRole("button", { name: "Allow", exact: true }).click()
+  await renderingApp.append(commandPrompt, "The command output is ready.")
+  await renderingApp.finish(commandPrompt)
+  const commandResponse = page
+    .getByRole("region", { name: "Response", exact: true })
+    .last()
+  await commandResponse.getByRole("button", { name: /^Worked for/ }).click()
+  await commandResponse
+    .getByRole("button", { name: "Run", exact: true })
+    .click()
+  const command = commandResponse.locator(".tool-cell")
+  await command.getByRole("button", { name: /Run/ }).click()
+  const output = command.locator(".tool-detail-surface .overflow-auto")
+  await expect(output).toContainText("output line")
+  const geometry = await output.evaluate((node) => ({
+    height: node.clientHeight,
+    scrollable: node.scrollHeight > node.clientHeight,
+    lines: (node.textContent?.match(/output line\n/g) ?? []).length,
+  }))
+  expect(geometry.height).toBeLessThan(700)
+  expect(geometry.scrollable).toBe(true)
+  expect(geometry.lines).toBe(150)
+  const original = await output.elementHandle()
+  if (!original) throw new Error("Command output is missing.")
+  await output.evaluate((node) => {
+    node.scrollTop = node.scrollHeight
+  })
+  const scrollTop = await output.evaluate((node) => node.scrollTop)
+  const group = commandResponse.getByRole("button", {
+    name: "Run",
+    exact: true,
+  })
+  await group.click()
+  await expect(output).toBeHidden()
+  await group.click()
+  expect(await original.evaluate((node) => node.isConnected)).toBe(true)
+  expect(await output.evaluate((node) => node.scrollTop)).toBe(scrollTop)
+  await expect(command.getByRole("button", { name: /Run/ })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  )
+})
+
+test("long tool groups retain opened output across folds and reveal offscreen rows", async ({
+  page,
+  renderingApp,
+}, testInfo) => {
+  await writeFile(
+    join(renderingApp.workspace, "large.ts"),
+    Array.from({ length: 200 }, (_, index) => `Source row ${index + 1}`).join(
+      "\n",
+    ),
+  )
+  const prompt = "Check a long group of file reads."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(
+    prompt,
+    "read_file",
+    { path: "large.ts", limit: 200 },
+    24,
+  )
+  await renderingApp.append(prompt, "Checked the files.")
+  await renderingApp.finish(prompt)
+  const response = page.getByRole("region", { name: "Response", exact: true })
+  const root = response.getByRole("button", { name: /^Worked for/ })
+  await root.click()
+  const group = response.getByRole("button", { name: "Read 24", exact: true })
+  await group.click()
+  const rows = response.locator(".tool-cell")
+  await expect(rows).toHaveCount(24)
+  await rows.locator(".tool-trigger").evaluateAll((buttons) => {
+    for (const button of buttons) (button as HTMLButtonElement).click()
+  })
+  const output = rows.first().locator("pre")
+  const original = await output.elementHandle()
+  if (!original) throw new Error("File output is missing.")
+  await group.click()
+  await expect(output).toBeHidden()
+  await group.click()
+  await root.click()
+  await expect(output).toBeHidden()
+  await root.click()
+  expect(await original.evaluate((node) => node.isConnected)).toBe(true)
+  await expect(rows.locator('.tool-trigger[aria-expanded="true"]')).toHaveCount(
+    24,
+  )
+  const last = rows.last()
+  await last.scrollIntoViewIfNeeded()
+  await expect(last.locator(".tool-trigger")).toBeInViewport()
+  await expect(last.locator("pre")).toContainText("Source row 200")
+  await expect(last.locator(".tool-detail-surface")).toHaveCSS(
+    "border-top-width",
+    "0px",
+  )
+  await last.screenshot({
+    path: testInfo.outputPath("tool-detail-borderless.png"),
+  })
+})
+
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`history disclosures respond immediately and retain opened content (${reducedMotion})`, async ({
+    page,
+    renderingApp,
+  }) => {
+    await page.emulateMedia({ reducedMotion })
+    const prompt = "Check repeated history toggles."
+    await renderingApp.send(prompt)
+    await renderingApp.think(
+      prompt,
+      Array.from(
+        { length: 100 },
+        (_, index) => `Reasoning paragraph ${index + 1}.`,
+      ).join("\n\n"),
+    )
+    await renderingApp.append(prompt, "Short final answer.")
+    await renderingApp.finish(prompt)
+    const response = page.getByRole("region", { name: "Response", exact: true })
+    const toggle = response.getByRole("button", { name: /^Worked for/ })
+    const panel = response.locator(".conversation-disclosure")
+    await expect(panel.locator("ol")).toHaveCount(0)
+    await toggle.click()
+    const reasoning = response.getByRole("button", {
+      name: "Reasoning",
+      exact: true,
+    })
+    await reasoning.click()
+    const details = response.locator(
+      `[id="${await reasoning.getAttribute("aria-controls")}"]`,
+    )
+    await details.evaluate((node) => {
+      node.scrollTop = 100
+    })
+    const initialScroll = await details.evaluate((node) => node.scrollTop)
+    const frames = await toggle.evaluate(async (button: HTMLButtonElement) => {
+      const panel = document.getElementById(
+        button.getAttribute("aria-controls") ?? "",
+      )
+      const timeline = panel?.querySelector("ol")
+      if (!panel || !timeline) throw new Error("History content is missing.")
+      const frames: {
+        closed: boolean
+        height: number
+        retained: boolean
+        animations: number
+      }[] = []
+      for (let index = 0; index < 8; index += 1) {
+        button.click()
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        )
+        frames.push({
+          closed: panel.hidden === true,
+          height: panel.getBoundingClientRect().height,
+          retained: timeline === panel.querySelector("ol"),
+          animations: panel.getAnimations().length,
+        })
+      }
+      return frames
+    })
+    for (const [index, frame] of frames.entries()) {
+      expect(frame.retained).toBe(true)
+      expect(frame.animations).toBe(0)
+      expect(frame.closed).toBe(index % 2 === 0)
+      if (frame.closed) expect(frame.height).toBe(0)
+      else expect(frame.height).toBeGreaterThan(30)
+    }
+    await expect(reasoning).toHaveAttribute("aria-expanded", "true")
+    expect(await details.evaluate((node) => node.scrollTop)).toBe(initialScroll)
+    await expect(
+      response.getByText("Reasoning paragraph 1.", { exact: true }),
+    ).toBeVisible()
+    await toggle.focus()
+    await page.keyboard.press("Enter")
+    await expect(panel).toBeHidden()
+    await expect(
+      response.getByText("Short final answer.", { exact: true }),
+    ).toBeVisible()
+    await page.keyboard.press("Enter")
+    await expect(reasoning).toHaveAttribute("aria-expanded", "true")
+  })
+}
 
 test("preserves streamed reasoning and the final answer through completion and reload", async ({
   page,

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import { useState } from "react"
 import { SidebarFrame } from "../../src/gui/components/sidebar-frame.tsx"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
@@ -10,6 +11,11 @@ vi.mock("../../src/gui/components/sidebar.tsx", () => ({
 vi.mock("../../src/gui/components/session-search.tsx", () => ({
   SessionSearch: () => <div>Session search</div>,
 }))
+
+function Frame() {
+  const [open, setOpen] = useState(true)
+  return <SidebarFrame open={open} setOpen={setOpen} />
+}
 
 beforeEach(() => {
   localStorage.clear()
@@ -48,7 +54,7 @@ function expectWidth(width: number, maximum: number) {
 }
 
 it("starts at 275 pixels with accessible 240–520 pixel resize bounds", () => {
-  render(<SidebarFrame />)
+  render(<Frame />)
   expectWidth(275, 520)
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("275")
 })
@@ -56,11 +62,11 @@ it("starts at 275 pixels with accessible 240–520 pixel resize bounds", () => {
 it("temporarily fits the viewport without replacing the preferred width and restores it when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
   useWorkspaceStore.setState({ open: true })
-  render(<SidebarFrame />)
+  render(<Frame />)
   expectWidth(500, 520)
 
   resizeViewport(1000)
-  expectWidth(328, 328)
+  expectWidth(280, 280)
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("500")
 
   resizeViewport(1400)
@@ -70,38 +76,38 @@ it("temporarily fits the viewport without replacing the preferred width and rest
 it("reserves room when the split workspace opens and restores the preferred width when it expands or closes", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
   resizeViewport(1000)
-  render(<SidebarFrame />)
+  render(<Frame />)
   expectWidth(500, 520)
 
   act(() => useWorkspaceStore.getState().setOpen(true))
-  expectWidth(328, 328)
+  expectWidth(280, 280)
   act(() => useWorkspaceStore.getState().setExpanded(true))
   expectWidth(500, 520)
   act(() => useWorkspaceStore.getState().setExpanded(false))
-  expectWidth(328, 328)
+  expectWidth(280, 280)
   act(() => useWorkspaceStore.getState().setOpen(false))
   expectWidth(500, 520)
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("500")
 })
 
-it("uses split-pane bounds at 912 pixels and viewport bounds below that breakpoint", () => {
+it("uses split-pane bounds at 960 pixels and viewport bounds below that breakpoint", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
   useWorkspaceStore.setState({ open: true })
-  resizeViewport(912)
-  render(<SidebarFrame />)
+  resizeViewport(960)
+  render(<Frame />)
   expectWidth(240, 240)
 
-  resizeViewport(911)
+  resizeViewport(959)
   expectWidth(500, 520)
   resizeViewport(750)
-  expectWidth(500, 510)
+  expectWidth(462, 462)
   resizeViewport(470)
   expectWidth(240, 240)
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("500")
 })
 
 it("adjusts the divider with arrow keys, stops at the minimum, and resets to 275 on double click", () => {
-  render(<SidebarFrame />)
+  render(<Frame />)
   const divider = screen.getByRole("separator", { name: "Sidebar width" })
   fireEvent.keyDown(divider, { key: "ArrowLeft" })
   expectWidth(259, 520)
@@ -121,20 +127,20 @@ it("limits keyboard resizing to the space available beside the split workspace",
   localStorage.setItem("yakitori.sidebarWidth", "320")
   useWorkspaceStore.setState({ open: true })
   resizeViewport(1000)
-  render(<SidebarFrame />)
+  render(<Frame />)
   const divider = screen.getByRole("separator", { name: "Sidebar width" })
   fireEvent.keyDown(divider, { key: "ArrowRight" })
-  expectWidth(328, 328)
+  expectWidth(280, 280)
   fireEvent.keyDown(divider, { key: "ArrowRight" })
-  expectWidth(328, 328)
-  expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("328")
+  expectWidth(280, 280)
+  expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("280")
 })
 
 it("resets the preferred width to 275 while constrained and reveals that default when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
   useWorkspaceStore.setState({ open: true })
-  resizeViewport(912)
-  render(<SidebarFrame />)
+  resizeViewport(960)
+  render(<Frame />)
   expectWidth(240, 240)
 
   fireEvent.doubleClick(
@@ -146,10 +152,14 @@ it("resets the preferred width to 275 while constrained and reveals that default
   expectWidth(275, 520)
 })
 
-it("clamps pointer resizing to its bounds and saves the chosen width on release", () => {
-  render(<SidebarFrame />)
+it("resizes relative to the sidebar edge and saves the clamped width on release", () => {
+  render(<Frame />)
   const divider = screen.getByRole("separator", { name: "Sidebar width" })
   const captured = new Set<number>()
+  vi.spyOn(
+    screen.getByRole("complementary", { name: "Sidebar" }),
+    "getBoundingClientRect",
+  ).mockReturnValue(new DOMRect(48, 40, 275, 860))
   // Happy DOM has no pointer capture; retain the browser's capture semantics
   // while exercising SidebarFrame's actual pointer handlers.
   Object.defineProperties(divider, {
@@ -158,6 +168,8 @@ it("clamps pointer resizing to its bounds and saves the chosen width on release"
     releasePointerCapture: { value: (id: number) => captured.delete(id) },
   })
   fireEvent.pointerDown(divider, { button: 0, pointerId: 1 })
+  fireEvent.pointerMove(divider, { pointerId: 1, clientX: 400 })
+  expectWidth(352, 520)
   fireEvent.pointerMove(divider, { pointerId: 1, clientX: 180 })
   expectWidth(240, 520)
   fireEvent.pointerMove(divider, { pointerId: 1, clientX: 800 })

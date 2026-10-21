@@ -632,10 +632,9 @@ export async function runProviderFlow(
       const activity = response.getByRole("button", { name: /^Worked for/ })
       await expect(activity).toHaveAttribute("aria-expanded", "false")
       await activity.click()
-      await page
-        .getByRole("button", { name: "View image", exact: true })
+      await response
+        .getByRole("button", { name: /^View image smoke\.png/ })
         .click()
-      await page.getByRole("button", { name: /^View image smoke\.png/ }).click()
       const parts = page.getByRole("region", {
         name: "Ordered tool result",
         exact: true,
@@ -877,10 +876,8 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
 }
 
 async function openProviderSettings(page: Page): Promise<void> {
-  await page
-    .getByRole("button", { name: "Open account menu", exact: true })
-    .click()
-  await page.getByRole("menuitem", { name: /^Providers/ }).click()
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await page.getByRole("button", { name: "Providers", exact: true }).click()
   await expect(
     page.getByRole("region", { name: "Provider settings", exact: true }),
   ).toBeVisible()

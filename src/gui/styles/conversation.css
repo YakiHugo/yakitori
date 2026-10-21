@@ -170,23 +170,6 @@
     animation: none;
   }
 }
-.conversation-disclosure {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transform: translateY(-8px);
-  transition:
-    grid-template-rows 150ms var(--conversation-ease),
-    opacity 150ms,
-    transform 150ms var(--conversation-ease);
-}
-.conversation-disclosure[data-expanded="true"] {
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transform: translateY(0);
-  transition-duration: 220ms;
-  transition-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
-}
 .conversation-inline-edit {
   animation: conversation-appear 150ms ease-out;
 }

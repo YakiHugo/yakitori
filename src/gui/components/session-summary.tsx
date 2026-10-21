@@ -260,7 +260,6 @@ function SummaryPopover({
         }}
       >
         <Monitor size={14} aria-hidden="true" />
-        <ChevronDown size={12} aria-hidden="true" />
       </button>
       {anchor
         ? createPortal(

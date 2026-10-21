@@ -1,15 +1,12 @@
 import { ChevronRight, LoaderCircle, Wrench } from "lucide-react"
-import type { ReactNode } from "react"
+import { type ReactNode, useId } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { reasoningSections } from "./reasoning-trace.tsx"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "./ui/collapsible.tsx"
+import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
+import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
 
 export function ActivityGroup({
   entries,
@@ -64,6 +61,7 @@ export function ActivityGroup({
       ? (progress.text.trim().split("\n")[0] ?? "Activity")
       : (heading ?? (actions || "Activity"))
   const open = expanded ?? (active || failed || approval)
+  const contentId = useId()
   return (
     <Collapsible
       open={open}
@@ -71,6 +69,7 @@ export function ActivityGroup({
       className="group/activity"
     >
       <CollapsibleTrigger
+        aria-controls={contentId}
         className={cn(
           "flex w-full min-w-0 items-center gap-2 py-1 text-left text-sm text-muted-foreground hover:text-foreground",
           failed && "text-destructive",
@@ -96,9 +95,13 @@ export function ActivityGroup({
         ) : null}
         <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/activity:rotate-90" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-2 border-l pl-4 pt-2 pb-1">
+      <TranscriptDisclosureContent
+        id={contentId}
+        open={open}
+        className="space-y-2 pl-4 pt-2 pb-1"
+      >
         {children}
-      </CollapsibleContent>
+      </TranscriptDisclosureContent>
     </Collapsible>
   )
 }

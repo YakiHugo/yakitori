@@ -1,0 +1,73 @@
+.window-shell {
+  position: relative;
+  display: flex;
+  height: 100dvh;
+  padding: 40px 0 0 48px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--muted) 80%, var(--background));
+}
+.window-titlebar {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 58px 12px;
+}
+.window-titlebar button:disabled {
+  opacity: 0.35;
+}
+.window-rail {
+  position: absolute;
+  inset: 40px auto 0 0;
+  width: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-block: 8px 12px;
+}
+.window-rail-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--muted-foreground);
+}
+.window-rail-button:hover,
+.window-rail-button[aria-current="page"] {
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  color: var(--foreground);
+}
+.window-rail-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.window-rail-settings {
+  margin-top: auto;
+}
+.window-shell > .app-shell {
+  overflow: hidden;
+  border-radius: 14px 0 0 14px;
+  background: var(--background);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--foreground) 4%, transparent),
+    0 2px 16px #00000004;
+}
+/* The outer chrome owns the native drag region and traffic-light clearance. */
+html[data-desktop="macos"],
+html[data-desktop="macos"] body {
+  background: transparent;
+}
+html[data-desktop="macos"] .window-shell {
+  background: color-mix(in oklab, var(--background) 65%, transparent);
+}
+html[data-desktop="macos"] .window-titlebar {
+  padding-left: 90px;
+  -webkit-app-region: drag;
+}
+html[data-desktop="macos"] .window-titlebar button {
+  -webkit-app-region: no-drag;
+}

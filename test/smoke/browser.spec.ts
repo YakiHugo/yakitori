@@ -294,3 +294,88 @@ test("reconnect confirms a lost input acknowledgement without resending or clear
     }
   }
 })
+
+test("window history restores sessions and drafts without creating duplicate conversations", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  let creations = 0
+  page.on("websocket", (socket) =>
+    socket.on("framesent", (frame) => {
+      const message: unknown = JSON.parse(String(frame.payload))
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        "method" in message &&
+        message.method === "session/create"
+      )
+        creations += 1
+    }),
+  )
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    const project = page.getByRole("combobox", { name: "New session project" })
+    await expect(project).not.toHaveValue("")
+    await runFauxTurn(page)
+    const composer = page.getByRole("textbox", { name: "Message the Mate" })
+    const reply = page.getByText("Hello from faux.", { exact: true })
+    await composer.fill("Keep the first unfinished draft")
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(project).toBeDisabled()
+    await composer.fill("Keep the second unfinished draft")
+    const back = page.getByRole("button", { name: "Go back", exact: true })
+    const forward = page.getByRole("button", {
+      name: "Go forward",
+      exact: true,
+    })
+    await back.click()
+    await expect(reply).toBeVisible()
+    await expect(composer).toHaveText("Keep the first unfinished draft")
+    await forward.click()
+    await expect(reply).toHaveCount(0)
+    await expect(composer).toHaveText("Keep the second unfinished draft")
+    expect(creations).toBe(2)
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page
+      .getByRole("button", { name: "Notifications", exact: true })
+      .click()
+    await back.click()
+    await expect(
+      page.getByRole("region", { name: "General settings", exact: true }),
+    ).toBeVisible()
+    await back.click()
+    await expect(composer).toHaveText("Keep the second unfinished draft")
+    await forward.click()
+    await page.getByRole("button", { name: "Chats", exact: true }).click()
+    await expect(forward).toBeDisabled()
+    // Global navigation must not consume editor selection/cursor shortcuts.
+    await composer.focus()
+    await page.keyboard.press("Alt+ArrowLeft")
+    await expect(
+      page.getByRole("region", { name: "General settings", exact: true }),
+    ).toHaveCount(0)
+    await back.focus()
+    await page.keyboard.press("Alt+ArrowLeft")
+    await expect(
+      page.getByRole("region", { name: "General settings", exact: true }),
+    ).toBeVisible()
+    await page.keyboard.press("Alt+ArrowRight")
+    await expect(composer).toHaveText("Keep the second unfinished draft")
+    expect(creations).toBe(2)
+  } finally {
+    const timer = setTimeout(() => void server?.forceStop(), 5_000)
+    try {
+      await server?.stop()
+    } finally {
+      clearTimeout(timer)
+      await environment.cleanup()
+    }
+  }
+})

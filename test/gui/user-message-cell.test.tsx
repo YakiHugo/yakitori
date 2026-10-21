@@ -206,6 +206,15 @@ describe("skill mentions", () => {
 })
 
 describe("user message fork actions", () => {
+  it("offers only copy and edit actions below a message", () => {
+    render(<UserMessageCell entry={entry} queued={false} />)
+    expect(
+      screen
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual(["Copy message", "Edit & resubmit"])
+  })
+
   it("honors the configured send shortcut while editing a message", async () => {
     const user = userEvent.setup()
     const forkSession = vi.fn(async () => {})
@@ -222,21 +231,6 @@ describe("user message fork actions", () => {
       inputFixture(inputParts("Original request")),
     )
   })
-  it("confirms conversation-only undo before creating a branch", async () => {
-    const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
-    useAppStore.setState({ forkSession })
-    render(<UserMessageCell entry={entry} queued={false} />)
-
-    await user.click(screen.getByRole("button", { name: "Undo to here" }))
-    expect(
-      screen.getByText(/Files and command effects stay as-is/),
-    ).toBeDefined()
-    await user.click(screen.getByRole("button", { name: "Undo" }))
-
-    expect(forkSession).toHaveBeenCalledWith("input_1", "undo")
-  })
-
   it("edits and resubmits the message in a new branch", async () => {
     const user = userEvent.setup()
     const forkSession = vi.fn(async () => {})
@@ -264,9 +258,9 @@ describe("user message fork actions", () => {
     expect(
       screen.getByRole("button", { name: "Edit & resubmit" }),
     ).toHaveProperty("disabled", true)
-    expect(screen.getByRole("button", { name: "Undo to here" })).toHaveProperty(
+    expect(screen.getByRole("button", { name: "Copy message" })).toHaveProperty(
       "disabled",
-      true,
+      false,
     )
 
     act(() => useAppStore.setState({ busy: false }))
@@ -287,22 +281,6 @@ describe("user message fork actions", () => {
       true,
     )
     await user.keyboard("{Enter}")
-    expect(forkSession).not.toHaveBeenCalled()
-  })
-
-  it("dismisses the undo confirmation without forking", async () => {
-    const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
-    useAppStore.setState({ forkSession })
-    render(<UserMessageCell entry={entry} queued={false} />)
-
-    await user.click(screen.getByRole("button", { name: "Undo to here" }))
-    await user.click(screen.getByRole("button", { name: "Cancel" }))
-
-    expect(
-      screen.queryByText(/Files and command effects stay as-is/),
-    ).toBeNull()
-    expect(screen.getByRole("button", { name: "Undo to here" })).toBeDefined()
     expect(forkSession).not.toHaveBeenCalled()
   })
 

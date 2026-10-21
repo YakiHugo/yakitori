@@ -117,7 +117,7 @@ describe("sidebar", () => {
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
   })
 
-  it("opens the account panel with live subscription states", async () => {
+  it("shows current subscription states without restarting an in-flight refresh", async () => {
     const loadSubscriptions = vi.fn().mockResolvedValue(undefined)
     const subscriptions = [
       {
@@ -174,8 +174,8 @@ describe("sidebar", () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(screen.getByRole("menuitem", { name: /Subscriptions/ }))
+    await user.click(screen.getByRole("button", { name: "Settings" }))
+    await user.click(screen.getByRole("button", { name: "Subscriptions" }))
 
     expect(
       screen.getByRole("region", { name: "Subscription settings" }),
@@ -203,7 +203,7 @@ describe("sidebar", () => {
     expect(grokCard?.getAttribute("aria-busy")).toBe("true")
     expect(within(grokCard as HTMLElement).getByText("Updating")).toBeDefined()
     expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull()
-    expect(loadSubscriptions).toHaveBeenCalledOnce()
+    expect(loadSubscriptions).not.toHaveBeenCalled()
   })
 
   it("opens local usage analytics separately from subscription limits", async () => {
@@ -211,8 +211,8 @@ describe("sidebar", () => {
     useAppStore.setState({ loadUsage })
     const user = userEvent.setup()
     render(<App />)
-    await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(screen.getByRole("menuitem", { name: "Usage" }))
+    await user.click(screen.getByRole("button", { name: "Settings" }))
+    await user.click(screen.getByRole("button", { name: "Usage" }))
     expect(
       screen.getByRole("region", { name: "Usage dashboard" }),
     ).toBeDefined()
@@ -242,8 +242,8 @@ describe("sidebar", () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(screen.getByRole("menuitem", { name: /Subscriptions/ }))
+    await user.click(screen.getByRole("button", { name: "Settings" }))
+    await user.click(screen.getByRole("button", { name: "Subscriptions" }))
 
     const kimiCard = screen
       .getByRole("heading", { name: "Kimi" })

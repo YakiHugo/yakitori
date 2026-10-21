@@ -47,11 +47,8 @@ import { reasoningSections } from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "./ui/collapsible.tsx"
+import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
+import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 import "./activity-timeline.css"
@@ -468,36 +465,41 @@ const TurnBlock = memo(
     }, [sourceNavigation])
     const contentId = useId()
     const labelId = useId()
-    const answerInBlock = entries.some(
-      (entry) =>
-        entry.kind === "assistant" &&
-        entry.itemId === finalAnswer?.entry.itemId,
-    )
-    const visibleAnswer = answerInBlock ? finalAnswer?.entry : undefined
-    const answerItemIds = new Set(finalAnswer?.itemIds)
-    const persistent = entries.flatMap<ExecutionEntry>((entry) => {
-      if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
-        return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
-      }
-      return entry.kind === "turn_terminal" ||
-        (entry.kind === "permission" && entry.state !== "resolved")
-        ? [entry]
-        : []
-    })
-    const reasoning = entries.filter(
-      (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
-        entry.kind === "reasoning",
-    )
-    const timeline = groupTurnTimeline(
-      entries.filter(
+    const completed = !active && timing?.completedAt !== undefined
+    const { visibleAnswer, persistent, reasoning, timeline } = useMemo(() => {
+      const answerInBlock = entries.some(
         (entry) =>
-          !persistent.includes(entry) &&
-          (entry.kind !== "reasoning" ||
-            entry.incomplete ||
-            entry.text.trim().length > 0) &&
-          !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
-      ),
-    )
+          entry.kind === "assistant" &&
+          entry.itemId === finalAnswer?.entry.itemId,
+      )
+      const visibleAnswer = answerInBlock ? finalAnswer?.entry : undefined
+      const answerItemIds = new Set(finalAnswer?.itemIds)
+      const persistent = entries.flatMap<ExecutionEntry>((entry) => {
+        if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
+          return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
+        }
+        return entry.kind === "turn_terminal" ||
+          (entry.kind === "permission" && entry.state !== "resolved")
+          ? [entry]
+          : []
+      })
+      const reasoning = entries.filter(
+        (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
+          entry.kind === "reasoning",
+      )
+      const timeline = groupTurnTimeline(
+        entries.filter(
+          (entry) =>
+            !persistent.includes(entry) &&
+            (entry.kind !== "reasoning" ||
+              entry.incomplete ||
+              entry.text.trim().length > 0) &&
+            !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
+        ),
+        completed,
+      )
+      return { visibleAnswer, persistent, reasoning, timeline }
+    }, [entries, finalAnswer, completed])
     const currentSummary = active
       ? reasoning
           .flatMap((entry) =>
@@ -505,7 +507,6 @@ const TurnBlock = memo(
           )
           .findLast((summary) => summary !== undefined && summary !== "")
       : undefined
-    const completed = !active && timing?.completedAt !== undefined
     // Live activity is visible, but completion starts with the process closed.
     const expanded = completed ? activityExpanded : !liveActivityCollapsed
     const hasDisclosure = timeline.length > 0
@@ -517,56 +518,59 @@ const TurnBlock = memo(
         retry={retry}
       />
     )
-    const timelineContent =
-      timeline.length > 0 ? (
-        <ol className="agent-timeline" aria-label="Agent activity">
-          {timeline.map((item) => (
-            <li
-              key={
-                item.kind === "activity"
-                  ? item.id
-                  : entryKey(
-                      item.kind === "entry" ? item.entry : item.entries[0],
-                    )
-              }
-              className="agent-timeline-item"
-              data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
-            >
-              {item.kind === "entry" ? (
-                <EntryCell entry={item.entry} />
-              ) : item.kind === "activity" ? (
-                <ActivityGroup
-                  entries={item.entries}
-                  active={active && item === timeline.at(-1)}
-                  expanded={groupExpanded[item.id]}
-                  onExpandedChange={(expanded) =>
-                    setGroupExpanded((previous) => ({
-                      ...previous,
-                      [item.id]: expanded,
-                    }))
-                  }
-                  pendingApproval={entries.some(
-                    (entry) =>
-                      entry.kind === "permission" &&
-                      entry.state !== "resolved" &&
-                      item.entries.some(
-                        (candidate) =>
-                          candidate.kind === "tool" &&
-                          candidate.toolCallId === entry.toolCallId,
-                      ),
-                  )}
-                >
-                  {item.entries.map((entry) => (
-                    <EntryCell key={entryKey(entry)} entry={entry} />
-                  ))}
-                </ActivityGroup>
-              ) : (
-                <ActionGroup entries={item.entries} />
-              )}
-            </li>
-          ))}
-        </ol>
-      ) : null
+    const timelineContent = useMemo(
+      () =>
+        timeline.length > 0 ? (
+          <ol className="agent-timeline" aria-label="Agent activity">
+            {timeline.map((item) => (
+              <li
+                key={
+                  item.kind === "activity"
+                    ? item.id
+                    : entryKey(
+                        item.kind === "entry" ? item.entry : item.entries[0],
+                      )
+                }
+                className="agent-timeline-item"
+                data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
+              >
+                {item.kind === "entry" ? (
+                  <EntryCell entry={item.entry} />
+                ) : item.kind === "activity" ? (
+                  <ActivityGroup
+                    entries={item.entries}
+                    active={active && item === timeline.at(-1)}
+                    expanded={groupExpanded[item.id]}
+                    onExpandedChange={(expanded) =>
+                      setGroupExpanded((previous) => ({
+                        ...previous,
+                        [item.id]: expanded,
+                      }))
+                    }
+                    pendingApproval={entries.some(
+                      (entry) =>
+                        entry.kind === "permission" &&
+                        entry.state !== "resolved" &&
+                        item.entries.some(
+                          (candidate) =>
+                            candidate.kind === "tool" &&
+                            candidate.toolCallId === entry.toolCallId,
+                        ),
+                    )}
+                  >
+                    {item.entries.map((entry) => (
+                      <EntryCell key={entryKey(entry)} entry={entry} />
+                    ))}
+                  </ActivityGroup>
+                ) : (
+                  <ActionGroup entries={item.entries} />
+                )}
+              </li>
+            ))}
+          </ol>
+        ) : null,
+      [timeline, active, groupExpanded, entries],
+    )
     return (
       <section
         className="flex flex-col gap-5"
@@ -577,7 +581,7 @@ const TurnBlock = memo(
             <div
               className={cn(
                 "flex items-center gap-1.5 text-left text-[14px] text-muted-foreground",
-                finalAnswer ? "border-b pb-3" : "pb-1",
+                finalAnswer ? "pb-3" : "pb-1",
               )}
             >
               {hasDisclosure ? (
@@ -625,19 +629,15 @@ const TurnBlock = memo(
               ) : null}
             </div>
             {!hasDisclosure ? null : (
-              <div
+              // Completion moves the final answer outside this cached tree.
+              <TranscriptDisclosureContent
+                key={completed ? "completed" : "live"}
                 id={contentId}
+                open={expanded}
                 className="conversation-disclosure"
-                data-expanded={expanded}
-                aria-hidden={!expanded}
-                inert={!expanded}
               >
-                <div className="min-h-0 overflow-hidden">
-                  {expanded ? (
-                    <div className="pt-4">{timelineContent}</div>
-                  ) : null}
-                </div>
-              </div>
+                <div className="pt-4">{timelineContent}</div>
+              </TranscriptDisclosureContent>
             )}
           </div>
         ) : null}
@@ -678,6 +678,7 @@ type TurnTimelineItem =
 
 function groupTurnTimeline(
   entries: readonly ExecutionEntry[],
+  completed: boolean,
 ): readonly TurnTimelineItem[] {
   const toolCalls = new Map(
     entries.flatMap((entry) =>
@@ -715,7 +716,13 @@ function groupTurnTimeline(
   const flushActions = () => {
     const [first, ...rest] = actions
     if (first === undefined) return
-    timeline.push({ kind: "actions", entries: [first, ...rest] })
+    // Keep live groups stable as more calls arrive. Once complete, a lone
+    // tool can expose its own result directly without a redundant disclosure.
+    timeline.push(
+      completed && rest.length === 0 && first.kind === "tool"
+        ? { kind: "entry", entry: first }
+        : { kind: "actions", entries: [first, ...rest] },
+    )
     actions = []
   }
   for (const run of runs) {
@@ -726,11 +733,15 @@ function groupTurnTimeline(
       run.entries.some((item) => item.kind === "tool")
     ) {
       flushActions()
-      timeline.push({
-        kind: "activity",
-        id: `${run.callId}:${entryKey(entry)}`,
-        entries: [entry, ...rest],
-      })
+      timeline.push(
+        completed && rest.length === 0 && entry.kind === "tool"
+          ? { kind: "entry", entry }
+          : {
+              kind: "activity",
+              id: `${run.callId}:${entryKey(entry)}`,
+              entries: [entry, ...rest],
+            },
+      )
       continue
     }
     for (const entry of run.entries) {
@@ -770,6 +781,7 @@ function ActionGroup({
   const interrupted = tools.some((entry) => entry.state === "interrupted")
   const hasProblem = failed || interrupted
   const [open, setOpen] = useState(hasProblem)
+  const contentId = useId()
   useEffect(() => {
     if (hasProblem) setOpen(true)
   }, [hasProblem])
@@ -810,6 +822,7 @@ function ActionGroup({
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="group/actions">
       <CollapsibleTrigger
+        aria-controls={contentId}
         aria-label={
           summary === "" ? statusLabel : `${statusLabel} · ${summary}`
         }
@@ -836,13 +849,13 @@ function ActionGroup({
         )}
         <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/actions:rotate-90" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">
+      <TranscriptDisclosureContent id={contentId} open={open} className="pt-2">
         <div className="flex flex-col gap-1 pl-3">
           {entries.map((entry) => (
             <EntryCell key={entryKey(entry)} entry={entry} />
           ))}
         </div>
-      </CollapsibleContent>
+      </TranscriptDisclosureContent>
     </Collapsible>
   )
 }

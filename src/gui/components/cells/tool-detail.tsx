@@ -1,4 +1,4 @@
-import { ExternalLink } from "lucide-react"
+import { Copy, ExternalLink } from "lucide-react"
 import { useState } from "react"
 import type { CommandResult } from "../../execution-view.ts"
 import {
@@ -13,13 +13,17 @@ import { DiffView } from "./diff-view.tsx"
 export function ToolDetailView({
   detail,
   workspaceRoot,
+  pending = false,
 }: Readonly<{
   detail?: ToolDetail | undefined
   workspaceRoot?: string | undefined
+  pending?: boolean
 }>) {
   if (detail === undefined) {
     return (
-      <p className="text-xs text-muted-foreground">Waiting for a result…</p>
+      <p className="text-xs text-muted-foreground">
+        {pending ? "Waiting for a result…" : "No output returned."}
+      </p>
     )
   }
   switch (detail.kind) {
@@ -157,7 +161,9 @@ export function ToolDetailView({
       )
     case "collaboration":
       return detail.text === undefined ? (
-        <p className="text-xs text-muted-foreground">Waiting for a result…</p>
+        <p className="text-xs text-muted-foreground">
+          {pending ? "Waiting for a result…" : "No output returned."}
+        </p>
       ) : (
         <TextOutput text={detail.text} />
       )
@@ -243,6 +249,7 @@ function ActionButton({
   readonly action: () => Promise<void>
 }) {
   const [error, setError] = useState<string>()
+  const Icon = title === "Copy path" ? Copy : ExternalLink
   return (
     <button
       type="button"
@@ -272,7 +279,10 @@ function ActionButton({
           {secondary}
         </span>
       )}
-      <ExternalLink className="size-3 shrink-0 self-center text-muted-foreground opacity-0 group-hover/action:opacity-100 group-focus-visible/action:opacity-100" />
+      <Icon
+        aria-hidden="true"
+        className="size-3 shrink-0 self-center text-muted-foreground opacity-60 group-hover/action:opacity-100 group-focus-visible/action:opacity-100"
+      />
     </button>
   )
 }
@@ -298,9 +308,12 @@ function CommandOutput({
 }) {
   if (result === undefined) {
     return (
-      <pre className="overflow-x-auto rounded-sm bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
+      <pre className="max-h-96 overflow-auto rounded-sm bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
         {`$ ${command}`}
         {resultText === undefined ? "" : `\n${resultText}`}
+        {errorMessage === undefined || errorMessage === resultText ? null : (
+          <span className="block text-red-300">{errorMessage}</span>
+        )}
       </pre>
     )
   }
@@ -322,7 +335,7 @@ function CommandOutput({
       <div className="bg-zinc-900/80 px-3 py-1.5 text-[11px] text-zinc-500">
         {result.cwd === undefined ? "workspace" : result.cwd}
       </div>
-      <div className="overflow-x-auto p-3 whitespace-pre-wrap">
+      <div className="max-h-96 overflow-auto p-3 whitespace-pre-wrap">
         <div className="text-zinc-100">{`$ ${command}`}</div>
         {result.stdout.length > 0 ? <div>{result.stdout}</div> : null}
         {result.stderr.length > 0 ? (

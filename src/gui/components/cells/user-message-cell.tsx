@@ -1,10 +1,4 @@
-import {
-  ImageOff,
-  LoaderCircle,
-  PencilLine,
-  RotateCcw,
-  Target,
-} from "lucide-react"
+import { ImageOff, LoaderCircle, PencilLine, Target } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { assetSourceKey } from "../../../protocol/asset-types.ts"
 import {
@@ -87,22 +81,21 @@ export function UserMessageCell({
   const goalInputId = useAppStore(
     (state) => state.selectedSession?.goal?.inputId,
   )
-  const setGoal = useAppStore((state) => state.setGoal)
   const sentAsGoal = goalInputId !== undefined && goalInputId === entry.inputId
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
-  const [mode, setMode] = useState<"undo" | "edit" | undefined>()
+  const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(entry.content)
   const [previewIndex, setPreviewIndex] = useState<number>()
   const [openError, setOpenError] = useState<string>()
   const edited = trimInputDraft(draft)
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
-    if (mode === "edit") {
+    if (editing) {
       editorRef.current?.focus(true)
     }
-  }, [mode])
+  }, [editing])
   const attachments = inputContentAttachments(inputContent(entry.content))
   const contextAttachments = entry.contextAttachments ?? []
   const preview =
@@ -110,7 +103,7 @@ export function UserMessageCell({
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {mode !== "edit" ? (
+      {!editing ? (
         <>
           {contextAttachments.length > 0 ? (
             <section
@@ -175,91 +168,28 @@ export function UserMessageCell({
           ) : null}
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}
-            {mode === undefined ? (
-              <div className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                <MessageTimestamp at={entry.at} />
-                <CopyIconButton text={entry.text} label="message" />
-                {entry.text.trim() && sessionId !== undefined && !sentAsGoal ? (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    aria-label="Set as goal"
-                    title="Set as goal"
-                    onClick={() =>
-                      void setGoal({
-                        sessionId,
-                        objective: entry.text.trim(),
-                        status: "active",
-                        inputId: entry.inputId,
-                      })
-                    }
-                    className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                  >
-                    <Target className="size-4" />
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label="Edit & resubmit"
-                  title="Edit & resubmit"
-                  onClick={() => {
-                    setDraft(entry.content)
-                    setMode("edit")
-                  }}
-                  className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                >
-                  <PencilLine className="size-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label="Undo to here"
-                  title="Undo to here"
-                  onClick={() => setMode("undo")}
-                  className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                >
-                  <RotateCcw className="size-4" />
-                </button>
-              </div>
-            ) : null}
+            <div className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+              <MessageTimestamp at={entry.at} />
+              <CopyIconButton text={entry.text} label="message" />
+              <button
+                type="button"
+                disabled={busy}
+                aria-label="Edit & resubmit"
+                title="Edit & resubmit"
+                onClick={() => {
+                  setDraft(entry.content)
+                  setEditing(true)
+                }}
+                className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <PencilLine className="size-4" />
+              </button>
+            </div>
           </div>
         </>
       ) : null}
-      {mode === "undo" ? (
-        <div className="w-full max-w-lg rounded-md border bg-card p-3 shadow-sm">
-          <p className="text-xs font-medium">
-            Undo this message and everything after it?
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            The conversation will branch. Files and command effects stay as-is.
-          </p>
-          <div className="mt-3 flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={busy}
-              onClick={() => setMode(undefined)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={busy}
-              onClick={() => {
-                void forkSession(entry.inputId, "undo")
-              }}
-            >
-              <RotateCcw /> Undo
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
       {openError === undefined ? null : <p role="alert">{openError}</p>}
-      {mode === "edit" ? (
+      {editing ? (
         <form
           className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
           onSubmit={(event) => {
@@ -291,7 +221,7 @@ export function UserMessageCell({
             }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
-                setMode(undefined)
+                setEditing(false)
                 return true
               }
               if (
@@ -316,7 +246,7 @@ export function UserMessageCell({
               variant="outline"
               size="sm"
               disabled={busy}
-              onClick={() => setMode(undefined)}
+              onClick={() => setEditing(false)}
             >
               Cancel
             </Button>

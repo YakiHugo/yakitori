@@ -40,6 +40,98 @@ afterEach(() => {
 })
 
 describe("tool cell", () => {
+  it("copies the full file location from the collapsed row without opening output", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, "writeText")
+    render(
+      <ToolCell
+        workspaceRoot="/workspace"
+        entry={{
+          kind: "tool",
+          toolCallId: "read_location",
+          turnId: "turn_1",
+          state: "completed",
+          resultText: "File output",
+          execution: {
+            ...fileReadExecution({
+              path: "src/index.ts",
+              offset: 12,
+              limit: 3,
+            }),
+            itemId: "read_location_item",
+            toolCallId: "read_location",
+            name: "read_file",
+            input: { path: "src/index.ts", offset: 12, limit: 3 },
+            requiresPermission: false,
+          },
+        }}
+      />,
+    )
+    await user.click(screen.getByRole("button", { name: "Copy path" }))
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(
+      "/workspace/src/index.ts:12",
+    )
+    expect(screen.getByText("Copied")).toBeDefined()
+    expect(screen.queryByText("File output")).toBeNull()
+    expect(
+      screen
+        .getByRole("button", { name: /Read src\/index.ts/ })
+        .getAttribute("aria-expanded"),
+    ).toBe("false")
+  })
+
+  it("shows a completed empty result without suggesting it is still running", async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCell
+        entry={toolEntry({
+          kind: "tool",
+          toolCallId: "read_empty",
+          turnId: "turn_1",
+          name: "read_file",
+          executionType: "file_read",
+          summary: "empty.ts",
+          input: { path: "empty.ts" },
+          state: "completed",
+        })}
+      />,
+    )
+    await user.click(screen.getByRole("button", { name: /Read empty.ts/ }))
+    expect(screen.getByText("No output returned.")).toBeDefined()
+    expect(screen.queryByText("Waiting for a result…")).toBeNull()
+  })
+
+  it.each([
+    "read_file",
+    "run_command",
+  ])("keeps the full failure reason when %s returns no result", (name) => {
+    const message =
+      "The operation could not start because the requested workspace no longer exists. Choose an existing workspace before trying again."
+    render(
+      <ToolCell
+        entry={toolEntry({
+          kind: "tool",
+          toolCallId: "failed_without_result",
+          turnId: "turn_1",
+          name,
+          executionType:
+            name === "read_file" ? "file_read" : "command_execution",
+          summary: "missing",
+          input:
+            name === "read_file"
+              ? { path: "missing.ts" }
+              : { command: "example" },
+          state: "failed",
+          resultError: true,
+          resultErrorMessage: message,
+        })}
+      />,
+    )
+    expect(screen.getByText("Failed")).toBeDefined()
+    expect(screen.getByText(message)).toBeDefined()
+    expect(screen.queryByText("Waiting for a result…")).toBeNull()
+  })
+
   it("opens a single recipient trace without expanding the actual tool output", async () => {
     const user = userEvent.setup()
     const onOpenSession = vi.fn(async (_sessionId: string) => {})

@@ -98,6 +98,7 @@ export default defineConfig(({ mode }) => {
             setupFiles: [
               "test/gui/setup-localstorage.ts",
               "test/gui/setup-app-store.ts",
+              "test/gui/setup-animations.ts",
             ],
           },
         },

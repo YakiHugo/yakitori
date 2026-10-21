@@ -23,7 +23,6 @@ import { SidebarGroups, SidebarOptions } from "./sidebar-groups.tsx"
 import { useSidebarMotion } from "./sidebar-motion.ts"
 import { SessionItems } from "./sidebar-sessions.tsx"
 import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
-import { SubscriptionPanelButton } from "./subscription-panel.tsx"
 import { Button } from "./ui/button.tsx"
 import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 
@@ -136,7 +135,6 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
           )}
         </nav>
       </div>
-      <SubscriptionPanelButton />
     </>
   )
 }
