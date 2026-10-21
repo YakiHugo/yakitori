@@ -224,7 +224,7 @@ it("collapses completed process output and keeps the final answer visible", () =
   fireEvent.click(toggle)
   expect(screen.getByText("Checking the implementation")).toBeDefined()
   expect(
-    screen.getByRole("button", { name: "Used tools · Read" }),
+    screen.getByRole("button", { name: /Read src\/index\.ts/ }),
   ).toBeDefined()
   expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
   for (const reasoning of screen.getAllByRole("button", { name: "Reasoning" }))
@@ -242,9 +242,20 @@ it("collapses completed process output and keeps the final answer visible", () =
       ?.getAttribute("aria-hidden"),
   ).toBe("false")
   fireEvent.click(toggle)
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
-  expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
+  expect(screen.queryByRole("list", { name: "Agent activity" })).toBeNull()
   expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
+  expect(disclosure?.hasAttribute("hidden")).toBe(true)
+  fireEvent.click(toggle)
+  expect(
+    screen
+      .getAllByRole("button", { name: "Reasoning" })
+      .every((button) => button.getAttribute("aria-expanded") === "true"),
+  ).toBe(true)
+  expect(
+    screen
+      .getByText("Reasoning details", { selector: "p" })
+      .closest("[hidden]"),
+  ).toBeNull()
   expect(screen.getByText("Final answer")).toBeDefined()
 })
 
@@ -384,8 +395,8 @@ it("updates elapsed work time and collapses an open live trace when the turn com
       .getAttribute("aria-expanded"),
   ).toBe("false")
   expect(screen.getByText("Final answer")).toBeDefined()
+  expect(screen.queryByRole("list", { name: "Agent activity" })).toBeNull()
   expect(screen.queryByText("Reasoning details")).toBeNull()
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
   act(() => vi.advanceTimersByTime(5000))
   expect(screen.getByText("Worked for", { exact: false }).textContent).toBe(
     "Worked for 1m 2s",
@@ -410,7 +421,7 @@ it("provides a completed activity disclosure when the turn has no reasoning", ()
   expect(screen.getByText("Final answer")).toBeDefined()
   fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
   expect(screen.getByText("Checking the implementation")).toBeDefined()
-  fireEvent.click(screen.getByRole("button", { name: "Used tools · Read" }))
+  expect(screen.queryByRole("button", { name: "Used tools · Read" })).toBeNull()
   expect(
     screen.getByRole("button", { name: /Read src\/index\.ts/ }),
   ).toBeDefined()
@@ -504,11 +515,11 @@ it("expands commentary, tools, and substantive reasoning in their original order
   const activity = screen.getByRole("list", { name: "Agent activity" })
   expect(Array.from(activity.children, (child) => child.textContent)).toEqual([
     "Checking the implementation",
-    "Read file",
+    expect.stringContaining("src/first.ts"),
     "Inspecting filesComparing implementation",
     "Reasoning",
     "Now checking the second file",
-    "Read file",
+    expect.stringContaining("src/second.ts"),
   ])
   expect(screen.getByText("Inspecting files")).toBeDefined()
   expect(screen.getByText("Comparing implementation")).toBeDefined()

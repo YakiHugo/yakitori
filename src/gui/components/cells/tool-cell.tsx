@@ -1,5 +1,21 @@
-import { ArrowUpRight, ChevronRight, ExternalLink } from "lucide-react"
-import { useEffect, useState } from "react"
+import {
+  ArrowUpRight,
+  Check,
+  ChevronRight,
+  CircleAlert,
+  Copy,
+  ExternalLink,
+  FilePenLine,
+  FileText,
+  Globe,
+  LoaderCircle,
+  Plug,
+  Search,
+  Terminal,
+  Users,
+  Wrench,
+} from "lucide-react"
+import { useEffect, useId, useState } from "react"
 import {
   parseSessionPlan,
   parseUserQuestions,
@@ -13,11 +29,8 @@ import {
 import { cn } from "../../lib/utils.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "../ui/collapsible.tsx"
+import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
+import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { PlanCell, UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
 import { ToolResultParts } from "./tool-result-parts.tsx"
@@ -47,7 +60,24 @@ export function ToolCell({
     entry.state === "failed" || entry.state === "interrupted",
   )
   const active = entry.state === "requested"
-  const failure = failureSummary(entry)
+  const contentId = useId()
+  const failed = entry.state === "failed" || entry.resultError === true
+  const interrupted = entry.state === "interrupted"
+  const Icon = active
+    ? LoaderCircle
+    : failed
+      ? CircleAlert
+      : {
+          command_execution: Terminal,
+          file_change: FilePenLine,
+          file_read: FileText,
+          file_search: Search,
+          web_fetch: Globe,
+          web_search: Globe,
+          collaboration_tool_call: Users,
+          mcp_tool_call: Plug,
+          dynamic_tool_call: Wrench,
+        }[entry.execution.type]
 
   useEffect(() => {
     if (entry.state === "failed" || entry.state === "interrupted") {
@@ -79,59 +109,55 @@ export function ToolCell({
       onOpenChange={setOpen}
       className={cn(
         "group/tool",
+        "tool-cell",
         collaboration !== undefined && "agent-collaboration",
       )}
+      data-status={
+        failed ? "failed" : interrupted ? "interrupted" : entry.state
+      }
     >
-      <div className="flex min-w-0 items-center rounded-md transition-colors hover:bg-muted/35">
-        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-sm outline-none focus-visible:bg-muted/55">
-          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/55 transition-transform group-data-[state=open]/tool:rotate-90" />
-          <span
-            className={cn(
-              "shrink-0 font-medium",
-              active && "tool-running-label",
-              entry.state === "failed" && "text-destructive",
-              entry.state === "interrupted" && "text-muted-foreground",
-            )}
-          >
-            {active ? presentation.activeVerb : presentation.verb}
-          </span>
-          {collaboration !== undefined && presentation.subject !== "" ? (
-            <span aria-hidden="true" className="text-muted-foreground">
-              ·
-            </span>
-          ) : null}
-          {presentation.subject !== "" ? (
-            <span
-              className={cn(
-                "min-w-0 truncate text-foreground/85",
-                presentation.subjectTone === "code" &&
-                  "font-mono text-[0.8125rem]",
-              )}
-            >
-              {presentation.subject}
-            </span>
-          ) : null}
-          <span className="ml-auto hidden min-w-0 max-w-[40%] shrink-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground sm:flex">
-            {(collaboration === undefined ? presentation.meta : []).map(
-              (part) => (
-                <span key={part} className="truncate">
-                  {part}
-                </span>
-              ),
-            )}
-            {failure === undefined ? null : (
-              <span
-                className={cn(
-                  "truncate",
-                  entry.state === "failed"
-                    ? "text-destructive"
-                    : "text-muted-foreground",
-                )}
-              >
-                {failure}
+      <div className="tool-header">
+        <CollapsibleTrigger aria-controls={contentId} className="tool-trigger">
+          <Icon
+            aria-hidden="true"
+            className={cn("tool-icon", active && "animate-spin")}
+          />
+          <span className="tool-summary">
+            <span className="tool-title">
+              <span className={cn("tool-verb", active && "tool-running-label")}>
+                {active ? presentation.activeVerb : presentation.verb}
               </span>
-            )}
+              {presentation.subject === "" ? null : (
+                <span
+                  title={presentation.subject}
+                  className={cn(
+                    "tool-subject",
+                    presentation.subjectTone === "code" &&
+                      "font-mono text-[0.8125rem]",
+                  )}
+                >
+                  {presentation.subject}
+                </span>
+              )}
+            </span>
+            {failed ||
+            interrupted ||
+            (collaboration === undefined && presentation.meta.length > 0) ? (
+              <span className="tool-meta">
+                {failed || interrupted ? (
+                  <span className="tool-state" title={entry.resultErrorMessage}>
+                    {failed ? "Failed" : "Interrupted"}
+                  </span>
+                ) : null}
+                {(collaboration === undefined ? presentation.meta : []).map(
+                  (part) => (
+                    <span key={part}>{part}</span>
+                  ),
+                )}
+              </span>
+            ) : null}
           </span>
+          <ChevronRight aria-hidden="true" className="tool-chevron" />
         </CollapsibleTrigger>
         {presentation.target === undefined ||
         (collaboration !== undefined && onOpenSession === undefined) ? null : (
@@ -170,8 +196,17 @@ export function ToolCell({
           ))}
         </div>
       )}
-      <CollapsibleContent className="pt-1 pb-2">
-        <div className="rounded-md bg-muted/35 px-3 py-2.5">
+      <TranscriptDisclosureContent
+        id={contentId}
+        open={open}
+        className="tool-details"
+      >
+        <div className="tool-detail-surface">
+          {entry.resultErrorMessage === undefined ||
+          presentation.detail?.kind === "command" ||
+          entry.resultText?.includes(entry.resultErrorMessage) ? null : (
+            <p className="tool-error">{entry.resultErrorMessage}</p>
+          )}
           {collaboration?.request === undefined ? null : (
             <p className="mb-3 text-xs leading-5 whitespace-pre-wrap text-foreground/85">
               {collaboration.request}
@@ -186,11 +221,12 @@ export function ToolCell({
           ) : (
             <ToolDetailView
               detail={presentation.detail}
+              pending={active}
               workspaceRoot={workspaceRoot}
             />
           )}
         </div>
-      </CollapsibleContent>
+      </TranscriptDisclosureContent>
     </Collapsible>
   )
 }
@@ -209,6 +245,9 @@ function ResourceAction({
   compact?: boolean
 }>) {
   const [error, setError] = useState<string>()
+  const [copiedPath, setCopiedPath] = useState<string>()
+  const fileKey =
+    target.kind === "file" ? `${target.path}:${target.line ?? ""}` : undefined
   const label =
     target.kind === "file"
       ? fileActionLabel()
@@ -217,19 +256,23 @@ function ResourceAction({
         : recipient === undefined
           ? "View trace"
           : `View trace for ${recipient}`
+  const copied = label === "Copy path" && copiedPath === fileKey
+  const Icon = copied ? Check : label === "Copy path" ? Copy : ExternalLink
   return (
     <button
       type="button"
-      aria-label={error ?? label}
+      aria-label={label}
+      aria-description={error}
       title={error ?? label}
       className={cn(
         target.kind === "session"
           ? "agent-trace-link text-xs"
-          : "mr-1.5 shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:bg-muted focus-visible:opacity-100 group-hover/tool:opacity-100",
-        error !== undefined && "text-destructive opacity-100",
+          : "tool-resource-action",
+        error !== undefined && "text-destructive",
       )}
-      onClick={() => {
+      onClick={async () => {
         setError(undefined)
+        setCopiedPath(undefined)
         const action =
           target.kind === "file"
             ? openFileTarget(target, workspaceRoot)
@@ -240,9 +283,15 @@ function ResourceAction({
           setError("Child task is not available")
           return
         }
-        void action.catch((reason: unknown) => {
-          setError(reason instanceof Error ? reason.message : "Could not open")
-        })
+        await action
+          .then(() => {
+            if (label === "Copy path") setCopiedPath(fileKey)
+          })
+          .catch((reason: unknown) => {
+            setError(
+              reason instanceof Error ? reason.message : "Could not open",
+            )
+          })
       }}
     >
       {target.kind === "session" ? (
@@ -251,15 +300,13 @@ function ResourceAction({
           <ArrowUpRight className="size-3.5" />
         </>
       ) : (
-        <ExternalLink className="size-3.5" />
+        <>
+          <Icon aria-hidden="true" className="size-3.5" />
+          <span aria-live="polite">
+            {error === undefined ? (copied ? "Copied" : label) : "Retry"}
+          </span>
+        </>
       )}
     </button>
   )
-}
-
-function failureSummary(entry: ToolEntry): string | undefined {
-  if (entry.state === "interrupted") return "Interrupted"
-  if (entry.state !== "failed") return undefined
-  const message = entry.resultErrorMessage ?? "Failed"
-  return message.length <= 72 ? message : `${message.slice(0, 71)}…`
 }

@@ -10,6 +10,132 @@
 .agent-timeline-item:last-child {
   padding-bottom: 0;
 }
+.tool-cell {
+  min-width: 0;
+  content-visibility: auto;
+  /* Skip offscreen output layout. Unseen cells start at roughly one summary
+     row; auto retains measured heights when a reader scrolls past them. */
+  contain-intrinsic-block-size: auto 3rem;
+}
+.tool-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  border-radius: 8px;
+  transition: background-color 120ms;
+}
+.tool-header:hover {
+  background: color-mix(in oklab, var(--muted) 35%, transparent);
+}
+.tool-trigger {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 6px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 13px;
+  line-height: 20px;
+}
+.tool-trigger:focus-visible,
+.tool-resource-action:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.tool-icon,
+.tool-chevron {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+}
+.tool-chevron {
+  width: 13px;
+  opacity: 0.65;
+  transition: transform 150ms;
+}
+.tool-trigger[data-state="open"] .tool-chevron {
+  transform: rotate(90deg);
+}
+.tool-summary {
+  flex: 1;
+  min-width: 0;
+}
+.tool-title {
+  display: flex;
+  min-width: 0;
+  gap: 7px;
+  align-items: baseline;
+}
+.tool-verb {
+  flex: none;
+  font-weight: 500;
+}
+.tool-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in oklab, var(--foreground) 85%, transparent);
+}
+.tool-meta {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 10px;
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--muted-foreground);
+}
+.tool-cell[data-status="failed"] :is(.tool-icon, .tool-verb, .tool-state) {
+  color: var(--destructive);
+}
+.tool-resource-action {
+  display: inline-flex;
+  flex: none;
+  max-width: 42%;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 4px 0 0;
+  padding: 5px 6px;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+}
+.tool-resource-action svg {
+  flex: none;
+}
+.tool-resource-action span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-resource-action:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.tool-details {
+  padding: 4px 0 8px 23px;
+}
+.tool-detail-surface {
+  min-width: 0;
+}
+.tool-error {
+  margin-bottom: 8px;
+  color: var(--destructive);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-header,
+  .tool-chevron {
+    transition: none;
+  }
+}
 .agent-collaboration {
   min-width: 0;
 }

@@ -162,23 +162,25 @@ function presentReadFile(
     },
     ...(resultText === undefined
       ? {}
-      : isDirectory
-        ? {
-            detail: {
-              kind: "file_list" as const,
-              paths: directoryPaths(path, result?.entries ?? []),
-              truncated: result?.truncated === true,
-            },
-          }
-        : {
-            detail: {
-              kind: "file_excerpt" as const,
-              path,
-              content: resultText,
-              ...(offset === undefined ? {} : { startLine: offset }),
-              truncated: result?.truncated === true,
-            },
-          }),
+      : entry.resultError
+        ? { detail: { kind: "text" as const, text: resultText } }
+        : isDirectory
+          ? {
+              detail: {
+                kind: "file_list" as const,
+                paths: directoryPaths(path, result?.entries ?? []),
+                truncated: result?.truncated === true,
+              },
+            }
+          : {
+              detail: {
+                kind: "file_excerpt" as const,
+                path,
+                content: resultText,
+                ...(offset === undefined ? {} : { startLine: offset }),
+                truncated: result?.truncated === true,
+              },
+            }),
   }
 }
 

@@ -196,7 +196,7 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
   vi.mocked(Markdown).mockClear()
   appendReasoning(" again")
   expect(toggle.getAttribute("aria-expanded")).toBe("false")
-  expect(disclosure()?.textContent ?? "").toBe("")
+  expect(disclosure()?.hidden).toBe(true)
   expect(Markdown).not.toHaveBeenCalled()
   fireEvent.click(toggle)
   expect(disclosure()?.textContent).toContain(

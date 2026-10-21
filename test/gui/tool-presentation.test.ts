@@ -88,6 +88,22 @@ describe("tool presentation", () => {
     })
   })
 
+  it("presents a failed read as an error instead of a file excerpt", () => {
+    const presentation = presentTool(
+      entry("read_file", {
+        input: { path: "missing.ts" },
+        state: "failed",
+        resultError: true,
+        resultText: "path_not_found: Path does not exist.",
+      }),
+    )
+    expect(presentation.detail).toEqual({
+      kind: "text",
+      text: "path_not_found: Path does not exist.",
+    })
+    expect(presentation.target).toEqual({ kind: "file", path: "missing.ts" })
+  })
+
   it("presents read ranges as a file preview target", () => {
     expect(
       presentTool(

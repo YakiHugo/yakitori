@@ -80,8 +80,10 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("session goal", () => {
-  it("sets a message as the goal and marks its originating input", async () => {
-    const user = userEvent.setup()
+  it("marks the originating goal message without offering a goal action", () => {
+    useAppStore.setState({
+      selectedSession: { ...session, goal: { ...goal, inputId: "input_1" } },
+    })
     render(
       <UserMessageCell
         entry={{
@@ -94,13 +96,6 @@ describe("session goal", () => {
         queued={false}
       />,
     )
-    await user.click(screen.getByRole("button", { name: "Set as goal" }))
-    expect(fakeRef.current.requestsFor("goal/set")[0]?.params).toEqual({
-      sessionId: session.id,
-      objective: goal.objective,
-      status: "active",
-      inputId: "input_1",
-    })
     expect(screen.getByText("Sent as goal")).toBeDefined()
     expect(screen.queryByRole("button", { name: "Set as goal" })).toBeNull()
   })
