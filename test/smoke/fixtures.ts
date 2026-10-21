@@ -632,10 +632,9 @@ export async function runProviderFlow(
       const activity = response.getByRole("button", { name: /^Worked for/ })
       await expect(activity).toHaveAttribute("aria-expanded", "false")
       await activity.click()
-      await page
-        .getByRole("button", { name: "View image", exact: true })
+      await response
+        .getByRole("button", { name: /^View image smoke\.png/ })
         .click()
-      await page.getByRole("button", { name: /^View image smoke\.png/ }).click()
       const parts = page.getByRole("region", {
         name: "Ordered tool result",
         exact: true,
