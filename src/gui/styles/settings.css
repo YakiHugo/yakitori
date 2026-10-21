@@ -247,10 +247,6 @@
   margin-top: 14px;
 }
 
-html[data-desktop="macos"] .settings-sidebar {
-  padding-top: 48px;
-}
-
 .settings-usage-heading {
   position: relative;
 }

@@ -59,7 +59,9 @@ export function chooseNewEngine(engineId: string) {
   clearEngineSelection()
   useEngineStore.setState({ engineId: engineId || undefined })
 }
-export async function selectEngineSession(session: EngineSessionSummary) {
+export async function selectEngineSession(
+  session: Pick<EngineSessionSummary, "id" | "engineId" | "projectId">,
+) {
   useAppStore.getState().clearSessionSelection({ projectId: session.projectId })
   clearEngineSelection()
   useEngineStore.setState({

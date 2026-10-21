@@ -476,20 +476,6 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
-/* The shell supplies a transparent native drag layer above empty headers. */
-html[data-desktop="macos"] .provider-workspace-header {
-  position: relative;
-  z-index: 2;
-  -webkit-app-region: drag;
-}
-html[data-desktop="macos"] .provider-workspace-header button {
-  -webkit-app-region: no-drag;
-}
-html[data-desktop="macos"]
-  .app-shell:has(.sidebar-show)
-  .provider-workspace-header {
-  padding-left: 128px;
-}
 .provider-workspace-body {
   container: providers / inline-size;
   width: 100%;

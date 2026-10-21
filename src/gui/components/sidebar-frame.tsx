@@ -1,4 +1,3 @@
-import { PanelLeft } from "lucide-react"
 import { type CSSProperties, useEffect, useLayoutEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
@@ -6,10 +5,10 @@ import { SessionSearch } from "./session-search.tsx"
 import { Sidebar } from "./sidebar.tsx"
 import { SidebarDragSurface } from "./sidebar-drag.tsx"
 
-export function SidebarFrame() {
-  const [open, setOpen] = useState(
-    () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
-  )
+export function SidebarFrame({
+  open,
+  setOpen,
+}: Readonly<{ open: boolean; setOpen(value: boolean): void }>) {
   const [preferredWidth, setPreferredWidth] = useState(() => {
     const saved = Number(localStorage.getItem("yakitori.sidebarWidth"))
     return Number.isFinite(saved) && saved >= 240 && saved <= 520 ? saved : 275
@@ -21,7 +20,7 @@ export function SidebarFrame() {
     240,
     Math.min(
       520,
-      windowWidth - (split && windowWidth >= 912 ? 320 + 352 : 240),
+      windowWidth - 48 - (split && windowWidth >= 960 ? 320 + 352 : 240),
     ),
   )
   const width = Math.min(preferredWidth, maximumWidth)
@@ -67,7 +66,7 @@ export function SidebarFrame() {
         )
       ) {
         event.preventDefault()
-        setOpen((value) => !value)
+        setOpen(!open)
       }
       if (event.key.toLowerCase() === "n") {
         event.preventDefault()
@@ -76,7 +75,7 @@ export function SidebarFrame() {
     }
     window.addEventListener("keydown", keydown)
     return () => window.removeEventListener("keydown", keydown)
-  }, [startNewSession])
+  }, [startNewSession, open, setOpen])
   return (
     <>
       <aside
@@ -87,17 +86,6 @@ export function SidebarFrame() {
         style={{ "--sidebar-width": `${width}px` } as CSSProperties}
       >
         <div className="sidebar-inner" inert={!open}>
-          <div className="sidebar-toolbar">
-            <button
-              type="button"
-              aria-label="Hide sidebar"
-              title="Hide sidebar (⌘B)"
-              className="sidebar-icon"
-              onClick={() => setOpen(false)}
-            >
-              <PanelLeft size={16} />
-            </button>
-          </div>
           <SidebarDragSurface>
             <Sidebar onSearch={() => setSearching(true)} />
           </SidebarDragSurface>
@@ -123,7 +111,10 @@ export function SidebarFrame() {
           }}
           onPointerMove={(event) => {
             if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
-            setWidth(event.clientX)
+            const left =
+              event.currentTarget.parentElement?.getBoundingClientRect().left ??
+              0
+            setWidth(event.clientX - left)
           }}
           onPointerUp={(event) => {
             if (event.currentTarget.hasPointerCapture(event.pointerId))
@@ -133,17 +124,6 @@ export function SidebarFrame() {
           onLostPointerCapture={() => setResizing(false)}
         />
       </aside>
-      {!open && (
-        <button
-          type="button"
-          aria-label="Show sidebar"
-          title="Show sidebar (⌘B)"
-          className="sidebar-icon sidebar-show"
-          onClick={() => setOpen(true)}
-        >
-          <PanelLeft size={16} />
-        </button>
-      )}
       {searching && <SessionSearch onClose={() => setSearching(false)} />}
     </>
   )

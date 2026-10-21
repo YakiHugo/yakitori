@@ -877,10 +877,8 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
 }
 
 async function openProviderSettings(page: Page): Promise<void> {
-  await page
-    .getByRole("button", { name: "Open account menu", exact: true })
-    .click()
-  await page.getByRole("menuitem", { name: /^Providers/ }).click()
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await page.getByRole("button", { name: "Providers", exact: true }).click()
   await expect(
     page.getByRole("region", { name: "Provider settings", exact: true }),
   ).toBeVisible()

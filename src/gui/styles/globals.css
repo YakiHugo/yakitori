@@ -3,6 +3,7 @@
 @import "./conversation.css";
 @import "./composer.css";
 @import "./sidebar.css";
+@import "./window.css";
 @import "./workspace.css";
 @import "../components/selection-actions.css";
 
