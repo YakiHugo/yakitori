@@ -1,8 +1,17 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { useState } from "react"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { SidebarFrame } from "../../src/gui/components/sidebar-frame.tsx"
+import {
+  createInitialAppState,
+  useAppStore,
+} from "../../src/gui/store/app-store.ts"
+import {
+  chooseNewEngine,
+  initializeEngineSessions,
+  useEngineStore,
+} from "../../src/gui/store/engine-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
 vi.mock("../../src/gui/components/sidebar.tsx", () => ({
@@ -10,6 +19,17 @@ vi.mock("../../src/gui/components/sidebar.tsx", () => ({
 }))
 vi.mock("../../src/gui/components/session-search.tsx", () => ({
   SessionSearch: () => <div>Session search</div>,
+}))
+vi.mock("../../src/gui/lib/rpc-client.ts", async (original) => ({
+  ...(await original<typeof import("../../src/gui/lib/rpc-client.ts")>()),
+  getAppRpcClient: () => ({
+    subscribeToEngineSessionChanges: () => () => {},
+    request: async (method: string) => {
+      if (method === "engine/list") return { engines: [] }
+      if (method === "engineSession/list") return { sessions: [] }
+      throw new Error(`Unexpected request: ${method}`)
+    },
+  }),
 }))
 
 function Frame() {
@@ -23,7 +43,8 @@ beforeEach(() => {
     configurable: true,
     value: 1400,
   })
-  useWorkspaceStore.setState({ open: false, expanded: false })
+  useWorkspaceStore.getState().setOpen(false)
+  useWorkspaceStore.getState().setExpanded(false)
 })
 afterEach(() => {
   cleanup()
@@ -61,7 +82,7 @@ it("starts at 275 pixels with accessible 240–520 pixel resize bounds", () => {
 
 it("temporarily fits the viewport without replacing the preferred width and restores it when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   render(<Frame />)
   expectWidth(500, 520)
 
@@ -92,7 +113,7 @@ it("reserves room when the split workspace opens and restores the preferred widt
 
 it("uses split-pane bounds at 960 pixels and viewport bounds below that breakpoint", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(960)
   render(<Frame />)
   expectWidth(240, 240)
@@ -125,7 +146,7 @@ it("adjusts the divider with arrow keys, stops at the minimum, and resets to 275
 
 it("limits keyboard resizing to the space available beside the split workspace", () => {
   localStorage.setItem("yakitori.sidebarWidth", "320")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(1000)
   render(<Frame />)
   const divider = screen.getByRole("separator", { name: "Sidebar width" })
@@ -138,7 +159,7 @@ it("limits keyboard resizing to the space available beside the split workspace",
 
 it("resets the preferred width to 275 while constrained and reveals that default when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(960)
   render(<Frame />)
   expectWidth(240, 240)
@@ -177,4 +198,15 @@ it("resizes relative to the sidebar edge and saves the clamped width on release"
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("275")
   fireEvent.pointerUp(divider, { pointerId: 1 })
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("520")
+})
+
+it("keeps the selected external engine when the new-session shortcut clears native selection", async () => {
+  useAppStore.setState(createInitialAppState())
+  await initializeEngineSessions()
+  chooseNewEngine("external")
+  render(<Frame />)
+  fireEvent.keyDown(window, { key: "n", metaKey: true })
+  expect(useEngineStore.getState().engineId).toBe("external")
+  expect(useEngineStore.getState().sessionId).toBeUndefined()
+  expect(useAppStore.getState().selection.sessionId).toBeUndefined()
 })

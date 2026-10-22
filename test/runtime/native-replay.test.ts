@@ -1,3 +1,4 @@
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
@@ -9,10 +10,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../../src/kernel/index.ts"
-import {
-  createAnthropicProvider,
-  toAnthropicMessages,
-} from "../../src/runtime/anthropic-provider.ts"
+import { toAnthropicMessages } from "../../src/runtime/anthropic-provider.ts"
 import {
   createChatCompletionsProvider,
   toChatCompletionsMessages,
@@ -274,7 +272,7 @@ it.each(
     api === "openai_responses"
       ? createOpenAIProvider(options)
       : api === "anthropic_messages"
-        ? createAnthropicProvider(options)
+        ? createAnthropicTestStream(options)
         : api === "openai_chat_completions"
           ? createChatCompletionsProvider(options)
           : createGeminiProvider(options)

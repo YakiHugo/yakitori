@@ -13,7 +13,10 @@ import {
   defaultPreferences,
   usePreferencesStore,
 } from "../../src/gui/store/preferences-store.ts"
-import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../../src/gui/store/workspace-store.ts"
 import {
   createEventEnvelope,
   EventType,
@@ -195,7 +198,11 @@ describe("skill mentions", () => {
     expect(
       useWorkspaceStore
         .getState()
-        .tabs.find((tab) => tab.id === useWorkspaceStore.getState().activeId),
+        .tabs.find(
+          (tab) =>
+            tab.id ===
+            selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+        ),
     ).toMatchObject({
       kind: "skill",
       name: "Review",

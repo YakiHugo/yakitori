@@ -104,14 +104,23 @@ export type UserConfiguration = Readonly<{
 }>
 
 export function createUserConfigStore(
-  options: {
-    readonly configPath?: string
-    readonly workspaceRoot?: string
-  } = {},
+  options: Readonly<{
+    configPath?: string
+    workspaceRoot?: string
+  }> = {},
 ): UserConfigStore {
-  const configPath = options.configPath ?? defaultUserConfigPath()
+  const configPath =
+    options.configPath ?? join(resolveYakitoriHome(), "config.toml")
   const workspaceRoot = options.workspaceRoot
   let pendingWrite = Promise.resolve()
+  const enqueueWrite = <T>(run: () => Promise<T>): Promise<T> => {
+    const write = pendingWrite.then(() => withConfigWriteLock(configPath, run))
+    pendingWrite = write.then(
+      () => undefined,
+      () => undefined,
+    )
+    return write
+  }
 
   return {
     async read() {
@@ -133,44 +142,14 @@ export function createUserConfigStore(
       })
     },
     write(preference) {
-      const write = pendingWrite.then(
-        () =>
-          withConfigWriteLock(configPath, () =>
-            writePreference(configPath, preference),
-          ),
-        () =>
-          withConfigWriteLock(configPath, () =>
-            writePreference(configPath, preference),
-          ),
-      )
-      pendingWrite = write.then(
-        () => undefined,
-        () => undefined,
-      )
-      return write
+      return enqueueWrite(() => writePreference(configPath, preference))
     },
     writeValue(input) {
-      const write = pendingWrite.then(
-        () =>
-          withConfigWriteLock(configPath, () =>
-            writeConfigValue(configPath, input, workspaceRoot),
-          ),
-        () =>
-          withConfigWriteLock(configPath, () =>
-            writeConfigValue(configPath, input, workspaceRoot),
-          ),
+      return enqueueWrite(() =>
+        writeConfigValue(configPath, input, workspaceRoot),
       )
-      pendingWrite = write.then(
-        () => undefined,
-        () => undefined,
-      )
-      return write
     },
   }
-}
-
-function defaultUserConfigPath(): string {
-  return join(resolveYakitoriHome(), "config.toml")
 }
 
 async function writePreference(
@@ -188,13 +167,11 @@ async function writePreference(
   const content = stringify(value)
   const candidate = parseConfigDocument(configPath, content)
   await readConfigurationSnapshot(configPath, {}, candidate)
-  const current = await readFile(configPath, "utf8").catch((error) => {
-    if (isMissingFile(error)) return ""
-    throw error
-  })
-  if (fingerprint(current) !== (document?.version ?? fingerprint("")))
-    throw new ConfigVersionConflictError()
-  await writeAtomically(configPath, content)
+  await writeAtomically(
+    configPath,
+    content,
+    document?.version ?? fingerprint(""),
+  )
   return preference
 }
 
@@ -251,15 +228,7 @@ async function writeConfigValue(
     candidate,
   )
 
-  // Check again immediately before the atomic rename. The in-process queue
-  // serializes Yakitori writers; the version catches edits from another
-  // process or editor between read and write.
-  const current = await readFile(configPath, "utf8").catch((error) => {
-    if (isMissingFile(error)) return ""
-    throw error
-  })
-  if (fingerprint(current) !== version) throw new ConfigVersionConflictError()
-  await writeAtomically(configPath, content)
+  await writeAtomically(configPath, content, version)
   return snapshot
 }
 
@@ -324,11 +293,24 @@ function flockPromise(
   })
 }
 
-async function writeAtomically(path: string, content: string): Promise<void> {
+async function writeAtomically(
+  path: string,
+  content: string,
+  expectedVersion: string,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${randomUUID()}.tmp`
   try {
     await writeFile(temporary, content, "utf8")
+    // The lock serializes Yakitori writers. Recheck after staging to detect
+    // external edits through this point; an editor ignoring the lock can still
+    // race the final read/rename pair.
+    const current = await readFile(path, "utf8").catch((error) => {
+      if (isMissingFile(error)) return ""
+      throw error
+    })
+    if (fingerprint(current) !== expectedVersion)
+      throw new ConfigVersionConflictError()
     await rename(temporary, path)
   } catch (error) {
     try {
@@ -346,12 +328,11 @@ async function writeAtomically(path: string, content: string): Promise<void> {
   }
 }
 
-type ConfigDocument = {
-  readonly content: string
-  readonly path: string
-  readonly value: TomlTable
-  readonly version: string
-}
+type ConfigDocument = Readonly<{
+  content: string
+  value: TomlTable
+  version: string
+}>
 
 async function readConfigDocument(
   configPath: string,
@@ -371,7 +352,6 @@ function parseConfigDocument(path: string, content: string): ConfigDocument {
   try {
     return {
       content,
-      path,
       value: parse(content, { integersAsBigInt: "asNeeded" }),
       version: fingerprint(content),
     }

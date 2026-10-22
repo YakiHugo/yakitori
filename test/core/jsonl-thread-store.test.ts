@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import Anthropic from "@anthropic-ai/sdk"
 import { afterEach, describe, expect, it } from "vitest"
-import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type {
@@ -23,15 +23,19 @@ import type {
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
-import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
+import type {
+  CreateThreadMetadata,
+  ThreadStore,
+} from "../../src/core/thread-store.ts"
 import {
   kernelErrorFromUnknown,
   YakitoriErrorCode,
 } from "../../src/kernel/errors.ts"
-import { createAnthropicProvider } from "../../src/runtime/anthropic-provider.ts"
+import { createAnthropicTurnTransport } from "../../src/runtime/anthropic-provider.ts"
 import { ModelFailureError } from "../../src/runtime/errors.ts"
 import type { ModelStreamEvent } from "../../src/runtime/model.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 const roots: string[] = []
 
@@ -913,7 +917,7 @@ describe("JsonlThreadStore", () => {
     const threadId = "thread_provider_rejection"
     const reason =
       "messages.2: tool_use ids must have tool_result blocks in the next message: call_read"
-    const provider = createAnthropicProvider({
+    const transport = createAnthropicTurnTransport({
       apiKey: "unused-test-key",
       model: "kimi-test",
       client: new Anthropic({
@@ -938,18 +942,22 @@ describe("JsonlThreadStore", () => {
       }),
     })
     const events: ModelStreamEvent[] = []
-    for await (const event of provider({
-      target: {
-        provider: "kimi-code",
-        model: "kimi-test",
-        instructionProfileId: "anthropic",
-      },
-      system: [],
-      messages: [{ role: "user", content: [{ type: "text", text: "test" }] }],
-      tools: [],
-      toolWireProtocol: "eager",
-    }))
-      events.push(event)
+    try {
+      for await (const event of transport.stream({
+        target: {
+          provider: "kimi-code",
+          model: "kimi-test",
+          instructionProfileId: "anthropic",
+        },
+        system: [],
+        messages: [{ role: "user", content: [{ type: "text", text: "test" }] }],
+        tools: [],
+        toolWireProtocol: "eager",
+      }))
+        events.push(event)
+    } finally {
+      await transport.close()
+    }
     const event = events.find((event) => event.type === "failure")
     if (event?.type !== "failure") throw new Error("Missing model failure")
     const error = kernelErrorFromUnknown(
@@ -1195,8 +1203,14 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread("thread_prefill")
   })
 
-  it("persists ordered rollout items and resumes a single live writer", async () => {
-    const { store } = await createStore()
+  it.each([
+    "jsonl",
+    "memory",
+  ] as const)("persists ordered rollout items and resumes a single live writer (%s)", async (adapter) => {
+    const store =
+      adapter === "jsonl"
+        ? (await createStore()).store
+        : new MemoryThreadStore()
     await createPersistentThread(store, metadata("thread_root"))
     await Promise.all([
       store.appendItems("thread_root", [response("turn_one", "one")]),
@@ -2797,7 +2811,7 @@ function pngBytes(): Buffer {
 }
 
 async function createPersistentThread(
-  store: JsonlThreadStore,
+  store: ThreadStore,
   input: CreateThreadMetadata,
 ) {
   const created = await store.createThread(input)

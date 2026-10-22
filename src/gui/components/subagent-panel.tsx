@@ -8,8 +8,8 @@ import {
   useState,
 } from "react"
 import type { ApiSessionDetail } from "../../protocol/application.ts"
+import { answerTextParts } from "../../protocol/model-output.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
-import { contextSourceAttributes } from "../conversation-context.ts"
 import {
   createExecutionViewState,
   type ExecutionEntry,
@@ -22,12 +22,11 @@ import { inputDisplayParts } from "../input-draft.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
-import { LiveTextNotice } from "./cells/live-text-notice.tsx"
+import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
-import { MarkdownView } from "./markdown.tsx"
 import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
   Collapsible,
@@ -183,11 +182,15 @@ function ChildTrace({
               ? "Completed"
               : "Idle"
   const blocks = useMemo(() => {
-    const assistants = new Map(
-      view.entries.flatMap((entry) =>
-        entry.kind === "assistant" ? [[entry.itemId, entry] as const] : [],
-      ),
-    )
+    const assistants = new Map<
+      string,
+      Extract<ExecutionEntry, { kind: "assistant" }>[]
+    >()
+    for (const entry of view.entries) {
+      if (entry.kind !== "assistant") continue
+      const id = entry.source?.itemId ?? entry.itemId
+      assistants.set(id, [...(assistants.get(id) ?? []), entry])
+    }
     const answers = new Map<
       string,
       {
@@ -204,18 +207,24 @@ function ChildTrace({
       )
         continue
       const itemIds = timing.outcome.answerItemIds
-      const pieces = itemIds.flatMap((itemId) => {
-        const entry = assistants.get(itemId)
-        return entry?.turnId === turnId ? [entry] : []
-      })
+      if (itemIds.some((id) => !assistants.has(id))) continue
+      const pieces = itemIds
+        .flatMap((id) => answerTextParts(assistants.get(id) ?? []))
+        .filter((entry) => entry.turnId === turnId)
       const last = pieces.at(-1)
-      if (last === undefined || pieces.length !== itemIds.length) continue
+      if (last === undefined) continue
       answers.set(turnId, {
-        itemIds,
+        itemIds: pieces.map((piece) => piece.itemId),
         entry: {
           ...last,
           text: pieces.map((entry) => entry.text).join(""),
           incomplete: pieces.some((entry) => entry.incomplete),
+          sources: pieces.flatMap((piece) =>
+            (piece.sources ?? []).map((source) => ({
+              ...source,
+              id: JSON.stringify([piece.itemId, source.id]),
+            })),
+          ),
         },
       })
     }
@@ -491,23 +500,14 @@ function TraceEntry({
       )
     case "assistant":
       return (
-        <div
-          {...contextSourceAttributes({
-            kind: "message",
-            label: "Child agent answer",
-            sessionId,
-            messageId: entry.itemId,
-          })}
-        >
-          <LiveTextNotice entry={entry} />
-          <MarkdownView
-            apiBase={apiBase}
-            text={entry.text}
-            streaming={entry.status === "streaming"}
-            workspaceRoot={workspaceRoot}
-            className="markdown-compact"
-          />
-        </div>
+        <AssistantMessageCell
+          entry={entry}
+          sessionId={sessionId}
+          apiBase={apiBase}
+          workspaceRoot={workspaceRoot}
+          className="markdown-compact"
+          sourceLabel="Child agent answer"
+        />
       )
     case "reasoning":
       return (

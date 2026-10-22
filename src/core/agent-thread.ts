@@ -141,6 +141,10 @@ export class AgentThread {
     return this.#endpoints.shutdown()
   }
 
+  shutdownIfIdle(): Promise<boolean> {
+    return this.#endpoints.shutdownIfIdle()
+  }
+
   nextEvent(): Promise<SessionEvent | undefined> {
     return this.#events.receive()
   }
@@ -161,7 +165,7 @@ export class AgentThread {
       throw new TypeError(
         "Thread messages require a valid source and text-only external content.",
       )
-    const turnInput: TurnInput = structuredClone({
+    const turnInput: TurnInput = {
       submissionId: input.submissionId ?? createRequestId(),
       content: input.content,
       ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
@@ -177,7 +181,7 @@ export class AgentThread {
       ...(input.parentInputId === undefined
         ? {}
         : { parentInputId: input.parentInputId }),
-    })
+    }
     return new Promise((resolve, reject) => {
       void this.#endpoints
         .send({

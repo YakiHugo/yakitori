@@ -14,7 +14,10 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../../src/gui/store/workspace-store.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import type { GitStatusResponse } from "../../src/server/workspace.ts"
 import { inputParts } from "./input-fixtures.ts"
@@ -74,7 +77,13 @@ beforeEach(() => {
     selectedSession: session(),
     apiBase: "http://localhost",
   })
-  useWorkspaceStore.setState({ open: false, tabs: [], activeId: undefined })
+  useWorkspaceStore.setState({
+    tabs: [],
+    sessionId: undefined,
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: undefined },
+    },
+  })
 })
 
 afterEach(() => {
@@ -111,7 +120,9 @@ it("loads real status on demand and opens the changes workspace", async () => {
     within(dialog).getByRole("button", { name: /3 changed files/ }),
   )
   expect(request).toHaveBeenCalledWith("git/status", { cwd: "/repo" })
-  expect(useWorkspaceStore.getState().open).toBe(true)
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    true,
+  )
   expect(useWorkspaceStore.getState().tabs[0]?.kind).toBe("changes")
   expect(screen.queryByRole("dialog")).toBeNull()
 })
@@ -434,9 +445,13 @@ it("opens the session's subagents without changing the main conversation", async
   await user.click(screen.getByRole("button", { name: "Session context" }))
   expect(await screen.findByText("1 working · 1 completed")).toBeDefined()
   await user.click(screen.getByRole("button", { name: /2 subagents/ }))
-  expect(useWorkspaceStore.getState()).toMatchObject({
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
     open: true,
     expanded: false,
+  })
+  expect(useWorkspaceStore.getState()).toMatchObject({
     tabs: [{ kind: "agents", sourceSessionId: "session-1" }],
   })
   expect(useAppStore.getState().selectedSession?.id).toBe("session-1")

@@ -36,7 +36,7 @@ it("does not animate activity when reduced motion was requested at mount", () =>
   expect(vi.getTimerCount()).toBe(0)
 })
 
-it("fits a loaded image, bounds zoom, and releases its Escape listener on unmount", () => {
+it("fits a loaded image, bounds zoom, and closes its native dialog on unmount", () => {
   const onClose = vi.fn()
   const { unmount } = render(
     <ImageLightbox
@@ -69,11 +69,12 @@ it("fits a loaded image, bounds zoom, and releases its Escape listener on unmoun
   expect(image.style.width).toBe("3000px")
   fireEvent.click(screen.getByRole("button", { name: "Reset zoom" }))
   expect(image.style.width).toBe("600px")
-  fireEvent.keyDown(document, { key: "Escape" })
+  const dialog = screen.getByRole("dialog") as HTMLDialogElement
+  expect(dialog.open).toBe(true)
+  fireEvent(dialog, new Event("cancel", { cancelable: true }))
   expect(onClose).toHaveBeenCalledTimes(1)
   unmount()
-  fireEvent.keyDown(document, { key: "Escape" })
-  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(dialog.open).toBe(false)
 })
 
 it("refits after viewport changes while preserving actual-size pixels", () => {

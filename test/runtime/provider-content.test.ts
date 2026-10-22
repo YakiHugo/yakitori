@@ -1,3 +1,4 @@
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { withSDKResponse } from "../support/sdk-response.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -10,7 +11,6 @@ import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { ModelMessage } from "../../src/kernel/index.ts"
 import {
-  createAnthropicProvider,
   fromAnthropicMessage,
   toAnthropicMessages,
 } from "../../src/runtime/anthropic-provider.ts"
@@ -231,7 +231,7 @@ it("accumulates Anthropic citation deltas and preserves source metadata through 
     },
   } as unknown as Anthropic)
   const events = await collect(
-    createAnthropicProvider({ apiKey: "fake", model: "model", client })(
+    createAnthropicTestStream({ apiKey: "fake", model: "model", client })(
       request("anthropic"),
     ),
   )

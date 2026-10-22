@@ -16,8 +16,6 @@ export function TelemetryRail() {
     telemetry.inputTokens > 0
       ? `${((telemetry.cacheReadInputTokens / telemetry.inputTokens) * 100).toFixed(1)}%`
       : "—"
-  // Live session usage can arrive before the turn's timing. Pair usage and
-  // duration from the same completed turn rather than inflating a live rate.
   const tps =
     usage && metrics && metrics.modelDurationMs > 0
       ? (usage.outputTokens / (metrics.modelDurationMs / 1_000)).toFixed(1)

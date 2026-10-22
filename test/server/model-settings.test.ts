@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import type { ModelSettingsConfiguration } from "../../src/protocol/providers.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createModelSettingsManager } from "../../src/runtime/model-settings-manager.ts"
 import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createProviderService } from "../../src/server/provider-service.ts"
@@ -151,4 +152,50 @@ it("allows an inherited reasoning list and rejects stale or invalid user writes"
       .models("codex")
       .resolve({ provider: "codex", model: "new-coder" }).defaultEffort,
   ).toBe("low")
+})
+
+it("keeps a partial effort override effective after reading persisted settings", async () => {
+  const f = await fixture()
+  const initial = await f.service.readModels("codex")
+  const written = await f.service.writeModels(
+    "codex",
+    { "new-coder": { efforts: ["low"] } },
+    initial.version,
+  )
+  expect(
+    written.models.find((model) => model.id === "new-coder"),
+  ).toMatchObject({
+    id: "new-coder",
+    efforts: ["low", "high"],
+    defaultEffort: "high",
+  })
+  expect(written.settings["new-coder"]).toEqual({ efforts: ["low"] })
+  const [effective] = await f.registry.models("codex").listModels()
+  expect(effective?.efforts).toEqual(["low"])
+  expect(effective?.defaultEffort).toBeUndefined()
+  expect(
+    f.registry
+      .models("codex")
+      .resolve({ provider: "codex", model: "new-coder" }).defaultEffort,
+  ).toBeUndefined()
+
+  const restarted = createUserConfigStore({
+    configPath: join(f.directory, "config.toml"),
+  })
+  const settings = (await restarted.readConfiguration()).models?.codex ?? {}
+  expect(settings["new-coder"]).toEqual({ efforts: ["low"] })
+  const source = createDiscoveringModelsManager({
+    provider: "codex",
+    identity: async () => "account",
+    discover: async () => [
+      { id: "new-coder", efforts: ["low", "high"], defaultEffort: "high" },
+    ],
+  })
+  const restored = createModelSettingsManager(source, () => settings)
+  const [listed] = await restored.listModels()
+  expect(listed?.efforts).toEqual(["low"])
+  expect(listed?.defaultEffort).toBeUndefined()
+  expect(
+    restored.resolve({ provider: "codex", model: "new-coder" }).defaultEffort,
+  ).toBeUndefined()
 })

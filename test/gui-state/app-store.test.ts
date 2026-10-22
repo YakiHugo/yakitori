@@ -464,32 +464,12 @@ describe("app store event stream", () => {
   })
 
   it("preserves an unavailable selected model until the user chooses another", () => {
-    const providers: readonly ApiProviderSummary[] = [
-      {
-        name: "codex",
-        availability: "requires_login" as const,
-        models: [],
-      },
-      {
-        name: "faux",
-        availability: "available" as const,
-        defaultModel: "scripted",
-        models: [
-          {
-            id: "scripted",
-            displayName: "Scripted",
-            instructionProfileId: "default",
-          },
-        ],
-      },
-    ]
     expect(
       resolveEffectiveModel({
         sessionCurrent: { provider: "codex", model: "stale-session" },
         userPreference: { provider: "codex", model: "stale-preference" },
         defaultProvider: "faux",
         defaultModel: "scripted",
-        providers,
       }),
     ).toEqual({ provider: "codex", model: "stale-session" })
   })
@@ -882,9 +862,10 @@ describe("delete session", () => {
     const stream = fakeRef.current.streams[0]
     useWorkspaceStore.setState({
       tabs: [{ id: "changes", kind: "changes" }],
-      activeId: "changes",
       sessionId: undefined,
-      presentationBySession: {},
+      presentationBySession: {
+        "": { open: false, expanded: false, activeId: "changes" },
+      },
     })
     useWorkspaceStore.getState().setSession("session_1")
     useWorkspaceStore.getState().addTab("chat", "session_1")
@@ -925,9 +906,10 @@ describe("delete session", () => {
     }
     useWorkspaceStore.setState({
       tabs: [{ id: "changes", kind: "changes" }],
-      activeId: "changes",
       sessionId: undefined,
-      presentationBySession: {},
+      presentationBySession: {
+        "": { open: false, expanded: false, activeId: "changes" },
+      },
     })
     useWorkspaceStore.getState().setSession("session_1")
     const sideChatId = useWorkspaceStore.getState().addTab("chat", "session_1")
@@ -3038,7 +3020,6 @@ describe("model selection", () => {
         userPreference: useAppStore.getState().userPreference,
         defaultProvider: "openai",
         defaultModel: "gpt-5.6-sol",
-        providers: useAppStore.getState().providers,
       }),
     ).toEqual(picked)
 
@@ -3091,7 +3072,6 @@ describe("model selection", () => {
         userPreference: state.userPreference,
         defaultProvider: state.defaultProvider,
         defaultModel: state.defaultModel,
-        providers: state.providers,
       }),
     ).toEqual({
       provider: "codex",
@@ -3104,7 +3084,6 @@ describe("model selection", () => {
         userPreference: state.userPreference,
         defaultProvider: state.defaultProvider,
         defaultModel: state.defaultModel,
-        providers: state.providers,
       }),
     ).toEqual({ provider: "faux", model: "new-global-default" })
     expect(
@@ -5230,4 +5209,78 @@ it("ignores a superseded queue read failure after the latest queue refresh succe
   await oldRead
   expect(useAppStore.getState().message).toBeUndefined()
   expect(useAppStore.getState().queuedItems).toEqual([])
+})
+
+describe("selected queue ownership", () => {
+  it.each([
+    "clear",
+    "new",
+    "create",
+    "fork",
+    "delete",
+  ])("releases the old queue when %s changes the selection", async (action) => {
+    const nextSession = {
+      ...sessionDetail,
+      id: "session_2",
+      conversationId: "conversation_2",
+    }
+    const nextItem = {
+      id: "queued_next",
+      sessionId: "session_2",
+      input: {
+        submissionId: "request_next",
+        content: inputFixture(inputParts("next")),
+      },
+      createdAt: sessionDetail.createdAt,
+    }
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return {
+          session: nextSession,
+          event: createEventEnvelope({
+            sessionId: nextSession.id,
+            seq: 1,
+            event: { type: "session.created", data: {} },
+          }),
+        }
+      if (method === "session/fork")
+        return { session: nextSession, events: [], historyEndSeqExclusive: 1 }
+      if (method === "session/queue/list") return { items: [nextItem] }
+      if (method === "session/skills") return { skills: [] }
+      if (method === "session/delete") return { sessionId: sessionDetail.id }
+      if (method === "sidebar/read") return { sections: [], entries: {} }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.setState({
+      selection: { sessionId: sessionDetail.id },
+      selectedSession: sessionDetail,
+      queuedItems: [
+        { ...nextItem, id: "queued_old", sessionId: sessionDetail.id },
+      ],
+    })
+    if (action === "clear") useAppStore.getState().clearSessionSelection()
+    if (action === "new") useAppStore.getState().startNewSession()
+    if (action === "create") await useAppStore.getState().createSession()
+    if (action === "fork")
+      await useAppStore
+        .getState()
+        .forkSession("input_1", "edit", inputFixture(inputParts("replacement")))
+    if (action === "delete")
+      await useAppStore.getState().deleteSession(sessionDetail.id)
+    if (action === "clear" || action === "delete") {
+      expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+      expect(useAppStore.getState().queuedItems).toEqual([])
+    } else {
+      await vi.waitFor(() =>
+        expect(useAppStore.getState().selection.sessionId).toBe(nextSession.id),
+      )
+      const stream = fakeRef.current.streams.at(-1)
+      emitSnapshot(stream, nextSession)
+      stream?.emitReplayComplete()
+      await vi.waitFor(() =>
+        expect(useAppStore.getState().queuedItems).toEqual([nextItem]),
+      )
+      expect(useAppStore.getState().selection.sessionId).toBe(nextSession.id)
+    }
+  })
 })

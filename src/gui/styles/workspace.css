@@ -287,22 +287,6 @@
   font-size: 13px;
   line-height: 1.6;
 }
-.side-chat-close-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 24px;
-}
-.side-chat-close-actions button {
-  padding: 8px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 13px;
-}
-.side-chat-close-actions button:last-child {
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
 .workspace-root {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);

@@ -1,6 +1,10 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
-import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { startNewEngineSession } from "../store/engine-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../store/workspace-store.ts"
 import { SessionSearch } from "./session-search.tsx"
 import { Sidebar } from "./sidebar.tsx"
 import { SidebarDragSurface } from "./sidebar-drag.tsx"
@@ -14,7 +18,10 @@ export function SidebarFrame({
     return Number.isFinite(saved) && saved >= 240 && saved <= 520 ? saved : 275
   })
   const [windowWidth, setWindowWidth] = useState(window.innerWidth)
-  const split = useWorkspaceStore((state) => state.open && !state.expanded)
+  const split = useWorkspaceStore((state) => {
+    const { open, expanded } = selectWorkspacePresentation(state)
+    return open && !expanded
+  })
   // Resizing the sidebar must leave room for both the chat and content pane.
   const maximumWidth = Math.max(
     240,
@@ -28,7 +35,6 @@ export function SidebarFrame({
     setPreferredWidth(Math.max(240, Math.min(maximumWidth, value)))
   const [resizing, setResizing] = useState(false)
   const [searching, setSearching] = useState(false)
-  const startNewSession = useAppStore((state) => state.startNewSession)
   useEffect(() => {
     localStorage.setItem("yakitori.sidebarOpen", String(open))
   }, [open])
@@ -71,12 +77,12 @@ export function SidebarFrame({
       }
       if (event.key.toLowerCase() === "n") {
         event.preventDefault()
-        startNewSession()
+        startNewEngineSession()
       }
     }
     window.addEventListener("keydown", keydown)
     return () => window.removeEventListener("keydown", keydown)
-  }, [startNewSession, open, setOpen])
+  }, [open, setOpen])
   return (
     <>
       <aside

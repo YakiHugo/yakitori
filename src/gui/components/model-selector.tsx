@@ -158,7 +158,6 @@ export function ModelSelector({
       userPreference,
       defaultProvider,
       defaultModel,
-      providers,
     }),
     providers,
   )
@@ -177,7 +176,6 @@ export function ModelSelector({
       userPreference,
       defaultProvider,
       defaultModel,
-      providers,
     }),
     providers,
   )

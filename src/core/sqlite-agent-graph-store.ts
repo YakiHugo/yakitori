@@ -2,13 +2,10 @@ import { mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { isGeneratedSessionId } from "../kernel/ids.ts"
-import {
-  type AgentGraphStore,
-  type ThreadSpawnEdge,
-  ThreadSpawnEdgeStatus,
-} from "./agent-graph-store.ts"
+import type { AgentGraphStore, ThreadSpawnEdge } from "./agent-graph-store.ts"
 
-export type SqliteAgentGraphStore = AgentGraphStore & Readonly<{ close(): void }>
+export type SqliteAgentGraphStore = AgentGraphStore &
+  Readonly<{ close(): void }>
 
 export type SqliteAgentGraphStoreOptions = Readonly<{
   databasePath?: string
@@ -63,31 +60,17 @@ export function createSqliteAgentGraphStore(
               parent_thread_id,
               child_thread_id,
               status
-            ) VALUES (?, ?, ?)
+            ) VALUES (?, ?, 'open')
             ON CONFLICT (child_thread_id)
             DO UPDATE SET
-              parent_thread_id = excluded.parent_thread_id,
-              status = excluded.status
+              parent_thread_id = excluded.parent_thread_id
           `)
-          .run(edge.parentThreadId, edge.childThreadId, edge.status)
+          .run(edge.parentThreadId, edge.childThreadId)
         database.exec("COMMIT")
       } catch (error) {
         if (database.isTransaction) database.exec("ROLLBACK")
         throw error
       }
-    },
-
-    async setThreadSpawnEdgeStatus(childThreadId, status) {
-      requireThreadId(childThreadId, "childThreadId")
-      requireStatus(status)
-      const result = database
-        .prepare(`
-          UPDATE thread_spawn_edges
-          SET status = ?
-          WHERE child_thread_id = ?
-        `)
-        .run(status, childThreadId)
-      return result.changes > 0
     },
 
     async deleteThreadEdges(threadId) {
@@ -100,68 +83,38 @@ export function createSqliteAgentGraphStore(
         .run(threadId, threadId)
     },
 
-    async listThreadSpawnChildren(parentThreadId, status) {
+    async listThreadSpawnChildren(parentThreadId) {
       requireThreadId(parentThreadId, "parentThreadId")
-      if (status !== undefined) requireStatus(status)
-      const rows = (status === undefined
-        ? database
-            .prepare(`
-              SELECT child_thread_id
-              FROM thread_spawn_edges
-              WHERE parent_thread_id = ?
-              ORDER BY child_thread_id
-            `)
-            .all(parentThreadId)
-        : database
-            .prepare(`
-              SELECT child_thread_id
-              FROM thread_spawn_edges
-              WHERE parent_thread_id = ? AND status = ?
-              ORDER BY child_thread_id
-            `)
-            .all(parentThreadId, status)) as ChildRow[]
+      const rows = database
+        .prepare(`
+          SELECT child_thread_id
+          FROM thread_spawn_edges
+          WHERE parent_thread_id = ?
+          ORDER BY child_thread_id
+        `)
+        .all(parentThreadId) as ChildRow[]
       return rows.map((row) => row.child_thread_id)
     },
 
-    async listThreadSpawnDescendants(rootThreadId, status) {
+    async listThreadSpawnDescendants(rootThreadId) {
       requireThreadId(rootThreadId, "rootThreadId")
-      if (status !== undefined) requireStatus(status)
-      const rows = (status === undefined
-        ? database
-            .prepare(`
-              WITH RECURSIVE descendants(child_thread_id, depth) AS (
-                SELECT child_thread_id, 1
-                FROM thread_spawn_edges
-                WHERE parent_thread_id = ?
-                UNION
-                SELECT edge.child_thread_id, descendants.depth + 1
-                FROM thread_spawn_edges AS edge
-                JOIN descendants
-                  ON edge.parent_thread_id = descendants.child_thread_id
-              )
-              SELECT child_thread_id
-              FROM descendants
-              ORDER BY depth, child_thread_id
-            `)
-            .all(rootThreadId)
-        : database
-            .prepare(`
-              WITH RECURSIVE descendants(child_thread_id, depth) AS (
-                SELECT child_thread_id, 1
-                FROM thread_spawn_edges
-                WHERE parent_thread_id = ? AND status = ?
-                UNION
-                SELECT edge.child_thread_id, descendants.depth + 1
-                FROM thread_spawn_edges AS edge
-                JOIN descendants
-                  ON edge.parent_thread_id = descendants.child_thread_id
-                WHERE edge.status = ?
-              )
-              SELECT child_thread_id
-              FROM descendants
-              ORDER BY depth, child_thread_id
-            `)
-            .all(rootThreadId, status, status)) as ChildRow[]
+      const rows = database
+        .prepare(`
+          WITH RECURSIVE descendants(child_thread_id, depth) AS (
+            SELECT child_thread_id, 1
+            FROM thread_spawn_edges
+            WHERE parent_thread_id = ?
+            UNION
+            SELECT edge.child_thread_id, descendants.depth + 1
+            FROM thread_spawn_edges AS edge
+            JOIN descendants
+              ON edge.parent_thread_id = descendants.child_thread_id
+          )
+          SELECT child_thread_id
+          FROM descendants
+          ORDER BY depth, child_thread_id
+        `)
+        .all(rootThreadId) as ChildRow[]
       return rows.map((row) => row.child_thread_id)
     },
 
@@ -176,6 +129,9 @@ function initializeDatabase(database: DatabaseSync): void {
     database.exec("PRAGMA journal_mode = WAL")
     database.exec("PRAGMA synchronous = FULL")
     database.exec("PRAGMA busy_timeout = 5000")
+    // Existing graph databases require this non-null column without a default.
+    // Keep its physical shape and insert a constant; graph ownership is edge
+    // existence, with no status transitions or filtering.
     database.exec(`
       CREATE TABLE IF NOT EXISTS thread_spawn_edges (
         parent_thread_id TEXT NOT NULL,
@@ -201,7 +157,6 @@ function initializeDatabase(database: DatabaseSync): void {
 function requireEdge(edge: ThreadSpawnEdge): void {
   requireThreadId(edge.parentThreadId, "parentThreadId")
   requireThreadId(edge.childThreadId, "childThreadId")
-  requireStatus(edge.status)
   if (edge.parentThreadId === edge.childThreadId) {
     throw new Error("A Thread cannot be its own child.")
   }
@@ -210,11 +165,5 @@ function requireEdge(edge: ThreadSpawnEdge): void {
 function requireThreadId(value: string, name: string): void {
   if (!isGeneratedSessionId(value)) {
     throw new Error(`${name} must be a generated Session id.`)
-  }
-}
-
-function requireStatus(value: ThreadSpawnEdgeStatus): void {
-  if (!Object.values(ThreadSpawnEdgeStatus).includes(value)) {
-    throw new Error(`Unsupported thread spawn edge status: ${String(value)}`)
   }
 }

@@ -538,30 +538,36 @@ export class ThreadManager {
     rootThreadId: string,
     protectedThreadId: string | undefined,
   ): Promise<void> {
-    const subagents = [...this.#threads.values()].filter(
-      (thread) => subagentRootThreadId(thread) === rootThreadId,
-    )
-    const candidates = [...this.#threads.values()]
-      .filter(
-        (thread) =>
-          thread.id !== protectedThreadId &&
-          subagentRootThreadId(thread) === rootThreadId &&
-          thread.status === SessionStatus.Idle &&
-          isTerminalAgentThread(thread),
+    const attempted = new Set<AgentThread>()
+    for (;;) {
+      const subagents = [...this.#threads.values()].filter(
+        (thread) => subagentRootThreadId(thread) === rootThreadId,
       )
-      .sort(
-        (left, right) =>
-          (this.#lastUsed.get(left.id) ?? 0) -
-          (this.#lastUsed.get(right.id) ?? 0),
-      )
-    let residentCount = subagents.length
-    for (const candidate of candidates) {
-      if (residentCount <= this.#maxResidentSubagentThreads) break
+      if (subagents.length <= this.#maxResidentSubagentThreads) return
+      const candidate = subagents
+        .filter(
+          (thread) =>
+            thread.id !== protectedThreadId &&
+            !attempted.has(thread) &&
+            !this.#closingThreads.has(thread.id) &&
+            thread.status === SessionStatus.Idle &&
+            isTerminalAgentThread(thread),
+        )
+        .sort(
+          (left, right) =>
+            (this.#lastUsed.get(left.id) ?? 0) -
+            (this.#lastUsed.get(right.id) ?? 0),
+        )[0]
+      if (candidate === undefined) return
+      attempted.add(candidate)
+      this.#closingThreads.add(candidate.id)
       try {
-        await this.closeThread(candidate.id)
-        residentCount -= 1
+        if (await candidate.shutdownIfIdle())
+          this.#removeInstalledThread(candidate.id, candidate)
       } catch (error) {
         this.#reportBackgroundError(error, candidate.id, "evict-idle-subagent")
+      } finally {
+        this.#closingThreads.delete(candidate.id)
       }
     }
   }

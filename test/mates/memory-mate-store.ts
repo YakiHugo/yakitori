@@ -66,9 +66,10 @@ export function createMemoryMateStore(): MateStore {
       mateId,
       seq: existing.length + 1,
     })
-    mates.set(mateId, [...existing, envelope])
-    const mate = projectMate(mates.get(mateId) ?? [])
+    const events = [...existing, envelope]
+    const mate = projectMate(events)
     if (!mate) throw new Error("Expected a mate projection.")
+    mates.set(mateId, events)
     summaries.set(mateId, mate)
     return envelope
   }

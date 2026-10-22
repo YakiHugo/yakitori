@@ -8,6 +8,7 @@ import {
   requireInstructionProfileId,
   resolveModel,
 } from "./model-catalog.ts"
+import { mergeModelEfforts } from "./model-effort.ts"
 import { isChatModel, NonChatModelError } from "./model-kind.ts"
 import { modelVisibleByDefault } from "./model-policy.ts"
 import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
@@ -79,16 +80,6 @@ export function createConfiguredModelsManager(input: {
       ...(configured.inputModalities === undefined
         ? {}
         : { inputModalities: [...configured.inputModalities] }),
-      ...(configured.efforts === undefined
-        ? known?.efforts === undefined
-          ? {}
-          : { efforts: known.efforts }
-        : { efforts: configured.efforts }),
-      ...(configured.defaultEffort === undefined
-        ? known?.defaultEffort === undefined
-          ? {}
-          : { defaultEffort: known.defaultEffort }
-        : { defaultEffort: configured.defaultEffort }),
       ...(configured.imageDetailModes === undefined
         ? {}
         : { imageDetailModes: configured.imageDetailModes }),
@@ -135,32 +126,8 @@ export function createConfiguredModelsManager(input: {
         ),
       }
     }
-    const efforts = configured.efforts ?? known?.efforts
-    const defaultEffort =
-      configured.defaultEffort ??
-      (known?.defaultEffort !== undefined &&
-      efforts?.includes(known.defaultEffort)
-        ? known.defaultEffort
-        : undefined)
-    if (
-      defaultEffort !== undefined &&
-      efforts !== undefined &&
-      !efforts.includes(defaultEffort)
-    ) {
-      throw new Error(
-        `Default effort ${defaultEffort} is not supported by ${input.provider}/${configured.id}.`,
-      )
-    }
-    const {
-      defaultEffort: previousDefault,
-      efforts: previousEfforts,
-      ...resolvedBase
-    } = resolved
-    resolved = {
-      ...resolvedBase,
-      ...(efforts === undefined ? {} : { efforts }),
-      ...(defaultEffort === undefined ? {} : { defaultEffort }),
-    }
+    resolved = mergeModelEfforts(resolved, configured, input.provider)
+    const { efforts } = resolved
     const { provider: _, usedFallbackModelMetadata: __, ...metadata } = resolved
     const listed: CatalogModel = {
       ...metadata,
@@ -192,7 +159,6 @@ export function createConfiguredModelsManager(input: {
       ...(configured.pricing === undefined
         ? {}
         : { pricing: configured.pricing }),
-      ...(defaultEffort === undefined ? {} : { defaultEffort }),
       ...(configured.speeds !== undefined
         ? { speeds: configured.speeds }
         : known?.speeds === undefined ||

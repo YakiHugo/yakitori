@@ -197,6 +197,8 @@ export type SessionEndpoints = Readonly<{
   readAgentStatus(): AgentStatus
   subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void
   shutdown(): Promise<void>
+  // Ordered with input admission; never interrupts an admitted Turn.
+  shutdownIfIdle(): Promise<boolean>
   termination: Promise<void>
 }>
 

@@ -55,8 +55,8 @@ bundle, spawns the bundled server as a sidecar, and serves the GUI same-origin:
 pnpm start:desktop
 ```
 
-Run desktop development with Vite HMR. The shell spawns `node --watch` for the
-server, so server edits restart the sidecar without restarting the window:
+Run desktop development with Vite HMR for renderer changes. Restart the command
+to load server changes:
 
 ```sh
 pnpm dev:desktop

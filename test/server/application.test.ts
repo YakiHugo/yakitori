@@ -1,9 +1,11 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises"
 import { createServer, type Server as HttpServer } from "node:http"
@@ -12,7 +14,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
-import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
@@ -282,6 +284,45 @@ describe("application composition", () => {
       await restarted.close()
     })
   })
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reads the current configuration when an unrelated project root becomes inaccessible",
+    async () => {
+      await withApplicationRoot(async (rootDir, workspace) => {
+        const blocked = join(rootDir, "blocked")
+        const other = join(blocked, "other")
+        await mkdir(other, { recursive: true })
+        await writeFile(
+          join(rootDir, "config.toml"),
+          'instructions = "Current profile"\n',
+        )
+        const application = await createYakitoriApplication(
+          testApplicationOptions({ rootDir, workspace }),
+        )
+        const server = application.createHttpServer()
+        try {
+          await application.projectStore.createProject({
+            name: "Unavailable project",
+            roots: [other],
+          })
+          const baseUrl = await listen(server)
+          await chmod(blocked, 0)
+          const snapshot = await rpcRequest<ConfigurationSnapshot>(
+            baseUrl,
+            "config/read",
+            { cwd: workspace },
+          )
+          expect(snapshot.configuration.baseInstructions).toBe(
+            "Current profile",
+          )
+        } finally {
+          await chmod(blocked, 0o700)
+          await closeServer(server)
+          await application.close()
+        }
+      })
+    },
+  )
 
   it.each([
     {
@@ -2593,13 +2634,20 @@ describe("application composition", () => {
     })
   })
 
-  it("uses the owning Project root for an outside-workspace Session and config/read", async () => {
+  it.each([
+    false,
+    true,
+  ])("uses the owning Project root for an outside-workspace Session and config/read (symlink=%s)", async (useSymlink) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const projectRoot = join(rootDir, "other-project")
       const nested = join(projectRoot, "packages", "app")
       const configPath = join(rootDir, "config.toml")
       await mkdir(join(projectRoot, ".yakitori"), { recursive: true })
       await mkdir(nested, { recursive: true })
+      const logicalRoot = useSymlink
+        ? join(rootDir, "project-alias")
+        : await realpath(projectRoot)
+      if (useSymlink) await symlink(projectRoot, logicalRoot, "dir")
       await writeFile(
         configPath,
         [
@@ -2631,7 +2679,7 @@ describe("application composition", () => {
       try {
         const project = await application.projectStore.createProject({
           name: "other-project",
-          roots: [await realpath(projectRoot)],
+          roots: [logicalRoot, join(rootDir, "absent-project-root")],
         })
         const created = await application.handlers.createSession({
           projectId: project.project.id,

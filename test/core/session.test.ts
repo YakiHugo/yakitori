@@ -3,6 +3,7 @@ import {
   type TestTurnRuntime,
 } from "../support/session-execution.ts"
 import { describe, expect, it } from "vitest"
+import type { AgentThread } from "../../src/core/agent-thread.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
@@ -590,6 +591,100 @@ describe("live Session actor", () => {
       ),
     ).toHaveLength(1)
     await manager.shutdown()
+  })
+
+  it("keeps a reused subagent running while older eviction candidates finish disposal", async () => {
+    const finishes = new Map(
+      ["blocker", "first", "second", "third"].map((name) => [
+        name,
+        deferred<void>(),
+      ]),
+    )
+    const blockerDisposing = deferred<void>()
+    const releaseBlocker = deferred<void>()
+    const firstDisposing = deferred<void>()
+    const releaseFirst = deferred<void>()
+    const reuseStarted = deferred<void>()
+    const finishReuse = deferred<void>()
+    let reusedSignal: AbortSignal | undefined
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      maxResidentSubagentThreads: 1,
+      createTurnProcessor: (stored) =>
+        withPreparation({
+          async run(_runtime, input, control) {
+            if (input.submissionId === "reused") {
+              reusedSignal = control.signal
+              reuseStarted.resolve()
+              await finishReuse.promise
+            } else {
+              await finishes.get(stored.metadata.title ?? "")?.promise
+            }
+          },
+          async dispose() {
+            if (stored.metadata.title === "blocker") {
+              blockerDisposing.resolve()
+              await releaseBlocker.promise
+            } else if (stored.metadata.title === "first") {
+              firstDisposing.resolve()
+              await releaseFirst.promise
+            }
+          },
+        }),
+    })
+    try {
+      const root = await manager.createThread()
+      const children = new Map<string, AgentThread>()
+      for (const name of finishes.keys()) {
+        const child = await manager.createThread({
+          ...subagentInput(root.id, name),
+          title: name,
+        })
+        children.set(name, child)
+        await child.startIfIdle({ content: createUserInput(name) })
+      }
+      finishes.get("blocker")?.resolve()
+      await blockerDisposing.promise
+      for (const name of ["first", "second", "third"]) {
+        finishes.get(name)?.resolve()
+        const child = children.get(name)
+        if (!child) throw new Error("Missing child")
+        await nextEventOfType(child, "turn.completed")
+      }
+      await waitForValue(() =>
+        [...children.values()].every((thread) => thread.status === "idle")
+          ? true
+          : undefined,
+      )
+      releaseBlocker.resolve()
+      await firstDisposing.promise
+      const reused = children.get("second")
+      const third = children.get("third")
+      if (!reused || !third) throw new Error("Missing child")
+      expect(
+        await reused.startIfIdle({
+          submissionId: "reused",
+          content: createUserInput("continue"),
+        }),
+      ).toMatchObject({ type: "started" })
+      await reuseStarted.promise
+      releaseFirst.resolve()
+      await waitForValue(() =>
+        manager.getThread(third.id) === undefined || reusedSignal?.aborted
+          ? true
+          : undefined,
+      )
+      expect(reusedSignal?.aborted).toBe(false)
+      expect(manager.getThread(reused.id)).toBe(reused)
+      expect(reused.status).toBe(SessionStatus.Active)
+      expect(manager.residentThreadCount).toBe(2)
+    } finally {
+      for (const finish of finishes.values()) finish.resolve()
+      releaseBlocker.resolve()
+      releaseFirst.resolve()
+      finishReuse.resolve()
+      await manager.shutdown()
+    }
   })
 
   it("applies the resident subagent cap independently to each root", async () => {
@@ -1516,9 +1611,35 @@ describe("live Session actor", () => {
 
     expect(thread.status).toBe(SessionStatus.Shutdown)
     expect(manager.getThread(thread.id)).toBeUndefined()
-    const resumed = await manager.resumeThread(thread.id)
-    expect(resumed?.status).toBe(SessionStatus.Idle)
+    await store.shutdownThread(thread.id)
     await manager.shutdown()
+  })
+
+  it("checks idle shutdown after earlier admissions and settles later commands", async () => {
+    const finish = deferred<void>()
+    const manager = createManager({ run: () => finish.promise })
+    try {
+      const thread = await manager.createThread()
+      const admitted = thread.startIfIdle({ content: createUserInput("work") })
+      expect(await thread.shutdownIfIdle()).toBe(false)
+      expect((await admitted).type).toBe("started")
+      expect(thread.status).toBe(SessionStatus.Active)
+
+      finish.resolve()
+      await nextEventOfType(thread, "turn.completed")
+      await waitForValue(() =>
+        thread.status === SessionStatus.Idle ? true : undefined,
+      )
+      const closing = thread.shutdownIfIdle()
+      expect(thread.shutdownIfIdle()).toBe(closing)
+      const late = thread.startIfIdle({ content: createUserInput("late") })
+      await expect(late).rejects.toThrow("shutting down")
+      expect(await closing).toBe(true)
+      expect(thread.status).toBe(SessionStatus.Shutdown)
+    } finally {
+      finish.resolve()
+      await manager.shutdown()
+    }
   })
 
   it("disposes processor-owned live resources during Session shutdown", async () => {

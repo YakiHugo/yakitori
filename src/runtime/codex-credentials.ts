@@ -119,15 +119,25 @@ export type CodexAuthProvider = {
   invalidate(): void
 }
 
+export class CodexAccountChangedError extends Error {
+  constructor() {
+    super("The selected Codex credential source changed accounts.")
+    this.name = "CodexAccountChangedError"
+  }
+}
+
 // Provider-scoped live auth owner. It re-reads the shared login before each
 // request so CLI rotations are observed. Stale refreshes are single-flight in
 // process, file-locked across Yakitori processes, guarded by account identity,
 // and persisted before the replacement access token becomes usable.
-export function createCodexAuthProvider(input?: {
-  readonly path?: string
-  readonly now?: () => number
-  readonly fetchFn?: typeof fetch
-}): CodexAuthProvider {
+export function createCodexAuthProvider(
+  input?: Readonly<{
+    path?: string
+    ownerIdentity?: string
+    now?: () => number
+    fetchFn?: typeof fetch
+  }>,
+): CodexAuthProvider {
   const path = input?.path ?? defaultCodexAuthPath()
   const now = input?.now ?? Date.now
   const fetchFn = input?.fetchFn ?? fetch
@@ -139,6 +149,13 @@ export function createCodexAuthProvider(input?: {
   return {
     async resolve(options) {
       const login = await requireChatGptLogin(path)
+      // Compare the selected owner with the same snapshot that supplies the
+      // token. A separate file read would leave account rotation unfenced.
+      if (
+        input?.ownerIdentity !== undefined &&
+        chatGptAccountIdentity(login) !== input.ownerIdentity
+      )
+        throw new CodexAccountChangedError()
       const nextSourceKey = credentialSourceKey(login)
       if (
         !options?.forceRefresh &&
@@ -174,14 +191,20 @@ export function createCodexAuthProvider(input?: {
 
 // Returns a valid ChatGPT access token, refreshing and persisting the shared
 // login when it is stale by the codex-rs weekly policy.
-export async function resolveCodexAccessToken(input?: {
-  readonly path?: string
-  readonly now?: () => number
-  readonly fetchFn?: typeof fetch
-}): Promise<CodexAccessToken> {
+export async function resolveCodexAccessToken(
+  input?: Readonly<{
+    path?: string
+    ownerIdentity?: string
+    now?: () => number
+    fetchFn?: typeof fetch
+  }>,
+): Promise<CodexAccessToken> {
   const path = input?.path ?? defaultCodexAuthPath()
   return createCodexAuthProvider({
     path,
+    ...(input?.ownerIdentity === undefined
+      ? {}
+      : { ownerIdentity: input.ownerIdentity }),
     ...(input?.now === undefined ? {} : { now: input.now }),
     ...(input?.fetchFn === undefined ? {} : { fetchFn: input.fetchFn }),
   }).resolve()
@@ -198,14 +221,22 @@ export async function resolveCodexAccountIdentity(input?: {
   const login = await readCodexLogin(input)
   if (login === undefined) return undefined
   if (login.kind === "chatgpt") {
-    if (login.accountId !== undefined) return login.accountId
-    return createHash("sha256")
+    return chatGptAccountIdentity(login)
+  }
+  return createHash("sha256").update(login.apiKey).digest("hex")
+}
+
+function chatGptAccountIdentity(
+  login: Extract<CodexLogin, { kind: "chatgpt" }>,
+): string {
+  return (
+    login.accountId ??
+    createHash("sha256")
       .update(login.accessToken)
       .update("\0")
       .update(login.refreshToken)
       .digest("hex")
-  }
-  return createHash("sha256").update(login.apiKey).digest("hex")
+  )
 }
 
 async function requireChatGptLogin(path: string) {

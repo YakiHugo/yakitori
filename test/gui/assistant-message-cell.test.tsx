@@ -61,7 +61,13 @@ afterEach(() => {
 
 describe("assistant message sources", () => {
   it("renders source links and non-clickable file/page labels after the answer", () => {
-    render(<AssistantMessageCell entry={entry} />)
+    render(
+      <AssistantMessageCell
+        sessionId="work"
+        apiBase="http://localhost"
+        entry={entry}
+      />,
+    )
     const section = screen.getByRole("region", { name: "Sources" })
     expect(screen.getByText("An answer with sources.")).toBeDefined()
     expect(within(section).getAllByRole("listitem")).toHaveLength(3)
@@ -77,7 +83,13 @@ describe("assistant message sources", () => {
   })
 
   it("routes a normal source click to the workspace browser and prevents native navigation", () => {
-    render(<AssistantMessageCell entry={entry} />)
+    render(
+      <AssistantMessageCell
+        sessionId="work"
+        apiBase="http://localhost"
+        entry={entry}
+      />,
+    )
     const link = screen.getByRole("link", { name: "Web source" })
     expect(fireEvent.click(link)).toBe(false)
     expect(openBrowser).toHaveBeenCalledExactlyOnceWith(
@@ -90,7 +102,13 @@ describe("assistant message sources", () => {
     "ctrlKey",
     "metaKey",
   ])("routes a %s source click through the existing external opener", (modifier) => {
-    render(<AssistantMessageCell entry={entry} />)
+    render(
+      <AssistantMessageCell
+        sessionId="work"
+        apiBase="http://localhost"
+        entry={entry}
+      />,
+    )
     expect(
       fireEvent.click(screen.getByRole("link", { name: "Web source" }), {
         [modifier]: true,
@@ -110,6 +128,8 @@ describe("assistant message sources", () => {
   ])("rejects unsafe URLs even when supplied as normalized props: %j", (url) => {
     render(
       <AssistantMessageCell
+        sessionId="work"
+        apiBase="http://localhost"
         entry={{
           ...entry,
           sources: [{ id: "unsafe", label: "Unsafe source", url }],
@@ -125,7 +145,13 @@ describe("assistant message sources", () => {
   })
 
   it("omits the source section when no sources are available", () => {
-    render(<AssistantMessageCell entry={{ ...entry, sources: [] }} />)
+    render(
+      <AssistantMessageCell
+        sessionId="work"
+        apiBase="http://localhost"
+        entry={{ ...entry, sources: [] }}
+      />,
+    )
     expect(screen.queryByRole("region", { name: "Sources" })).toBeNull()
     expect(screen.getByText("An answer with sources.")).toBeDefined()
   })

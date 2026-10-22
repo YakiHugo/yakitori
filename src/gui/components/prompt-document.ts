@@ -186,18 +186,6 @@ export function promptPartsText(draft: InputDraft): string {
     .join("")
 }
 
-export function serializePrompt(doc: Node): string {
-  const paragraphs: string[] = []
-  doc.forEach((paragraph) => {
-    let text = ""
-    paragraph.forEach((node) => {
-      text += node.isText ? (node.text ?? "") : mentionText(node)
-    })
-    paragraphs.push(text)
-  })
-  return paragraphs.join("\n")
-}
-
 export function promptOffset(doc: Node, position: number): number {
   let offset = 0
   doc.forEach((paragraph, start, index) => {

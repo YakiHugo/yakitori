@@ -9,7 +9,6 @@ import {
   collaborationExecution,
   commandExecution,
   completeCollaborationExecution,
-  completeCommandExecution,
   completeFileChangeExecution,
   completeFileReadExecution,
   completeFileSearchExecution,
@@ -411,7 +410,7 @@ describe("tool presentation", () => {
     }
   })
 
-  it("summarizes diffs and command results without status badges", () => {
+  it("summarizes file diffs", () => {
     expect(
       presentTool(
         entry("edit_file", {
@@ -424,23 +423,6 @@ describe("tool presentation", () => {
         }),
       ),
     ).toMatchObject({ meta: ["+2 −1"], detail: { kind: "diff" } })
-
-    expect(
-      presentTool(
-        entry("run_command", {
-          input: { command: "pnpm test" },
-          commandResult: {
-            exitCode: 0,
-            signal: null,
-            stdout: "ok",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            durationMs: 1_240,
-          },
-        }),
-      ),
-    ).toMatchObject({ meta: ["exit 0", "1.2s"], detail: { kind: "command" } })
   })
 
   it("keeps every file in a multi-file change", () => {
@@ -627,24 +609,16 @@ function entry(
   > & {
     readonly input?: JsonValue
     readonly diff?: { readonly text: string; readonly truncated: boolean }
-    readonly commandResult?: unknown
   },
 ): ToolEntry {
-  const {
-    input: rawInput = {},
-    diff,
-    commandResult,
-    output: rawOutput,
-    ...rest
-  } = input
+  const { input: rawInput = {}, diff, output: rawOutput, ...rest } = input
   const output =
-    commandResult ??
-    (diff === undefined
+    diff === undefined
       ? rawOutput
       : {
           ...(recordOf(rawOutput) ?? {}),
           diff: { format: "unified", ...diff },
-        })
+        }
   const toolCallId = `tool_${name}`
   return {
     kind: "tool",
@@ -674,7 +648,7 @@ function executionDescriptor(
   const value = output as JsonValue
   switch (started.type) {
     case "command_execution":
-      return completeCommandExecution(started, value)
+      return started
     case "file_change":
       return completeFileChangeExecution(started, value)
     case "file_read":

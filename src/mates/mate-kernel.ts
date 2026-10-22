@@ -33,7 +33,7 @@ export function createMateKernel(store: MateStore): MateKernel {
     async createMate(input) {
       const profile = requireMateProfile(input)
       const mateId = createMateId()
-      await store.appendEvent(
+      const created = await store.appendEvent(
         mateId,
         {
           type: MateEventType.Created,
@@ -44,7 +44,9 @@ export function createMateKernel(store: MateStore): MateKernel {
         },
         { expectedSeq: 0 },
       )
-      return { mate: await readRequiredMate(store, mateId) }
+      const mate = projectMate([created])
+      if (!mate) throw new Error("Mate creation did not produce a projection.")
+      return { mate }
     },
 
     async listMates(input = {}) {
@@ -91,20 +93,6 @@ function requireBoundedString(
     code: YakitoriErrorCode.InvalidArgument,
     message: `Mate ${field} must be ${allowEmpty ? "at most" : "between 1 and"} ${maximumLength} characters.`,
     details: { field, maximumLength },
-  })
-}
-
-async function readRequiredMate(
-  store: MateStore,
-  mateId: string,
-): Promise<MateProjection> {
-  requireMateId(mateId)
-  const mate = projectMate(await store.readEvents(mateId))
-  if (mate) return mate
-  throw createYakitoriError({
-    code: YakitoriErrorCode.NotFound,
-    message: `Mate ${mateId} was not found.`,
-    details: { mateId },
   })
 }
 

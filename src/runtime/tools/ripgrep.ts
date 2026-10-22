@@ -17,15 +17,15 @@ export type RipgrepRecordResult =
 
 export async function runRipgrepRecords(
   args: readonly string[],
-  input: {
-    readonly cwd: string
-    readonly signal?: AbortSignal
-    readonly timeoutMs: number
-    readonly maxBytes: number
-    readonly maxRecordBytes: number
-    readonly delimiter: "newline" | "null"
-    readonly onRecord: (record: string) => boolean
-  },
+  input: Readonly<{
+    cwd: string
+    signal?: AbortSignal
+    timeoutMs: number
+    maxBytes: number
+    maxRecordBytes: number
+    delimiter: "newline" | "null" | "filename_count"
+    onRecord: (record: string) => boolean
+  }>,
 ): Promise<RipgrepRecordResult> {
   return new Promise((resolve) => {
     // Search owns its executable, independent of the desktop's PATH or the
@@ -54,7 +54,15 @@ export async function runRipgrepRecords(
       bytes += accepted.byteLength
       pending = Buffer.concat([pending, accepted])
 
-      let boundary = pending.indexOf(delimiter)
+      // Count output uses filename NUL count LF; filenames may themselves
+      // contain LF. Only look for the count terminator after its NUL boundary.
+      const recordBoundary = () =>
+        input.delimiter === "filename_count"
+          ? pending.indexOf(0x00) < 0
+            ? -1
+            : pending.indexOf(0x0a, pending.indexOf(0x00) + 1)
+          : pending.indexOf(delimiter)
+      let boundary = recordBoundary()
       while (boundary >= 0 && stopReason === undefined) {
         if (boundary > input.maxRecordBytes) {
           stop("record_byte_limit")
@@ -66,7 +74,7 @@ export async function runRipgrepRecords(
           stop("consumer_limit")
           return
         }
-        boundary = pending.indexOf(delimiter)
+        boundary = recordBoundary()
       }
       if (pending.byteLength > input.maxRecordBytes) {
         stop("record_byte_limit")

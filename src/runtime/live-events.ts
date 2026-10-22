@@ -13,7 +13,6 @@ export type {
   LiveRuntimeWarning,
   LiveSessionError,
   LiveSessionEvent,
-  LiveSessionUsage,
   LiveTurnFinished,
 } from "../protocol/live-events.ts"
 

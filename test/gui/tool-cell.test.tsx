@@ -3,11 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ToolCell } from "../../src/gui/components/cells/tool-cell.tsx"
-import type {
-  CommandResult,
-  ExecutionEntry,
-  ToolDiff,
-} from "../../src/gui/execution-view.ts"
+import type { ExecutionEntry, ToolDiff } from "../../src/gui/execution-view.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
 import type {
   ImageAttachment,
@@ -16,7 +12,6 @@ import type {
 } from "../../src/kernel/events.ts"
 import {
   commandExecution,
-  completeCommandExecution,
   completeFileChangeExecution,
   completeFileReadExecution,
   completeFileSearchExecution,
@@ -32,7 +27,6 @@ type LegacyToolEntry = Omit<ToolEntry, "execution"> & {
   readonly summary: string
   readonly input: JsonValue
   readonly diff?: ToolDiff
-  readonly commandResult?: CommandResult
 }
 
 afterEach(() => {
@@ -262,7 +256,7 @@ describe("tool cell", () => {
     expect(screen.queryByText(/"path"/)).toBeNull()
   })
 
-  it("renders a structured command result with exit status and stderr", async () => {
+  it("renders the recorded command result text unchanged", async () => {
     const user = userEvent.setup()
     render(
       <ToolCell
@@ -275,18 +269,8 @@ describe("tool cell", () => {
           summary: "pnpm lint",
           input: { command: "pnpm lint" },
           state: "completed",
-          resultText: "lint failed",
-          commandResult: {
-            exitCode: 1,
-            signal: null,
-            stdout: "checking…",
-            stderr: "2 errors",
-            truncated: false,
-            timedOut: false,
-            durationMs: 1_240,
-            cwd: "packages/gui",
-            shell: "/bin/zsh",
-          },
+          resultText:
+            "Process exited with code 1.\nWall time: 1.24 seconds.\nchecking…\n2 errors",
         })}
       />,
     )
@@ -294,11 +278,9 @@ describe("tool cell", () => {
     await user.click(screen.getByRole("button", { name: /Run pnpm lint/ }))
 
     expect(await screen.findByText(/\$ pnpm lint/)).toBeTruthy()
-    expect(screen.getByText(/checking…/)).toBeTruthy()
-    expect(screen.getByText(/\[stderr\]/)).toBeTruthy()
-    expect(screen.getByText("exit 1")).toBeTruthy()
-    expect(screen.getByText("1.2s")).toBeTruthy()
-    expect(screen.getByText("packages/gui")).toBeTruthy()
+    expect(screen.getByText(/\$ pnpm lint/).textContent).toBe(
+      "$ pnpm lint\nProcess exited with code 1.\nWall time: 1.24 seconds.\nchecking…\n2 errors",
+    )
   })
 
   it("renders blocked commands as failed without implying a process started", async () => {
@@ -318,18 +300,6 @@ describe("tool cell", () => {
             "Command blocked by catastrophic-command fuse (rm_root). No process was started.",
           resultText:
             "Command blocked by catastrophic-command fuse (rm_root). No process was started.",
-          commandResult: {
-            exitCode: null,
-            signal: null,
-            stdout: "",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            durationMs: 0,
-            cwd: ".",
-            shell: "/bin/zsh",
-            blocked: { rule: "rm_root" },
-          },
         })}
       />,
     )
@@ -487,16 +457,6 @@ describe("tool cell", () => {
           state: "failed",
           resultError: true,
           resultErrorMessage: "Command failed to start: spawn example ENOENT",
-          commandResult: {
-            exitCode: null,
-            signal: null,
-            stdout: "",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            cwd: ".",
-            shell: "/bin/zsh",
-          },
         })}
       />,
     )
@@ -613,18 +573,16 @@ function toolEntry(input: LegacyToolEntry): ToolEntry {
     summary: _summary,
     input: rawInput,
     diff,
-    commandResult,
     output: rawOutput,
     ...entry
   } = input
   const output =
-    commandResult ??
-    (diff === undefined
+    diff === undefined
       ? rawOutput
       : {
           ...(recordOf(rawOutput) ?? {}),
           diff: { format: "unified", ...diff },
-        })
+        }
   const startedExecution = (() => {
     if (name === "run_command") return commandExecution(rawInput)
     if (name === "edit_file") {
@@ -657,7 +615,7 @@ function completeTestExecution(
 ): ToolExecutionDescriptor {
   switch (started.type) {
     case "command_execution":
-      return completeCommandExecution(started, output)
+      return started
     case "file_change":
       return completeFileChangeExecution(started, output)
     case "file_search":

@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { SessionSidebar } from "../../src/core/session-sidebar.ts"
 import type { InputDraft } from "../../src/core/user-input.ts"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
@@ -687,7 +688,7 @@ describe("composer", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("closes the image preview with Escape", async () => {
+  it("closes the image preview on native dialog cancellation", async () => {
     const user = userEvent.setup()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -700,8 +701,10 @@ describe("composer", () => {
         name: "Preview screenshot.png",
       }),
     )
-    expect(screen.getByRole("dialog")).toBeDefined()
-    await user.keyboard("{Escape}")
+    fireEvent(
+      screen.getByRole("dialog"),
+      new Event("cancel", { cancelable: true }),
+    )
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
@@ -2827,4 +2830,45 @@ describe("PDF attachment composer", () => {
       undoPdf,
     ])
   })
+})
+
+it.each([
+  "/pin",
+  "/archive",
+])("keeps another session's restored %s draft when a local command finishes", async (command) => {
+  let finish!: (sidebar: SessionSidebar) => void
+  const pending = new Promise<SessionSidebar>((resolve) => {
+    finish = resolve
+  })
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return pending
+    if (method === "session/queue/list") return { items: [] }
+    if (method === "session/skills") return { skills: [] }
+    throw new ApiRequestError("not found", "not_found")
+  }
+  useAppStore.setState({
+    selection: { sessionId: "session_1" },
+    selectedSession: createdSession,
+    promptDraft: inputParts(command),
+    sessionDrafts: {
+      session_b: { content: inputParts(command), excerpts: [] },
+    },
+  })
+  render(<Composer />)
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
+  await waitFor(() => expect(useAppStore.getState().busy).toBe(true))
+  await act(() => useAppStore.getState().selectSession("session_b"))
+  act(() => {
+    const stream = fakeRef.current.streams.at(-1)
+    stream?.emitSnapshot({ session: { ...createdSession, id: "session_b" } })
+    stream?.emitReplayComplete()
+  })
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts(command))
+  await act(async () => {
+    finish({ sections: [], entries: {} })
+    await pending
+  })
+  await waitFor(() => expect(useAppStore.getState().busy).toBe(false))
+  expect(useAppStore.getState().selection.sessionId).toBe("session_b")
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts(command))
 })

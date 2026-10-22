@@ -1,82 +1,84 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
-import {
-  createSqliteAgentGraphStore,
-  ThreadSpawnEdgeStatus,
-} from "../../src/core/index.ts"
+import { createSqliteAgentGraphStore } from "../../src/core/index.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true })))
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true })),
+  )
 })
 
 describe("SqliteAgentGraphStore", () => {
-  it("persists open descendants across store instances", async () => {
+  it("persists descendants in depth and ID order across store instances", async () => {
     const root = await temporaryRoot()
     const databasePath = join(root, "agent-graph.sqlite")
     const parent = threadId(0)
     const child = threadId(9)
+    const sibling = threadId(2)
     const grandchild = threadId(1)
     const first = createSqliteAgentGraphStore({ databasePath })
 
     await first.upsertThreadSpawnEdge({
       parentThreadId: parent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
     await first.upsertThreadSpawnEdge({
       parentThreadId: child,
       childThreadId: grandchild,
-      status: ThreadSpawnEdgeStatus.Open,
+    })
+    await first.upsertThreadSpawnEdge({
+      parentThreadId: parent,
+      childThreadId: sibling,
     })
     first.close()
 
     const resumed = createSqliteAgentGraphStore({ databasePath })
-    await expect(
-      resumed.listThreadSpawnDescendants(
-        parent,
-        ThreadSpawnEdgeStatus.Open,
-      ),
-    ).resolves.toEqual([child, grandchild])
+    await expect(resumed.listThreadSpawnDescendants(parent)).resolves.toEqual([
+      sibling,
+      child,
+      grandchild,
+    ])
     resumed.close()
   })
 
-  it("excludes a closed branch from open descendant traversal", async () => {
-    const store = createSqliteAgentGraphStore({ databasePath: ":memory:" })
-    const parent = createSessionId()
-    const child = createSessionId()
-    const grandchild = createSessionId()
-    await store.upsertThreadSpawnEdge({
-      parentThreadId: parent,
-      childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
-    })
+  it("preserves existing graph data while appending descendants", async () => {
+    const root = await temporaryRoot()
+    const databasePath = join(root, "agent-graph.sqlite")
+    const parent = threadId(0)
+    const child = threadId(1)
+    const grandchild = threadId(2)
+    const database = new DatabaseSync(databasePath)
+    database.exec(`
+      CREATE TABLE thread_spawn_edges (
+        parent_thread_id TEXT NOT NULL,
+        child_thread_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('open', 'closed'))
+      ) STRICT;
+    `)
+    database
+      .prepare("INSERT INTO thread_spawn_edges VALUES (?, ?, 'open')")
+      .run(parent, child)
+    database.close()
+
+    const store = createSqliteAgentGraphStore({ databasePath })
     await store.upsertThreadSpawnEdge({
       parentThreadId: child,
       childThreadId: grandchild,
-      status: ThreadSpawnEdgeStatus.Open,
     })
-
-    await expect(
-      store.setThreadSpawnEdgeStatus(
-        child,
-        ThreadSpawnEdgeStatus.Closed,
-      ),
-    ).resolves.toBe(true)
-    await expect(
-      store.listThreadSpawnDescendants(
-        parent,
-        ThreadSpawnEdgeStatus.Open,
-      ),
-    ).resolves.toEqual([])
-    await expect(store.listThreadSpawnDescendants(parent)).resolves.toEqual(
-      [child, grandchild],
-    )
     store.close()
+
+    const reopened = createSqliteAgentGraphStore({ databasePath })
+    await expect(reopened.listThreadSpawnDescendants(parent)).resolves.toEqual([
+      child,
+      grandchild,
+    ])
+    reopened.close()
   })
 
   it("upserts an existing edge without duplicating it", async () => {
@@ -86,20 +88,15 @@ describe("SqliteAgentGraphStore", () => {
     await store.upsertThreadSpawnEdge({
       parentThreadId: parent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
     await store.upsertThreadSpawnEdge({
       parentThreadId: parent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Closed,
     })
 
     await expect(store.listThreadSpawnChildren(parent)).resolves.toEqual([
       child,
     ])
-    await expect(
-      store.listThreadSpawnChildren(parent, ThreadSpawnEdgeStatus.Open),
-    ).resolves.toEqual([])
     store.close()
   })
 
@@ -111,20 +108,18 @@ describe("SqliteAgentGraphStore", () => {
     await store.upsertThreadSpawnEdge({
       parentThreadId: firstParent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
     await store.upsertThreadSpawnEdge({
       parentThreadId: secondParent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
 
     await expect(store.listThreadSpawnChildren(firstParent)).resolves.toEqual(
       [],
     )
-    await expect(store.listThreadSpawnChildren(secondParent)).resolves.toEqual(
-      [child],
-    )
+    await expect(store.listThreadSpawnChildren(secondParent)).resolves.toEqual([
+      child,
+    ])
     store.close()
   })
 
@@ -135,14 +130,12 @@ describe("SqliteAgentGraphStore", () => {
     await store.upsertThreadSpawnEdge({
       parentThreadId: parent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
 
     await expect(
       store.upsertThreadSpawnEdge({
         parentThreadId: child,
         childThreadId: parent,
-        status: ThreadSpawnEdgeStatus.Open,
       }),
     ).rejects.toThrow("would create a cycle")
     await expect(store.listThreadSpawnChildren(parent)).resolves.toEqual([
@@ -160,12 +153,10 @@ describe("SqliteAgentGraphStore", () => {
     await store.upsertThreadSpawnEdge({
       parentThreadId: parent,
       childThreadId: child,
-      status: ThreadSpawnEdgeStatus.Open,
     })
     await store.upsertThreadSpawnEdge({
       parentThreadId: child,
       childThreadId: grandchild,
-      status: ThreadSpawnEdgeStatus.Open,
     })
 
     await store.deleteThreadEdges(child)

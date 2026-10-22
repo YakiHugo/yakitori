@@ -3,7 +3,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
-  resolveGrokAccessToken,
   resolveGrokCredentials,
   resolveGrokModelCredentials,
 } from "../../src/runtime/grok-credentials.ts"
@@ -47,12 +46,6 @@ describe("Grok OIDC credentials (read-only)", () => {
       }),
     )
 
-  it("returns the stored token when it is fresh", async () => {
-    await writeAuth(new Date(1_000_000_000).toISOString())
-    const token = await resolveGrokAccessToken({ path, now: () => 500_000 })
-    expect(token).toBe("stored-access")
-  })
-
   it("returns the user identity needed for subscription billing", async () => {
     await writeAuth(new Date(1_000_000_000).toISOString())
     await expect(
@@ -67,8 +60,11 @@ describe("Grok OIDC credentials (read-only)", () => {
   it("keeps model access usable when an older login lacks a billing identity", async () => {
     await writeAuth(new Date(1_000_000_000).toISOString(), null)
     await expect(
-      resolveGrokAccessToken({ path, now: () => 500_000 }),
-    ).resolves.toBe("stored-access")
+      resolveGrokModelCredentials({ path, now: () => 500_000 }),
+    ).resolves.toEqual({
+      accessToken: "stored-access",
+      ownerIdentity: "token:stored-access",
+    })
     await expect(
       resolveGrokCredentials({ path, now: () => 500_000 }),
     ).rejects.toThrow(/user identity/)
@@ -77,7 +73,7 @@ describe("Grok OIDC credentials (read-only)", () => {
   it("rejects a near-expiry token with a re-login hint", async () => {
     await writeAuth(new Date(1_000_000).toISOString())
     await expect(
-      resolveGrokAccessToken({ path, now: () => 999 }),
+      resolveGrokModelCredentials({ path, now: () => 999 }),
     ).rejects.toThrow(/log in again/)
   })
 
@@ -94,8 +90,11 @@ describe("Grok OIDC credentials (read-only)", () => {
       }),
     )
     await expect(
-      resolveGrokAccessToken({ path, now: () => 500_000 }),
-    ).resolves.toBe("public-access")
+      resolveGrokModelCredentials({ path, now: () => 500_000 }),
+    ).resolves.toEqual({
+      accessToken: "public-access",
+      ownerIdentity: "account:public-user",
+    })
     await expect(
       resolveGrokCredentials({ path, now: () => 500_000 }),
     ).resolves.toEqual({
@@ -103,11 +102,6 @@ describe("Grok OIDC credentials (read-only)", () => {
       userId: "public-user",
       expiresAt: 1_000_000,
     })
-    await expect(
-      resolveGrokModelCredentials({ path, now: () => 500_000 }).then(
-        (credentials) => credentials.ownerIdentity,
-      ),
-    ).resolves.toBe("account:public-user")
   })
 
   it("requires the public scope when only unrelated logins exist", async () => {
@@ -120,7 +114,7 @@ describe("Grok OIDC credentials (read-only)", () => {
       }),
     )
     await expect(
-      resolveGrokAccessToken({ path, now: () => 500_000 }),
+      resolveGrokModelCredentials({ path, now: () => 500_000 }),
     ).rejects.toThrow(/no login/)
     await expect(
       resolveGrokModelCredentials({ path, now: () => 500_000 }).then(
@@ -145,7 +139,7 @@ describe("Grok OIDC credentials (read-only)", () => {
       }),
     )
     await expect(
-      resolveGrokAccessToken({ path, now: () => 500_000 }),
+      resolveGrokModelCredentials({ path, now: () => 500_000 }),
     ).rejects.toThrow(/malformed xAI login|bad expires_at/)
   })
 
@@ -162,7 +156,7 @@ describe("Grok OIDC credentials (read-only)", () => {
       }),
     )
     await expect(
-      resolveGrokAccessToken({ path, now: () => 1_001 }),
+      resolveGrokModelCredentials({ path, now: () => 1_001 }),
     ).rejects.toThrow(/expired/)
   })
 
@@ -175,22 +169,28 @@ describe("Grok OIDC credentials (read-only)", () => {
   })
 
   it("preserves a credential file read failure that is not a missing file", async () => {
-    await expect(resolveGrokAccessToken({ path: dir })).rejects.toMatchObject({
+    await expect(
+      resolveGrokModelCredentials({ path: dir }),
+    ).rejects.toMatchObject({
       code: "EISDIR",
     })
   })
 
   it("surfaces a login hint when credentials are missing", async () => {
-    await expect(resolveGrokAccessToken({ path })).rejects.toThrow(/grok/)
+    await expect(resolveGrokModelCredentials({ path })).rejects.toThrow(/grok/)
   })
 
   it("rejects a file without a login entry", async () => {
     await writeFile(path, JSON.stringify({ other: { key: 1 } }))
-    await expect(resolveGrokAccessToken({ path })).rejects.toThrow(/no login/)
+    await expect(resolveGrokModelCredentials({ path })).rejects.toThrow(
+      /no login/,
+    )
   })
 
   it("rejects a malformed expires_at", async () => {
     await writeAuth("not-a-date")
-    await expect(resolveGrokAccessToken({ path })).rejects.toThrow(/expires_at/)
+    await expect(resolveGrokModelCredentials({ path })).rejects.toThrow(
+      /expires_at/,
+    )
   })
 })

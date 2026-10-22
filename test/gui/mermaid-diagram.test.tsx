@@ -122,7 +122,7 @@ describe("Mermaid markdown", () => {
     await user.click(within(dialog).getByRole("button", { name: "Reset zoom" }))
     expect(expanded.style.width).toBe(`${fitted}px`)
     expect(conversationFindRanges(document.body, "Mermaid")).toHaveLength(0)
-    await user.keyboard("{Escape}")
+    fireEvent(dialog, new Event("cancel", { cancelable: true }))
     expect(screen.queryByRole("dialog")).toBeNull()
     await user.click(
       screen.getByRole("button", { name: "Expand Mermaid diagram" }),

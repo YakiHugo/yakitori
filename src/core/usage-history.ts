@@ -29,6 +29,32 @@ export type UsageHistory = Readonly<{
   rollout: readonly UsageHistoryRecord[]
 }>
 
+const nonAccountingRecords: Record<
+  Exclude<
+    RolloutItem["type"],
+    | "session_meta"
+    | "turn_context"
+    | "auxiliary_usage"
+    | "turn_completed"
+    | "turn_usage"
+  >,
+  true
+> = {
+  model_context: true,
+  model_attempt: true,
+  response_item: true,
+  turn_started: true,
+  agent_status: true,
+  agent_message: true,
+  thread_message_admitted: true,
+  thread_message_consumed: true,
+  item_started: true,
+  item_completed: true,
+  world_state: true,
+  compacted: true,
+  token_count: true,
+}
+
 // Accounting reads known historical record envelopes, not executable context.
 // Configuration schemas 3/4/5 all stored the same selection and token fields;
 // obsolete execution policy must not erase valid recorded usage. Unknown formats
@@ -182,21 +208,7 @@ export async function readUsageHistory(
               ...(item.usage === undefined ? {} : { usage: item.usage }),
             },
           })
-        } else if (
-          ![
-            "model_context",
-            "model_attempt",
-            "response_item",
-            "turn_started",
-            "agent_status",
-            "agent_message",
-            "item_started",
-            "item_completed",
-            "world_state",
-            "compacted",
-            "token_count",
-          ].includes(String(item.type))
-        ) {
+        } else if (!Object.hasOwn(nonAccountingRecords, String(item.type))) {
           throw new Error("Unsupported usage record type.")
         }
       }

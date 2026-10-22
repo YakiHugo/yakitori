@@ -239,37 +239,23 @@ function memoryGraphStore(): AgentGraphStore {
     async upsertThreadSpawnEdge(edge) {
       edges.set(edge.childThreadId, edge)
     },
-    async setThreadSpawnEdgeStatus(childThreadId, status) {
-      const edge = edges.get(childThreadId)
-      if (edge === undefined) return false
-      edges.set(childThreadId, { ...edge, status })
-      return true
-    },
     async deleteThreadEdges(threadId) {
       for (const [id, edge] of edges) {
         if (edge.parentThreadId === threadId || edge.childThreadId === threadId)
           edges.delete(id)
       }
     },
-    async listThreadSpawnChildren(parentThreadId, status) {
+    async listThreadSpawnChildren(parentThreadId) {
       return [...edges.values()]
-        .filter(
-          (edge) =>
-            edge.parentThreadId === parentThreadId &&
-            (status === undefined || edge.status === status),
-        )
+        .filter((edge) => edge.parentThreadId === parentThreadId)
         .map((edge) => edge.childThreadId)
     },
-    async listThreadSpawnDescendants(rootThreadId, status) {
+    async listThreadSpawnDescendants(rootThreadId) {
       const found: string[] = []
       let parents = [rootThreadId]
       while (parents.length > 0) {
         const children = [...edges.values()]
-          .filter(
-            (edge) =>
-              parents.includes(edge.parentThreadId) &&
-              (status === undefined || edge.status === status),
-          )
+          .filter((edge) => parents.includes(edge.parentThreadId))
           .map((edge) => edge.childThreadId)
         found.push(...children)
         parents = children

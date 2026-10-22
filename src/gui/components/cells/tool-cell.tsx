@@ -51,7 +51,7 @@ export function ToolCell({
 }>) {
   const storeApiBase = useAppStore((state) => state.apiBase)
   const apiBase = apiBaseOverride ?? storeApiBase
-  const presentation = presentTool(entry, workspaceRoot)
+  const presentation = presentTool(entry)
   const collaboration =
     presentation.detail?.kind === "collaboration"
       ? presentation.detail

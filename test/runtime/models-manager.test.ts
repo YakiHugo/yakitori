@@ -10,6 +10,29 @@ import {
 } from "../../src/runtime/models-manager.ts"
 
 describe("discovering models manager", () => {
+  it.each([
+    { efforts: [], expectedDefault: undefined },
+    { efforts: ["low"], expectedDefault: undefined },
+    { efforts: ["low", "medium"], expectedDefault: "medium" },
+  ])("uses the same effective efforts $efforts in the directory and execution", async ({
+    efforts,
+    expectedDefault,
+  }) => {
+    const manager = createDiscoveringModelsManager({
+      provider: "work",
+      catalogProvider: "openai",
+      identity: async () => "account",
+      discover: async () => [{ id: "gpt-6-sol", efforts }],
+    })
+    const [listed] = await manager.listModels()
+    const resolved = manager.resolve({ provider: "work", model: "gpt-6-sol" })
+    expect(listed?.efforts).toEqual(efforts)
+    expect(listed?.effortStyle).toBe(efforts.length === 0 ? "none" : "levels")
+    expect(listed?.defaultEffort).toBe(expectedDefault)
+    expect(resolved.efforts).toEqual(efforts)
+    expect(resolved.defaultEffort).toBe(expectedDefault)
+  })
+
   it("blocks only a cold cache on the first fetch", async () => {
     const gate = deferred<readonly DiscoveredModel[]>()
     let discovered = false

@@ -843,7 +843,6 @@ describe("agent runtime", () => {
     await graph.store.upsertThreadSpawnEdge({
       parentThreadId: root.id,
       childThreadId: interruptedId,
-      status: "open",
     })
     const provisionalId = await createStoredChild({
       store,
@@ -902,7 +901,7 @@ describe("agent runtime", () => {
     )
 
     await expect(
-      graph.store.listThreadSpawnDescendants(root.id, "open"),
+      graph.store.listThreadSpawnDescendants(root.id),
     ).resolves.toEqual([interruptedId, provisionalId].sort())
     const storedRoot = await store.readThread(root.id)
     const notifications =
@@ -1082,12 +1081,6 @@ function memoryGraphStore(): {
         }
         edges.set(edge.childThreadId, edge)
       },
-      async setThreadSpawnEdgeStatus(childThreadId, status) {
-        const edge = edges.get(childThreadId)
-        if (edge === undefined) return false
-        edges.set(childThreadId, { ...edge, status })
-        return true
-      },
       async deleteThreadEdges(threadId) {
         if (shouldFailDelete) {
           shouldFailDelete = false
@@ -1102,26 +1095,18 @@ function memoryGraphStore(): {
           }
         }
       },
-      async listThreadSpawnChildren(parentThreadId, status) {
+      async listThreadSpawnChildren(parentThreadId) {
         return Array.from(edges.values())
-          .filter(
-            (edge) =>
-              edge.parentThreadId === parentThreadId &&
-              (status === undefined || edge.status === status),
-          )
+          .filter((edge) => edge.parentThreadId === parentThreadId)
           .map((edge) => edge.childThreadId)
           .sort()
       },
-      async listThreadSpawnDescendants(rootThreadId, status) {
+      async listThreadSpawnDescendants(rootThreadId) {
         const descendants: string[] = []
         let parents = [rootThreadId]
         while (parents.length > 0) {
           const children = Array.from(edges.values())
-            .filter(
-              (edge) =>
-                parents.includes(edge.parentThreadId) &&
-                (status === undefined || edge.status === status),
-            )
+            .filter((edge) => parents.includes(edge.parentThreadId))
             .map((edge) => edge.childThreadId)
             .sort()
           descendants.push(...children)

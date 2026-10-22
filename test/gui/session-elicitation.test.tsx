@@ -423,3 +423,32 @@ it("keeps input after a rejected answer and prevents duplicate submissions", asy
   await act(async () => resolveAnswer({}))
   expect(screen.queryByText("Choose your preferences")).toBeNull()
 })
+
+it("accepts an explicit empty required multiselect when the schema has no minimum", async () => {
+  request.mockResolvedValue(
+    formResponse({
+      type: "object",
+      required: ["features"],
+      properties: {
+        features: {
+          type: "array",
+          items: { type: "string", enum: ["email", "analytics"] },
+          default: [],
+        },
+      },
+    }),
+  )
+  render(<SessionElicitation />)
+  await screen.findByRole("listbox", { name: "features (required)" })
+  await userEvent.setup().click(screen.getByRole("button", { name: "Submit" }))
+  expect(answerCalls()).toEqual([
+    [
+      "session/elicitation/answer",
+      {
+        sessionId: "work",
+        requestId: "request-1",
+        result: { action: "accept", content: { features: [] } },
+      },
+    ],
+  ])
+})

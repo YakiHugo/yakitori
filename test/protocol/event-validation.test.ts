@@ -64,7 +64,6 @@ describe("application admission and completion validation", () => {
       },
     },
     { usage: { inputTokens: -1, outputTokens: 0 } },
-    { sessionUsage: { inputTokens: 1, outputTokens: 1, extra: true } },
     {
       metrics: {
         modelCalls: 0,

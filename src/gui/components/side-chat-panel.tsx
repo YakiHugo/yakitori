@@ -81,7 +81,6 @@ export function SideChatPanel({
         userPreference: state.userPreference,
         defaultProvider: state.defaultProvider,
         defaultModel: state.defaultModel,
-        providers: state.providers,
       }),
       state.providers,
     )
@@ -699,7 +698,6 @@ export function SideChatPanel({
                         userPreference: state.userPreference,
                         defaultProvider: state.defaultProvider,
                         defaultModel: state.defaultModel,
-                        providers: state.providers,
                       }),
                       state.providers,
                     ) ??

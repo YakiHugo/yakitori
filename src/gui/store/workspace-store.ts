@@ -52,17 +52,16 @@ export function isSideChatExpired(
   )
 }
 
-type WorkspaceStore = {
+export type WorkspacePresentation = Readonly<{
   open: boolean
   expanded: boolean
-  tabs: readonly WorkspaceTab[]
   activeId: string | undefined
+}>
+
+type WorkspaceStore = {
+  tabs: readonly WorkspaceTab[]
   sessionId: string | undefined
-  // Only inactive sessions are stored here; the active session uses the flat fields.
-  presentationBySession: Record<
-    string,
-    { open: boolean; expanded: boolean; activeId: string | undefined }
-  >
+  presentationBySession: Record<string, WorkspacePresentation>
   setOpen(open: boolean): void
   setExpanded(expanded: boolean): void
   setSession(sessionId: string | undefined): void
@@ -102,55 +101,69 @@ type WorkspaceStore = {
   ): void
 }
 
+export function selectWorkspacePresentation(
+  state: Pick<WorkspaceStore, "sessionId" | "presentationBySession">,
+): WorkspacePresentation {
+  const presentation = state.presentationBySession[state.sessionId ?? ""]
+  if (presentation === undefined)
+    throw new Error("The current workspace presentation is missing.")
+  return presentation
+}
+
+function updatePresentation(
+  state: WorkspaceStore,
+  patch: Partial<WorkspacePresentation>,
+  key = state.sessionId ?? "",
+) {
+  const presentation = state.presentationBySession[key]
+  if (presentation === undefined)
+    throw new Error("The workspace presentation owner is missing.")
+  return {
+    presentationBySession: {
+      ...state.presentationBySession,
+      [key]: { ...presentation, ...patch },
+    },
+  }
+}
+
 const tabs: WorkspaceTab[] = [{ id: "changes", kind: "changes" }]
 export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
-  open: false,
-  expanded: false,
   tabs,
-  activeId: tabs[0]?.id,
   sessionId: undefined,
-  presentationBySession: {},
-  setOpen: (open) => set({ open }),
-  setExpanded: (expanded) => set({ expanded }),
+  presentationBySession: {
+    "": { open: false, expanded: false, activeId: tabs[0]?.id },
+  },
+  setOpen: (open) => set((state) => updatePresentation(state, { open })),
+  setExpanded: (expanded) =>
+    set((state) => updatePresentation(state, { expanded })),
   setSession(sessionId) {
     const current = get()
     if (current.sessionId === sessionId) return
-    const visible = current.tabs.filter(
+    const key = sessionId ?? ""
+    if (current.presentationBySession[key] !== undefined) {
+      set({ sessionId })
+      return
+    }
+    const existing = current.tabs.find(
       (tab) => tab.workspaceSessionId === sessionId,
     )
-    const key = sessionId ?? ""
-    const remembered = current.presentationBySession[key]
-    const created = visible.length === 0 && !remembered
-    const tabs = created
-      ? [
-          ...current.tabs,
-          {
-            id: `workspace_${crypto.randomUUID()}`,
-            kind: "changes" as const,
-            ...(sessionId === undefined
-              ? {}
-              : { workspaceSessionId: sessionId }),
-          },
-        ]
-      : current.tabs
-    const activeId = visible.some((tab) => tab.id === remembered?.activeId)
-      ? remembered?.activeId
-      : (visible[0]?.id ?? (created ? tabs.at(-1)?.id : undefined))
-    const { [key]: _restored, ...inactive } = current.presentationBySession
+    const initialTab = existing ?? {
+      id: `workspace_${crypto.randomUUID()}`,
+      kind: "changes" as const,
+      ...(sessionId === undefined ? {} : { workspaceSessionId: sessionId }),
+    }
+    const { open, expanded } = selectWorkspacePresentation(current)
     set({
       sessionId,
-      tabs,
-      open: remembered?.open ?? current.open,
-      expanded: remembered?.expanded ?? current.expanded,
+      tabs: existing ? current.tabs : [...current.tabs, initialTab],
       presentationBySession: {
-        ...inactive,
-        [current.sessionId ?? ""]: {
-          open: current.open,
-          expanded: current.expanded,
-          activeId: current.activeId,
+        ...current.presentationBySession,
+        [key]: {
+          open,
+          expanded,
+          activeId: initialTab.id,
         },
       },
-      activeId,
     })
   },
   removeSession(sessionId) {
@@ -164,9 +177,10 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     })
   },
   activate(id) {
-    const tab = get().tabs.find((candidate) => candidate.id === id)
-    if (!tab || tab.workspaceSessionId !== get().sessionId) return
-    set({ open: true, activeId: id })
+    const current = get()
+    const tab = current.tabs.find((candidate) => candidate.id === id)
+    if (!tab || tab.workspaceSessionId !== current.sessionId) return
+    set(updatePresentation(current, { open: true, activeId: id }))
   },
   addTab(kind, sourceSessionId) {
     const reusable =
@@ -234,18 +248,11 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       (tab) => tab.workspaceSessionId === owner,
     )
     const key = owner ?? ""
-    const inactive = current.presentationBySession[key]
+    const presentation = current.presentationBySession[key]
     set({
       tabs: remaining,
-      activeId:
-        current.activeId === id ? ownerTabs.at(-1)?.id : current.activeId,
-      ...(inactive?.activeId === id
-        ? {
-            presentationBySession: {
-              ...current.presentationBySession,
-              [key]: { ...inactive, activeId: ownerTabs.at(-1)?.id },
-            },
-          }
+      ...(presentation?.activeId === id
+        ? updatePresentation(current, { activeId: ownerTabs.at(-1)?.id }, key)
         : {}),
     })
   },
@@ -355,8 +362,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         tab.sourceSessionId === sourceSessionId,
     )
     const current =
-      available.find((tab) => tab.id === state.activeId) ??
-      (available.length === 1 ? available[0] : undefined)
+      available.find(
+        (tab) => tab.id === selectWorkspacePresentation(state).activeId,
+      ) ?? (available.length === 1 ? available[0] : undefined)
     const id = current?.id ?? get().addTab("chat", sourceSessionId)
     get().addChatExcerpt(id, excerpt)
   },

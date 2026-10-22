@@ -71,10 +71,10 @@ it("opens the selected model with its catalog capabilities and account overrides
     />,
   )
   fireEvent.click(
-    screen.getByRole("button", { name: "Edit settings for MODEL-A" }),
+    screen.getByRole("button", { name: "Edit settings for model-a" }),
   )
   expect(onEditModel).toHaveBeenCalledExactlyOnceWith({
-    id: "MODEL-A",
+    id: "model-a",
     displayName: "My model",
     defaultEffort: "high",
   })

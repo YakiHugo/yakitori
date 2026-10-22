@@ -190,18 +190,10 @@ export function isInputAdmittedEvent(
 
 export function isTurnCompletedData(data: Record<string, unknown>): boolean {
   return (
-    onlyKeys(data, [
-      "turnId",
-      "outcome",
-      "usage",
-      "sessionUsage",
-      "metrics",
-      "metadata",
-    ]) &&
+    onlyKeys(data, ["turnId", "outcome", "usage", "metrics", "metadata"]) &&
     isString(data.turnId) &&
     isTurnOutcome(data.outcome) &&
     (data.usage === undefined || isTokenUsage(data.usage)) &&
-    (data.sessionUsage === undefined || isTokenUsage(data.sessionUsage)) &&
     (data.metrics === undefined || isTurnMetrics(data.metrics)) &&
     (data.metadata === undefined || isJsonObject(data.metadata))
   )

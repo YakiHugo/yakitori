@@ -1,4 +1,4 @@
-import { chooseNewEngine, useEngineStore } from "../store/engine-store.ts"
+import { startNewEngineSession } from "../store/engine-store.ts"
 import { EngineSelector, EngineSessionItems } from "./engine-session.tsx"
 import {
   ArrowDown,
@@ -27,7 +27,6 @@ import { Button } from "./ui/button.tsx"
 import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 
 export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
-  const engineId = useEngineStore((state) => state.engineId)
   const navRef = useSidebarMotion()
   const dragging = useContext(SidebarDragKind)
   const emptyPinned = useAppStore((state) => {
@@ -45,7 +44,6 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
   const showPinTarget =
     emptyPinned && (dragging === "session" || dragging === "project")
   const projects = useAppStore((state) => state.projects)
-  const startNewSession = useAppStore((state) => state.startNewSession)
   const [showAll, setShowAll] = useState(false)
   const loadSessions = useAppStore((state) => state.loadSessions)
   return (
@@ -73,11 +71,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
           type="button"
           aria-label="New session"
           className={cn("sidebar-row w-full", showPinTarget && "invisible")}
-          onClick={() =>
-            engineId === undefined
-              ? startNewSession()
-              : chooseNewEngine(engineId)
-          }
+          onClick={startNewEngineSession}
         >
           <SquarePen size={16} />
           <span className="flex-1 text-left">New session</span>

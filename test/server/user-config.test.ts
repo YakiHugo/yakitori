@@ -11,9 +11,17 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { flock } from "fs-ext"
 import { parse } from "smol-toml"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { ConfigurationError } from "../../src/server/config-errors.ts"
-import { createUserConfigStore } from "../../src/server/user-config.ts"
+import {
+  ConfigVersionConflictError,
+  createUserConfigStore,
+} from "../../src/server/user-config.ts"
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...actual, writeFile: vi.fn(actual.writeFile) }
+})
 
 describe("user config", () => {
   it("validates HTTP MCP configuration before committing it", async () => {
@@ -675,6 +683,44 @@ describe("user config", () => {
       } finally {
         if (locked) await flockAsync(externalLock.fd, "un")
         await externalLock.close()
+      }
+    })
+  })
+
+  it.each([
+    "preference",
+    "value",
+  ] as const)("preserves external edits made while staging a %s write", async (kind) => {
+    await withConfigPath(async (configPath) => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        )
+      await writeFile(configPath, 'provider = "codex"\nmodel = "one"\n')
+      const external = 'provider = "codex"\nmodel = "external"\n'
+      let edited = false
+      vi.mocked(writeFile).mockImplementation(async (path, ...args) => {
+        await actual.writeFile(path, ...args)
+        if (
+          !edited &&
+          typeof path === "string" &&
+          path.startsWith(`${configPath}.`) &&
+          path.endsWith(".tmp")
+        ) {
+          edited = true
+          await actual.writeFile(configPath, external)
+        }
+      })
+      try {
+        const store = createUserConfigStore({ configPath })
+        await expect(
+          kind === "preference"
+            ? store.write({ provider: "codex", model: "ours" })
+            : store.writeValue({ keyPath: ["model"], value: "ours" }),
+        ).rejects.toBeInstanceOf(ConfigVersionConflictError)
+        expect(await readFile(configPath, "utf8")).toBe(external)
+      } finally {
+        vi.mocked(writeFile).mockImplementation(actual.writeFile)
       }
     })
   })

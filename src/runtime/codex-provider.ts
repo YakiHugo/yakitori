@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import {
   CODEX_API_BASE_URL,
+  CodexAccountChangedError,
   type CodexAuthProvider,
   createCodexAuthProvider,
 } from "./codex-credentials.ts"
@@ -11,25 +12,30 @@ import { createOpenAIProvider } from "./openai-provider.ts"
 // codex backend. Tokens resolve lazily per model call (same pattern as the
 // Grok CLI stream): a refreshed or rotated login is picked up without a
 // restart, and no token is frozen at application startup.
-export function createCodexProvider(input?: {
-  readonly credentialsPath?: string
-  readonly auth?: CodexAuthProvider
-  readonly createStream?: typeof createOpenAIProvider
-  readonly accountId?: string
-}): StreamFn {
+export function createCodexProvider(
+  input?: Readonly<{
+    credentialsPath?: string
+    ownerIdentity?: string
+    auth?: CodexAuthProvider
+    createStream?: typeof createOpenAIProvider
+  }>,
+): StreamFn {
   const auth =
     input?.auth ??
-    createCodexAuthProvider(
-      input?.credentialsPath === undefined
+    createCodexAuthProvider({
+      ...(input?.credentialsPath === undefined
         ? {}
-        : { path: input.credentialsPath },
-    )
+        : { path: input.credentialsPath }),
+      ...(input?.ownerIdentity === undefined
+        ? {}
+        : { ownerIdentity: input.ownerIdentity }),
+    })
   const createStream = input?.createStream ?? createOpenAIProvider
   // Codex's sticky routing token belongs to one Turn, including its retries.
   // The caller must create a fresh stream for each Turn.
   let turnState: string | undefined
-  let expectedAccountId: string | undefined = input?.accountId
-  let accountBound = input?.accountId !== undefined
+  let expectedAccountId: string | undefined
+  let accountBound = false
   const stream: StreamFn = async function* (request) {
     for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
       let token: Awaited<ReturnType<CodexAuthProvider["resolve"]>>
@@ -38,6 +44,10 @@ export function createCodexProvider(input?: {
           authAttempt === 0 ? {} : { forceRefresh: true },
         )
       } catch (cause) {
+        if (cause instanceof CodexAccountChangedError) {
+          yield accountChangedResponse(request.target.provider)
+          return
+        }
         yield codexLoginFailure(cause, request.target.provider)
         return
       }

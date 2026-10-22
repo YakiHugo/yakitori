@@ -639,6 +639,78 @@ describe("workspace search tools", () => {
     })
   })
 
+  it("retains a long matching line's location within the public output budget", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(
+        join(workspace, "generated.txt"),
+        `needle ${"x".repeat(60_000)}\n`,
+      )
+      const result = await createGrepTool().execute(
+        { pattern: "needle", output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          locations: [
+            {
+              path: "generated.txt",
+              line: 1,
+              text: expect.stringContaining("needle"),
+            },
+          ],
+          lineTruncated: true,
+          page: { has_more: false },
+        },
+      })
+      expect(
+        Buffer.byteLength(JSON.stringify(result.output)),
+      ).toBeLessThanOrEqual(40 * 1024)
+    })
+  })
+
+  it("keeps short match text intact when only its path needs shortening", async () => {
+    await withWorkspace(async (workspace) => {
+      const directory = join("a".repeat(80), "b".repeat(80))
+      await mkdir(join(workspace, directory), { recursive: true })
+      const path = `${directory}/file.txt`
+      await writeFile(join(workspace, path), "needle\n")
+      const result = await createGrepTool({ maxLineCharacters: 120 }).execute(
+        { pattern: "needle", path, output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          locations: [
+            { path: path.replaceAll("\\", "/"), line: 1, text: "needle" },
+          ],
+          lineTruncated: true,
+        },
+      })
+    })
+  })
+
+  it.skipIf(process.platform === "win32")(
+    "preserves newline filenames in count results",
+    async () => {
+      await withWorkspace(async (workspace) => {
+        const path = "line\nname.txt"
+        await writeFile(join(workspace, path), "needle needle\n")
+        const result = await createGrepTool().execute(
+          { pattern: "needle", path, output_mode: "count" },
+          { workspaceRoot: workspace },
+        )
+        expect(result).toMatchObject({
+          ok: true,
+          output: { locations: [{ path, count: 2 }], truncated: false },
+        })
+      })
+    },
+  )
+
   it("never returns file observations from grep results", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "a.ts"), "needle\n")

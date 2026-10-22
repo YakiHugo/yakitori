@@ -282,14 +282,7 @@ describe("model retry execution state", () => {
     const before = retryingState()
     const actions: ExecutionViewAction[] = [
       { type: "transient", event: { ...warning, code: "tool.warning" } },
-      {
-        type: "transient",
-        event: {
-          ...live,
-          type: "session.usage",
-          usage: { inputTokens: 10, outputTokens: 2 },
-        },
-      },
+
       {
         type: "transient",
         event: {

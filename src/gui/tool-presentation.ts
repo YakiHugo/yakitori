@@ -1,9 +1,5 @@
 import type { FileChange, ToolExecutionItem } from "../protocol/events.ts"
-import type {
-  CommandResult,
-  ExecutionEntry,
-  ToolDiff,
-} from "./execution-view.ts"
+import type { ExecutionEntry, ToolDiff } from "./execution-view.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 type ExecutionOf<Type extends ToolExecutionItem["type"]> = Extract<
@@ -74,7 +70,6 @@ export type ToolDetail =
   | {
       readonly kind: "command"
       readonly command: string
-      readonly result?: CommandResult
       readonly resultText?: string
       readonly errorMessage?: string
     }
@@ -104,13 +99,10 @@ export type ToolPresentation = {
   readonly detail?: ToolDetail
 }
 
-export function presentTool(
-  entry: ToolEntry,
-  workspaceRoot?: string,
-): ToolPresentation {
+export function presentTool(entry: ToolEntry): ToolPresentation {
   switch (entry.execution.type) {
     case "command_execution":
-      return presentRunCommand(entry, entry.execution, workspaceRoot)
+      return presentRunCommand(entry, entry.execution)
     case "file_change":
       return presentDiff(entry, entry.execution)
     case "file_read":
@@ -319,29 +311,18 @@ function presentDiff(
 function presentRunCommand(
   entry: ToolEntry,
   execution: ExecutionOf<"command_execution">,
-  workspaceRoot?: string,
 ): ToolPresentation {
   const command = execution.command
   const description = execution.description
-  const result = displayCommandResult(execution.result, workspaceRoot)
   return {
     verb: "Run",
     activeVerb: "Running",
     subject: truncateLine(description ?? command, 120),
     subjectTone: description === undefined ? "code" : "text",
-    meta: [
-      result?.exitCode === null || result?.exitCode === undefined
-        ? undefined
-        : `exit ${result.exitCode}`,
-      result?.timedOut === true ? "timed out" : undefined,
-      result?.durationMs === undefined
-        ? undefined
-        : formatDuration(result.durationMs),
-    ].filter(isString),
+    meta: [],
     detail: {
       kind: "command",
       command,
-      ...(result === undefined ? {} : { result }),
       ...(entry.resultText === undefined
         ? {}
         : { resultText: entry.resultText }),
@@ -606,32 +587,6 @@ function diffCounts(text: string): {
   return { added, deleted }
 }
 
-function displayCommandResult(
-  result: ExecutionOf<"command_execution">["result"],
-  workspaceRoot?: string,
-): CommandResult | undefined {
-  if (result === undefined) return undefined
-  return {
-    ...result,
-    ...(result.cwd === undefined
-      ? {}
-      : { cwd: workspaceRelativePath(workspaceRoot, result.cwd) }),
-  }
-}
-
-function workspaceRelativePath(
-  workspaceRoot: string | undefined,
-  cwd: string,
-): string {
-  if (workspaceRoot === undefined) return cwd
-  const normalizedRoot = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "")
-  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/$/, "")
-  if (normalizedCwd === normalizedRoot) return "."
-  return normalizedCwd.startsWith(`${normalizedRoot}/`)
-    ? normalizedCwd.slice(normalizedRoot.length + 1)
-    : cwd
-}
-
 function displayUrl(value: string): string {
   try {
     const url = new URL(value)
@@ -653,11 +608,6 @@ function isHttpUrl(value: string): boolean {
 function humanize(value: string): string {
   const words = value.replaceAll("_", " ")
   return `${words.slice(0, 1).toUpperCase()}${words.slice(1)}`
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${Math.round(durationMs)}ms`
-  return `${(durationMs / 1_000).toFixed(1)}s`
 }
 
 function truncateLine(value: string, max: number): string {

@@ -811,7 +811,7 @@ export function createAgentControl(input: {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           const status = await input.adapter.failChild(agent.agentId, message)
-          const failedOutcome = outcomeFromAgentStatus(status)
+          const failedOutcome = agentRunOutcomeFromStatus(status)
           if (failedOutcome === undefined) {
             throw new Error(
               `Agent ${agent.agentId} launch failed without a Session-owned terminal status.`,
@@ -1015,7 +1015,7 @@ export function createAgentControl(input: {
   }
 }
 
-function outcomeFromAgentStatus(
+export function agentRunOutcomeFromStatus(
   status: AgentStatus,
 ): AgentRunOutcome | undefined {
   if (typeof status === "object") {

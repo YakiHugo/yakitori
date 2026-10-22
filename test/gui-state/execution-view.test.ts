@@ -13,7 +13,7 @@ import {
   isKernelEvent,
   type JsonValue,
   type KernelError,
-  type KernelFact,
+  type KernelEvent,
   type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
@@ -874,7 +874,7 @@ describe("execution view", () => {
   })
 
   it("does not render a display item that completed without recorded text", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       {
         type: EventType.ItemCompleted,
         data: {
@@ -895,35 +895,7 @@ describe("execution view", () => {
     expect(projectExecutionView(state).entries).toEqual([])
   })
 
-  it("replaces whole usage snapshots instead of aggregating them", () => {
-    let state = reduceExecutionView(createExecutionViewState(), {
-      type: "transient",
-      event: {
-        type: "session.usage",
-        sessionId,
-        turnId: "turn_1",
-        usage: { inputTokens: 100, outputTokens: 20 },
-        createdAt: "2026-07-24T00:00:00.000Z",
-      },
-    })
-    state = reduceExecutionView(state, {
-      type: "transient",
-      event: {
-        type: "session.usage",
-        sessionId,
-        turnId: "turn_1",
-        usage: { inputTokens: 125, outputTokens: 24 },
-        createdAt: "2026-07-24T00:00:01.000Z",
-      },
-    })
-
-    expect(projectExecutionView(state).telemetry).toMatchObject({
-      inputTokens: 125,
-      outputTokens: 24,
-    })
-  })
-
-  it("accumulates per-turn usage when no cumulative snapshot is provided", () => {
+  it("accumulates usage from completed turns", () => {
     const turnCompleted = (turnId: string, inputTokens: number) => ({
       type: EventType.TurnCompleted,
       data: {
@@ -1020,7 +992,7 @@ describe("execution view", () => {
   })
 
   it("projects durable tool facts and a transient pending permission", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       {
         type: EventType.InputAdmitted,
         data: {
@@ -1132,7 +1104,7 @@ describe("execution view", () => {
   })
 
   it("extracts structured diff and command results from tool output", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       toolStarted({
         toolCallId: "tool_1",
         itemId: "item_call_1",
@@ -1187,45 +1159,14 @@ describe("execution view", () => {
         turnId: "turn_1",
         content: { kind: "text", text: "all green" },
         output: {
-          exitCode: 0,
-          signal: null,
-          stdout: "all green",
-          stderr: "",
-          truncated: false,
-          timedOut: false,
-          durationMs: 4100,
-          cwd: "/workspace/packages/gui",
-          shell: "/bin/zsh",
-          blocked: { rule: "rm_root" },
-          binary: {
-            stdout: false,
-            stderr: true,
-            stdoutBytes: 9,
-            stderrBytes: 3,
-          },
+          exit_code: 0,
+          output: "all green",
+          wall_time_seconds: 4.1,
         },
         execution: {
           type: "command_execution",
           command: "pnpm test",
           description: "Run the test suite",
-          result: {
-            exitCode: 0,
-            signal: null,
-            stdout: "all green",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            durationMs: 4100,
-            cwd: "/workspace/packages/gui",
-            shell: "/bin/zsh",
-            blocked: { rule: "rm_root" },
-            binary: {
-              stdout: false,
-              stderr: true,
-              stdoutBytes: 9,
-              stderrBytes: 3,
-            },
-          },
         },
       }),
     ]
@@ -1248,7 +1189,7 @@ describe("execution view", () => {
       expect.objectContaining({
         kind: "tool",
         toolCallId: "tool_2",
-        output: expect.objectContaining({ exitCode: 0, stdout: "all green" }),
+        output: expect.objectContaining({ exit_code: 0, output: "all green" }),
       }),
     ])
     const presentations = entries.flatMap((entry) =>
@@ -1270,104 +1211,15 @@ describe("execution view", () => {
         subject: "Run the test suite",
         detail: expect.objectContaining({
           kind: "command",
-          result: {
-            exitCode: 0,
-            signal: null,
-            stdout: "all green",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            durationMs: 4100,
-            cwd: "/workspace/packages/gui",
-            shell: "/bin/zsh",
-            blocked: { rule: "rm_root" },
-            binary: {
-              stdout: false,
-              stderr: true,
-              stdoutBytes: 9,
-              stderrBytes: 3,
-            },
-          },
+          command: "pnpm test",
+          resultText: "all green",
         }),
       }),
     ])
   })
 
-  it("projects a timed-out command result with partial output and no exit code", () => {
-    const facts = [
-      toolStarted({
-        toolCallId: "tool_1",
-        itemId: "item_call_1",
-        turnId: "turn_1",
-        name: "run_command",
-        input: { command: "sleep 60" },
-        requiresPermission: true,
-      }),
-      toolCompleted({
-        itemId: "item_call_1",
-        resultItemId: "item_result_1",
-        toolCallId: "tool_1",
-        turnId: "turn_1",
-        content: {
-          kind: "text",
-          text: "Command timed out after 30s.",
-        },
-        output: {
-          timedOut: true,
-          stdout: "partial",
-          stderr: "",
-          truncated: false,
-        },
-        execution: {
-          type: "command_execution",
-          command: "sleep 60",
-          result: {
-            exitCode: null,
-            signal: null,
-            stdout: "partial",
-            stderr: "",
-            truncated: false,
-            timedOut: true,
-          },
-        },
-        error: { code: "command_timeout", message: "Command timed out." },
-      }),
-    ]
-    const state = facts.reduce(
-      (current, event, index) =>
-        reduceExecutionView(current, {
-          type: "durable",
-          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
-        }),
-      createExecutionViewState(),
-    )
-
-    const entry = projectExecutionView(state).entries[0]
-    expect(entry).toMatchObject({
-      kind: "tool",
-      toolCallId: "tool_1",
-      state: "failed",
-      resultError: true,
-      resultErrorMessage: "Command timed out.",
-    })
-    if (entry?.kind !== "tool") throw new Error("Expected a tool entry.")
-    expect(presentTool(entry)).toMatchObject({
-      detail: {
-        kind: "command",
-        result: {
-          exitCode: null,
-          signal: null,
-          stdout: "partial",
-          stderr: "",
-          truncated: false,
-          timedOut: true,
-        },
-      },
-    })
-  })
-
   it("renders a recorded open-tool disposition when the turn is interrupted", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       toolStarted({
         toolCallId: "tool_1",
         itemId: "item_call",
@@ -1447,7 +1299,7 @@ describe("execution view", () => {
   })
 
   it("summarizes tool entries and tracks model, usage, and queued inputs", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       {
         type: EventType.InputAdmitted,
         data: {
@@ -1495,12 +1347,6 @@ describe("execution view", () => {
           turnId: "turn_1",
           outcome: { status: "completed" },
           usage: {
-            inputTokens: 120,
-            outputTokens: 45,
-            cacheReadInputTokens: 90,
-            cacheWriteInputTokens: 10,
-          },
-          sessionUsage: {
             inputTokens: 120,
             outputTokens: 45,
             cacheReadInputTokens: 90,
@@ -1728,7 +1574,7 @@ describe("execution view", () => {
   })
 
   it("keeps reporting a requested tool after another tool completes", () => {
-    const facts: KernelFact[] = [
+    const facts: KernelEvent[] = [
       {
         type: EventType.TurnStarted,
         data: { turnId: "turn_1", inputId: "input_1" },
@@ -2046,7 +1892,7 @@ function agentCompleted(input: {
   readonly itemId: string
   readonly turnId: string
   readonly text: string
-}): KernelFact {
+}): KernelEvent {
   return {
     type: EventType.ItemCompleted,
     data: {
@@ -2067,7 +1913,7 @@ function toolStarted(input: {
   readonly name: string
   readonly input: JsonValue
   readonly requiresPermission: boolean
-}): KernelFact {
+}): KernelEvent {
   return {
     type: EventType.ItemStarted,
     data: {
@@ -2099,7 +1945,7 @@ function toolCompleted(input: {
   readonly output?: JsonValue
   readonly error?: KernelError
   readonly execution?: ToolExecutionDescriptor
-}): KernelFact {
+}): KernelEvent {
   return {
     type: EventType.ItemCompleted,
     data: {

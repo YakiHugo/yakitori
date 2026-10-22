@@ -71,7 +71,12 @@ it("keeps provider data, app visibility, and user overrides independent through 
   expect(writes.flat().some((model) => model.id === "manual-coder")).toBe(false)
 })
 
-it("validates the effective effort list without dropping the source speed contract", () => {
+it.each([
+  { efforts: [] },
+  { efforts: ["low"] },
+])("validates effective efforts $efforts without dropping the source speed contract", async ({
+  efforts,
+}) => {
   const source = createConfiguredModelsManager({
     provider: "work",
     models: [
@@ -84,17 +89,56 @@ it("validates the effective effort list without dropping the source speed contra
     ],
   })
   const manager = createModelSettingsManager(source, () => ({
-    coder: { efforts: [] },
+    coder: { efforts },
   }))
   expect(
     manager.resolve({ provider: "work", model: "coder" }).defaultEffort,
   ).toBeUndefined()
+  const [listed] = await manager.listModels()
+  expect(listed?.efforts).toEqual(efforts)
+  expect(listed?.defaultEffort).toBeUndefined()
+  expect(
+    source.resolve({ provider: "work", model: "coder" }).defaultEffort,
+  ).toBe("high")
   expect(() =>
     manager.validate({ provider: "work", model: "coder", effort: "high" }),
   ).toThrow("not supported")
   expect(() =>
     manager.validate({ provider: "work", model: "coder", speed: "fast" }),
   ).toThrow("not supported")
+})
+
+it.each([
+  { defaultEffort: "invalid" },
+  { efforts: ["low"], defaultEffort: "high" },
+])("rejects explicit defaults outside the effective effort list %j", async (override) => {
+  const manager = createModelSettingsManager(
+    createConfiguredModelsManager({
+      provider: "work",
+      models: [
+        { id: "coder", efforts: ["low", "high"], defaultEffort: "high" },
+      ],
+    }),
+    () => ({ coder: override }),
+  )
+  expect(() => manager.resolve({ provider: "work", model: "coder" })).toThrow(
+    "Default effort",
+  )
+  await expect(manager.listModels()).rejects.toThrow("Default effort")
+})
+
+it("keeps an explicit default when the source has no known effort list", async () => {
+  const manager = createModelSettingsManager(
+    createConfiguredModelsManager({
+      provider: "work",
+      models: [{ id: "coder" }],
+    }),
+    () => ({ coder: { defaultEffort: "custom" } }),
+  )
+  expect(
+    manager.resolve({ provider: "work", model: "coder" }).defaultEffort,
+  ).toBe("custom")
+  expect((await manager.listModels())[0]?.defaultEffort).toBe("custom")
 })
 
 it("captures user model settings for active Turns while applying new settings to later Turns", async () => {

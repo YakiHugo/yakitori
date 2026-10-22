@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { JsonObject } from "../../src/kernel/index.ts"
-import { createAnthropicProvider } from "../../src/runtime/anthropic-provider.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import type { ModelResponse } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import {
@@ -223,7 +223,7 @@ it("continues a Messages server-tool pause with native blocks and persists both 
         capabilities: { remoteCompaction: false },
         retry: { maxAttempts: 1 },
       },
-      stream: createAnthropicProvider({
+      stream: createAnthropicTestStream({
         apiKey: "fixture",
         model: "test",
         baseURL: `http://127.0.0.1:${address.port}`,

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util"
 import type { JsonValue, ToolExecutionDescriptor } from "../../kernel/index.ts"
 import type { ModelToolDefinition, ToolWireProtocol } from "../model.ts"
 import type { UserShellEnv } from "../user-shell-env.ts"
@@ -14,6 +15,7 @@ import { createThreadCollaborationTools } from "./thread-collaboration.ts"
 import { canonicalToolName, plainToolName, type ToolName } from "./tool-name.ts"
 import {
   createToolSearchIndex,
+  type ToolSearchDocument,
   type ToolSearchIndex,
 } from "./tool-search-index.ts"
 import type {
@@ -114,16 +116,13 @@ export function createToolRegistry(
   let registered = new Map<string, RegisteredTool>()
   const trustedToolNames: string[] = []
   const trustedNamespaceOwners = new Map<string, string>()
-  let catalogGeneration = 0
-  const searchCache = new Map<
-    string,
-    Readonly<{
-      generation: number
-      fingerprint: string
-      index: ToolSearchIndex
-      definitions: ReadonlyArray<ModelToolDefinition>
-    }>
-  >()
+  let cachedSearch:
+    | Readonly<{
+        sources: readonly ToolSearchDocument[]
+        index: ToolSearchIndex
+        definitions: ReadonlyArray<ModelToolDefinition>
+      }>
+    | undefined
   const runtimeLeases = new Map<RuntimeTool, number>()
   const retirements = new Map<RuntimeTool, Retirement>()
   let disposePromise: Promise<void> | undefined
@@ -195,8 +194,6 @@ export function createToolRegistry(
       }
 
       registered = staged
-      catalogGeneration += 1
-      searchCache.clear()
       retireUnregisteredRuntimes(
         previousEntries.map((entry) => entry.runtime),
         registered,
@@ -214,6 +211,7 @@ export function createToolRegistry(
           retirements,
         )
         registered = new Map()
+        cachedSearch = undefined
         await settleRetirements(
           [...retirements.values()].map((state) => state.promise),
         )
@@ -237,13 +235,8 @@ export function createToolRegistry(
       const deferred = [...selected.values()].filter(
         (entry) => entry.exposure === "deferred",
       )
-      const selectionKey = JSON.stringify({
-        customToolMode: options.customToolMode,
-        enabledTrustedTools: [...options.enabledTrustedTools].sort(),
-      })
-      // External runtimes may refresh their definition/search metadata in
-      // place. Re-snapshot on every Step so the search cache represents the
-      // exact catalog captured by that Step, not merely the registration set.
+      // Runtime identity does not promise immutable search metadata. Compare
+      // snapshots of the actual sources; dispatch and leases stay Step-owned.
       const deferredDocuments = deferred.map((entry) => ({
         definition: deepFreeze({
           ...definitionForMode(
@@ -252,33 +245,22 @@ export function createToolRegistry(
           ),
           deferLoading: true,
         }),
-        search:
-          entry.runtime.search === undefined
-            ? undefined
-            : deepFreeze(structuredClone(entry.runtime.search)),
+        ...(entry.runtime.search === undefined
+          ? {}
+          : { metadata: deepFreeze(structuredClone(entry.runtime.search)) }),
       }))
-      const searchFingerprint = JSON.stringify(deferredDocuments)
-      let cachedSearch = searchCache.get(selectionKey)
       if (
         cachedSearch === undefined ||
-        cachedSearch.generation !== catalogGeneration ||
-        cachedSearch.fingerprint !== searchFingerprint
+        !isDeepStrictEqual(cachedSearch.sources, deferredDocuments)
       ) {
         const definitions = deferredDocuments.map(
           ({ definition }) => definition,
         )
         cachedSearch = {
-          generation: catalogGeneration,
-          fingerprint: searchFingerprint,
+          sources: deferredDocuments,
           definitions,
-          index: createToolSearchIndex(
-            deferredDocuments.map(({ definition, search }) => ({
-              definition,
-              ...(search === undefined ? {} : { metadata: search }),
-            })),
-          ),
+          index: createToolSearchIndex(deferredDocuments),
         }
-        searchCache.set(selectionKey, cachedSearch)
       }
       const stepSearch = cachedSearch
       const search = (query: string, limit = DEFAULT_TOOL_SEARCH_LIMIT) => {
