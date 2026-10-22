@@ -284,6 +284,35 @@ describe("finalized tool router", () => {
     await second.release()
   })
 
+  it("keeps deferred search results bound to each Step when replacement runtimes have the same definition", async () => {
+    const registry = createToolRegistry([])
+    const toolName = { namespace: "demo", name: "lookup" }
+    registry.replaceExternalSource("demo", [
+      identifiedTool(toolName, "version one", "deferred"),
+    ])
+    const first = finalize(registry, new Set())
+
+    registry.replaceExternalSource("demo", [
+      identifiedTool(toolName, "version two", "deferred"),
+    ])
+    const second = finalize(registry, new Set())
+
+    for (const router of [first, second]) {
+      expect(router.search("lookup")).toMatchObject([
+        { name: "demo__lookup", description: "demo__lookup description" },
+      ])
+    }
+    await expect(
+      first.execute("demo__lookup", {}, { workspaceRoot: "/workspace" }),
+    ).resolves.toMatchObject({ content: "version one" })
+    await expect(
+      second.execute("demo__lookup", {}, { workspaceRoot: "/workspace" }),
+    ).resolves.toMatchObject({ content: "version two" })
+    await first.release()
+    await second.release()
+    await registry.dispose()
+  })
+
   it("replaces one external source atomically and retires old runtimes after Step release", async () => {
     const disposed: string[] = []
     const versionOne = {
@@ -553,6 +582,54 @@ describe("finalized tool router", () => {
         toolSearch: { tools },
       }),
     ).toBe(true)
+  })
+
+  it("keeps captured deferred custom definitions in their Step's encoding when later Steps change mode", async () => {
+    const external = {
+      ...identifiedTool(
+        { namespace: "demo", name: "evaluate" },
+        "evaluate",
+        "deferred",
+      ),
+      inputSchema: {
+        type: "object",
+        properties: { code: { type: "string" } },
+        required: ["code"],
+      },
+      customInputFormat: {
+        type: "grammar" as const,
+        syntax: "lark" as const,
+        definition: "start: /.+/",
+      },
+      customInputFallbackKey: "code",
+    } satisfies RuntimeTool
+    const registry = createToolRegistry([])
+    registry.replaceExternalSource("demo", [external])
+    const native = finalize(registry, new Set())
+    const functions = registry.finalize({
+      enabledTrustedTools: new Set(),
+      customToolMode: "function",
+      wireProtocol: "anthropic_deferred",
+    })
+    const nativeAgain = finalize(registry, new Set())
+
+    expect(functions.search("evaluate")).toMatchObject([
+      { name: "demo__evaluate", inputSchema: { required: ["code"] } },
+    ])
+    expect(functions.search("evaluate")[0]).not.toHaveProperty("kind")
+    for (const router of [native, nativeAgain]) {
+      expect(router.search("evaluate")).toMatchObject([
+        {
+          name: "demo__evaluate",
+          kind: "custom",
+          inputFormat: { definition: "start: /.+/" },
+        },
+      ])
+    }
+    await native.release()
+    await functions.release()
+    await nativeAgain.release()
+    await registry.dispose()
   })
 
   it("refreshes a later Step when deferred metadata mutates in place", async () => {
