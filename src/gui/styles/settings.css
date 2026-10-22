@@ -188,8 +188,7 @@
   overflow: hidden;
 }
 
-.app-shell:has(.settings-page) > :is(.sidebar-frame, .workspace-frame),
-.app-shell:has(.settings-page) > .workspace-show {
+.app-shell:has(.settings-page) > :is(.sidebar-frame, .workspace-frame) {
   display: none;
 }
 

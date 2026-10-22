@@ -1,5 +1,12 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { BrowserPanelProps } from "../../src/gui/components/browser-panel.tsx"
@@ -175,6 +182,44 @@ async function addView(user: ReturnType<typeof userEvent.setup>, name: string) {
     screen.getByRole("menuitem", { name: new RegExp(`^${name}`) }),
   )
 }
+
+it("opens the selected session's changes and files from its project card", async () => {
+  const user = userEvent.setup()
+  useAppStore.setState({
+    selection: { sessionId: "session-two" },
+    selectedSession: {
+      ...session("session-two", "/project/two"),
+      projectId: "project-two",
+    },
+    projects: [
+      project("project-one", "/project/one"),
+      project("project-two", "/project/two"),
+    ],
+  })
+  useWorkspaceStore.getState().setSession("session-two")
+  useWorkspaceStore.getState().setOpen(false)
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  const card = screen.getByRole("complementary", { name: "Project overview" })
+  expect(within(card).getByText("project-two")).toBeDefined()
+  await user.click(within(card).getByRole("button", { name: "Changes" }))
+  expect(screen.getByText("Changes at /project/two")).toBeDefined()
+  expect(
+    screen.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected"),
+  ).toBe("true")
+  expect(
+    screen.queryByRole("complementary", { name: "Project overview" }),
+  ).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Hide workspace" }))
+  await user.click(screen.getByRole("button", { name: "Open project files" }))
+  expect(
+    screen.getByRole("tab", { name: "Files" }).getAttribute("aria-selected"),
+  ).toBe("true")
+  expect(screen.getByText("Files at /project/two")).toBeDefined()
+})
 
 it("keeps a dirty file tab until its edits are explicitly discarded", async () => {
   const user = userEvent.setup()

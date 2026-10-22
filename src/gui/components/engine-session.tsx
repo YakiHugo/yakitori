@@ -74,6 +74,28 @@ export function EngineSessionItems() {
   )
 }
 
+export function EngineSessionHeading() {
+  const state = useEngineStore()
+  const descriptor = state.engines.find(
+    (engine) => engine.id === state.engineId,
+  )
+  const session = state.sessions.find((entry) => entry.id === state.sessionId)
+  return (
+    <div className="window-session-heading">
+      <h2 className="truncate text-sm font-semibold">
+        {state.sessionId === undefined
+          ? "New session"
+          : (state.snapshot?.session.title ??
+            session?.title ??
+            "Untitled session")}
+      </h2>
+      <span className="window-engine-label">
+        {descriptor?.label ?? state.engineId}
+      </span>
+    </div>
+  )
+}
+
 export function EngineConversation() {
   const state = useEngineStore()
   const apiBase = useAppStore((app) => app.apiBase)
@@ -99,16 +121,6 @@ export function EngineConversation() {
     (view?.uncertain.length ?? 0) > 0 || state.pendingRequestId !== undefined
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {state.sessionId !== undefined && (
-        <header className="session-header flex h-12 shrink-0 items-center justify-between border-b px-5">
-          <h2 className="truncate text-sm font-semibold">
-            {state.snapshot?.session.title ?? "Untitled session"}
-          </h2>
-          <span className="text-xs text-muted-foreground">
-            {descriptor?.label ?? state.engineId}
-          </span>
-        </header>
-      )}
       <section
         ref={scroll}
         onScroll={() => {

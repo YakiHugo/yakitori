@@ -578,12 +578,7 @@ const TurnBlock = memo(
       >
         {entries.length > 0 || active ? (
           <div>
-            <div
-              className={cn(
-                "flex items-center gap-1.5 text-left text-[14px] text-muted-foreground",
-                finalAnswer ? "pb-3" : "pb-1",
-              )}
-            >
+            <div className="turn-activity-header" data-completed={completed}>
               {hasDisclosure ? (
                 <button
                   type="button"
