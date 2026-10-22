@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import type { ModelTarget } from "../../../src/runtime/model.ts"
 import { createConfiguredModelsManager } from "../../../src/runtime/configured-models-manager.ts"
+import type { ModelTarget } from "../../../src/runtime/model.ts"
 import { createModelProvider } from "../../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../../src/runtime/session-configuration.ts"
@@ -389,7 +389,7 @@ describe("Step tool planning", () => {
       protocol: "meta_dispatch",
     },
     {
-      target: target("kimi", "k3", "kimi"),
+      target: target("kimi-code", "k3", "kimi-code"),
       present: ["edit_file", "write_file"],
       absent: ["apply_patch"],
       protocol: "meta_dispatch",
@@ -518,7 +518,7 @@ describe("Step tool planning", () => {
     const registry = createToolRegistry()
     registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const enabledTools = registry.trustedToolNames()
-    const kimiTarget = target("kimi", "k3", "kimi")
+    const kimiTarget = target("kimi-code", "k3", "kimi-code")
     const kimi = captureStepContext({
       registry,
       configuration: configuration(kimiTarget, enabledTools),

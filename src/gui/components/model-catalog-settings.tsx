@@ -4,95 +4,99 @@ import type {
   ProviderModelSettings,
 } from "../../protocol/providers.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { createSettingsWriter } from "../lib/settings-writer.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { ProviderModels } from "./provider-models.tsx"
+import { ModelConfigurationPanel } from "./model-configuration-panel.tsx"
 import { Button } from "./ui/button.tsx"
-import { Field, FieldLabel } from "./ui/field.tsx"
 
 export function ModelCatalogSettings({
   apiBase,
-}: Readonly<{ apiBase: string }>) {
-  const providers = useAppStore((state) => state.providers)
-  const [selected, setSelected] = useState("")
-  const available = providers.filter(
-    (provider) => provider.availability !== "requires_login",
-  )
-  const provider = available.some((provider) => provider.name === selected)
-    ? selected
-    : (available.find((provider) => provider.name !== "faux")?.name ??
-      available[0]?.name)
+  provider,
+}: Readonly<{ apiBase: string; provider: string }>) {
   return (
-    <section
-      className="model-catalog-settings"
-      aria-label="Model catalog settings"
-    >
-      <div className="provider-page-heading">
-        <div>
-          <h2>Models</h2>
-          <p>Provider capabilities, app defaults, and your overrides.</p>
-        </div>
-      </div>
-      {provider ? (
-        <>
-          <Field>
-            <FieldLabel htmlFor="model-catalog-provider">
-              Provider connection
-            </FieldLabel>
-            <select
-              id="model-catalog-provider"
-              value={provider}
-              onChange={(event) => setSelected(event.target.value)}
-            >
-              {available.map((provider) => (
-                <option key={provider.name} value={provider.name}>
-                  {provider.displayName ?? provider.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <ConnectionModels
-            key={`${apiBase}:${provider}`}
-            apiBase={apiBase}
-            provider={provider}
-          />
-        </>
-      ) : (
-        <p>Connect a provider to manage its models.</p>
-      )}
-    </section>
+    <AccountModels
+      key={`${apiBase}:${provider}`}
+      apiBase={apiBase}
+      provider={provider}
+    />
   )
 }
 
-function ConnectionModels({
+function AccountModels({
   apiBase,
   provider,
 }: Readonly<{ apiBase: string; provider: string }>) {
   const [catalog, setCatalog] = useState<ModelCatalogResponse>()
   const [settings, setSettings] = useState<ProviderModelSettings>({})
-  const [pending, setPending] = useState<"save" | "refresh">()
+  const [status, setStatus] = useState<
+    Readonly<{ pending: boolean; error?: string }>
+  >({ pending: false })
   const [error, setError] = useState<string>()
-  const [saved, setSaved] = useState(false)
   const [revision, setRevision] = useState(0)
-  const dirty = useRef(false)
-  const busy = useRef(false)
+  const snapshot = useRef<ModelCatalogResponse | undefined>(undefined)
   const request = useRef(0)
+  const readNeeded = useRef(false)
   const mounted = useRef(true)
+  const page = useAppStore((state) => state.providerSettingsPage)
+  const navigate = useAppStore((state) => state.setProviderSettingsPage)
+  const editing =
+    page.kind === "account"
+      ? catalog?.models.find((model) => model.id === page.modelId)
+      : undefined
+  const [writer] = useState(() =>
+    createSettingsWriter<ProviderModelSettings>({
+      async write(next) {
+        if (!snapshot.current) throw new Error("Model settings are not loaded.")
+        const response = await getAppRpcClient(apiBase).request(
+          "provider/models/write",
+          {
+            provider,
+            settings: next,
+            version: snapshot.current.version,
+          },
+        )
+        snapshot.current = response
+        if (mounted.current) setCatalog(response)
+        await useAppStore.getState().loadProviders()
+      },
+      changed(next) {
+        if (mounted.current) {
+          setStatus(next)
+          if (!next.pending && !next.error && readNeeded.current) {
+            readNeeded.current = false
+            setRevision((value) => value + 1)
+          }
+        } else if (next.error) useAppStore.setState({ message: next.error })
+      },
+    }),
+  )
   useEffect(() => {
     mounted.current = true
     return () => {
       mounted.current = false
+      if (!writer.failed()) void writer.flush()
     }
-  }, [])
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry and discard explicitly request a fresh configuration snapshot.
+  }, [writer])
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Retry requests a fresh configuration snapshot.
   useEffect(() => {
     const client = getAppRpcClient(apiBase)
     const load = () => {
-      if (dirty.current || busy.current) return
+      if (writer.pending() || writer.failed()) {
+        readNeeded.current = true
+        return
+      }
       const id = ++request.current
       void client.request("provider/models/read", { provider }).then(
         (response) => {
-          if (!mounted.current || id !== request.current || dirty.current)
+          if (
+            !mounted.current ||
+            id !== request.current ||
+            writer.pending() ||
+            writer.failed()
+          )
             return
+          snapshot.current = response
           setCatalog(response)
           setSettings(response.settings)
           setError(undefined)
@@ -111,43 +115,7 @@ function ConnectionModels({
       request.current++
       unsubscribe()
     }
-  }, [apiBase, provider, revision])
-  const perform = async (action: "save" | "refresh") => {
-    if (!catalog) return
-    const id = ++request.current
-    busy.current = true
-    setPending(action)
-    setError(undefined)
-    setSaved(false)
-    try {
-      const client = getAppRpcClient(apiBase)
-      const response =
-        action === "save"
-          ? await client.request("provider/models/write", {
-              provider,
-              settings,
-              version: catalog.version,
-            })
-          : await client.request("provider/models/refresh", { provider })
-      if (!mounted.current || id !== request.current) return
-      setCatalog(response)
-      if (action === "save") {
-        dirty.current = false
-        setSettings(response.settings)
-        setSaved(true)
-      }
-      if (response.error) setError(response.error)
-      await useAppStore.getState().loadProviders()
-    } catch (cause) {
-      if (mounted.current && id === request.current)
-        setError(
-          cause instanceof Error ? cause.message : "Model action failed.",
-        )
-    } finally {
-      busy.current = false
-      if (mounted.current && id === request.current) setPending(undefined)
-    }
-  }
+  }, [apiBase, provider, revision, writer])
   if (!catalog)
     return (
       <div className="provider-loading">
@@ -168,72 +136,89 @@ function ConnectionModels({
     )
   return (
     <>
-      <div className="provider-page-heading">
-        <div>
-          <p>
-            {catalog.fetchedAt
-              ? `Last updated ${new Date(catalog.fetchedAt).toLocaleString()}`
-              : "Provider and app defaults"}
-          </p>
-          {catalog.error ? <p role="alert">{catalog.error}</p> : null}
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={pending !== undefined}
-          onClick={() => void perform("refresh")}
-        >
-          {pending === "refresh" ? "Refreshing…" : "Refresh models"}
-        </Button>
-      </div>
-      <fieldset disabled={pending !== undefined}>
-        <ProviderModels
-          configuration={{
-            models: Object.entries(settings).map(([id, value]) => ({
-              ...value,
-              id,
-            })),
-          }}
-          available={catalog.models}
-          fetchingModels={pending === "refresh"}
-          onChange={(patch) => {
-            dirty.current = true
-            setSaved(false)
-            setSettings(
-              Object.fromEntries(
-                patch.models.map(({ id, ...value }) => [id, value]),
-              ),
-            )
+      <p className="provider-field-hint">
+        {catalog.fetchedAt
+          ? `Last updated ${new Date(catalog.fetchedAt).toLocaleString()}`
+          : "Provider and app defaults"}
+      </p>
+      {catalog.error ? <p role="alert">{catalog.error}</p> : null}
+      <ProviderModels
+        configuration={{
+          models: Object.entries(settings).map(([id, value]) => ({
+            ...value,
+            id,
+          })),
+        }}
+        available={catalog.models}
+        fetchingModels={false}
+        onEditModel={(model) => {
+          if (page.kind === "account") navigate({ ...page, modelId: model.id })
+        }}
+        onChange={(patch) => {
+          request.current++
+          const next = Object.fromEntries(
+            patch.models.map(({ id, ...value }) => [id, value]),
+          )
+          setSettings(next)
+          writer.update(next)
+        }}
+      />
+      {editing && page.kind === "account" ? (
+        <ModelConfigurationPanel
+          key={editing.id}
+          apiBase={apiBase}
+          provider={provider}
+          model={editing}
+          settings={settings[editing.id] ?? {}}
+          onClose={() =>
+            navigate({
+              kind: "account",
+              accountKind: page.accountKind,
+              accountId: page.accountId,
+            })
+          }
+          onChange={(override) => {
+            request.current++
+            const next = { ...settings, [editing.id]: override }
+            setSettings(next)
+            writer.update(next)
           }}
         />
-      </fieldset>
-      {error ? (
-        <p role="alert" className="provider-message">
-          {error}
-        </p>
       ) : null}
-      {saved ? <p role="status">Model settings saved.</p> : null}
-      <div className="provider-editor-actions">
-        <Button
-          type="button"
-          disabled={pending !== undefined || !dirty.current}
-          onClick={() => void perform("save")}
-        >
-          {pending === "save" ? "Saving…" : "Save model settings"}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={pending !== undefined || !dirty.current}
-          onClick={() => {
-            dirty.current = false
-            setSaved(false)
-            setRevision((value) => value + 1)
-          }}
-        >
-          Discard changes
-        </Button>
-      </div>
+      {status.pending ? <p role="status">Applying changes…</p> : null}
+      {status.error ? (
+        <div className="provider-message">
+          <p role="alert">{status.error}</p>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              // Retrying explicitly reapplies the retained local edits to the current
+              // configuration version after an operational failure or conflict.
+              void getAppRpcClient(apiBase)
+                .request("provider/models/read", { provider })
+                .then(
+                  (response) => {
+                    snapshot.current = response
+                    void writer.flush()
+                  },
+                  (cause: unknown) => {
+                    if (mounted.current)
+                      setStatus({
+                        pending: false,
+                        error:
+                          cause instanceof Error
+                            ? cause.message
+                            : "Could not load models.",
+                      })
+                  },
+                )
+            }}
+          >
+            Retry changes
+          </Button>
+        </div>
+      ) : null}
     </>
   )
 }

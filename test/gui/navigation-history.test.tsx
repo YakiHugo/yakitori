@@ -97,3 +97,42 @@ it("drops destinations belonging to a previous API server", async () => {
   expect(result.current.canGoBack).toBe(false)
   expect(result.current.canGoForward).toBe(false)
 })
+
+it("traverses account creation, details and the model configuration pane", async () => {
+  const { result } = renderHook(useNavigationHistory)
+  const app = () => useAppStore.getState()
+  await act(async () => app().openSettings("providers"))
+  await act(async () => app().setProviderSettingsPage({ kind: "catalog" }))
+  await act(async () => result.current.back())
+  expect(app().providerSettingsPage).toEqual({ kind: "accounts" })
+  await act(async () => result.current.forward())
+  expect(app().providerSettingsPage).toEqual({ kind: "catalog" })
+  await act(async () =>
+    app().setProviderSettingsPage({
+      kind: "account",
+      accountKind: "configured",
+      accountId: "work",
+    }),
+  )
+  await act(async () =>
+    app().setProviderSettingsPage({
+      kind: "account",
+      accountKind: "configured",
+      accountId: "work",
+      modelId: "coder",
+    }),
+  )
+  await act(async () => result.current.back())
+  expect(app().providerSettingsPage).toEqual({
+    kind: "account",
+    accountKind: "configured",
+    accountId: "work",
+  })
+  await act(async () => result.current.forward())
+  expect(app().providerSettingsPage).toEqual({
+    kind: "account",
+    accountKind: "configured",
+    accountId: "work",
+    modelId: "coder",
+  })
+})

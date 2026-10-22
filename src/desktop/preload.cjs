@@ -2,6 +2,9 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron")
 
 contextBridge.exposeInMainWorld("yakitoriDesktop", {
   platform: process.platform,
+  focusWindow() {
+    return ipcRenderer.invoke("yakitori:focus-window")
+  },
   notifications: {
     permission: () => ipcRenderer.invoke("yakitori:notification-permission"),
     show: (input) => ipcRenderer.invoke("yakitori:notification-show", input),

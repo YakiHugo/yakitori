@@ -18,16 +18,13 @@ import type { ThreadManager } from "../core/thread-manager.ts"
 import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
 import {
   inputContentAttachments,
-  inputContentFromModelMessage,
   inputContentText,
   isInputContent,
   replaceInputAttachments,
 } from "../core/user-input.ts"
 import {
   AttachmentConflictError,
-  createEventEnvelope,
   createRequestId,
-  EVENT_SCHEMA_VERSION,
   type EventMetadata,
   ForkReason,
   IdPrefix,
@@ -45,7 +42,6 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
-import type { AppSessionEventEnvelope } from "../protocol/events.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
@@ -62,6 +58,7 @@ import {
   InputQueueFullError,
   type QueuedInput,
 } from "./input-queue.ts"
+import { ModelRouteError } from "./model-router.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -101,9 +98,14 @@ import {
   QueuedSessionArchivedError,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
+import {
+  mapRolloutEvent,
+  modelUserInputContent,
+} from "./session-event-projection.ts"
 import { AppSessionService } from "./session-service.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
+import { ApiBoundaryError, invalidInput } from "./thread-handler-errors.ts"
 import { readWorkspaceGitInfo } from "./workspace.ts"
 
 // Input payload allocation boundary for local RPC commands, independent of
@@ -146,6 +148,7 @@ export type ThreadServerHandlerOptions = {
   ) => readonly RuntimePermissionRequest[]
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
+  readonly prepareModelRouting?: () => Promise<void>
   // Fire-and-forget first-input title naming; absent in tests/embedders
   // without a model directory.
   readonly sessionTitle?: SessionTitleGenerator
@@ -871,6 +874,7 @@ export function createThreadServerHandlers(
       content: InputContent,
     ) => Promise<TurnInputSubmission>,
   ) => {
+    await options.prepareModelRouting?.()
     if ((await options.store.sessionPresentation(request.sessionId)).archived)
       throw conflict("Restore this conversation before sending a message.")
     requireAvailableProvider(
@@ -1946,6 +1950,7 @@ export function createThreadServerHandlers(
     // carries the steered Turn id rather than a durable input event.
     async steerInput(input) {
       try {
+        await options.prepareModelRouting?.()
         const request = requireSteerInputRequest(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
@@ -2029,6 +2034,7 @@ export function createThreadServerHandlers(
 
     async compactSession(input) {
       try {
+        await options.prepareModelRouting?.()
         const request = requireCompactSessionRequest(input)
         if (
           (await options.store.sessionPresentation(request.sessionId)).archived
@@ -2273,7 +2279,11 @@ async function mapStoredThread(
       : { active: true, activeTurnId: live.snapshot().activeTurnId }),
     ...(currentContext === undefined
       ? {}
-      : { currentModel: currentContext.context.selection }),
+      : {
+          currentModel:
+            currentContext.context.configuration.modelChoice ??
+            currentContext.context.selection,
+        }),
     ...(usage === undefined ? {} : { usage }),
     ...(cacheExpiry === undefined ? {} : { cacheExpiry }),
     pendingInputs: pendingQueue.map((entry) => ({
@@ -2318,164 +2328,6 @@ async function liveProjectIds(
     if ((await store.readProject(id)) !== undefined) live.add(id)
   }
   return live
-}
-
-function mapRolloutEvent(
-  record: StoredRolloutItem,
-  threadId: string,
-): AppSessionEventEnvelope {
-  const item = record.item
-  const base = {
-    sessionId: threadId,
-    seq: hostSeq(record),
-    id: `event_${threadId}_${record.rolloutId}_${record.seq}`,
-    createdAt: record.createdAt,
-  }
-  if (item.type === "session_meta") {
-    const metadata = item.metadata
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "session.created",
-        data: {
-          conversationId: metadata.conversationId,
-          ...(metadata.title === undefined ? {} : { title: metadata.title }),
-          ...(metadata.workingDirectory === undefined
-            ? {}
-            : { workingDirectory: metadata.workingDirectory }),
-          ...(metadata.projectId === undefined
-            ? {}
-            : { projectId: metadata.projectId }),
-          ...(metadata.mateId === undefined ? {} : { mateId: metadata.mateId }),
-          ...(metadata.mateRevisionId === undefined
-            ? {}
-            : { mateRevisionId: metadata.mateRevisionId }),
-          ...(metadata.parentThreadId === undefined
-            ? {}
-            : { parentSessionId: metadata.parentThreadId }),
-          ...(metadata.forkedFromInputId === undefined
-            ? {}
-            : { forkedFromInputId: metadata.forkedFromInputId }),
-          ...(metadata.forkReason === undefined
-            ? {}
-            : { forkReason: metadata.forkReason }),
-          ...(metadata.metadata === undefined
-            ? {}
-            : { metadata: metadata.metadata }),
-        },
-      },
-    })
-  }
-  if (
-    item.type === "response_item" &&
-    item.item.item.role === "user" &&
-    (item.item.id.startsWith("input_") ||
-      item.item.id.startsWith("message_")) &&
-    item.item.item.context === undefined
-  ) {
-    // message_-prefixed user items are steered inputs, recorded when the
-    // active Turn sampled them; input_-prefixed items start Turns.
-    const steered = item.item.id.startsWith("message_")
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "input.admitted",
-        data: {
-          requestId: item.item.turnId,
-          inputId: item.item.id,
-          role: InputRole.User,
-          ...(steered ? { steered: true } : {}),
-          content:
-            item.item.submissionMetadata?.content ??
-            modelUserInputContent(item.item.item),
-          ...(item.item.submissionMetadata?.modelSelection === undefined
-            ? {}
-            : {
-                modelSelection: item.item.submissionMetadata.modelSelection,
-              }),
-          ...(item.item.submissionMetadata?.parentInputId === undefined
-            ? {}
-            : { parentInputId: item.item.submissionMetadata.parentInputId }),
-          ...(item.item.submissionMetadata?.metadata === undefined
-            ? {}
-            : { metadata: item.item.submissionMetadata.metadata }),
-        },
-      },
-    })
-  }
-  if (item.type === "turn_started") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "turn.started",
-        data: { turnId: item.turnId, inputId: item.inputItemId },
-      },
-    })
-  }
-  if (item.type === "turn_completed") {
-    const outcome =
-      item.outcome === "completed"
-        ? ({ status: "completed", ...item.completion } as const)
-        : item.outcome === "interrupted"
-          ? ({ status: "interrupted" } as const)
-          : ({
-              status: "failed",
-              error: item.error ?? { message: "Turn execution failed." },
-            } as const)
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "turn.completed",
-        data: {
-          turnId: item.turnId,
-          outcome,
-          ...(item.usage === undefined ? {} : { usage: item.usage }),
-          ...(item.metrics === undefined ? {} : { metrics: item.metrics }),
-        },
-      },
-    })
-  }
-  if (item.type === "item_started") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "item.started",
-        data: { turnId: item.turnId, item: item.item },
-      },
-    })
-  }
-  if (item.type === "token_count") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "context.tokens",
-        data: {
-          turnId: item.turnId,
-          activeContextTokens: item.activeContextTokens,
-          ...(item.capacityTokens === undefined
-            ? {}
-            : { capacityTokens: item.capacityTokens }),
-          ...(item.provider === undefined ? {} : { provider: item.provider }),
-          ...(item.model === undefined ? {} : { model: item.model }),
-        },
-      },
-    })
-  }
-  if (item.type === "item_completed") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "item.completed",
-        data: { turnId: item.turnId, item: item.item },
-      },
-    })
-  }
-  return {
-    ...base,
-    version: EVENT_SCHEMA_VERSION,
-    type: "session.cursor",
-    data: {},
-  }
 }
 
 function threadSeq(stored: StoredThread): number {
@@ -2549,15 +2401,6 @@ function turnIdForInput(stored: StoredThread, inputId: string): string {
     sessionId: stored.metadata.id,
     inputId,
   })
-}
-
-function modelUserInputContent(
-  message: import("../kernel/events.ts").ModelUserMessage,
-): InputContent {
-  const content = inputContentFromModelMessage(message)
-  if (content === undefined)
-    throw invalidInput("Input attachments require portable asset sources.")
-  return content
 }
 
 function requireRolloutAssets(
@@ -3315,6 +3158,8 @@ function fail(
 }
 
 function mapError(error: unknown): ApiBoundaryError {
+  if (error instanceof ModelRouteError)
+    return invalidInput(error.message, { field: "modelSelection" })
   if (error instanceof ApiBoundaryError) return error
   if (error instanceof GoalToolError) return conflict(error.message)
   if (!isYakitoriError(error)) {
@@ -3332,13 +3177,6 @@ function mapError(error: unknown): ApiBoundaryError {
   }
 
   return internalError(error.message, error.details)
-}
-
-function invalidInput(
-  message: string,
-  details?: EventMetadata,
-): ApiBoundaryError {
-  return new ApiBoundaryError(ApiErrorCode.InvalidInput, message, details)
 }
 
 function invalidCursor(
@@ -3361,18 +3199,6 @@ function internalError(
   details?: EventMetadata,
 ): ApiBoundaryError {
   return new ApiBoundaryError(ApiErrorCode.InternalError, message, details)
-}
-
-class ApiBoundaryError extends Error {
-  readonly code: ApiErrorCode
-  readonly details?: EventMetadata
-
-  constructor(code: ApiErrorCode, message: string, details?: EventMetadata) {
-    super(message)
-    this.name = "ApiBoundaryError"
-    this.code = code
-    if (details !== undefined) this.details = details
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

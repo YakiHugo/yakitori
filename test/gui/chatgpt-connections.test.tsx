@@ -10,7 +10,13 @@ import {
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import { ChatGPTConnections } from "../../src/gui/components/chatgpt-connections.tsx"
+import {
+  ChatGPTAccountDialogs,
+  ChatGPTAccountRows,
+  ChatGPTAccountActions,
+} from "../../src/gui/components/chatgpt-connections.tsx"
+import { useChatGPTConnections } from "../../src/gui/components/use-chatgpt-connections.ts"
+import { ChatGPTUsageLink } from "../../src/gui/components/chatgpt-usage-link.tsx"
 import { ModelSelector } from "../../src/gui/components/model-selector.tsx"
 import {
   createInitialAppState,
@@ -35,6 +41,47 @@ vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
     },
   }),
 }))
+// Isolate the auth controller/dialog lifecycle from account catalog navigation.
+// The production account rows are shared with the unified account list.
+function ChatGPTAuthHarness({
+  apiBase,
+  active,
+}: Readonly<{ apiBase: string; active: boolean }>) {
+  const connection = useChatGPTConnections(apiBase, active)
+  const blocked =
+    connection.pending || connection.state?.attempt?.state === "waiting"
+  return (
+    <>
+      {connection.state?.accounts.length === 0 ? (
+        <button
+          type="button"
+          disabled={blocked}
+          onClick={() => void connection.signIn({})}
+        >
+          Continue with ChatGPT
+        </button>
+      ) : connection.state ? (
+        <button
+          type="button"
+          disabled={blocked}
+          onClick={() => connection.open()}
+        >
+          Add account
+        </button>
+      ) : null}
+      <ChatGPTAccountRows connection={connection} onOpen={() => {}} />
+      {connection.state?.accounts.map((account) => (
+        <ChatGPTAccountActions
+          key={account.id}
+          connection={connection}
+          accountId={account.id}
+        />
+      ))}
+      <ChatGPTAccountDialogs connection={connection} active={active} />
+      <ChatGPTUsageLink />
+    </>
+  )
+}
 const empty: ChatGPTConnectionState = { accounts: [], welcomeRequired: false }
 const account = {
   id: "profile-personal",
@@ -78,7 +125,7 @@ async function notify() {
 
 it("starts sign-in once and cancels the exact attempt on dismissal without rendering auth data", async () => {
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   const button = await screen.findByRole("button", {
     name: "Continue with ChatGPT",
   })
@@ -99,9 +146,42 @@ it("starts sign-in once and cancels the exact attempt on dismissal without rende
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
 })
 
+it("returns to the desktop once after its own sign-in completes and does not focus saved sessions", async () => {
+  const focusWindow = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(window, "yakitoriDesktop", {
+    configurable: true,
+    value: { focusWindow },
+  })
+  state = { ...empty, attempt: { id: "saved", state: "succeeded" } }
+  try {
+    const user = userEvent.setup()
+    render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
+    await screen.findByRole("button", { name: "Continue with ChatGPT" })
+    expect(focusWindow).not.toHaveBeenCalled()
+    await user.click(
+      screen.getByRole("button", { name: "Continue with ChatGPT" }),
+    )
+    await screen.findByText("Waiting for sign-in in your system browser…")
+    state = {
+      accounts: [account],
+      welcomeRequired: false,
+      attempt: { id: "attempt-one", state: "succeeded" },
+    }
+    await notify()
+    await waitFor(() => expect(focusWindow).toHaveBeenCalledOnce())
+    await notify()
+    expect(focusWindow).toHaveBeenCalledOnce()
+  } finally {
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: undefined,
+    })
+  }
+})
+
 it("keeps sign-in open when the opening double-click lands on the new native backdrop", async () => {
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )
@@ -139,7 +219,7 @@ it("cancels a browser launch that resolves after its panel was closed", async ()
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )
@@ -158,14 +238,14 @@ it("cancels a browser launch that resolves after its panel was closed", async ()
 it("cancels on navigation away without cancelling twice on unmount", async () => {
   const user = userEvent.setup()
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )
   await screen.findByText("Waiting for sign-in in your system browser…")
   view.rerender(
-    <ChatGPTConnections apiBase="http://localhost:4100" active={false} />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active={false} />,
   )
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith("chatgpt/cancel", {
@@ -194,7 +274,7 @@ it("keeps saved accounts with matching emails distinct and reconnects the chosen
     welcomeRequired: false,
   }
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await screen.findByText("Personal")
   expect(screen.getByText("Work")).toBeDefined()
   expect(screen.getAllByText("same@example.test")).toHaveLength(2)
@@ -214,7 +294,7 @@ it("adds a labeled account without reusing a saved registration", async () => {
     attempt: { id: "old", state: "succeeded" },
   }
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(await screen.findByRole("button", { name: "Add account" }))
   await user.type(
     screen.getByRole("textbox", { name: "Account label" }),
@@ -230,7 +310,7 @@ it("adds a labeled account without reusing a saved registration", async () => {
 
 it("keeps declined plan permission as identity-only and never shows the plan welcome", async () => {
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )
@@ -262,7 +342,7 @@ it("acknowledges the first plan welcome once and preserves that state across lat
     throw new Error(method)
   })
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
@@ -282,7 +362,7 @@ it("acknowledges the first plan welcome once and preserves that state across lat
     request.mock.calls.filter(([method]) => method === "chatgpt/acknowledge"),
   ).toHaveLength(1)
   view.unmount()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await screen.findByText("Personal")
   expect(screen.queryByRole("dialog")).toBeNull()
 })
@@ -301,7 +381,7 @@ it("discloses unconfirmed remote revocation after local signout with a usage-set
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Sign out Personal" }),
   )
@@ -320,7 +400,7 @@ it("discloses unconfirmed remote revocation after local signout with a usage-set
 it("ignores an older read after a newer sign-out action", async () => {
   state = { accounts: [account], welcomeRequired: false }
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await screen.findByText("Personal")
   let staleRead: ((value: ChatGPTConnectionState) => void) | undefined
   request.mockImplementation(async (method) => {
@@ -342,7 +422,8 @@ it("ignores an older read after a newer sign-out action", async () => {
   expect(screen.getByText("Signed out on this device")).toBeDefined()
 })
 
-it("shows ChatGPT plan use for the selected account and removes it for other providers", async () => {
+it("disambiguates matching model labels by service and returns the logical selection", async () => {
+  const change = vi.fn()
   const model = {
     id: "test-model",
     instructionProfileId: "test",
@@ -350,35 +431,27 @@ it("shows ChatGPT plan use for the selected account and removes it for other pro
   }
   useAppStore.setState({
     providers: [
-      {
-        name: "chatgpt-profile-personal",
-        displayName: "ChatGPT · Personal",
-        models: [model],
-      },
-      { name: "codex", models: [model] },
+      { name: "openai", displayName: "OpenAI", models: [model] },
+      { name: "other", displayName: "Other", models: [model] },
     ],
-    defaultProvider: "chatgpt-profile-personal",
+    defaultProvider: "openai",
     defaultModel: "test-model",
   })
-  const { rerender } = render(
+  const user = userEvent.setup()
+  render(
     <ModelSelector
-      selection={{ provider: "chatgpt-profile-personal", model: "test-model" }}
-      onChange={() => {}}
+      selection={{ provider: "openai", model: "test-model" }}
+      onChange={change}
     />,
   )
-  expect(screen.getByText("Using ChatGPT plan")).toBeDefined()
-  const user = userEvent.setup()
   await user.click(
     screen.getByRole("button", { name: "Select model and effort" }),
   )
-  expect(screen.getByText("ChatGPT · Personal")).toBeDefined()
-  rerender(
-    <ModelSelector
-      selection={{ provider: "codex", model: "test-model" }}
-      onChange={() => {}}
-    />,
-  )
-  expect(screen.queryByText("Using ChatGPT plan")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Test model Other" }))
+  expect(change).toHaveBeenCalledWith({
+    provider: "other",
+    model: "test-model",
+  })
 })
 
 it("attempts cancellation after an unresolved launch unmounts and reports failure visibly", async () => {
@@ -395,7 +468,7 @@ it("attempts cancellation after an unresolved launch unmounts and reports failur
   })
   const user = userEvent.setup()
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
@@ -412,7 +485,7 @@ it("attempts cancellation after an unresolved launch unmounts and reports failur
 
 it("allows cancelling again after a failed cancellation and blocks another sign-in", async () => {
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )
@@ -444,7 +517,7 @@ it("allows cancelling again after a failed cancellation and blocks another sign-
 it("rejects duplicate account labels before starting authentication", async () => {
   state = { accounts: [account], welcomeRequired: false }
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(await screen.findByRole("button", { name: "Add account" }))
   await user.type(
     screen.getByRole("textbox", { name: "Account label" }),
@@ -469,7 +542,7 @@ it("keeps welcome acknowledgement retryable after dismissing during a failed sav
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await screen.findByRole("dialog", { name: "You’re using your ChatGPT plan" })
   await user.click(screen.getByRole("button", { name: "Close" }))
   const error = await screen.findByRole("alert")
@@ -484,7 +557,7 @@ it("keeps welcome acknowledgement retryable after dismissing during a failed sav
 it("polls waiting attempts without overlapping slow reads", async () => {
   vi.useFakeTimers()
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   await act(async () => {})
   await act(async () => {
@@ -528,7 +601,7 @@ it("retries a failed reconnect against the same saved registration", async () =>
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Reconnect Personal" }),
   )
@@ -574,12 +647,10 @@ it("shows an account catalog failure while keeping other model choices available
   await user.click(
     screen.getByRole("button", { name: "Select model and effort" }),
   )
-  expect(screen.getByText("ChatGPT · Personal")).toBeDefined()
-  expect(screen.getByRole("status").textContent).toContain(
-    "Could not load this account’s models",
-  )
   expect(screen.getByRole("button", { name: "Working model" })).toBeDefined()
-  await user.click(screen.getByRole("button", { name: "Manage connection" }))
+  await user.click(
+    screen.getByRole("button", { name: "Some accounts need attention" }),
+  )
   expect(useAppStore.getState().settingsSection).toBe("providers")
 })
 
@@ -596,13 +667,13 @@ it("resynchronizes signout and its revocation warning after navigating away duri
   })
   const user = userEvent.setup()
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   await user.click(
     await screen.findByRole("button", { name: "Sign out Personal" }),
   )
   view.rerender(
-    <ChatGPTConnections apiBase="http://localhost:4100" active={false} />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active={false} />,
   )
   state = {
     accounts: [
@@ -612,7 +683,7 @@ it("resynchronizes signout and its revocation warning after navigating away duri
   }
   await notify()
   await act(async () => finish?.(state))
-  view.rerender(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  view.rerender(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   expect(
     await screen.findByText(/Remote revocation wasn’t confirmed/),
   ).toBeDefined()
@@ -633,13 +704,13 @@ it("restarts a dismissed initial read when the settings section becomes active a
     throw new Error(method)
   })
   const view = render(
-    <ChatGPTConnections apiBase="http://localhost:4100" active />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active />,
   )
   view.rerender(
-    <ChatGPTConnections apiBase="http://localhost:4100" active={false} />,
+    <ChatGPTAuthHarness apiBase="http://localhost:4100" active={false} />,
   )
   await act(async () => finish?.(empty))
-  view.rerender(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  view.rerender(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   expect(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   ).toBeDefined()
@@ -673,7 +744,7 @@ it("retries a newly named failed attempt against its persisted registration", as
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(await screen.findByRole("button", { name: "Add account" }))
   await user.type(
     screen.getByRole("textbox", { name: "Account label" }),
@@ -702,7 +773,7 @@ it("opens Manage usage through the desktop bridge without navigating the rendere
   })
   try {
     const user = userEvent.setup()
-    render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+    render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
     await screen.findByRole("button", { name: "Continue with ChatGPT" })
     const original = window.location.href
     await user.click(screen.getByRole("link", { name: "Manage usage ↗" }))
@@ -733,7 +804,7 @@ it("reconciles a terminal sign-in after early dismissal without reopening the di
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Reconnect Personal" }),
   )
@@ -760,7 +831,7 @@ it("ignores a failed browser launch after the sign-in was dismissed", async () =
     throw new Error(method)
   })
   const user = userEvent.setup()
-  render(<ChatGPTConnections apiBase="http://localhost:4100" active />)
+  render(<ChatGPTAuthHarness apiBase="http://localhost:4100" active />)
   await user.click(
     await screen.findByRole("button", { name: "Continue with ChatGPT" }),
   )

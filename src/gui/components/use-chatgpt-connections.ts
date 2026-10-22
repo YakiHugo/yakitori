@@ -17,6 +17,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
   const epoch = useRef(0)
   const readSequence = useRef(0)
   const attemptId = useRef<string | undefined>(undefined)
+  const ownedAttempt = useRef<string | undefined>(undefined)
   const cancellations = useRef(
     new Map<string, Promise<ChatGPTConnectionState>>(),
   )
@@ -36,6 +37,19 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
   )
 
   const apply = useCallback((next: ChatGPTConnectionState) => {
+    if (
+      ownedAttempt.current !== undefined &&
+      next.attempt?.id === ownedAttempt.current &&
+      (next.attempt.state === "succeeded" ||
+        next.attempt.state === "identity_only")
+    ) {
+      ownedAttempt.current = undefined
+      void window.yakitoriDesktop?.focusWindow().catch(() => {
+        setError(
+          "Sign-in completed, but Yakitori could not return to the foreground.",
+        )
+      })
+    }
     attemptId.current =
       next.attempt?.state === "waiting" ? next.attempt.id : undefined
     const snapshot = JSON.stringify(next.accounts)
@@ -87,6 +101,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
     return () => {
       mounted.current = false
       epoch.current++
+      ownedAttempt.current = undefined
       unsubscribe()
       const id = attemptId.current
       attemptId.current = undefined
@@ -117,6 +132,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
 
   const close = useCallback(async () => {
     epoch.current++
+    ownedAttempt.current = undefined
     setDialog(undefined)
     const id = attemptId.current
     attemptId.current = undefined
@@ -184,6 +200,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
         return
       }
       setReconnectingAccountId(next.attempt?.accountId ?? params.accountId)
+      ownedAttempt.current = next.attempt?.id
       apply(next)
     } catch {
       if (mounted.current && revision === epoch.current)
@@ -245,3 +262,7 @@ export function useChatGPTConnections(apiBase: string, active: boolean) {
       }),
   }
 }
+
+export type ChatGPTConnectionController = ReturnType<
+  typeof useChatGPTConnections
+>

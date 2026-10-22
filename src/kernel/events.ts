@@ -189,21 +189,24 @@ export type ModelTransportPolicy = ModelRequestPolicy &
     providers?: Readonly<Record<string, ModelRequestPolicy>>
   }>
 
-export type SessionConfigurationSnapshot = {
-  readonly schemaVersion: 5
-  readonly collaborationToolsVersion?: 2
-  readonly workspaceRoot: string
-  readonly promptCacheKey: string
-  readonly defaultTarget: ModelSelection
-  readonly baseInstructions: BaseInstructionsSnapshot
-  readonly enabledTools: readonly string[]
-  readonly approvalPolicy: ApprovalPolicy
-  readonly executionPolicyDefaults: SessionExecutionPolicyDefaultsSnapshot
-  readonly modelContextWindowTokens?: number
-  readonly modelAutoCompactTokenLimit?: number
-  readonly modelAutoCompactTokenLimitScope: AutoCompactTokenLimitScope
-  readonly modelTransport?: ModelTransportPolicy
-}
+export type SessionConfigurationSnapshot = Readonly<{
+  schemaVersion: 5
+  collaborationToolsVersion?: 2
+  workspaceRoot: string
+  promptCacheKey: string
+  defaultTarget: ModelSelection
+  // User-facing model identity; defaultTarget records the resolved account/model.
+  modelChoice?: ModelSelection
+  serviceId?: string
+  baseInstructions: BaseInstructionsSnapshot
+  enabledTools: readonly string[]
+  approvalPolicy: ApprovalPolicy
+  executionPolicyDefaults: SessionExecutionPolicyDefaultsSnapshot
+  modelContextWindowTokens?: number
+  modelAutoCompactTokenLimit?: number
+  modelAutoCompactTokenLimitScope: AutoCompactTokenLimitScope
+  modelTransport?: ModelTransportPolicy
+}>
 
 export type TurnExecutionContext = {
   readonly mateId: string
@@ -1128,6 +1131,8 @@ export function isSessionConfigurationSnapshot(
       "workspaceRoot",
       "promptCacheKey",
       "defaultTarget",
+      "modelChoice",
+      "serviceId",
       "baseInstructions",
       "enabledTools",
       "approvalPolicy",
@@ -1144,6 +1149,8 @@ export function isSessionConfigurationSnapshot(
     !isString(value.promptCacheKey) ||
     value.promptCacheKey.trim().length === 0 ||
     !isModelSelection(value.defaultTarget) ||
+    (value.modelChoice !== undefined && !isModelSelection(value.modelChoice)) ||
+    (value.serviceId !== undefined && !isString(value.serviceId)) ||
     !isBaseInstructionsSnapshot(value.baseInstructions) ||
     !Array.isArray(value.enabledTools) ||
     !value.enabledTools.every(isString) ||

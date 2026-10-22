@@ -45,6 +45,9 @@ vi.mock("../../src/desktop/attachment-importer.ts", () => ({
 vi.mock("../../src/desktop/clipboard-writer.ts", () => ({
   registerClipboardWriter: vi.fn(),
 }))
+vi.mock("../../src/desktop/window-focus.ts", () => ({
+  registerWindowFocus: vi.fn(),
+}))
 vi.mock("../../src/desktop/completion-notifications.ts", () => ({
   registerCompletionNotifications: vi.fn(),
 }))

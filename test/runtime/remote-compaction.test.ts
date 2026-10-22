@@ -197,7 +197,7 @@ describe("provider-native compaction history", () => {
       normalCalls += 1
       if (normalCalls === 2 || normalCalls === 3)
         expect(nativeItems(request)).toEqual([checkpoint])
-      if (request.target.provider === "kimi") {
+      if (request.target.provider === "kimi-code") {
         expect(nativeItems(request)).toEqual([])
         expect(JSON.stringify(request.messages)).toContain("Portable progress")
         expect(JSON.stringify(request.messages)).toContain(
@@ -280,7 +280,7 @@ describe("provider-native compaction history", () => {
       content: inputFixture([
         { type: "text" as const, text: "Continue with Kimi." },
       ]),
-      modelSelection: { provider: "kimi", model: "kimi-k2.5" },
+      modelSelection: { provider: "kimi-code", model: "kimi-k2.5" },
     })
     await expect
       .poll(() => resumed.agentStatus)
@@ -380,7 +380,7 @@ async function setup(stream: StreamFn) {
   const store = new JsonlThreadStore({ root })
   const registry = createProviderRegistry(
     Object.fromEntries(
-      ["codex", "kimi"].map((id) => [
+      ["codex", "kimi-code"].map((id) => [
         id,
         createModelProvider({
           info: {

@@ -194,16 +194,26 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   await expect(health).toBeOK()
   expect(await health.json()).toEqual({ ok: true })
 
+  await application.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0]?.minimize()
+  })
   const bridge = await page.evaluate(async () => {
     const desktop = window.yakitoriDesktop
     if (desktop === undefined)
       throw new Error("Desktop preload bridge is missing.")
+    await desktop.focusWindow()
     return {
       platform: desktop.platform,
       permission: await desktop.notifications.permission(),
     }
   })
   expect(bridge.platform).toBe("darwin")
+  expect(
+    await application.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      return { visible: window?.isVisible(), minimized: window?.isMinimized() }
+    }),
+  ).toEqual({ visible: true, minimized: false })
   expect(["granted", "unsupported"]).toContain(bridge.permission)
   await page
     .getByRole("button", { name: "Show workspace", exact: true })

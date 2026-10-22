@@ -11,23 +11,21 @@ import type {
 import { isSessionConfigurationSnapshot } from "../kernel/index.ts"
 import {
   createSessionExecutionPolicy,
-  SessionExecutionPolicyDefaults,
   type SessionExecutionPolicy,
+  SessionExecutionPolicyDefaults,
 } from "./limits.ts"
+import type { ModelSystemSection, ModelTarget } from "./model.ts"
 import {
   catalogModelCapacity,
   DefaultToolOutputTruncation,
   type ResolvedModel,
-  resolveModel,
   validateModelSelection,
 } from "./model-catalog.ts"
-import {
-  type ModelSystemSection,
-  type ModelTarget,
-  resolveModelRequestMaxOutputTokens,
-} from "./model.ts"
 import type { ModelRequestPolicy } from "./model-request.ts"
-import type { ModelsManager } from "./models-manager.ts"
+import {
+  createStaticModelsManager,
+  type ModelsManager,
+} from "./models-manager.ts"
 import { getModelInstructions } from "./prompt-registry.ts"
 
 export type { ApprovalPolicy } from "../kernel/index.ts"
@@ -181,10 +179,7 @@ export class SessionConfiguration {
     )
     const effort = selection.effort ?? model.defaultEffort
     const prompt = getModelInstructions(model)
-    const requestedOutputTokens = resolveModelRequestMaxOutputTokens(
-      model.provider,
-      model.defaultOutputTokens,
-    )
+    const requestedOutputTokens = model.defaultOutputTokens
     const maxOutputTokens =
       requestedOutputTokens === undefined
         ? undefined
@@ -485,7 +480,7 @@ function resolveSelection(
   models: ModelsManager | undefined,
 ) {
   return models === undefined
-    ? resolveModel(selection)
+    ? createStaticModelsManager(selection.provider).resolve(selection)
     : models.resolve(selection)
 }
 

@@ -1,4 +1,4 @@
-import { LoaderCircle, RefreshCw } from "lucide-react"
+import { LoaderCircle } from "lucide-react"
 import { useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import {
@@ -33,18 +33,26 @@ export function UsageSection() {
     <div className="usage-dashboard">
       <div className="settings-section-heading settings-usage-heading">
         <h3>Usage</h3>
-        <button
-          type="button"
-          aria-label="Refresh usage"
-          disabled={usage.loading}
-          onClick={() => void loadUsage()}
-        >
-          {usage.loading ? (
-            <LoaderCircle size={16} className="animate-spin" />
-          ) : (
-            <RefreshCw size={16} />
-          )}
-        </button>
+        {usage.error || (summary?.unavailableThreads ?? 0) > 0 ? (
+          <button
+            type="button"
+            aria-label="Retry usage"
+            disabled={usage.loading}
+            onClick={() => void loadUsage()}
+          >
+            {usage.loading ? (
+              <LoaderCircle size={16} className="animate-spin" />
+            ) : (
+              "Retry"
+            )}
+          </button>
+        ) : usage.loading ? (
+          <LoaderCircle
+            size={16}
+            className="animate-spin"
+            aria-label="Loading usage"
+          />
+        ) : null}
       </div>
       {usage.error && (
         <p role="alert">
@@ -56,7 +64,7 @@ export function UsageSection() {
         <p role="alert">
           Usage is incomplete: {summary?.unavailableThreads} conversation{" "}
           {summary?.unavailableThreads === 1 ? "history" : "histories"} could
-          not be read. Refresh to retry.
+          not be read. You can retry loading them.
         </p>
       )}
       {!summary || !view ? (
@@ -64,7 +72,7 @@ export function UsageSection() {
           {usage.loading
             ? "Loading usage…"
             : usage.error
-              ? "Refresh to try again."
+              ? "Retry to load usage."
               : "Usage has not been loaded."}
         </p>
       ) : (

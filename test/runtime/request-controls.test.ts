@@ -46,7 +46,7 @@ it.each(
     api === "openai_responses"
       ? createOpenAIProvider(options)
       : api === "anthropic_messages"
-        ? createAnthropicProvider(options)
+        ? createAnthropicProvider({ ...options, profile: "anthropic" })
         : api === "openai_chat_completions"
           ? createChatCompletionsProvider(options)
           : createGeminiProvider(options)

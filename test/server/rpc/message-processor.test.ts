@@ -1,10 +1,6 @@
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  ConfigVersionConflictError,
-  createUserConfigStore,
-} from "../../../src/server/user-config.ts"
 import { describe, expect, it } from "vitest"
 import {
   INTERNAL_ERROR,
@@ -23,6 +19,10 @@ import {
 import type {
   ConfigValueWrite,
   UserConfigStore,
+} from "../../../src/server/user-config.ts"
+import {
+  ConfigVersionConflictError,
+  createUserConfigStore,
 } from "../../../src/server/user-config.ts"
 import {
   createFakeHandlers,
@@ -261,6 +261,7 @@ describe("method dispatch", () => {
       handlers: createFakeHandlers(),
       projectStore,
       providers: async () => ({
+        accounts: [],
         providers: [{ name: "fake", models: [] }],
         defaultProvider: "fake",
         defaultModel: "fake-model",
@@ -310,7 +311,7 @@ describe("method dispatch", () => {
     })
     expect(requestedSubscriptions).toEqual(["codex"])
     await expect(
-      connection.sendRequest("subscription/read", { provider: "unknown" }),
+      connection.sendRequest("subscription/read", { provider: "" }),
     ).resolves.toMatchObject({ error: { code: INVALID_PARAMS } })
     expect(requestedSubscriptions).toEqual(["codex"])
     projectStore.close()
@@ -648,6 +649,7 @@ describe("serialization scopes", () => {
       providers: async () => {
         providersCalled = true
         return {
+          accounts: [],
           providers: [{ name: "fake", models: [] }],
           defaultProvider: "fake",
           defaultModel: "fake-model",

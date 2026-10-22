@@ -18,7 +18,7 @@ import {
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
-  normalizeKimiModelSelection,
+  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
   useExecutionView,
@@ -135,7 +135,7 @@ export function Composer() {
     },
     [getFileIndex],
   )
-  const effectiveModel = normalizeKimiModelSelection(
+  const effectiveModel = normalizeModelSelection(
     resolveEffectiveModel({
       sessionCurrent,
       userPreference,

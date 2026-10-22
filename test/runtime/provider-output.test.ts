@@ -861,28 +861,31 @@ describe("provider output completeness", () => {
     ["max_time_limit", "unknown"],
   ] as const)("preserves Grok partial text and an unusable tool tail at %s", async (reason, lengthReason) => {
     const events = await collect(
-      openaiStream([
-        {
-          type: "response.output_text.delta",
-          item_id: "message_tail",
-          output_index: 0,
-          content_index: 0,
-          delta: "Partial Grok answer",
-        },
-        {
-          type: "response.output_item.added",
-          output_index: 1,
-          item: {
-            type: "function_call",
-            id: "tool_tail",
-            call_id: "call_tail",
-            name: "write_file",
-            arguments: '{"path":"unfinished.txt"',
-            status: "in_progress",
+      openaiStream(
+        [
+          {
+            type: "response.output_text.delta",
+            item_id: "message_tail",
+            output_index: 0,
+            content_index: 0,
+            delta: "Partial Grok answer",
           },
-        },
-        openaiFinish(reason),
-      ]),
+          {
+            type: "response.output_item.added",
+            output_index: 1,
+            item: {
+              type: "function_call",
+              id: "tool_tail",
+              call_id: "call_tail",
+              name: "write_file",
+              arguments: '{"path":"unfinished.txt"',
+              status: "in_progress",
+            },
+          },
+          openaiFinish(reason),
+        ],
+        "grok",
+      ),
       request("grok"),
     )
     expect(events.some((event) => event.type === "output_item")).toBe(false)
@@ -1102,7 +1105,10 @@ function openaiFinish(
   }
 }
 
-function openaiStream(frames: readonly SseFrame[]): StreamFn {
+function openaiStream(
+  frames: readonly SseFrame[],
+  responseProfile?: "grok",
+): StreamFn {
   const client = new OpenAI({
     apiKey: "test",
     maxRetries: 0,
@@ -1111,7 +1117,12 @@ function openaiStream(frames: readonly SseFrame[]): StreamFn {
         headers: { "content-type": "text/event-stream" },
       }),
   })
-  return createOpenAIProvider({ apiKey: "test", model: "gpt-test", client })
+  return createOpenAIProvider({
+    apiKey: "test",
+    model: "gpt-test",
+    client,
+    ...(responseProfile ? { responseProfile } : {}),
+  })
 }
 
 function streamWithFetch(

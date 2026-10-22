@@ -1,4 +1,4 @@
-import { inputSource } from "../core/session.ts"
+import { inputSource } from "../core/turn-input-metadata.ts"
 import { inputContentText } from "../core/user-input.ts"
 import { createSkillsSection } from "./native-context-sections.ts"
 import {

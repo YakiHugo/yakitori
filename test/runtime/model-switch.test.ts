@@ -191,7 +191,7 @@ describe("pre-sampling model switches", () => {
       content: inputFixture([
         { type: "text" as const, text: "switch provider" },
       ]),
-      modelSelection: { provider: "kimi", model: "new" },
+      modelSelection: { provider: "kimi-code", model: "new" },
     })
     await expect
       .poll(() => thread.agentStatus)
@@ -640,7 +640,7 @@ async function setup(fixtures: Record<string, ModelFixture>, stream: StreamFn) {
   const store = new JsonlThreadStore({ root })
   const registry = createProviderRegistry(
     Object.fromEntries(
-      ["codex", "kimi"].map((provider) => {
+      ["codex", "kimi-code"].map((provider) => {
         const base = createStaticModelsManager(provider)
         return [
           provider,

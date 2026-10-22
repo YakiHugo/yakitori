@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react"
-import { type SettingsSection, useAppStore } from "../store/app-store.ts"
+import {
+  type SettingsSection,
+  type ProviderSettingsPage,
+  useAppStore,
+} from "../store/app-store.ts"
 import {
   chooseNewEngine,
   clearEngineSelection,
@@ -19,7 +23,12 @@ type Destination =
 
 type Visit = {
   destination: Destination
-  settings: SettingsSection | undefined
+  settings:
+    | Readonly<{
+        section: SettingsSection
+        providerPage?: ProviderSettingsPage
+      }>
+    | undefined
   intent: number
 }
 
@@ -37,7 +46,15 @@ function currentVisit(): Visit {
       : app.selection.sessionId
         ? { kind: "session", sessionId: app.selection.sessionId }
         : { kind: "draft", projectId: app.currentProject },
-    settings: app.settingsSection,
+    settings:
+      app.settingsSection === undefined
+        ? undefined
+        : {
+            section: app.settingsSection,
+            ...(app.settingsSection === "providers"
+              ? { providerPage: app.providerSettingsPage }
+              : {}),
+          },
     intent: app.sessionSelectionIntentRevision,
   }
 }
@@ -74,14 +91,16 @@ export function useNavigationHistory() {
           const sameDestination =
             JSON.stringify(previous.destination) ===
             JSON.stringify(next.destination)
-          if (sameDestination && previous.settings === next.settings) {
+          const sameSettings =
+            JSON.stringify(previous.settings) === JSON.stringify(next.settings)
+          if (sameDestination && sameSettings) {
             state.visits[state.index] = next
             return
           }
           // A draft receiving its newly created ID is still the same visit.
           const created =
             previous.intent === next.intent &&
-            previous.settings === next.settings &&
+            sameSettings &&
             ((previous.destination.kind === "draft" &&
               next.destination.kind === "session") ||
               (previous.destination.kind === "engine" &&
@@ -144,8 +163,11 @@ export function useNavigationHistory() {
         else app.clearSessionSelection({ projectId: target.projectId })
       }
     }
-    if (visit.settings) app.openSettings(visit.settings)
-    else app.closeSettings()
+    if (visit.settings) {
+      app.openSettings(visit.settings.section)
+      if (visit.settings.providerPage)
+        app.setProviderSettingsPage(visit.settings.providerPage)
+    } else app.closeSettings()
     setPosition({ back: index > 0, forward: index < state.visits.length - 1 })
   }
   return {

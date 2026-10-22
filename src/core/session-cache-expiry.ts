@@ -39,6 +39,7 @@ export function sessionCacheExpiry(
   if (context?.item.type !== "turn_context") return undefined
 
   const { provider, model } = context.item.context.selection
+  const service = context.item.context.configuration.serviceId
   const lastTurnCompletedAt = lastCompletion.createdAt
   const lastRequestStartedAt = lastCompletion.item.lastRequestStartedAt
   const startedMs =
@@ -52,7 +53,7 @@ export function sessionCacheExpiry(
       ? { expiresAt: new Date(startedMs + minutes * 60_000).toISOString() }
       : {}
 
-  if (provider === "anthropic") {
+  if (service === "anthropic") {
     // Yakitori sends ephemeral cache breakpoints without an explicit TTL.
     return {
       provider,
@@ -67,7 +68,7 @@ export function sessionCacheExpiry(
     }
   }
   if (
-    provider === "openai" &&
+    service === "openai" &&
     /^gpt-(?:[6-9](?:[.-]|$)|5\.(?:[6-9]|\d{2,})(?:[.-]|$))/.test(model)
   ) {
     // GPT-5.6+ has a minimum retention policy; an entry can outlive it.
@@ -84,11 +85,11 @@ export function sessionCacheExpiry(
     }
   }
   const ttlDescription =
-    provider === "openai"
+    service === "openai"
       ? "Retention varies by model and organization"
-      : provider === "grok"
+      : service === "xai"
         ? "Cache may be evicted at any time"
-        : provider === "kimi"
+        : service === "kimi-code"
           ? "Cache lifetime managed by provider"
           : "Cache lifetime unknown"
   return {

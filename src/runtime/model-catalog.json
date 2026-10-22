@@ -180,7 +180,7 @@
       "maxOutputTokens": 64000
     },
     {
-      "provider": "kimi",
+      "provider": "kimi-code",
       "model": "kimi-for-coding",
       "instructionProfileId": "kimi-for-coding",
       "shellToolType": "unified_exec",
@@ -196,7 +196,7 @@
       "effectiveContextWindowPercent": 100
     },
     {
-      "provider": "kimi",
+      "provider": "kimi-code",
       "model": "kimi-for-coding-highspeed",
       "instructionProfileId": "kimi-for-coding-highspeed",
       "shellToolType": "unified_exec",
@@ -210,7 +210,7 @@
       "effectiveContextWindowPercent": 100
     },
     {
-      "provider": "kimi",
+      "provider": "kimi-code",
       "model": "k3",
       "instructionProfileId": "k3",
       "shellToolType": "unified_exec",
@@ -226,7 +226,7 @@
       "effectiveContextWindowPercent": 100
     },
     {
-      "provider": "kimi",
+      "provider": "kimi-code",
       "model": "k3-256k",
       "instructionProfileId": "k3-256k",
       "shellToolType": "unified_exec",

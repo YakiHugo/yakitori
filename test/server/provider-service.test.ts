@@ -1,26 +1,27 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { providerPresets } from "../../src/runtime/provider-presets.ts"
 import {
   createProviderRegistry,
   type ModelRequest,
 } from "../../src/runtime/index.ts"
+import { providerPresets } from "../../src/runtime/provider-presets.ts"
 import { ConfigurationError } from "../../src/server/config-errors.ts"
+import { createModelSourceTool } from "../../src/server/model-source-tools.ts"
 import {
   providerConfigValue,
   requireProviderConfiguration,
 } from "../../src/server/provider-configuration.ts"
-import { createProviderService } from "../../src/server/provider-service.ts"
-import { createModelSourceTool } from "../../src/server/model-source-tools.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
+import { createProviderService } from "../../src/server/provider-service.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
 
 const directories: string[] = []
 afterEach(async () => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   await Promise.all(
     directories
       .splice(0)
@@ -39,6 +40,7 @@ async function fixture() {
   const service = createProviderService({
     userConfig,
     credentialDirectory,
+    registry: () => registry,
     apply: (providers) => {
       void registrySource.replace(providers)
     },
@@ -54,6 +56,46 @@ const configuration = {
 } as const
 
 describe("provider configuration", () => {
+  it("applies account metadata changes without requiring another catalog request", async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ data: [{ id: "account-coder" }] })),
+      )
+    vi.stubGlobal("fetch", fetch)
+    const { service, userConfig } = await fixture()
+    const connected = await service.write({
+      configuration: { ...configuration, models: [], authentication: "stored" },
+      apiKey: "fixture-key",
+    })
+    const saved = connected.providers[0]
+    if (!saved) throw new Error("Missing account")
+    fetch.mockImplementation(async () => {
+      throw new Error("Network unavailable")
+    })
+    const updated = await service.write({
+      id: saved.id,
+      configuration: { ...saved.configuration, name: "Work account" },
+    })
+    expect(updated.providers[0]?.configuration.name).toBe("Work account")
+    expect(
+      (await userConfig.readConfiguration()).modelProviders?.[saved.id]?.name,
+    ).toBe("Work account")
+    expect(
+      (await service.readModels(saved.id)).models.map((model) => model.id),
+    ).toEqual(["account-coder"])
+    await expect(
+      service.write({
+        id: saved.id,
+        configuration: {
+          ...saved.configuration,
+          baseURL: "https://different.example/v1",
+        },
+      }),
+    ).rejects.toThrow("Network unavailable")
+  })
+
   it("preserves explicit request warmup through saved configuration and reload", async () => {
     vi.stubGlobal(
       "fetch",
@@ -103,6 +145,7 @@ describe("provider configuration", () => {
     const connection = {
       name: preset.name,
       preset: preset.id,
+      service: preset.id,
       wireApi: preset.wireApi,
       baseURL: preset.baseURL,
       models: [],
@@ -160,15 +203,17 @@ describe("provider configuration", () => {
           action: "save",
           name: "Local coder",
           base_url: `http://127.0.0.1:${address.port}/v1`,
-          no_key: true,
+          authentication: "none",
         },
         { workspaceRoot: tmpdir() },
       )
       expect(saved.ok).toBe(true)
       expect(seen).toEqual([{ path: "/v1/models", authorization: undefined }])
       const source = (await service.read()).providers[0]
+      if (!source) throw new Error("Missing account")
+      const accountId = source.id
       expect(source).toMatchObject({
-        id: "local-coder",
+        id: expect.stringMatching(/^account_/),
         credential: "optional",
         configuration: { models: [] },
         catalog: {
@@ -182,12 +227,12 @@ describe("provider configuration", () => {
         },
       })
       expect(
-        (await registry.models("local-coder").listModels()).map(
+        (await registry.models(accountId).listModels()).map(
           (model) => model.model,
         ),
       ).toEqual(["upstream-coder"])
       expect(
-        (await userConfig.readConfiguration()).modelProviders?.["local-coder"]
+        (await userConfig.readConfiguration()).modelProviders?.[accountId]
           ?.credentialRef,
       ).toBeUndefined()
       const restartedRegistry = createProviderRegistry({})
@@ -202,7 +247,7 @@ describe("provider configuration", () => {
       await restarted.reload()
       expect(await restarted.read()).toEqual(await service.read())
       expect(
-        (await restartedRegistry.models("local-coder").listModels()).map(
+        (await restartedRegistry.models(accountId).listModels()).map(
           (model) => model.model,
         ),
       ).toEqual(["upstream-coder"])
@@ -211,18 +256,21 @@ describe("provider configuration", () => {
           action: "save",
           name: "Local coder",
           base_url: `http://127.0.0.1:${address.port}/v1`,
-          no_key: true,
+          authentication: "none",
         },
         { workspaceRoot: tmpdir() },
       )
-      expect(registry.providers).toEqual(["local-coder", "local-coder-2"])
+      const secondId = registry.providers.find((id) => id !== accountId)
+      expect(secondId).toMatch(/^account_/)
+      expect(registry.providers).toHaveLength(2)
+      if (!secondId) throw new Error("Missing second account")
       await tool.execute(
-        { action: "save", id: "local-coder", enabled: false },
+        { action: "save", id: accountId, enabled: false },
         { workspaceRoot: tmpdir() },
       )
-      expect(registry.providers).toEqual(["local-coder-2"])
+      expect(registry.providers).toEqual([secondId])
       await tool.execute(
-        { action: "remove", id: "local-coder-2" },
+        { action: "remove", id: secondId },
         { workspaceRoot: tmpdir() },
       )
       expect(registry.providers).toEqual([])
@@ -599,6 +647,7 @@ it("reads model capacities, modalities and token prices from the OpenRouter cata
       {
         ...configuration,
         preset: "openrouter",
+        service: "openrouter",
         baseURL: "https://openrouter.ai/api/v1",
         models: [],
       },
@@ -607,6 +656,7 @@ it("reads model capacities, modalities and token prices from the OpenRouter cata
   ).toEqual([
     {
       id: "vendor/coder",
+      kind: "chat",
       defaultVisible: true,
       contextWindowTokens: 128000,
       maxOutputTokens: 16000,
@@ -618,6 +668,155 @@ it("reads model capacities, modalities and token prices from the OpenRouter cata
         cacheReadPerMillion: 0.25,
       },
     },
-    { id: "image-generator", defaultVisible: false },
+    { id: "image-generator", kind: "image", defaultVisible: false },
   ])
+})
+
+it.each([
+  "openai",
+  "anthropic",
+  "kimi-code",
+  "xai",
+])("keeps %s accounts explicit and binds exactly one credential source", async (serviceId) => {
+  const preset = providerPresets.find((entry) => entry.id === serviceId)
+  if (!preset?.envKey) throw new Error("Missing service definition")
+  vi.stubEnv(preset.envKey, "environment-key")
+  const seen: string[] = []
+  vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+    const headers = new Headers(init?.headers)
+    seen.push(
+      headers.get("x-api-key") ??
+        headers.get("Authorization")?.replace("Bearer ", "") ??
+        "",
+    )
+    return Response.json({ data: [{ id: "future-model" }] })
+  })
+  const { service, registry, userConfig, credentialDirectory } = await fixture()
+  await service.reload()
+  expect((await service.read()).providers).toEqual([])
+  const configuration = {
+    name: "Personal",
+    service: serviceId,
+    preset: preset.id,
+    authentication: "environment" as const,
+    envKey: preset.envKey,
+    baseURL: preset.baseURL,
+    wireApi: preset.wireApi,
+    models: [],
+  }
+  await service.write({ id: "personal", configuration })
+  expect(await service.resolveCredential("personal")).toBe("environment-key")
+  const stored = { ...configuration, authentication: "stored" as const }
+  await service.write({
+    id: "personal",
+    configuration: stored,
+    apiKey: "saved-key",
+  })
+  expect(
+    (await service.read()).providers.map((entry) => [
+      entry.id,
+      entry.credential,
+    ]),
+  ).toEqual([["personal", "stored"]])
+  expect(seen).toEqual(["environment-key", "saved-key"])
+  const reference = (await userConfig.readConfiguration()).modelProviders
+    ?.personal?.credentialRef
+  if (!reference) throw new Error("Missing stored credential")
+  await rm(join(credentialDirectory, reference))
+  expect(await service.resolveCredential("personal")).toBeUndefined()
+  await service.reload()
+  expect(registry.providers).toEqual([])
+  await service.write({
+    id: "team",
+    configuration: { ...stored, name: "Team" },
+    apiKey: "saved-key",
+  })
+  expect((await service.read()).providers.map((entry) => entry.id)).toEqual([
+    "personal",
+    "team",
+  ])
+  await service.delete("personal")
+  expect(registry.providers).toEqual(["team"])
+  await service.delete("team")
+  await service.reload()
+  expect((await service.read()).providers).toEqual([])
+  await registry.close()
+})
+
+it("retains generation metadata on disk but excludes it from chat models after reload and visibility overrides", async () => {
+  vi.stubEnv("XAI_API_KEY", "environment-key")
+  vi.stubGlobal("fetch", async () =>
+    Response.json({
+      data: [
+        {
+          id: "grok-future",
+          input_modalities: ["text", "image"],
+          architecture: { output_modalities: ["text"] },
+        },
+        { id: "grok-imagine-image" },
+        { id: "grok-imagine-video" },
+      ],
+    }),
+  )
+  const { service, registry, userConfig, credentialDirectory } = await fixture()
+  await service.write({
+    id: "grok",
+    configuration: {
+      name: "Grok account",
+      service: "xai",
+      preset: "xai",
+      authentication: "environment",
+      envKey: "XAI_API_KEY",
+      baseURL: "https://api.x.ai/v1",
+      wireApi: "openai_responses",
+      models: [],
+    },
+  })
+  await service.reload()
+  const catalog = (await service.read()).providers[0]?.catalog
+  expect(catalog?.models.map((m) => [m.id, m.kind])).toEqual([
+    ["grok-future", "chat"],
+    ["grok-imagine-image", "image"],
+    ["grok-imagine-video", "video"],
+  ])
+  const connection = (await service.read()).providers[0]
+  if (!connection) throw new Error("Missing default Grok connection")
+  await service.write({
+    id: "grok",
+    configuration: {
+      ...connection.configuration,
+      models: [{ id: "grok-imagine-image", visible: true }],
+    },
+  })
+  expect(
+    (await registry.models("grok").listModels({ includeHidden: true })).map(
+      (m) => m.model,
+    ),
+  ).toEqual(["grok-future"])
+  const read = await service.readModels("grok")
+  await expect(
+    service.writeModels(
+      "grok",
+      { "GROK-IMAGINE-VIDEO": { visible: true } },
+      read.version,
+    ),
+  ).rejects.toThrow("not a chat model")
+  expect(() =>
+    registry
+      .models("grok")
+      .validate({ provider: "grok", model: "grok-imagine-image" }),
+  ).toThrow("not a chat model")
+  const restarted = createProviderService({
+    userConfig,
+    credentialDirectory,
+    apply() {},
+  })
+  const restored = await restarted.reload()
+  expect(
+    (await restored.grok?.models.listModels())?.map((m) => m.model),
+  ).toEqual(["grok-future"])
+  expect((await restarted.read()).providers[0]?.catalog?.models).toEqual(
+    catalog?.models,
+  )
+  await registry.close()
 })

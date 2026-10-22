@@ -1,20 +1,21 @@
-import { answerTextParts, modelOutputItemId } from "../protocol/model-output.ts"
 import { isDeepStrictEqual } from "node:util"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
-import type { TurnCompletion, Session } from "../core/session.ts"
+import type { Session, TurnCompletion } from "../core/session.ts"
+import type { TurnInput } from "../core/session-io.ts"
 import type {
-  TurnControl,
   ExecutionContext,
   SessionTaskRunner,
+  TurnControl,
 } from "../core/session-task.ts"
-import { inputPurpose, inputSource } from "../core/session.ts"
 import { settleTaskResources, TaskCleanupError } from "../core/session-task.ts"
-import { fingerprintTurnInput, type TurnInput } from "../core/session-io.ts"
+import {
+  inputSource,
+  turnInputSubmissionMetadata,
+} from "../core/turn-input-metadata.ts"
 import {
   inputContentText,
   inputContentToModelMessage,
 } from "../core/user-input.ts"
-import type { ModelToolContentBlock } from "../kernel/index.ts"
 import {
   type CompletedExecutionItem,
   type ContextCompactionCompletedItem,
@@ -32,6 +33,7 @@ import {
   type ToolExecutionItem,
   type TurnLatency,
 } from "../kernel/index.ts"
+import { answerTextParts, modelOutputItemId } from "../protocol/model-output.ts"
 import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
 import { readAssetSource } from "./asset-media.ts"
 import {
@@ -49,7 +51,6 @@ import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
-import { formatInputContext } from "./input-context.ts"
 import {
   createRunnerTimingPolicy,
   createSessionExecutionPolicy,
@@ -74,17 +75,16 @@ import {
   retainCompactionUserMessages,
   retainRemoteCompactionMessages,
 } from "./model-context.ts"
-import { adaptImagesForModel } from "./model-images.ts"
+import { prepareModelMedia } from "./model-media.ts"
 import type { ModelClient, ModelClientSession } from "./model-provider.ts"
+import { ModelStreamCleanupError } from "./model-request.ts"
 import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
 } from "./model-request-budget.ts"
-import { ModelStreamCleanupError } from "./model-request.ts"
 import { toolContentText } from "./model-tool-content.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
-import { prepareModelImage } from "./prepare-model-image.ts"
 import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
@@ -154,6 +154,11 @@ export type PreparedStepContext = Readonly<{
 }>
 
 export type TurnLoopOptions = Readonly<{
+  resolveModelRoute?(
+    selection: ModelSelection,
+    input: TurnInput,
+    context: Readonly<{ preferredAccount?: string; requiresImages: boolean }>,
+  ): ModelSelection
   modelClient?: ModelClient
   stream?: StreamFn
   toolRegistry: ToolRegistry
@@ -321,8 +326,15 @@ export function createTurnLoop(options: TurnLoopOptions): SessionTaskRunner {
       if (metadata.workingDirectory === undefined) {
         throw new Error("Thread is missing a working directory for execution.")
       }
-      const selection: ModelSelection = input.modelSelection ??
+      const modelChoice: ModelSelection = input.modelSelection ??
+        snapshot.configuration?.modelChoice ??
         snapshot.configuration?.defaultTarget ?? { provider, model }
+      const selection =
+        options.resolveModelRoute?.(
+          modelChoice,
+          input,
+          modelRouteContext(snapshot, input),
+        ) ?? modelChoice
       const modelTransport = structuredClone(
         options.readModelTransport === undefined
           ? snapshot.configuration?.modelTransport
@@ -410,9 +422,17 @@ export function createTurnLoop(options: TurnLoopOptions): SessionTaskRunner {
             const configuration =
               capturedConfiguration ??
               resolveConfiguration(modelSession?.models)
+            const { serviceId: _previousService, ...snapshotConfiguration } =
+              configuration.snapshot
             const context = {
               turnId: input.submissionId,
-              configuration: configuration.snapshot,
+              configuration: {
+                ...snapshotConfiguration,
+                ...(modelSession?.serviceId === undefined
+                  ? {}
+                  : { serviceId: modelSession.serviceId }),
+                ...(options.resolveModelRoute ? { modelChoice } : {}),
+              },
               selection,
             }
             await session.beginExecution(execution, context)
@@ -485,14 +505,43 @@ export function createTurnLoop(options: TurnLoopOptions): SessionTaskRunner {
       ) {
         return undefined
       }
+      const selection =
+        options.resolveModelRoute?.(
+          input.modelSelection,
+          input,
+          modelRouteContext(snapshot, input),
+        ) ?? input.modelSelection
       return SessionConfiguration.restore(
         {
           ...snapshot.configuration,
-          defaultTarget: input.modelSelection,
+          defaultTarget: selection,
+          ...(options.resolveModelRoute
+            ? { modelChoice: input.modelSelection }
+            : {}),
         },
-        options.modelClient?.models(input.modelSelection.provider),
+        options.modelClient?.models(selection.provider),
       ).snapshot
     },
+  }
+}
+
+function modelRouteContext(
+  snapshot: import("../core/session.ts").SessionSnapshot,
+  input: TurnInput,
+) {
+  return {
+    ...(snapshot.configuration === undefined
+      ? {}
+      : { preferredAccount: snapshot.configuration.defaultTarget.provider }),
+    requiresImages:
+      input.content.attachments.some((attachment) =>
+        attachment.mediaType.startsWith("image/"),
+      ) ||
+      snapshot.context.history.some(
+        ({ item }) =>
+          (item.role === "user" || item.role === "tool") &&
+          item.content.some((block) => block.type === "image"),
+      ),
   }
 }
 
@@ -1055,7 +1104,7 @@ async function executeTurnModelLoop(
                     sourceSelection.provider === step.target.provider &&
                     (sourceSession?.remoteCompaction ?? false),
                   ...(sourceSelection.provider === step.target.provider &&
-                  step.target.provider === "codex" &&
+                  remoteCompaction === "codex_remote" &&
                   sourceSelection.model !== step.target.model &&
                   remoteCompaction
                     ? { fallback: { step, stream } }
@@ -1218,7 +1267,6 @@ async function executeTurnModelLoop(
       const messages = durableMessages
       let visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
-      const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
       let requestHistoryAnchorItemId = input.session
         .executionSnapshot(input.execution)
         .context.history.at(-1)?.id
@@ -1250,17 +1298,14 @@ async function executeTurnModelLoop(
           // during the previous attempt did not authorize that attempt's tools.
           visibleFileObservations =
             createVisibleFileObservationsFromMessages(history)
-          return resolveRolloutAssetMedia(
-            adaptImagesForModel(
-              history,
-              executionStep.target,
-              executionStep.modelInfo,
-            ).messages,
-            input.options.rolloutAssets,
-            executionStep.documentReading,
-            executionStep.userDocumentReading,
-            input.signal,
-          )
+          return prepareModelMedia(history, {
+            target: executionStep.target,
+            imageCapabilities: executionStep.modelInfo,
+            rolloutAssets: input.options.rolloutAssets,
+            documentReading: executionStep.documentReading,
+            userDocumentReading: executionStep.userDocumentReading,
+            signal: input.signal,
+          })
         },
         target: step.target,
         cacheKey: configuration.promptCacheKey,
@@ -1270,13 +1315,14 @@ async function executeTurnModelLoop(
             ? []
             : [input.options.additionalInstructions]),
         ],
-        messages: await resolveRolloutAssetMedia(
-          adapted.messages,
-          input.options.rolloutAssets,
-          step.documentReading,
-          step.userDocumentReading,
-          input.signal,
-        ),
+        messages: await prepareModelMedia(messages, {
+          target: step.target,
+          imageCapabilities: step.modelInfo,
+          rolloutAssets: input.options.rolloutAssets,
+          documentReading: step.documentReading,
+          userDocumentReading: step.userDocumentReading,
+          signal: input.signal,
+        }),
         tools: toolPlan.modelDefinitions,
         toolWireProtocol: step.toolWireProtocol,
         ...(configuration.maxOutputTokens === undefined
@@ -1780,16 +1826,16 @@ async function executeTurnModelLoop(
           let firstTokenAt: number | undefined
           let requestStartedAt: number | undefined
           try {
-            const messages = await resolveRolloutAssetMedia(
-              adaptImagesForModel(
-                prefix.map(({ item }) => item),
-                step.target,
-                step.modelInfo,
-              ).messages,
-              input.options.rolloutAssets,
-              step.documentReading,
-              step.userDocumentReading,
-              signal,
+            const messages = await prepareModelMedia(
+              prefix.map(({ item }) => item),
+              {
+                target: step.target,
+                imageCapabilities: step.modelInfo,
+                rolloutAssets: input.options.rolloutAssets,
+                documentReading: step.documentReading,
+                userDocumentReading: step.userDocumentReading,
+                signal,
+              },
             )
             requestStartedAt = Date.now()
             const result = await consumeModelStream({
@@ -2569,16 +2615,16 @@ async function compactLiveHistory(
     }
     let result: Awaited<ReturnType<typeof compact>> | undefined
     while (result === undefined) {
-      const messages = await resolveRolloutAssetMedia(
-        adaptImagesForModel(
-          completeToolCallHistory(source),
-          compactionStep.target,
-          compactionStep.modelInfo,
-        ).messages,
-        input.rolloutAssets,
-        compactionStep.documentReading,
-        compactionStep.userDocumentReading,
-        input.signal,
+      const messages = await prepareModelMedia(
+        completeToolCallHistory(source),
+        {
+          target: compactionStep.target,
+          imageCapabilities: compactionStep.modelInfo,
+          rolloutAssets: input.rolloutAssets,
+          documentReading: compactionStep.documentReading,
+          userDocumentReading: compactionStep.userDocumentReading,
+          signal: input.signal,
+        },
       )
       try {
         result = await compact(
@@ -3342,22 +3388,7 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
       turnId,
       inputContentToModelMessage(input.content, input.goalId),
     ),
-    submissionMetadata: {
-      content: input.content,
-      source: inputSource(input),
-      purpose: inputPurpose(input),
-      ...(inputSource(input) === "human" &&
-      inputPurpose(input) !== "question_answer"
-        ? {}
-        : { requestFingerprint: fingerprintTurnInput(input) }),
-      ...(input.modelSelection === undefined
-        ? {}
-        : { modelSelection: input.modelSelection }),
-      ...(input.parentInputId === undefined
-        ? {}
-        : { parentInputId: input.parentInputId }),
-      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-    },
+    ...turnInputSubmissionMetadata(input),
   }
 }
 
@@ -3374,80 +3405,6 @@ function envelope(
     item,
     ...(providerMetadata === undefined ? {} : { providerMetadata }),
   }
-}
-
-async function resolveRolloutAssetMedia(
-  messages: readonly ModelMessage[],
-  rolloutAssets: RolloutAssets | undefined,
-  documentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
-  userDocumentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
-  signal?: AbortSignal,
-): Promise<readonly ModelMessage[]> {
-  const { createNativePdfBudget, prepareModelDocuments } = await import(
-    "./prepare-model-document.ts"
-  )
-  const nativePdfBudget = createNativePdfBudget(
-    userDocumentReading.nativePdfLimits ?? documentReading.nativePdfLimits,
-    // Images and PDF pages share Anthropic's allowance. Reserve all ordinary
-    // image occurrences first, including later messages, so an earlier PDF
-    // cannot displace them. History/cache reuse does not deduplicate the wire.
-    messages.reduce(
-      (count, message) =>
-        count +
-        (message.role === "user" || message.role === "tool"
-          ? message.content.filter((block) => block.type === "image").length
-          : 0),
-      0,
-    ),
-  )
-  const resolved: ModelMessage[] = []
-  // Project messages in order so a history full of PDFs cannot launch one
-  // rasterization worker per message concurrently.
-  for (const message of messages) {
-    if (message.role !== "user" && message.role !== "tool") {
-      resolved.push(message)
-      continue
-    }
-    const resolveImage = async (
-      image: import("./model.ts").ModelImageBlock,
-    ) => {
-      if ("data" in image && image.data !== undefined)
-        return prepareModelImage(
-          Buffer.from(image.data, "base64"),
-          image.detail ?? "high",
-        )
-      return image
-    }
-    const content: ModelToolContentBlock[] = []
-    // PDF raster/text fallback expands at its source slot, not after later text
-    // or other assets. Keep the existing sequential PDF cache/budget boundary.
-    for (const block of message.content) {
-      if (block.type === "image") content.push(await resolveImage(block))
-      else if (block.type === "text") content.push(block)
-      else {
-        const projected = await prepareModelDocuments(
-          [block],
-          rolloutAssets,
-          message.role === "user" ? userDocumentReading : documentReading,
-          signal,
-          nativePdfBudget,
-        )
-        if (projected.content !== "")
-          content.push({ type: "text", text: projected.content })
-        content.push(...projected.images, ...projected.documents)
-      }
-    }
-    if (message.role === "user") {
-      const { contextAttachments, ...user } = message
-      if (contextAttachments?.length)
-        content.push({
-          type: "text",
-          text: formatInputContext(contextAttachments),
-        })
-      resolved.push({ ...user, content })
-    } else resolved.push({ ...message, content })
-  }
-  return resolved
 }
 
 function aggregateTokenUsage(

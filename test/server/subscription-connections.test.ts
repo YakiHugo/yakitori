@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { setImmediate as nextTurn } from "node:timers/promises"
 import { afterEach, expect, it, vi } from "vitest"
 import { deferred } from "./rpc/testkit.ts"
+import { LoginRequiredError } from "../../src/runtime/login-required.ts"
 import {
   createSubscriptionConnections,
   type SubscriptionConnections,
@@ -104,8 +105,8 @@ it("waits for a file import during shutdown and leaves its failure with the requ
 
 it("starts one CLI login, exposes its authorization URL and imports completion", async () => {
   const { service, completed, gate, log } = await loginFixture()
-  await service.login("codex")
-  await service.login("codex")
+  await service.login("codex", true)
+  await service.login("codex", true)
   await expect
     .poll(async () => (await service.read())[0])
     .toMatchObject({
@@ -127,22 +128,76 @@ it("starts one CLI login, exposes its authorization URL and imports completion",
   expect(completed).toHaveBeenCalledOnce()
 })
 
+it("connects an existing local credential source without starting the CLI", async () => {
+  const { service, completed, log } = await loginFixture()
+  expect((await service.login("codex"))[0]).toMatchObject({
+    available: true,
+    login: { state: "succeeded" },
+  })
+  expect(completed).toHaveBeenCalledOnce()
+  await expect(readFile(log, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+})
+
+it("starts browser authentication only when local credentials require a new login", async () => {
+  const { service, completed, gate, log } = await loginFixture()
+  completed.mockRejectedValueOnce(new LoginRequiredError("Credentials expired"))
+  await service.login("codex")
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.url)
+    .toBe("https://auth.openai.com/authorize?state=test")
+  expect(await readFile(log, "utf8")).toBe("login\n")
+  await writeFile(gate, "done")
+  await expect
+    .poll(async () => (await service.read())[0]?.login?.state)
+    .toBe("succeeded")
+  expect(completed).toHaveBeenCalledTimes(2)
+})
+
+it("retains operational errors without opening a browser or claiming connection", async () => {
+  const { service, completed, log } = await loginFixture()
+  completed.mockRejectedValueOnce(new TypeError("Network unavailable"))
+  await expect(service.login("codex")).rejects.toThrow("Network unavailable")
+  expect((await service.read())[0]).toMatchObject({ available: false })
+  expect((await service.read())[0]?.login).toBeUndefined()
+  await expect(readFile(log, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+  expect((await service.login("codex"))[0]?.available).toBe(true)
+})
+
+it.each([
+  "cancel",
+  "close",
+] as const)("does not launch sign-in after %s interrupts a local check", async (action) => {
+  const { service, completed, log } = await loginFixture()
+  const local = deferred<void>()
+  completed.mockImplementationOnce(async () => {
+    await local.promise
+    throw new LoginRequiredError("Missing credentials")
+  })
+  const checking = service.login("codex")
+  const closing =
+    action === "cancel" ? service.cancel("codex") : service.close()
+  local.resolve()
+  await checking
+  await closing
+  await expect(readFile(log, "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+})
+
 it("stops an owned login process when the application closes", async () => {
   const { service, completed } = await loginFixture()
-  await service.login("codex")
+  await service.login("codex", true)
   await expect
     .poll(async () => (await service.read())[0]?.login?.url)
     .toBe("https://auth.openai.com/authorize?state=test")
   await service.close()
   expect((await service.read())[0]?.login?.state).toBe("failed")
   expect(completed).not.toHaveBeenCalled()
-  await expect(service.login("codex")).rejects.toThrow("closed")
+  await expect(service.login("codex", true)).rejects.toThrow("closed")
 })
 
 it("reports a CLI that exits successfully without producing a usable account", async () => {
   const { service, completed, gate } = await loginFixture()
   completed.mockImplementation(async () => {})
-  await service.login("codex")
+  await service.login("codex", true)
   await expect
     .poll(async () => (await service.read())[0]?.login?.url)
     .toBe("https://auth.openai.com/authorize?state=test")
@@ -161,13 +216,13 @@ it("reports a CLI that exits successfully without producing a usable account", a
 
 it("cancels a pending login without importing it and allows a new attempt", async () => {
   const { service, completed, log } = await loginFixture()
-  await service.login("codex")
+  await service.login("codex", true)
   await expect
     .poll(async () => (await service.read())[0]?.login?.url)
     .toBe("https://auth.openai.com/authorize?state=test")
   expect((await service.cancel("codex"))[0]?.login).toBeUndefined()
   expect(completed).not.toHaveBeenCalled()
-  await service.login("codex")
+  await service.login("codex", true)
   await expect
     .poll(async () => (await service.read())[0]?.login?.url)
     .toBe("https://auth.openai.com/authorize?state=test")
@@ -178,7 +233,7 @@ it("waits for login persistence before a canceled sign-in can be replaced", asyn
   const { service, completed, importStarted, gate } = await loginFixture()
   const persistence = deferred<void>()
   completed.mockImplementation(() => persistence.promise)
-  await service.login("codex")
+  await service.login("codex", true)
   await writeFile(gate, "done")
   // Wait for the process-exit callback itself, not a one-second mock poll.
   await importStarted.promise
@@ -200,7 +255,7 @@ it("waits for login persistence before a canceled sign-in can be replaced", asyn
 
 it("reports a missing CLI without claiming that the subscription connected", async () => {
   const { service, completed } = await loginFixture()
-  await service.login("grok")
+  await service.login("grok", true)
   await expect
     .poll(async () => (await service.read())[1])
     .toMatchObject({

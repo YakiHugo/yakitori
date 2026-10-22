@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -330,7 +330,7 @@ it("does not carry a connection's successful status to a changed endpoint from t
   expect((await f.service.read()).providers[0]?.connection).toBeUndefined()
 })
 
-it("refreshes with current discovery semantics after a preset-only change", async () => {
+it("refreshes with current discovery semantics after a service binding change", async () => {
   const f = await fixture()
   await f.service.write({
     id: "personal",
@@ -342,6 +342,7 @@ it("refreshes with current discovery semantics after a preset-only change", asyn
     configuration: {
       ...f.configuration,
       preset: "siliconflow",
+      service: "siliconflow",
       models: [{ id: "coder" }],
     },
   })
@@ -360,26 +361,40 @@ it("refreshes with current discovery semantics after a preset-only change", asyn
   expect(f.requests.at(-1)?.path).toBe("/v1/models")
 })
 
-it("refreshes auth headers when no-key mode changes without changing the stored key", async () => {
+it("changes authentication sources without retaining a hidden saved-key fallback", async () => {
   const f = await fixture()
-  // API keys are opaque: this value is also the no-key mode placeholder.
   await f.service.write({
     id: "personal",
-    configuration: { ...f.configuration, noKey: true },
+    configuration: { ...f.configuration, authentication: "stored" },
     apiKey: "local-no-key",
+  })
+  await f.service.write({
+    id: "personal",
+    configuration: { ...f.configuration, authentication: "none" },
   })
   expect(f.requests.at(-1)?.key).toBeUndefined()
   await f.service.write({
     id: "personal",
     configuration: {
       ...f.configuration,
-      noKey: false,
+      authentication: "stored",
       models: [{ id: "coder" }],
     },
   })
+  expect((await f.service.read()).providers[0]?.credential).toBe("missing")
+  expect(f.registry.providers).toEqual([])
+  await f.service.write({
+    id: "personal",
+    configuration: {
+      ...f.configuration,
+      authentication: "stored",
+      models: [{ id: "coder" }],
+    },
+    apiKey: "replacement",
+  })
   await f.service.refreshModels("personal")
   expect(f.requests.at(-1)).toEqual({
-    key: "Bearer local-no-key",
+    key: "Bearer replacement",
     path: "/v1/models",
   })
 })

@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { LoginRequiredError } from "./login-required.ts"
 
 // xAI subscription credentials, shared read-only with the official Grok CLI
 // (~/.grok/auth.json). We deliberately do not refresh or write this file:
@@ -61,7 +61,7 @@ export async function resolveGrokCredentials(
 > {
   const credentials = await resolveStoredGrokCredentials(options)
   if (credentials.userId === undefined) {
-    throw new Error(
+    throw new LoginRequiredError(
       "The Grok CLI login has no user identity. Run `grok` and log in again.",
     )
   }
@@ -72,26 +72,6 @@ export async function resolveGrokCredentials(
   }
 }
 
-// Account identity for scoping cached per-account data (the model catalog),
-// following the same credential source as discovery: the XAI_API_KEY
-// environment key when set, otherwise the CLI login. Old logins without a
-// user id fall back to a token digest and simply rescope when tokens rotate.
-export async function resolveGrokAccountIdentity(
-  options: GrokCredentialsOptions = {},
-): Promise<string | undefined> {
-  const envKey = process.env.XAI_API_KEY
-  if (envKey !== undefined) {
-    return createHash("sha256").update(envKey).digest("hex")
-  }
-  const credentials = await readGrokCredentials(
-    options.path ?? defaultGrokCredentialsPath(),
-  )
-  return (
-    credentials.userId ??
-    createHash("sha256").update(credentials.accessToken).digest("hex")
-  )
-}
-
 async function resolveStoredGrokCredentials(
   options: GrokCredentialsOptions,
 ): Promise<GrokCredentials> {
@@ -99,7 +79,7 @@ async function resolveStoredGrokCredentials(
   const now = options.now ?? (() => Math.floor(Date.now() / 1000))
   const credentials = await readGrokCredentials(path)
   if (credentials.expiresAt - now() <= EXPIRY_MARGIN_SECONDS) {
-    throw new Error(
+    throw new LoginRequiredError(
       "The Grok CLI login has expired. Run `grok` and log in again, or set XAI_API_KEY.",
     )
   }
@@ -123,22 +103,32 @@ async function readGrokCredentials(path: string): Promise<GrokCredentials> {
       cause.code !== "ENOENT"
     )
       throw cause
-    throw new Error(
+    throw new LoginRequiredError(
       `Grok credentials not found at ${path}. Run \`grok\` and log in first, or set XAI_API_KEY.`,
     )
   }
-  const parsed: unknown = JSON.parse(raw)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause
+    throw new LoginRequiredError(
+      `Grok credentials at ${path} are invalid JSON.`,
+    )
+  }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`Grok credentials at ${path} are malformed.`)
+    throw new LoginRequiredError(`Grok credentials at ${path} are malformed.`)
   }
   const entry = (parsed as Record<string, unknown>)[GROK_AUTH_SCOPE]
   if (entry === undefined) {
-    throw new Error(
+    throw new LoginRequiredError(
       `Grok credentials at ${path} hold no login. Run \`grok\` and log in first.`,
     )
   }
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-    throw new Error(`Grok credentials at ${path} carry a malformed xAI login.`)
+    throw new LoginRequiredError(
+      `Grok credentials at ${path} carry a malformed xAI login.`,
+    )
   }
   const {
     key,
@@ -150,11 +140,15 @@ async function readGrokCredentials(path: string): Promise<GrokCredentials> {
     key.trim() === "" ||
     typeof expiresAtValue !== "string"
   ) {
-    throw new Error(`Grok credentials at ${path} carry a malformed xAI login.`)
+    throw new LoginRequiredError(
+      `Grok credentials at ${path} carry a malformed xAI login.`,
+    )
   }
   const expiresAt = Math.floor(Date.parse(expiresAtValue) / 1000)
   if (Number.isNaN(expiresAt)) {
-    throw new Error(`Grok credentials at ${path} carry a bad expires_at.`)
+    throw new LoginRequiredError(
+      `Grok credentials at ${path} carry a bad expires_at.`,
+    )
   }
   return {
     accessToken: key,

@@ -1,5 +1,7 @@
-import { resolve } from "node:path"
+import { readFile, writeFile } from "node:fs/promises"
+import { join, resolve } from "node:path"
 import { expect, test, type WebSocketRoute } from "@playwright/test"
+import { parse, stringify } from "smol-toml"
 import {
   type ServerProcess,
   spawnServerProcess,
@@ -12,6 +14,171 @@ import {
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+test("an unavailable saved model can be replaced and stays corrected after reload", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const configPath = join(environment.root, "home", "config.toml")
+  const logs: string[] = []
+  let server: ServerProcess | undefined
+  try {
+    await writeFile(
+      configPath,
+      stringify({ provider: "removed-account", model: "scripted" }),
+    )
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+      onStdout: (line) => logs.push(line),
+      onStderr: (line) => logs.push(line),
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await page.getByRole("button", { name: "Choose another model" }).click()
+    await expect(
+      page.getByRole("button", {
+        name: /Default.*Default model is unavailable/,
+      }),
+    ).toBeDisabled()
+    await page.getByRole("button", { name: "scripted", exact: true }).click()
+    await expect(
+      page.getByText(/Selected model is no longer available/),
+    ).toHaveCount(0)
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Test model selection recovery.")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByRole("main").getByText("Hello from faux.", { exact: true }),
+    ).toBeVisible()
+    await expect
+      .poll(async () => parse(await readFile(configPath, "utf8")).provider)
+      .toBe("faux")
+    await page.reload()
+    await expect(
+      page.getByRole("button", { name: "Select model and effort" }),
+    ).toContainText("scripted")
+    await expect(
+      page.getByText(/Selected model is no longer available/),
+    ).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath("model-recovered.png") })
+  } finally {
+    await testInfo.attach("server.log", {
+      body: logs.join("\n"),
+      contentType: "text/plain",
+    })
+    const timer = setTimeout(() => void server?.forceStop(), 5_000)
+    try {
+      await server?.stop()
+    } finally {
+      clearTimeout(timer)
+      await environment.cleanup()
+    }
+  }
+})
+
+test("provider settings preserve settings navigation and restore chat panels", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const errors: string[] = []
+  const logs: string[] = []
+  let server: ServerProcess | undefined
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+      onStdout: (line) => logs.push(line),
+      onStderr: (line) => logs.push(line),
+    })
+    await page.goto(server.url)
+    const sidebar = page.locator(".sidebar-frame")
+    await expect(sidebar).toHaveAttribute("data-open", "true")
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await expect(
+      page.getByRole("complementary", { name: "Workspace", exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    const navigation = page.getByRole("complementary", {
+      name: "Settings navigation",
+    })
+    await navigation
+      .getByRole("button", { name: "Providers", exact: true })
+      .click()
+    await expect(
+      page.getByText("No accounts connected yet.", { exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Add account", exact: true }).click()
+    await expect(
+      page.getByText("Use your ChatGPT plan", { exact: true }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole("button", { name: "Back to app", exact: true }),
+    ).toHaveCount(1)
+    await expect(sidebar).toBeHidden()
+    await expect(page.locator(".workspace-frame")).toBeHidden()
+    await expect(
+      page.getByRole("button", { name: "Show workspace", exact: true }),
+    ).toBeHidden()
+    await page.keyboard.press("ControlOrMeta+b")
+    await page.keyboard.press("ControlOrMeta+Shift+b")
+    for (const width of [1280, 800, 480]) {
+      await page.setViewportSize({ width, height: 800 })
+      await expect(navigation).toBeVisible()
+      await expect(
+        navigation.getByRole("button", { name: "Providers", exact: true }),
+      ).toHaveAttribute("aria-current", "page")
+      await expect(page.getByRole("tab")).toHaveCount(0)
+      await expect(
+        page.getByRole("button", { name: "ChatGPT", exact: true }),
+      ).toBeVisible()
+      const bounds = await page.evaluate(() => ({
+        width: document.documentElement.clientWidth,
+        content: document.documentElement.scrollWidth,
+      }))
+      expect(bounds.content).toBeLessThanOrEqual(bounds.width)
+      await page.screenshot({
+        path: testInfo.outputPath(`provider-navigation-${width}.png`),
+        fullPage: true,
+      })
+    }
+    await navigation
+      .getByRole("button", { name: "General", exact: true })
+      .click()
+    await navigation
+      .getByRole("button", { name: "Providers", exact: true })
+      .click()
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.getByRole("button", { name: "Back to app", exact: true }).click()
+    await expect(navigation).toHaveCount(0)
+    await expect(sidebar).toHaveAttribute("data-open", "true")
+    await expect(sidebar).toBeVisible()
+    await expect(
+      page.getByRole("complementary", { name: "Workspace", exact: true }),
+    ).toBeVisible()
+    expect(errors).toEqual([])
+  } finally {
+    await testInfo.attach("server.log", {
+      body: logs.join("\n"),
+      contentType: "text/plain",
+    })
+    const timer = setTimeout(() => void server?.forceStop(), 5_000)
+    try {
+      await server?.stop()
+    } finally {
+      clearTimeout(timer)
+      await environment.cleanup()
+    }
+  }
+})
 
 test("built GUI sends a turn and restores its transcript after reload", async ({
   page,

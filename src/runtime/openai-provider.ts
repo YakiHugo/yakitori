@@ -50,20 +50,21 @@ import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
-export type OpenAIProviderOptions = {
-  readonly warmup?: boolean
-  readonly requestProfile?: "chatgpt-plan"
-  readonly apiKey: string
-  readonly model: string
-  readonly client?: OpenAI
+export type OpenAIProviderOptions = Readonly<{
+  warmup?: boolean
+  requestProfile?: "chatgpt-plan" | "codex"
+  responseProfile?: "openai" | "grok"
+  apiKey: string
+  model: string
+  client?: OpenAI
   // Compatible endpoints (e.g. xAI at https://api.x.ai/v1) override the default.
-  readonly baseURL?: string
+  baseURL?: string
   // Extra per-endpoint identity headers (e.g. chatgpt-account-id for the
   // codex ChatGPT backend).
-  readonly defaultHeaders?: Record<string, string>
-  readonly onResponseHeaders?: (headers: Headers) => void
-  readonly fetchOptions?: ClientOptions["fetchOptions"]
-}
+  defaultHeaders?: Record<string, string | null>
+  onResponseHeaders?: (headers: Headers) => void
+  fetchOptions?: ClientOptions["fetchOptions"]
+}>
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
   const client = openAIClient(options)
@@ -77,6 +78,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
       false,
       options.requestProfile,
       undefined,
+      options.responseProfile,
     )
 }
 
@@ -119,6 +121,7 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
       false,
       options.requestProfile,
       upload,
+      options.responseProfile,
     )
   return {
     stream,
@@ -135,6 +138,7 @@ export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
               true,
               options.requestProfile,
               upload,
+              options.responseProfile,
             )) as StreamFn,
         }),
     async close() {
@@ -175,8 +179,9 @@ async function* streamOpenAI(
   onResponseHeaders?: (headers: Headers) => void,
   transport?: ReturnType<typeof createOpenAIResponsesTransport>,
   warmup = false,
-  requestProfile?: "chatgpt-plan",
+  requestProfile?: "chatgpt-plan" | "codex",
   upload?: ReturnType<typeof createFileUploadCache>,
+  responseProfile: "openai" | "grok" = "openai",
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -190,6 +195,11 @@ async function* streamOpenAI(
     | Extract<ModelStreamEvent, { type: "response" | "failure" }>
     | undefined
   try {
+    const reasoningSummary =
+      requestProfile === "codex" ||
+      (requestProfile === undefined &&
+        URL.parse(client.baseURL ?? "https://api.openai.com")?.origin ===
+          "https://api.openai.com")
     const nativeDeferredLoading =
       requestProfile !== "chatgpt-plan" &&
       nativeDeferredToolProtocol(request) === "openai"
@@ -207,7 +217,7 @@ async function* streamOpenAI(
           },
     )
     if (request.compaction === "responses_compact") {
-      if (requestProfile !== undefined || request.target.provider === "codex")
+      if (requestProfile !== undefined)
         throw new ModelRequestControlsError(
           "Public Responses compaction requires an API-key endpoint.",
         )
@@ -258,6 +268,8 @@ async function* streamOpenAI(
         request.target.provider,
         request.continuationScope,
         request.target.model,
+        undefined,
+        responseProfile,
       )
       const { output: _compactedOutput, ...compactMetadata } = compacted
       yield {
@@ -279,10 +291,7 @@ async function* streamOpenAI(
       }
       return
     }
-    if (
-      request.compaction === "codex_remote" &&
-      request.target.provider !== "codex"
-    )
+    if (request.compaction === "codex_remote" && requestProfile !== "codex")
       throw new ModelRequestControlsError(
         "compaction_trigger belongs to the Codex backend, not the public Responses API.",
       )
@@ -326,29 +335,25 @@ async function* streamOpenAI(
           }),
       // The Codex subscription endpoint rejects max_output_tokens. Its
       // ResponsesApiRequest omits this API-only output control.
-      ...(request.target.provider === "codex" ||
-      request.maxOutputTokens === undefined
+      ...(requestProfile === "codex" || request.maxOutputTokens === undefined
         ? {}
         : { max_output_tokens: request.maxOutputTokens }),
       store: false,
       stream: true,
-      ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+      ...(reasoningSummary
         ? { include: ["reasoning.encrypted_content" as const] }
         : {}),
       ...(request.cacheKey === undefined
         ? {}
         : { prompt_cache_key: request.cacheKey }),
-      ...(effort === undefined &&
-      !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+      ...(effort === undefined && !reasoningSummary
         ? {}
         : {
             reasoning: {
               ...(effort === undefined
                 ? {}
                 : { effort: effort as ReasoningEffort }),
-              ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
-                ? { summary: "auto" as const }
-                : {}),
+              ...(reasoningSummary ? { summary: "auto" as const } : {}),
             },
           }),
       // Speed tiers: only "fast" maps onto the wire ("priority"); anything
@@ -442,7 +447,7 @@ async function* streamOpenAI(
           event.response,
           ModelStopReason.EndTurn,
           [],
-          request.target.provider,
+          responseProfile,
         ).usage
         if (terminalUsage !== undefined)
           request.onUsageSnapshot?.(terminalUsage)
@@ -716,7 +721,11 @@ async function* streamOpenAI(
             .sort(([left], [right]) => left - right)
             .map(([, item]) => item),
         }
-        const failure = responseFailure(response, request.target.provider)
+        const failure = responseFailure(
+          response,
+          request.target.provider,
+          responseProfile,
+        )
         if (failure !== undefined) {
           terminalEvent = failure
         } else {
@@ -729,6 +738,7 @@ async function* streamOpenAI(
               request.continuationScope,
               request.target.model,
               completedIds,
+              responseProfile,
             ),
           }
         }
@@ -822,6 +832,7 @@ async function* streamOpenAI(
         terminalEvent?.type === "response"
           ? terminalEvent.response.providerResponseId
           : terminalEvent?.failure.providerResponseId,
+        responseProfile,
       ),
       ...(terminalUsage === undefined ? {} : { usage: terminalUsage }),
     }
@@ -1178,6 +1189,7 @@ export function fromOpenAIResponse(
   continuationScope?: string,
   model = response.model,
   completedItemIds: ReadonlySet<string> = new Set(),
+  responseProfile: "openai" | "grok" = "openai",
 ): ModelResponse {
   if (response.status === "cancelled") {
     throw new OpenAIProtocolError(
@@ -1199,11 +1211,17 @@ export function fromOpenAIResponse(
       stopReason = ModelStopReason.Length
       // OpenAI uses this reason for both output and context exhaustion. Only
       // xAI distinguishes max_prompt_tokens, so do not infer OpenAI's cause.
-      lengthReason = provider === "grok" ? "output" : "unknown"
-    } else if (provider === "grok" && rawStopReason === "max_prompt_tokens") {
+      lengthReason = responseProfile === "grok" ? "output" : "unknown"
+    } else if (
+      responseProfile === "grok" &&
+      rawStopReason === "max_prompt_tokens"
+    ) {
       stopReason = ModelStopReason.Length
       lengthReason = "context"
-    } else if (provider === "grok" && rawStopReason === "max_time_limit") {
+    } else if (
+      responseProfile === "grok" &&
+      rawStopReason === "max_time_limit"
+    ) {
       stopReason = ModelStopReason.Length
       lengthReason = "unknown"
     } else if (rawStopReason === "content_filter") {
@@ -1249,7 +1267,7 @@ export function fromOpenAIResponse(
       : ModelStopReason.EndTurn
   const { output: _output, ...metadata } = response
   return {
-    ...responseResult(response, stopReason, result.content, provider),
+    ...responseResult(response, stopReason, result.content, responseProfile),
     nativeMetadata: modelNativeResponseMetadata(
       {
         target: { provider, model, instructionProfileId: "native" },
@@ -1567,7 +1585,7 @@ function responseResult(
   response: Response,
   stopReason: ModelResponse["stopReason"],
   content: readonly ModelContentBlock[],
-  provider = "openai",
+  responseProfile: "openai" | "grok" = "openai",
 ): ModelResponse {
   return {
     stopReason,
@@ -1585,7 +1603,10 @@ function responseResult(
                 }
               : {}),
             inputTokens: response.usage.input_tokens,
-            activeContextTokens: activeContextTokens(response.usage, provider),
+            activeContextTokens: activeContextTokens(
+              response.usage,
+              responseProfile,
+            ),
             outputTokens: response.usage.output_tokens,
             ...((response.usage.input_tokens_details?.cached_tokens ?? 0) === 0
               ? {}
@@ -1609,6 +1630,7 @@ function responseResult(
 function responseFailure(
   response: Response,
   provider: string,
+  responseProfile: "openai" | "grok",
 ): ModelStreamFailureEvent | undefined {
   if (
     response.status !== "cancelled" &&
@@ -1637,17 +1659,21 @@ function responseFailure(
     ...(response.usage == null
       ? {}
       : {
-          usage: responseResult(response, ModelStopReason.EndTurn, [], provider)
-            .usage,
+          usage: responseResult(
+            response,
+            ModelStopReason.EndTurn,
+            [],
+            responseProfile,
+          ).usage,
         }),
   }
 }
 
 function activeContextTokens(
   usage: NonNullable<Response["usage"]>,
-  provider: string,
+  responseProfile: "openai" | "grok",
 ): number {
-  if (provider === "grok") {
+  if (responseProfile === "grok") {
     const contextDetails = (usage as unknown as Record<string, unknown>)
       .context_details
     if (isJsonObject(contextDetails)) {
@@ -1669,6 +1695,7 @@ function terminalFailure(
   stage: "connect" | "response_body",
   requestId?: string,
   responseId?: string,
+  responseProfile: "openai" | "grok" = "openai",
 ): ModelStreamFailureEvent {
   const status =
     error instanceof OpenAI.APIError && typeof error.status === "number"
@@ -1697,7 +1724,7 @@ function terminalFailure(
   const serverShouldRetry =
     error instanceof OpenAI.APIError
       ? (parseShouldRetry(error.headers) ??
-        (provider === "grok" && (status === 525 || status === 526)
+        (responseProfile === "grok" && (status === 525 || status === 526)
           ? false
           : undefined))
       : undefined
@@ -1735,11 +1762,6 @@ function failureKindForProviderCode(
   if (code === "server_error") return "server_error"
   return "provider_error"
 }
-
-const REASONING_SUMMARY_PROVIDERS: ReadonlySet<string> = new Set([
-  "openai",
-  "codex",
-])
 
 function abortedResponse(usage?: ModelResponse["usage"]): ModelStreamEvent {
   return { type: "cancelled", ...(usage === undefined ? {} : { usage }) }

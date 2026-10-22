@@ -9,7 +9,7 @@ import manifest from "../../src/runtime/prompts/manifest.json" with {
 const officialAgents = {
   openai: "codex",
   codex: "codex",
-  kimi: "kimi-code",
+  "kimi-code": "kimi-code",
   grok: "grok-build",
   anthropic: "claude-code",
   faux: "yakitori",

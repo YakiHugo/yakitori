@@ -940,7 +940,7 @@ describe("JsonlThreadStore", () => {
     const events: ModelStreamEvent[] = []
     for await (const event of provider({
       target: {
-        provider: "kimi",
+        provider: "kimi-code",
         model: "kimi-test",
         instructionProfileId: "anthropic",
       },
@@ -1145,7 +1145,7 @@ describe("JsonlThreadStore", () => {
         type: "token_count",
         turnId: "turn_one",
         activeContextTokens: 900,
-        provider: "kimi",
+        provider: "kimi-code",
         model: "k3",
         capacityTokens: 258_000,
       },
@@ -1156,7 +1156,7 @@ describe("JsonlThreadStore", () => {
       type: "token_count",
       turnId: "turn_one",
       activeContextTokens: 900,
-      provider: "kimi",
+      provider: "kimi-code",
       model: "k3",
       capacityTokens: 258_000,
     })

@@ -1,4 +1,3 @@
-import { withSDKResponse } from "../support/sdk-response.ts"
 import OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
 import { describe, expect, it } from "vitest"
@@ -14,6 +13,7 @@ import {
   toOpenAIInput,
   toOpenAITools,
 } from "../../src/runtime/openai-provider.ts"
+import { withSDKResponse } from "../support/sdk-response.ts"
 
 describe("OpenAI Responses provider", () => {
   it.each([
@@ -246,6 +246,7 @@ describe("OpenAI Responses provider", () => {
       },
     })
     const stream = createOpenAIProvider({
+      ...(provider === "codex" ? { requestProfile: "codex" as const } : {}),
       apiKey: "test",
       model,
       client,
@@ -438,6 +439,7 @@ describe("OpenAI Responses provider", () => {
       },
     })
     const stream = createOpenAIProvider({
+      requestProfile: "codex",
       apiKey: "test",
       model: "gpt-test",
       client,
@@ -1041,9 +1043,17 @@ describe("OpenAI Responses provider", () => {
       } as never,
     })
 
-    expect(fromOpenAIResponse(response, new Map(), "grok").usage).toMatchObject(
-      { activeContextTokens: 36 },
-    )
+    expect(
+      fromOpenAIResponse(
+        response,
+        new Map(),
+        "account_xai",
+        undefined,
+        response.model,
+        undefined,
+        "grok",
+      ).usage,
+    ).toMatchObject({ activeContextTokens: 36 })
   })
 
   it("maps text, function calls, usage, and incomplete responses", () => {
@@ -1706,6 +1716,7 @@ describe("OpenAI provider error classification", () => {
     } as unknown as OpenAI)
     const stream = createOpenAIProvider({
       apiKey: "test",
+      responseProfile: "grok",
       model: "grok-test",
       client,
     })
@@ -1713,7 +1724,7 @@ describe("OpenAI provider error classification", () => {
     for await (const event of stream(
       requestFixture({
         target: {
-          provider: "grok",
+          provider: "account_xai",
           model: "grok-test",
           instructionProfileId: "default",
         },

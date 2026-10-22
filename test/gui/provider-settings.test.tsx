@@ -23,21 +23,62 @@ import {
 import type { ApiConfiguredProvider } from "../../src/server/provider-configuration.ts"
 import type { SubscriptionConnection } from "../../src/server/subscription-connections.ts"
 
-const { request, loadProviders, providerChanges } = vi.hoisted(() => ({
-  request:
-    vi.fn<
-      (method: string, params: Record<string, unknown>) => Promise<unknown>
-    >(),
-  loadProviders: vi.fn<() => Promise<void>>(),
-  providerChanges: new Set<() => void>(),
+const { request, detailRequest, loadProviders, providerChanges } = vi.hoisted(
+  () => ({
+    request:
+      vi.fn<
+        (method: string, params: Record<string, unknown>) => Promise<unknown>
+      >(),
+    detailRequest:
+      vi.fn<
+        (method: string, params: Record<string, unknown>) => Promise<unknown>
+      >(),
+    loadProviders: vi.fn<() => Promise<void>>(),
+    providerChanges: new Set<() => void>(),
+  }),
+)
+
+vi.mock("../../src/gui/components/code-editor.tsx", () => ({
+  CodeEditor: ({
+    value,
+    path,
+    onChange,
+  }: {
+    value: string
+    path: string
+    onChange(value: string): void
+  }) => (
+    <textarea
+      aria-label={`Edit ${path}`}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
 }))
 
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
   getAppRpcClient: () => ({
     request: (method: string, params: Record<string, unknown>) =>
-      method === "chatgpt/read"
-        ? Promise.resolve({ accounts: [], welcomeRequired: false })
-        : request(method, params),
+      method === "config/read"
+        ? Promise.resolve({
+            layers: [
+              {
+                source: "user",
+                path: "/home/config.toml",
+                version: "models-1",
+              },
+            ],
+          })
+        : method === "chatgpt/read"
+          ? Promise.resolve({ accounts: [], welcomeRequired: false })
+          : [
+                "provider/models/read",
+                "provider/models/write",
+                "provider/models/refresh",
+                "subscription/read",
+              ].includes(method)
+            ? detailRequest(method, params)
+            : request(method, params),
     subscribeToProviderChanges: (listener: () => void) => {
       providerChanges.add(listener)
       return () => providerChanges.delete(listener)
@@ -82,14 +123,58 @@ const connection: ApiConfiguredProvider = {
 
 beforeEach(() => {
   request.mockReset().mockResolvedValue({ providers: [], presets: [preset] })
+  detailRequest.mockReset().mockImplementation(async (method, params) =>
+    method === "subscription/read"
+      ? {
+          subscription: {
+            provider: params.provider,
+            displayName: "Account",
+            availability: "available",
+            usage: { status: "unavailable", reason: "not_supported" },
+          },
+          fetchedAt: 1,
+        }
+      : {
+          provider: params.provider,
+          models: preset.models,
+          settings: method === "provider/models/write" ? params.settings : {},
+          version: "models-1",
+        },
+  )
   loadProviders.mockReset().mockResolvedValue()
-  useAppStore.setState({ ...createInitialAppState(), loadProviders })
+  useAppStore.setState({
+    ...createInitialAppState(),
+    loadProviders,
+    loadUsage: async () => {},
+  })
 })
 
 afterEach(() => {
   cleanup()
   providerChanges.clear()
   useAppStore.setState(createInitialAppState())
+})
+
+async function openAccountSettings() {
+  render(<ProviderSettings />)
+  const add = await screen.findByRole("button", {
+    name: "Add account",
+  })
+  await waitFor(() => expect(add).toHaveProperty("disabled", false))
+  if (!screen.queryByRole("region", { name: "Configured providers" }))
+    await userEvent.setup().click(add)
+}
+
+it("keeps the outer page as an account list until adding or opening an account", async () => {
+  const user = userEvent.setup()
+  render(<ProviderSettings />)
+  await screen.findByText("No accounts connected yet.")
+  expect(screen.queryByRole("button", { name: "DeepSeek" })).toBeNull()
+  expect(screen.queryByRole("tab")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Add account" }))
+  await screen.findByRole("button", { name: "DeepSeek" })
+  await user.click(screen.getByRole("button", { name: "Back to accounts" }))
+  expect(screen.getByText("No accounts connected yet.")).toBeDefined()
 })
 
 it("starts subscription sign-in from the catalog and opens a working account import form", async () => {
@@ -120,7 +205,7 @@ it("starts subscription sign-in from the catalog and opens a working account imp
       })
     return { providers: [], presets: [preset], subscriptions }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "Codex CLI" }))
   expect(request).toHaveBeenCalledWith("provider/subscription/login", {
     id: "codex",
@@ -184,7 +269,7 @@ it("shows why a local subscription account could not be imported and allows retr
       )
     return { providers: [], presets: [preset], subscriptions }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "Codex CLI" }))
   await user.click(
     screen.getByRole("button", { name: "Import existing account…" }),
@@ -207,7 +292,21 @@ it("opens provider settings and saves a preset connection with an API key", asyn
   useAppStore.setState({ settingsSection: "general" })
   render(<SettingsPage />)
   await user.click(screen.getByRole("button", { name: "Providers" }))
-  expect(await screen.findByText("Add provider")).toBeDefined()
+  const navigation = screen.getByRole("complementary", {
+    name: "Settings navigation",
+  })
+  expect(
+    within(navigation)
+      .getByRole("button", { name: "Providers" })
+      .getAttribute("aria-current"),
+  ).toBe("page")
+  expect(screen.getAllByRole("button", { name: "Back to app" })).toHaveLength(1)
+  expect(screen.queryByText("Use your ChatGPT plan")).toBeNull()
+  await user.click(within(navigation).getByRole("button", { name: "General" }))
+  await user.click(
+    within(navigation).getByRole("button", { name: "Providers" }),
+  )
+  expect(await screen.findByText("Add account")).toBeDefined()
   expect(
     screen.getByRole("region", { name: "Provider settings" }),
   ).toBeDefined()
@@ -215,13 +314,17 @@ it("opens provider settings and saves a preset connection with an API key", asyn
   expect(
     screen.queryByRole("button", { name: "Configure with Mate" }),
   ).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Add account" }))
   await user.click(screen.getByRole("button", { name: /DeepSeek/ }))
   expect(screen.getByRole("dialog", { name: "DeepSeek" })).toBeDefined()
   expect(screen.queryByLabelText("Connection ID")).toBeNull()
-  expect(screen.queryByLabelText("DeepSeek Chat deepseek-chat")).toBeNull()
+  expect(screen.getByLabelText("Enable DeepSeek Chat")).toHaveProperty(
+    "outerHTML",
+    expect.stringContaining('aria-checked="true"'),
+  )
   expect(screen.getByLabelText("API key").getAttribute("type")).toBe("password")
   await user.type(screen.getByLabelText("API key"), "test-provider-key")
-  await user.click(screen.getByRole("button", { name: "Add provider" }))
+  await user.click(screen.getByRole("button", { name: "Add account" }))
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
   expect(request).toHaveBeenCalledWith("provider/configuration/write", {
     configuration: {
@@ -230,6 +333,8 @@ it("opens provider settings and saves a preset connection with an API key", asyn
       baseURL: preset.baseURL,
       envKey: preset.envKey,
       preset: preset.id,
+      service: preset.id,
+      authentication: "stored",
       models: [],
     },
     apiKey: "test-provider-key",
@@ -237,29 +342,96 @@ it("opens provider settings and saves a preset connection with an API key", asyn
   expect(screen.queryByRole("form", { name: "New provider" })).toBeNull()
 })
 
-it("retains existing model metadata and the stored key while editing model IDs", async () => {
+it("preserves model metadata and the stored key when editing account information", async () => {
   const user = userEvent.setup()
   request.mockResolvedValue({ providers: [connection], presets: [preset] })
-  render(<ProviderSettings />)
-  expect(await screen.findByText("Key saved")).toBeDefined()
-  await user.click(screen.getByRole("button", { name: /^DeepSeek work/ }))
-  expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("")
-  await user.click(screen.getByLabelText("DeepSeek Chat deepseek-chat"))
-  await user.click(screen.getByText("Add an unlisted model"))
-  await user.type(screen.getByLabelText("Model ID"), " new-model ")
-  await user.click(screen.getByRole("button", { name: "Add model" }))
-  await user.click(screen.getByRole("button", { name: "Save changes" }))
-  await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
+  await openAccountSettings()
+  await user.click(
+    await screen.findByRole("button", { name: /^DeepSeek work/ }),
+  )
+  expect(screen.queryByRole("tab")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
+  expect(screen.getByLabelText("API key")).toHaveProperty("value", "")
+  await user.clear(screen.getByLabelText("Account name"))
+  await user.type(screen.getByLabelText("Account name"), "Updated account")
+  await waitFor(() =>
+    expect(
+      request.mock.calls.some(
+        ([method]) => method === "provider/configuration/write",
+      ),
+    ).toBe(true),
+  )
   expect(request).toHaveBeenCalledWith("provider/configuration/write", {
     id: connection.id,
-    configuration: {
-      ...connection.configuration,
-      models: [
-        preset.models[1],
-        { ...preset.models[0], visible: false },
-        { id: "new-model", visible: true },
-      ],
-    },
+    configuration: { ...connection.configuration, name: "Updated account" },
+  })
+})
+
+it("applies the latest connection edit when the dialog closes before its write delay", async () => {
+  const user = userEvent.setup()
+  let stored = connection
+  request.mockImplementation(async (method, params) => {
+    if (method === "provider/configuration/write")
+      stored = {
+        ...connection,
+        configuration:
+          params.configuration as ApiConfiguredProvider["configuration"],
+      }
+    return { providers: [stored], presets: [preset] }
+  })
+  await openAccountSettings()
+  await user.click(
+    await screen.findByRole("button", { name: /^DeepSeek work/ }),
+  )
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
+  fireEvent.change(screen.getByLabelText("Account name"), {
+    target: { value: "Renamed account" },
+  })
+  await user.click(screen.getByRole("button", { name: "Done" }))
+  await screen.findByRole("heading", { name: "Renamed account", level: 2 })
+  expect(request).toHaveBeenCalledWith("provider/configuration/write", {
+    id: connection.id,
+    configuration: { ...connection.configuration, name: "Renamed account" },
+  })
+  expect(screen.queryByRole("dialog")).toBeNull()
+})
+
+it("opens model and usage details for the clicked account without requesting other accounts", async () => {
+  const user = userEvent.setup()
+  const personal = {
+    ...connection,
+    id: "deepseek-personal",
+    configuration: { ...connection.configuration, name: "DeepSeek personal" },
+  }
+  request.mockResolvedValue({
+    providers: [connection, personal],
+    presets: [preset],
+  })
+  await openAccountSettings()
+  await screen.findByRole("button", { name: /^DeepSeek work/ })
+  expect(screen.queryByRole("tab")).toBeNull()
+  expect(detailRequest).not.toHaveBeenCalled()
+  await user.click(screen.getByRole("button", { name: /^DeepSeek work/ }))
+  await screen.findByRole("region", { name: "Account models" })
+  expect(detailRequest).toHaveBeenCalledWith("provider/models/read", {
+    provider: "deepseek-work",
+  })
+  expect(detailRequest).toHaveBeenCalledWith("subscription/read", {
+    provider: "deepseek-work",
+  })
+  expect(
+    detailRequest.mock.calls.every(
+      ([, params]) => params.provider === "deepseek-work",
+    ),
+  ).toBe(true)
+  await user.click(screen.getByRole("button", { name: "Back to accounts" }))
+  expect(screen.queryByRole("region", { name: "Provider usage" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: /^DeepSeek personal/ }))
+  expect(detailRequest).toHaveBeenCalledWith("provider/models/read", {
+    provider: "deepseek-personal",
+  })
+  expect(detailRequest).toHaveBeenCalledWith("subscription/read", {
+    provider: "deepseek-personal",
   })
 })
 
@@ -271,6 +443,8 @@ it("preserves an existing Gemini compatibility connection when the native preset
     configuration: {
       name: "Gemini compatibility",
       preset: "gemini",
+      service: "gemini",
+      authentication: "stored",
       wireApi: "openai_chat_completions",
       baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
       models: [{ id: "gemini-3.8-flash" }],
@@ -280,10 +454,11 @@ it("preserves an existing Gemini compatibility connection when the native preset
     providers: [compatibility],
     presets: providerPresets,
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("button", { name: /^Gemini compatibility/ }),
   )
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
   await user.click(screen.getByText("Advanced settings"))
   expect(
     (screen.getByLabelText("API protocol") as HTMLSelectElement).value,
@@ -291,10 +466,16 @@ it("preserves an existing Gemini compatibility connection when the native preset
   expect(
     (screen.getByLabelText("API base URL") as HTMLInputElement).value,
   ).toBe("https://generativelanguage.googleapis.com/v1beta/openai/")
-  fireEvent.change(screen.getByLabelText("Connection name"), {
+  fireEvent.change(screen.getByLabelText("Account name"), {
     target: { value: "Gemini work" },
   })
-  await user.click(screen.getByRole("button", { name: "Save changes" }))
+  await waitFor(() =>
+    expect(
+      request.mock.calls.some(
+        ([method]) => method === "provider/configuration/write",
+      ),
+    ).toBe(true),
+  )
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
   expect(request).toHaveBeenCalledWith("provider/configuration/write", {
     id: "gemini-compatibility",
@@ -305,7 +486,7 @@ it("preserves an existing Gemini compatibility connection when the native preset
 it("saves a new Gemini preset connection with the native protocol and endpoint", async () => {
   const user = userEvent.setup()
   request.mockResolvedValue({ providers: [], presets: providerPresets })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "Google Gemini" }))
   await user.click(screen.getByText("Advanced settings"))
   expect(
@@ -320,12 +501,14 @@ it("saves a new Gemini preset connection with the native protocol and endpoint",
     "gemini_generate_content",
   )
   await user.type(screen.getByLabelText("API key"), "native-test-key")
-  await user.click(screen.getByRole("button", { name: "Add provider" }))
+  await user.click(screen.getByRole("button", { name: "Add account" }))
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
   expect(request).toHaveBeenCalledWith("provider/configuration/write", {
     configuration: {
       name: "Google Gemini",
       preset: "gemini",
+      service: "gemini",
+      authentication: "stored",
       wireApi: "gemini_generate_content",
       baseURL: "https://generativelanguage.googleapis.com/v1beta",
       envKey: "GEMINI_API_KEY",
@@ -342,21 +525,28 @@ it("keeps the form and entered key when saving fails", async () => {
       throw new Error("Could not save connection.")
     return { providers: [connection], presets: [preset] }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
   )
-  fireEvent.change(screen.getByLabelText("Connection name"), {
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
+  fireEvent.change(screen.getByLabelText("Account name"), {
     target: { value: "Renamed work connection" },
   })
   await user.type(screen.getByLabelText("API key"), "replacement-key")
-  await user.click(screen.getByRole("button", { name: "Save changes" }))
+  await waitFor(() =>
+    expect(
+      request.mock.calls.some(
+        ([method]) => method === "provider/configuration/write",
+      ),
+    ).toBe(true),
+  )
   expect(await screen.findByRole("alert")).toHaveProperty(
     "textContent",
     "Could not save connection.",
   )
   expect(
-    (screen.getByLabelText("Connection name") as HTMLInputElement).value,
+    (screen.getByLabelText("Account name") as HTMLInputElement).value,
   ).toBe("Renamed work connection")
   expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe(
     "replacement-key",
@@ -371,7 +561,7 @@ it("tests the current draft only when requested and preserves it after authentic
       throw new Error("Invalid API key.")
     return { providers: [], presets: [preset] }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: /DeepSeek/ }))
   expect(screen.getByText(/may incur API charges/)).toBeDefined()
   await user.type(screen.getByLabelText("API key"), "draft-key")
@@ -402,10 +592,11 @@ it("removes a connection after confirmation and refreshes model availability", a
     providers: method === "provider/configuration/delete" ? [] : [connection],
     presets: [preset],
   }))
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
   )
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
   await user.click(screen.getByRole("button", { name: "Remove provider" }))
   expect(
     request.mock.calls.some(
@@ -413,7 +604,7 @@ it("removes a connection after confirmation and refreshes model availability", a
     ),
   ).toBe(false)
   await user.click(screen.getByRole("button", { name: "Remove" }))
-  expect(await screen.findByText("Add provider")).toBeDefined()
+  expect(await screen.findByText("Add account")).toBeDefined()
   expect(request).toHaveBeenCalledWith("provider/configuration/delete", {
     id: connection.id,
   })
@@ -434,7 +625,7 @@ it("filters the provider catalog and returns to it without saving a cancelled dr
       },
     ],
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   const search = await screen.findByRole("searchbox", {
     name: "Find a provider",
   })
@@ -458,15 +649,16 @@ it("adds another preset connection with its own ID and key", async () => {
     providers: [{ ...connection, id: "deepseek" }],
     presets: [preset],
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
   )
+  await user.click(screen.getByRole("button", { name: "Edit connection" }))
   await user.click(screen.getByRole("button", { name: "Add another" }))
   await user.type(screen.getByLabelText("API key"), "another-key")
   await user.click(
     within(screen.getByRole("dialog")).getByRole("button", {
-      name: "Add provider",
+      name: "Add account",
     }),
   )
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
@@ -477,6 +669,8 @@ it("adds another preset connection with its own ID and key", async () => {
       baseURL: preset.baseURL,
       envKey: preset.envKey,
       preset: preset.id,
+      service: preset.id,
+      authentication: "stored",
       models: [],
     },
     apiKey: "another-key",
@@ -490,14 +684,14 @@ it("loads the catalog when choosing models and persists a selection without copy
       ? preset.models
       : { providers: [], presets: [preset] },
   )
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
   await user.click(screen.getByText("Model defaults (optional)"))
-  await user.click(await screen.findByLabelText("DeepSeek Chat deepseek-chat"))
-  await user.click(screen.getByLabelText("deepseek-reasoner"))
-  await user.click(screen.getByLabelText("deepseek-reasoner"))
-  await user.click(screen.getByRole("button", { name: "Add provider" }))
+  await user.click(await screen.findByLabelText("Enable DeepSeek Chat"))
+  await user.click(screen.getByLabelText("Enable deepseek-reasoner"))
+  await user.click(screen.getByLabelText("Enable deepseek-reasoner"))
+  await user.click(screen.getByRole("button", { name: "Add account" }))
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
   expect(request).toHaveBeenCalledWith("provider/configuration/write", {
     configuration: {
@@ -506,6 +700,8 @@ it("loads the catalog when choosing models and persists a selection without copy
       baseURL: preset.baseURL,
       envKey: preset.envKey,
       preset: preset.id,
+      service: preset.id,
+      authentication: "stored",
       models: [
         { id: "deepseek-chat", visible: false },
         { id: "deepseek-reasoner", visible: true },
@@ -517,7 +713,7 @@ it("loads the catalog when choosing models and persists a selection without copy
 
 it("refreshes connections changed outside the form without losing an unsaved draft", async () => {
   const user = userEvent.setup()
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "unsaved-key")
   request.mockResolvedValue({ providers: [connection], presets: [preset] })
@@ -528,6 +724,7 @@ it("refreshes connections changed outside the form without losing an unsaved dra
     "unsaved-key",
   )
   await user.click(screen.getByRole("button", { name: "Cancel" }))
+  await user.click(screen.getByRole("button", { name: "Back to accounts" }))
   expect(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
   ).toBeDefined()
@@ -559,7 +756,7 @@ it("offers every source category and connects local services without a key or mo
     ],
     subscriptions: [{ id: "codex", name: "Codex CLI", available: false }],
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   for (const name of ["Subscriptions", "Vendors", "Relays", "On this machine"])
     expect(await screen.findByRole("region", { name })).toBeDefined()
   expect(screen.getByRole("button", { name: "Custom provider" })).toBeDefined()
@@ -571,7 +768,7 @@ it("offers every source category and connects local services without a key or mo
   )
   await user.click(
     within(screen.getByRole("dialog")).getByRole("button", {
-      name: "Add provider",
+      name: "Add account",
     }),
   )
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
@@ -581,8 +778,9 @@ it("offers every source category and connects local services without a key or mo
       wireApi: preset.wireApi,
       baseURL: "http://localhost:11434/v1",
       preset: "ollama",
+      service: "ollama",
       models: [],
-      noKey: true,
+      authentication: "none",
     },
   })
 })
@@ -598,7 +796,7 @@ it("toggles a connection without opening a form and offers undo", async () => {
       ? { providers: [disabled], presets: [preset], undoId: "undo-test" }
       : { providers: [connection], presets: [preset] },
   )
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("switch", { name: "Enable DeepSeek work" }),
   )
@@ -634,7 +832,7 @@ it("supports keyboard reordering using the logo handle", async () => {
     providers: [connection, other],
     presets: [preset],
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   const handle = await screen.findByRole("button", {
     name: "Move DeepSeek personal",
   })
@@ -648,49 +846,35 @@ it("supports keyboard reordering using the logo handle", async () => {
   )
 })
 
-it("saves model names, reasoning defaults and explicit pricing through the same connection form", async () => {
+it("saves model names, reasoning defaults and explicit pricing through the selected account detail", async () => {
   const user = userEvent.setup()
   request.mockResolvedValue({ providers: [connection], presets: [preset] })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
   )
-  await user.click(screen.getByLabelText("Settings for deepseek-reasoner"))
-  const settings = screen.getByLabelText(
-    "Settings for deepseek-reasoner",
-  ).parentElement
-  if (!settings) throw new Error("Missing model settings")
-  await user.type(
-    within(settings).getByLabelText("Display name"),
-    "My reasoner",
-  )
-  await user.selectOptions(
-    within(settings).getByLabelText("Default reasoning effort"),
-    "low",
-  )
   await user.click(
-    within(settings).getByText("Pricing · USD per million tokens"),
+    screen.getByRole("button", { name: "Edit settings for deepseek-reasoner" }),
   )
-  await user.type(within(settings).getByLabelText("Input price"), "1.5")
-  await user.type(within(settings).getByLabelText("Output price"), "6")
-  await user.click(
-    within(settings).getByRole("button", { name: "Apply rates" }),
-  )
-  await user.click(screen.getByRole("button", { name: "Save changes" }))
+  const editor = await screen.findByRole("textbox", {
+    name: "Edit /home/config.toml",
+  })
+  fireEvent.change(editor, {
+    target: {
+      value:
+        '[models.deepseek-work.deepseek-reasoner]\ndisplayName = "My reasoner"\ndefaultEffort = "low"\n[models.deepseek-work.deepseek-reasoner.pricing]\ninputPerMillion = 1.5\noutputPerMillion = 6',
+    },
+  })
   await waitFor(() =>
-    expect(request).toHaveBeenCalledWith("provider/configuration/write", {
-      id: connection.id,
-      configuration: {
-        ...connection.configuration,
-        models: [
-          preset.models[0],
-          {
-            ...preset.models[1],
-            displayName: "My reasoner",
-            defaultEffort: "low",
-            pricing: { inputPerMillion: 1.5, outputPerMillion: 6 },
-          },
-        ],
+    expect(detailRequest).toHaveBeenCalledWith("provider/models/write", {
+      provider: connection.id,
+      version: "models-1",
+      settings: {
+        "deepseek-reasoner": {
+          displayName: "My reasoner",
+          defaultEffort: "low",
+          pricing: { inputPerMillion: 1.5, outputPerMillion: 6 },
+        },
       },
     }),
   )
@@ -707,7 +891,7 @@ it("does not reopen a closed editor when its model catalog request completes", a
       ? catalog
       : { providers: [], presets: [preset] },
   )
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
   await user.click(screen.getByText("Model defaults (optional)"))
@@ -738,7 +922,7 @@ it("keeps a new editor locked to its own model request after an older request co
       )
     return { providers: [], presets: [preset, localPreset] }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "catalog-key")
   await user.click(screen.getByText("Model defaults (optional)"))
@@ -785,7 +969,7 @@ it.each([
       })
     return { providers: [], presets: [preset], subscriptions: [] }
   })
-  render(<ProviderSettings />)
+  await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "Import…" }))
   const importDialog = screen.getByRole("dialog", { name: "Import provider" })
   fireEvent.change(screen.getByLabelText("Provider configuration JSON"), {
@@ -796,7 +980,7 @@ it.each([
           wireApi: "openai_chat_completions",
           baseURL: "http://localhost:11434/v1",
           models: [],
-          noKey: true,
+          authentication: "none",
         },
       }),
     },
@@ -867,7 +1051,7 @@ it.each([
       : { providers: [], presets: [preset], subscriptions }
   })
   try {
-    render(<ProviderSettings />)
+    await openAccountSettings()
     fireEvent.click(
       await screen.findByRole("button", {
         name: kind === "documentation" ? "DeepSeek" : "Grok CLI",
@@ -886,4 +1070,109 @@ it.each([
       value: undefined,
     })
   }
+})
+
+it("drops an entered key when the account switches to environment authentication", async () => {
+  const user = userEvent.setup()
+  await openAccountSettings()
+  await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
+  await user.type(screen.getByLabelText("API key"), "discarded-key")
+  await user.selectOptions(
+    screen.getByLabelText("Authentication"),
+    "environment",
+  )
+  expect(screen.queryByLabelText("API key")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Add account" }))
+  await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
+  const write = request.mock.calls.find(
+    ([method]) => method === "provider/configuration/write",
+  )
+  expect(write?.[1]).toMatchObject({
+    configuration: { authentication: "environment", envKey: preset.envKey },
+  })
+  expect(write?.[1]).not.toHaveProperty("apiKey")
+})
+
+it("shows service defaults before authentication and loads account models after the open editor receives a key", async () => {
+  const kimi = providerPresets.find((preset) => preset.id === "kimi-code")
+  if (!kimi) throw new Error("Missing Kimi Code template")
+  request.mockImplementation(async (method) =>
+    method === "provider/configuration/models"
+      ? [{ id: "account-coder", displayName: "Account coder" }]
+      : { providers: [], presets: [kimi] },
+  )
+  const user = userEvent.setup()
+  await openAccountSettings()
+  await user.click(await screen.findByRole("button", { name: "Kimi Code" }))
+  await user.click(screen.getByText("Model defaults (optional)"))
+  expect(screen.getByLabelText("Enable kimi-for-coding")).toHaveProperty(
+    "outerHTML",
+    expect.stringContaining('aria-checked="true"'),
+  )
+  expect(
+    screen.getByText(
+      "Service defaults shown below. Account access has not been checked.",
+    ),
+  ).toBeDefined()
+  expect(
+    screen.queryByRole("button", { name: /Load models|Refresh models/ }),
+  ).toBeNull()
+  expect(
+    screen.getByText(
+      "Models will be discovered automatically after you enter an API key.",
+    ),
+  ).toBeDefined()
+  expect(
+    request.mock.calls.filter(
+      ([method]) => method === "provider/configuration/models",
+    ),
+  ).toHaveLength(0)
+  await user.type(screen.getByLabelText("API key"), "test-kimi-key")
+  expect(
+    await screen.findByRole("switch", {
+      name: "Enable Account coder",
+    }),
+  ).toHaveProperty("outerHTML", expect.stringContaining('aria-checked="true"'))
+  expect(screen.queryByLabelText("Enable kimi-for-coding")).toBeNull()
+  expect(
+    screen.queryByText(
+      "Service defaults shown below. Account access has not been checked.",
+    ),
+  ).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: /Load models|Refresh models/ }),
+  ).toBeNull()
+  await user.clear(screen.getByLabelText("API key"))
+  expect(screen.queryByLabelText("Enable Account coder")).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: /Load models|Refresh models/ }),
+  ).toBeNull()
+})
+
+it("retries failed discovery and distinguishes an empty account catalog from service defaults", async () => {
+  let attempts = 0
+  request.mockImplementation(async (method) => {
+    if (method !== "provider/configuration/models")
+      return { providers: [], presets: [preset] }
+    attempts++
+    if (attempts === 1) throw new Error("Catalog temporarily unavailable")
+    return attempts === 2 ? [] : [{ id: "account-recovered" }]
+  })
+  const user = userEvent.setup()
+  await openAccountSettings()
+  await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
+  await user.click(screen.getByText("Model defaults (optional)"))
+  await user.type(screen.getByLabelText("API key"), "test-account-key")
+  await screen.findByText("Catalog temporarily unavailable")
+  await user.click(screen.getByRole("button", { name: "Retry models" }))
+  await screen.findByText(
+    "No chat models returned by this account. Check account access or add a model ID.",
+  )
+  expect(screen.queryByLabelText("Enable DeepSeek Chat")).toBeNull()
+  expect(screen.queryByText("Catalog temporarily unavailable")).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: /Refresh models|Retry models/ }),
+  ).toBeNull()
+  await user.type(screen.getByLabelText("API key"), "-updated")
+  await screen.findByRole("switch", { name: "Enable account-recovered" })
 })

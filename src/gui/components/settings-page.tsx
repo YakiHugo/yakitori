@@ -47,15 +47,14 @@ export function SettingsPage() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return
+      if (event.defaultPrevented || event.key !== "Escape" || event.isComposing)
+        return
       if (document.querySelector("dialog[open]")) return
       closeSettings()
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [closeSettings])
-
-  if (section === "providers") return <ProviderSettings />
 
   return (
     <div className="settings-page">
@@ -87,29 +86,38 @@ export function SettingsPage() {
           </nav>
         </div>
       </aside>
-      <main className="settings-page-body">
-        <section className="settings-content" aria-label={sectionAria[section]}>
-          <div className="settings-content-inner">
-            {section === "general" ? (
-              <GeneralSettingsSection />
-            ) : section === "notifications" ? (
-              <NotificationSettingsSection />
-            ) : section === "subscriptions" ? (
-              <>
-                <div className="settings-section-heading">
-                  <CircleUserRound size={22} />
-                  <h3>Subscriptions</h3>
-                  <p>Connected accounts and their current limits.</p>
-                </div>
-                <SubscriptionsSection />
-              </>
-            ) : section === "mcp" ? (
-              <McpSettings />
-            ) : (
-              <UsageSection />
-            )}
-          </div>
-        </section>
+      <main
+        className={`settings-page-body${section === "providers" ? " settings-provider-body" : ""}`}
+      >
+        {section === "providers" ? (
+          <ProviderSettings />
+        ) : (
+          <section
+            className="settings-content"
+            aria-label={sectionAria[section]}
+          >
+            <div className="settings-content-inner">
+              {section === "general" ? (
+                <GeneralSettingsSection />
+              ) : section === "notifications" ? (
+                <NotificationSettingsSection />
+              ) : section === "subscriptions" ? (
+                <>
+                  <div className="settings-section-heading">
+                    <CircleUserRound size={22} />
+                    <h3>Subscriptions</h3>
+                    <p>Connected accounts and their current limits.</p>
+                  </div>
+                  <SubscriptionsSection />
+                </>
+              ) : section === "mcp" ? (
+                <McpSettings />
+              ) : (
+                <UsageSection />
+              )}
+            </div>
+          </section>
+        )}
       </main>
     </div>
   )

@@ -3,155 +3,108 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { useState } from "react"
 import { afterEach, expect, it, vi } from "vitest"
 import { ProviderModels } from "../../src/gui/components/provider-models.tsx"
-import type { ProviderConfiguration } from "../../src/server/provider-configuration.ts"
+import type { ConfiguredModel } from "../../src/protocol/providers.ts"
 
-const base: ProviderConfiguration = {
-  name: "Service",
-  wireApi: "openai_chat_completions",
-  baseURL: "https://service.example/v1",
-  models: [],
-}
-const available = [{ id: "model-a", displayName: "Model A" }, { id: "model-b" }]
+const available: readonly ConfiguredModel[] = [
+  { id: "model-a", displayName: "Model A", defaultEffort: "high" },
+  { id: "model-b" },
+]
 afterEach(cleanup)
 
-it.each([
-  "model-a",
-  "MODEL-A",
-])("keeps automatic catalog selection when exposed ID %s is added", (id) => {
+it("stores only visibility when hiding a discovered model", () => {
   const onChange = vi.fn()
   render(
     <ProviderModels
-      configuration={base}
+      configuration={{ models: [] }}
       available={available}
       onChange={onChange}
       fetchingModels={false}
     />,
   )
-  fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: id } })
-  fireEvent.click(screen.getByRole("button", { name: "Add model" }))
-  expect(onChange).not.toHaveBeenCalled()
-})
-
-it("shows edits to a catalog model selected through its typed ID", () => {
-  function Editor() {
-    const [configuration, setConfiguration] = useState<ProviderConfiguration>({
-      ...base,
-    })
-    return (
-      <ProviderModels
-        configuration={configuration}
-        available={available}
-        onChange={(patch) => setConfiguration({ ...configuration, ...patch })}
-        fetchingModels={false}
-      />
-    )
-  }
-  render(<Editor />)
-  fireEvent.change(screen.getByLabelText("Model ID"), {
-    target: { value: "model-a" },
+  fireEvent.click(screen.getByRole("switch", { name: "Enable Model A" }))
+  expect(onChange).toHaveBeenCalledExactlyOnceWith({
+    models: [{ id: "model-a", visible: false }],
   })
-  fireEvent.click(screen.getByRole("button", { name: "Add model" }))
-  const name = document.getElementById("model-name-model-a")
-  if (!name) throw new Error("Missing model editor")
-  fireEvent.change(name, { target: { value: "My model" } })
-  expect(name).toHaveProperty("value", "My model")
-  expect(
-    screen.getByRole("checkbox", { name: "My model model-a" }),
-  ).toHaveProperty("checked", true)
 })
 
-it("preserves automatic selection when a discovered model receives an override", () => {
-  function Editor() {
-    const [configuration, setConfiguration] = useState(base)
-    return (
-      <ProviderModels
-        configuration={configuration}
-        available={available}
-        onChange={(patch) => setConfiguration({ ...configuration, ...patch })}
-        fetchingModels={false}
-      />
-    )
-  }
-  render(<Editor />)
-  const name = document.getElementById("model-name-model-a")
-  if (!name) throw new Error("Missing model editor")
-  fireEvent.change(name, { target: { value: "My model" } })
-  expect(screen.getByRole("checkbox", { name: "model-b" })).toHaveProperty(
-    "checked",
-    true,
-  )
-})
-
-it("typing an already configured differently-cased catalog ID stays idempotent", () => {
+it.each([
+  "model-a",
+  "MODEL-A",
+])("updates an existing %s override without pinning discovered defaults", (id) => {
   const onChange = vi.fn()
   render(
     <ProviderModels
       configuration={{
-        ...base,
-        models: [{ id: "MODEL-A", displayName: "Custom A" }],
+        models: [
+          { id, displayName: "My model", efforts: ["low", "high"] },
+          { id: "model-b", visible: false },
+        ],
       }}
       available={available}
       onChange={onChange}
       fetchingModels={false}
     />,
   )
-  fireEvent.change(screen.getByLabelText("Model ID"), {
-    target: { value: "MODEL-A" },
+  fireEvent.click(screen.getByRole("switch", { name: "Enable My model" }))
+  expect(onChange).toHaveBeenCalledExactlyOnceWith({
+    models: [
+      { id: "model-b", visible: false },
+      {
+        id,
+        displayName: "My model",
+        efforts: ["low", "high"],
+        visible: false,
+      },
+    ],
   })
-  fireEvent.click(screen.getByRole("button", { name: "Add model" }))
-  expect(onChange).not.toHaveBeenCalled()
 })
 
-it("hides one model without freezing later discoveries", () => {
-  function Editor() {
-    const [configuration, setConfiguration] = useState(base)
-    const [models, setModels] = useState(available)
-    return (
-      <>
-        <ProviderModels
-          configuration={configuration}
-          available={models}
-          fetchingModels={false}
-          onChange={(patch) => setConfiguration({ ...configuration, ...patch })}
-        />
-        <button
-          type="button"
-          onClick={() => setModels([...available, { id: "new-model" }])}
-        >
-          Discover
-        </button>
-      </>
-    )
-  }
-  render(<Editor />)
-  fireEvent.click(screen.getByRole("checkbox", { name: "Model A model-a" }))
-  fireEvent.click(screen.getByRole("button", { name: "Discover" }))
-  expect(
-    screen.getByRole("checkbox", { name: "Model A model-a" }),
-  ).toHaveProperty("checked", false)
-  expect(screen.getByRole("checkbox", { name: "new-model" })).toHaveProperty(
-    "checked",
-    true,
-  )
-})
-
-it("does not pin provider reasoning defaults while editing the supported levels", () => {
-  const onChange = vi.fn()
+it("opens the selected model with its catalog capabilities and account overrides", () => {
+  const onEditModel = vi.fn()
   render(
     <ProviderModels
-      configuration={base}
-      available={[
-        { id: "coder", efforts: ["low", "high"], defaultEffort: "high" },
-      ]}
-      onChange={onChange}
+      configuration={{ models: [{ id: "MODEL-A", displayName: "My model" }] }}
+      available={available}
+      onChange={vi.fn()}
+      onEditModel={onEditModel}
       fetchingModels={false}
     />,
   )
-  const input = screen.getByLabelText("Reasoning levels")
-  fireEvent.blur(input, { target: { value: "low, high" } })
-  expect(onChange).not.toHaveBeenCalled()
-  fireEvent.blur(input, { target: { value: "low, high, xhigh" } })
-  expect(onChange).toHaveBeenCalledWith({
-    models: [{ id: "coder", efforts: ["low", "high", "xhigh"] }],
+  fireEvent.click(
+    screen.getByRole("button", { name: "Edit settings for MODEL-A" }),
+  )
+  expect(onEditModel).toHaveBeenCalledExactlyOnceWith({
+    id: "MODEL-A",
+    displayName: "My model",
+    defaultEffort: "high",
   })
+})
+
+it("keeps a hidden model disabled while enabling later catalog discoveries", () => {
+  function Editor({ models }: { models: readonly ConfiguredModel[] }) {
+    const [configuration, setConfiguration] = useState<{
+      models: readonly ConfiguredModel[]
+    }>({ models: [] })
+    return (
+      <ProviderModels
+        configuration={configuration}
+        available={models}
+        fetchingModels={false}
+        onChange={setConfiguration}
+      />
+    )
+  }
+  const view = render(<Editor models={available} />)
+  fireEvent.click(screen.getByRole("switch", { name: "Enable Model A" }))
+  view.rerender(<Editor models={[...available, { id: "new-model" }]} />)
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable Model A" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable new-model" })
+      .getAttribute("aria-checked"),
+  ).toBe("true")
 })

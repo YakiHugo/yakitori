@@ -1139,13 +1139,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       if (context.subscriptionUsage === undefined)
         throw unavailable("subscription/read")
       const record = requireParamsRecord(params, "subscription/read")
-      if (
-        record.provider !== "codex" &&
-        record.provider !== "grok" &&
-        record.provider !== "kimi"
-      ) {
-        throw invalidParams("provider must be codex, grok, or kimi.")
-      }
+      if (typeof record.provider !== "string" || !record.provider.trim())
+        throw invalidParams("provider must name a configured account.")
       return { result: await context.subscriptionUsage(record.provider) }
     },
   },

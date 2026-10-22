@@ -7,12 +7,12 @@ import {
   createOpenAITurnTransport,
   createProviderContinuationScope,
   type ModelProvider,
-  providerPresets,
   type StreamFn,
 } from "../runtime/index.ts"
 import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
+import { providerServices } from "../runtime/provider-services.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
 export function createConfiguredProvider(
@@ -25,22 +25,26 @@ export function createConfiguredProvider(
     result(state: "ready" | "error", message?: string): void
   }>,
 ): ModelProvider {
-  const preset = providerPresets.find(
-    (entry) => entry.id === configuration.preset,
+  const preset = providerServices.find(
+    (entry) => entry.id === configuration.service,
   )
-  const catalogProvider = preset?.catalogProvider
   // Presets are editable. Native PDF support requires the documented endpoint;
   // URL syntax normalization and one trailing slash do not change that endpoint.
   const knownPresetEndpoint =
     preset !== undefined &&
     new URL(configuration.baseURL).href.replace(/\/$/, "") ===
       new URL(preset.baseURL).href.replace(/\/$/, "")
+  const catalogProvider = knownPresetEndpoint
+    ? preset.catalogProvider
+    : undefined
   const buildModels = (configured: readonly ConfiguredModel[]) =>
     createConfiguredModelsManager({
       provider: id,
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
       models: configured.map((model) => ({
-        ...preset?.models.find((known) => known.id === model.id),
+        ...(knownPresetEndpoint
+          ? preset.models.find((known) => known.id === model.id)
+          : undefined),
         ...model,
       })),
       wireApi: configuration.wireApi,
@@ -72,6 +76,7 @@ export function createConfiguredProvider(
   return createModelProvider({
     info: {
       id,
+      ...(knownPresetEndpoint ? { serviceId: preset.id } : {}),
       wireApi: configuration.wireApi,
       capabilities: {
         remoteCompaction:
@@ -99,7 +104,19 @@ export function createConfiguredProvider(
     ),
     createTurnTransport() {
       const options = {
-        apiKey,
+        apiKey:
+          configuration.authentication === "none" &&
+          configuration.wireApi === "gemini_generate_content"
+            ? ""
+            : apiKey,
+        ...(configuration.authentication === "none"
+          ? {
+              defaultHeaders:
+                configuration.wireApi === "anthropic_messages"
+                  ? { "x-api-key": null }
+                  : { Authorization: null },
+            }
+          : {}),
         model: configuration.models.at(0)?.id ?? "",
         baseURL: configuration.baseURL,
       }
@@ -110,9 +127,19 @@ export function createConfiguredProvider(
           ? createOpenAITurnTransport({
               ...options,
               warmup: configuration.requestWarmup === true,
+              responseProfile:
+                knownPresetEndpoint && preset.id === "xai" ? "grok" : "openai",
             })
           : configuration.wireApi === "anthropic_messages"
-            ? createAnthropicTurnTransport(options)
+            ? createAnthropicTurnTransport({
+                ...options,
+                profile:
+                  knownPresetEndpoint &&
+                  (catalogProvider === "anthropic" ||
+                    catalogProvider === "kimi-code")
+                    ? catalogProvider
+                    : "generic",
+              })
             : undefined
       const stream =
         transport?.stream ??
@@ -147,26 +174,13 @@ export function createConfiguredProvider(
             (entry) => entry.model === request.target.model,
           )
           const effort = request.target.effort ?? model?.defaultEffort
-          // Old adapters use the model's canonical catalog identity for native
-          // features. Routing remains connection-scoped; opaque history is fenced
-          // by the endpoint+credential scope before it reaches the adapter.
           const target = {
             ...request.target,
-            ...(catalogProvider === undefined ||
-            configuration.wireApi === "openai_chat_completions" ||
-            configuration.wireApi === "gemini_generate_content"
-              ? {}
-              : { provider: catalogProvider }),
             ...(effort === undefined ? {} : { effort }),
           }
-          const providerOptions =
-            request.providerOptions?.provider === request.target.provider
-              ? { ...request.providerOptions, provider: target.provider }
-              : request.providerOptions
           for await (const event of stream({
             ...request,
             target,
-            ...(providerOptions === undefined ? {} : { providerOptions }),
           })) {
             if (event.type === "response") dynamic?.result("ready")
             else if (event.type === "failure")

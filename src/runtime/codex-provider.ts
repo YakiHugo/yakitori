@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto"
 import {
   CODEX_API_BASE_URL,
-  createCodexAuthProvider,
   type CodexAuthProvider,
+  createCodexAuthProvider,
 } from "./codex-credentials.ts"
 import type { ModelStreamEvent, StreamFn } from "./model.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
@@ -15,6 +15,7 @@ export function createCodexProvider(input?: {
   readonly credentialsPath?: string
   readonly auth?: CodexAuthProvider
   readonly createStream?: typeof createOpenAIProvider
+  readonly accountId?: string
 }): StreamFn {
   const auth =
     input?.auth ??
@@ -27,8 +28,8 @@ export function createCodexProvider(input?: {
   // Codex's sticky routing token belongs to one Turn, including its retries.
   // The caller must create a fresh stream for each Turn.
   let turnState: string | undefined
-  let expectedAccountId: string | undefined
-  let accountBound = false
+  let expectedAccountId: string | undefined = input?.accountId
+  let accountBound = input?.accountId !== undefined
   const stream: StreamFn = async function* (request) {
     for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
       let token: Awaited<ReturnType<CodexAuthProvider["resolve"]>>
@@ -37,14 +38,14 @@ export function createCodexProvider(input?: {
           authAttempt === 0 ? {} : { forceRefresh: true },
         )
       } catch (cause) {
-        yield codexLoginFailure(cause)
+        yield codexLoginFailure(cause, request.target.provider)
         return
       }
       if (!accountBound) {
         expectedAccountId = token.accountId
         accountBound = true
       } else if (token.accountId !== expectedAccountId) {
-        yield accountChangedResponse()
+        yield accountChangedResponse(request.target.provider)
         return
       }
       const scopedRequest =
@@ -57,6 +58,7 @@ export function createCodexProvider(input?: {
       let outputObserved = false
       let recoverUnauthorized = false
       for await (const event of createStream({
+        requestProfile: "codex",
         apiKey: token.accessToken,
         model: request.target.model,
         baseURL: CODEX_API_BASE_URL,
@@ -94,13 +96,13 @@ export function createCodexProvider(input?: {
   return stream
 }
 
-function codexLoginFailure(cause: unknown): ModelStreamEvent {
+function codexLoginFailure(cause: unknown, provider: string): ModelStreamEvent {
   return {
     type: "failure",
     failure: {
       kind: "authentication",
       stage: "request_build",
-      provider: "codex",
+      provider,
       wireApi: "openai_responses",
       providerCode: "codex_login_unavailable",
       message:
@@ -114,13 +116,13 @@ function codexAccountScope(accountId: string): string {
   return `codex:${createHash("sha256").update(accountId).digest("hex")}`
 }
 
-function accountChangedResponse(): ModelStreamEvent {
+function accountChangedResponse(provider: string): ModelStreamEvent {
   return {
     type: "failure",
     failure: {
       kind: "authentication",
       stage: "request_build",
-      provider: "codex",
+      provider,
       wireApi: "openai_responses",
       providerCode: "codex_account_changed",
       message:

@@ -7,14 +7,13 @@ import { requireProviderConfiguration } from "./provider-configuration.ts"
 import type { ProviderService } from "./provider-service.ts"
 import { ConfigVersionConflictError } from "./user-config.ts"
 
-// Neither primary reference has a model-operated provider setup boundary.
-// Yakitori's explicit self-configuration requirement uses the same service as
-// the GUI, so model edits receive identical validation, persistence and reload.
+// Model-authored account changes use the same validation, persistence and
+// routing refresh boundary as the settings UI.
 export function createModelSourceTool(service: ProviderService): RuntimeTool {
   return {
     toolName: plainToolName("configure_model_sources"),
     description:
-      "Inspect and configure Yakitori's model sources. Start with list for presets and saved connections; keys are never returned. Preview validates a change without saving. Save accepts preset, env_key or api_key, and base_url for custom/local services. Omit id to generate a connection ID. Omit model_ids to expose all upstream models automatically; model_settings supplies visibility and metadata overrides. Discover lists upstream IDs, never aliases. Refresh with id updates that source's catalog. Successful save/remove returns undoId; restore with undo_id reverses it only if no later change replaced it. Changes persist and update the GUI and subsequent turns. Only change connections at the user's request. Subscription sign-in is completed by the user in Providers.",
+      "Inspect and configure Yakitori's model sources. Start with list for presets and saved connections; keys are never returned. Preview validates a change without saving. Save accepts preset, env_key or api_key, and base_url for custom/local services. Omit id to generate a connection ID. Omit model_ids to expose all upstream models automatically; model_settings supplies visibility and metadata overrides. Discover lists upstream IDs, never aliases. Refresh with id updates that source's catalog. Successful save/remove returns undoId; restore with undo_id reverses it only if no later change replaced it. Changes persist and update the GUI and subsequent turns. Only change connections at the user's request. Subscription sign-in is completed by the user in Accounts.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -62,9 +61,11 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
           type: "string",
           description: "Environment variable containing the API key.",
         },
-        no_key: {
-          type: "boolean",
-          description: "For a local or unauthenticated endpoint.",
+        authentication: {
+          type: "string",
+          enum: ["stored", "environment", "none"],
+          description:
+            "Bind exactly one credential source. none is for an unauthenticated endpoint.",
         },
         enabled: { type: "boolean" },
         undo_id: {
@@ -191,8 +192,17 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
                         preset?.wireApi ??
                         "openai_chat_completions"),
             preset: preset?.id ?? previous?.preset,
+            service: preset?.id ?? previous?.service ?? "generic",
+            authentication:
+              record.authentication ??
+              (record.api_key !== undefined
+                ? "stored"
+                : record.env_key !== undefined
+                  ? "environment"
+                  : preset?.noKey === true
+                    ? "none"
+                    : (previous?.authentication ?? "stored")),
             envKey: record.env_key ?? previous?.envKey ?? preset?.envKey,
-            noKey: record.no_key ?? previous?.noKey ?? preset?.noKey,
             enabled: record.enabled ?? previous?.enabled,
             models:
               record.model_settings !== undefined

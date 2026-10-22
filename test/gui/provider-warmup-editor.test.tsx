@@ -32,6 +32,7 @@ function editor(
       onChange={changed}
       onClose={() => {}}
       onSubmit={() => {}}
+      onApply={async () => {}}
       onTest={() => {}}
       onRemove={() => {}}
     />,

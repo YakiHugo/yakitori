@@ -1,6 +1,4 @@
 import type OpenAI from "openai"
-import { withSDKResponse } from "../support/sdk-response.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import { expect, it } from "vitest"
 import type { ProviderModelSettings } from "../../src/protocol/providers.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
@@ -10,7 +8,9 @@ import {
   createDiscoveringModelsManager,
   type DiscoveredModel,
 } from "../../src/runtime/models-manager.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { withSDKResponse } from "../support/sdk-response.ts"
 
 it("keeps provider data, app visibility, and user overrides independent through refresh", async () => {
   let upstream: readonly DiscoveredModel[] = [
@@ -215,4 +215,29 @@ it("preserves app reasoning aliases through a user override and the actual reque
   } finally {
     await registry.close()
   }
+})
+
+it("does not turn a generation model into a chat model through a visibility override", async () => {
+  const source = createDiscoveringModelsManager({
+    provider: "grok",
+    identity: async () => "account",
+    discover: async () => [
+      { id: "new-coder" },
+      { id: "draw", kind: "image" },
+      { id: "film", kind: "video" },
+    ],
+  })
+  const manager = createModelSettingsManager(source, () => ({
+    draw: { visible: true },
+    film: { visible: true },
+  }))
+  expect(
+    (await manager.listModels({ includeHidden: true })).map((m) => m.model),
+  ).toEqual(["new-coder"])
+  expect(() => manager.resolve({ provider: "grok", model: "draw" })).toThrow(
+    "not a chat model",
+  )
+  expect(() => manager.validate({ provider: "grok", model: "film" })).toThrow(
+    "not a chat model",
+  )
 })

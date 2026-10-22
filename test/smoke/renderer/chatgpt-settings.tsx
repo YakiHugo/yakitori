@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import { ModelSelector } from "../../../src/gui/components/model-selector.tsx"
-import { ProviderSettings } from "../../../src/gui/components/provider-settings.tsx"
+import { SettingsPage } from "../../../src/gui/components/settings-page.tsx"
 import { useAppStore } from "../../../src/gui/store/app-store.ts"
 import "../../../src/gui/styles/globals.css"
 
@@ -28,7 +28,7 @@ function RendererFixture() {
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
       {settings ? (
-        <ProviderSettings />
+        <SettingsPage />
       ) : (
         <main className="p-8">
           <h1>Conversation</h1>

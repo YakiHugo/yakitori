@@ -1,56 +1,39 @@
+import type { ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
-import type {
-  ApiConfiguredProvider,
-  SubscriptionConnection,
-} from "../../protocol/providers.ts"
+import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
+import { useAppStore } from "../store/app-store.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { Badge } from "./ui/badge.tsx"
 
 export function ProviderConnectionList({
   providers,
-  subscriptions,
+  children,
   pending,
-  onEdit,
-  onSubscription,
+  onOpen,
   onEnabled,
   onMove,
 }: Readonly<{
+  children?: ReactNode
   providers: readonly ApiConfiguredProvider[]
-  subscriptions: readonly SubscriptionConnection[]
   pending: boolean
-  onEdit(provider: ApiConfiguredProvider): void
-  onSubscription(id: string): void
+  onOpen(provider: ApiConfiguredProvider): void
   onEnabled(provider: ApiConfiguredProvider, enabled: boolean): void
   onMove(id: string, beforeId?: string): void
 }>) {
+  const accounts = useAppStore((state) => state.accounts)
   return (
     <section className="provider-connections" aria-label="Configured providers">
-      {subscriptions
-        .filter((entry) => entry.available)
-        .map((entry) => (
-          <div className="provider-connection" key={entry.id}>
-            <button
-              type="button"
-              className="provider-connection-main"
-              onClick={() => onSubscription(entry.id)}
-            >
-              <ProviderLogo preset={entry.id === "codex" ? "openai" : "xai"} />
-              <span className="provider-connection-info">
-                <strong>{entry.name}</strong>
-                <span>Subscription · signed in</span>
-              </span>
-            </button>
-            <Badge variant="secondary">Signed in</Badge>
-            <ChevronRight size={14} className="provider-connection-chevron" />
-          </div>
-        ))}
+      {children}
       {providers.map((provider, index) => {
         const config = provider.configuration
-        const count = new Set(
-          [...(provider.catalog?.models ?? []), ...config.models]
-            .filter((model) => model.visible !== false)
-            .map((model) => model.id),
-        ).size
+        const count =
+          accounts.find((account) => account.name === provider.id)?.models
+            .length ??
+          new Set(
+            [...(provider.catalog?.models ?? []), ...config.models]
+              .filter((model) => model.visible !== false)
+              .map((model) => model.id),
+          ).size
         const error =
           provider.connection?.state === "error"
             ? provider.connection.message
@@ -103,14 +86,14 @@ export function ProviderConnectionList({
                   onMove(provider.id, providers[index + 2]?.id)
                 }
               }}
-              onClick={() => onEdit(provider)}
+              onClick={() => onOpen(provider)}
             >
               <ProviderLogo preset={config.preset} />
             </button>
             <button
               type="button"
               className="provider-connection-main"
-              onClick={() => onEdit(provider)}
+              onClick={() => onOpen(provider)}
             >
               <span className="provider-connection-info">
                 <strong>{config.name}</strong>
@@ -135,9 +118,11 @@ export function ProviderConnectionList({
                     ? "Key saved"
                     : provider.credential === "environment"
                       ? "Environment key"
-                      : provider.credential === "optional"
-                        ? "No key needed"
-                        : "Key required"}
+                      : provider.credential === "external"
+                        ? "External account"
+                        : provider.credential === "optional"
+                          ? "No key needed"
+                          : "Key required"}
             </Badge>
             <button
               type="button"

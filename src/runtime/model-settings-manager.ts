@@ -1,12 +1,13 @@
 import type { ProviderModelSettings } from "../protocol/providers.ts"
 import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import {
-  resolveModel,
-  requireInstructionProfileId,
   type CatalogModel,
   type ResolvedModel,
+  requireInstructionProfileId,
+  resolveModel,
 } from "./model-catalog.ts"
-import type { ModelsManager, ModelSelectionInput } from "./models-manager.ts"
+import { NonChatModelError } from "./model-kind.ts"
+import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
 
 // Provider managers apply Yakitori's execution defaults. This final projection
 // applies user choices without changing the provider's catalog or its cache.
@@ -79,11 +80,18 @@ export function createModelSettingsManager(
       )
       for (const id of Object.keys(settings())) {
         if (!byId.has(id.toLowerCase())) {
+          let resolved: ResolvedModel
+          try {
+            resolved = resolve({ provider: source.provider, model: id })
+          } catch (error) {
+            if (error instanceof NonChatModelError) continue
+            throw error
+          }
           const {
             provider: _,
             usedFallbackModelMetadata: __,
             ...metadata
-          } = resolve({ provider: source.provider, model: id })
+          } = resolved
           byId.set(id.toLowerCase(), metadata)
         }
       }

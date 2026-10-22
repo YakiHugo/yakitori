@@ -3,14 +3,14 @@ import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
-import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { providerPresets } from "../../src/runtime/provider-presets.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { createModelSourceTool } from "../../src/server/model-source-tools.ts"
 import {
   providerConfigValue,
   providersFromConfig,
   requireProviderConfiguration,
 } from "../../src/server/provider-configuration.ts"
-import { createModelSourceTool } from "../../src/server/model-source-tools.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
 import { createProviderService } from "../../src/server/provider-service.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
@@ -20,6 +20,7 @@ afterEach(() => vi.unstubAllGlobals())
 const configuration = {
   name: "Gemini",
   preset: "gemini",
+  service: "gemini",
   wireApi: "gemini_generate_content",
   baseURL: "https://generativelanguage.googleapis.com/v1beta",
   models: [],
@@ -168,7 +169,9 @@ it("discovers native pages using header authentication and persists input-only l
     expect(persisted).not.toContain("catalog-secret")
     const restarted = create()
     await restarted.service.reload()
-    const manager = restarted.registry.models("native-gemini")
+    const accountId = restarted.registry.providers[0]
+    if (!accountId) throw new Error("Missing account")
+    const manager = restarted.registry.models(accountId)
     expect(
       (await manager.listModels()).map((model) => ({
         id: model.model,
@@ -180,7 +183,7 @@ it("discovers native pages using header authentication and persists input-only l
       { id: "native-b", efforts: undefined, inputModalities: ["text"] },
     ])
     expect(
-      manager.capacity({ provider: "native-gemini", model: "native-b" }),
+      manager.capacity({ provider: accountId, model: "native-b" }),
     ).toEqual({
       contextWindowTokens: 1024,
       maxContextWindowTokens: 1024,
@@ -188,7 +191,7 @@ it("discovers native pages using header authentication and persists input-only l
       effectiveContextWindowPercent: 100,
     })
     expect(
-      manager.resolve({ provider: "native-gemini", model: "native-b" })
+      manager.resolve({ provider: accountId, model: "native-b" })
         .maxOutputTokens,
     ).toBe(2048)
     expect(requests).toHaveLength(2)
@@ -270,6 +273,6 @@ it("retains native non-generation models with a hidden default", async () => {
     ),
   )
   expect(await discoverProviderModels(configuration, "key")).toEqual([
-    { id: "embedding", defaultVisible: false },
+    { id: "embedding", kind: "other", defaultVisible: false },
   ])
 })

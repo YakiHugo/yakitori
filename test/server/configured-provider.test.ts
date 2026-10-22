@@ -223,7 +223,9 @@ it.each([
     "openai",
     {
       name: "Editable connection",
-      ...("preset" in connection ? { preset: connection.preset } : {}),
+      ...("preset" in connection
+        ? { preset: connection.preset, service: connection.preset }
+        : {}),
       wireApi: connection.wireApi,
       baseURL: connection.baseURL,
       models: [{ id: model, inputModalities: ["text", "image"] }],
@@ -406,7 +408,9 @@ it.each([
     connection.id,
     {
       name: "PDF connection",
-      ...("preset" in connection ? { preset: connection.preset } : {}),
+      ...("preset" in connection
+        ? { preset: connection.preset, service: connection.preset }
+        : {}),
       wireApi: connection.wireApi,
       baseURL: `http://127.0.0.1:${address.port}/v1`,
       models: [{ id: "pdf-model", inputModalities: connection.modalities }],
@@ -633,4 +637,79 @@ it("validates warmup policy before saving provider configuration", () => {
       baseURL: "https://chatgpt.com/backend-api/codex",
     }),
   ).toThrow("official OpenAI")
+})
+
+it.each([
+  "openai_responses",
+  "anthropic_messages",
+  "gemini_generate_content",
+] as const)("sends no credential header for an unauthenticated %s account", async (wireApi) => {
+  const headers: {
+    authorization: string | undefined
+    apiKey: string | undefined
+    googleKey: string | undefined
+  }[] = []
+  const endpoint = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      /* Drain the request before completing its response. */
+    }
+    headers.push({
+      authorization: request.headers.authorization,
+      apiKey: request.headers["x-api-key"] as string | undefined,
+      googleKey: request.headers["x-goog-api-key"] as string | undefined,
+    })
+    response.writeHead(200, { "content-type": "text/event-stream" })
+    if (wireApi === "openai_responses")
+      response.end(
+        `data: ${JSON.stringify({ type: "response.completed", response: { id: "reply", model: "local", status: "completed", output: [], error: null } })}\n\n`,
+      )
+    else if (wireApi === "anthropic_messages")
+      response.end(
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"reply","type":"message","role":"assistant","model":"local","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+      )
+    else
+      response.end(
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}]}\n\n',
+      )
+  })
+  await new Promise<void>((resolve) => endpoint.listen(0, "127.0.0.1", resolve))
+  const address = endpoint.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing address")
+  const provider = createConfiguredProvider(
+    "account_local",
+    {
+      name: "Local",
+      authentication: "none",
+      baseURL: `http://127.0.0.1:${address.port}`,
+      wireApi,
+      models: [{ id: "local" }],
+    },
+    "local-no-key",
+  )
+  const turn = provider.startTurn({ maxAttempts: 1 })
+  try {
+    const events = []
+    for await (const event of turn.stream({
+      target: {
+        provider: "account_local",
+        model: "local",
+        instructionProfileId: "default",
+      },
+      system: [],
+      tools: [],
+      toolWireProtocol: "eager",
+      messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+    }))
+      events.push(event)
+    expect(events.at(-1)?.type).toBe("response")
+    expect(headers).toEqual([
+      { authorization: undefined, apiKey: undefined, googleKey: undefined },
+    ])
+  } finally {
+    await turn.close()
+    await provider.close?.()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+  }
 })

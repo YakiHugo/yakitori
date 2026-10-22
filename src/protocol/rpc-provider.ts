@@ -15,7 +15,10 @@ export type ProviderRpcParams = {
   "provider/configuration/delete": Readonly<{ id: string }>
   "provider/configuration/test": ProviderWriteInput
   "provider/configuration/models": ProviderWriteInput
-  "provider/subscription/login": Readonly<{ id: string }>
+  "provider/subscription/login": Readonly<{
+    id: string
+    reauthenticate?: boolean
+  }>
   "provider/subscription/cancel": Readonly<{ id: string }>
   "provider/subscription/import": Readonly<{ id: string; text?: string }>
   "provider/configuration/refresh": Record<string, never>

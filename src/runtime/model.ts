@@ -149,16 +149,6 @@ export type ModelRequest = Readonly<{
 // not a provider capability or API default. Optional output limits stay unset.
 export const DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS = 32_000
 
-export function resolveModelRequestMaxOutputTokens(
-  provider: string,
-  maxOutputTokens?: number,
-): number | undefined {
-  if (provider === "codex") return undefined
-  return provider === "anthropic" || provider === "kimi"
-    ? (maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS)
-    : maxOutputTokens
-}
-
 export function flattenModelSystem(
   sections: readonly ModelSystemSection[],
 ): string {

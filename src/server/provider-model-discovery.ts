@@ -1,9 +1,9 @@
-import {
-  providerPresets,
-  type ConfiguredModel,
-} from "../runtime/provider-presets.ts"
-import type { ProviderConfiguration } from "./provider-configuration.ts"
+import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
+import { discoveredModelKind } from "../runtime/model-kind.ts"
+import type { ConfiguredModel } from "../runtime/provider-presets.ts"
+import { providerServices } from "../runtime/provider-services.ts"
 import { ConfigurationError } from "./config-errors.ts"
+import type { ProviderConfiguration } from "./provider-configuration.ts"
 
 // Discovery is a read-only catalog request. The timeout bounds network work
 // during setup; it is an implementation safety boundary, not a model quota.
@@ -13,8 +13,8 @@ export async function discoverProviderModels(
 ): Promise<readonly ConfiguredModel[]> {
   const messages = configuration.wireApi === "anthropic_messages"
   const gemini = configuration.wireApi === "gemini_generate_content"
-  const preset = providerPresets.find(
-    (entry) => entry.id === configuration.preset,
+  const preset = providerServices.find(
+    (entry) => entry.id === configuration.service,
   )
   const officialPreset =
     preset?.baseURL.replace(/\/+$/, "") ===
@@ -24,10 +24,13 @@ export async function discoverProviderModels(
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)
-  if (configuration.preset === "siliconflow")
+  if (configuration.service === "siliconflow")
     url.searchParams.set("sub_type", "chat")
   const headers: Record<string, string> = { accept: "application/json" }
-  if (apiKey && !(configuration.noKey && apiKey === "local-no-key")) {
+  if (
+    apiKey &&
+    !(configuration.authentication === "none" && apiKey === "local-no-key")
+  ) {
     if (messages) headers["x-api-key"] = apiKey
     else if (gemini) headers["x-goog-api-key"] = apiKey
     else headers.Authorization = `Bearer ${apiKey}`
@@ -107,6 +110,9 @@ export async function discoverProviderModels(
         const output = entry.outputTokenLimit
         models.set(id, {
           id,
+          ...(Array.isArray(entry.supportedGenerationMethods) && !defaultVisible
+            ? { kind: "other" as const }
+            : {}),
           defaultVisible,
           ...(typeof entry.displayName === "string" && entry.displayName.trim()
             ? { displayName: entry.displayName }
@@ -182,7 +188,7 @@ export async function discoverProviderModels(
       // OpenRouter's official /models pricing is USD per token. Do not infer
       // prices for vendors that omit them, or apply another vendor's prices.
       const prices =
-        configuration.preset === "openrouter" && isRecord(entry.pricing)
+        configuration.service === "openrouter" && isRecord(entry.pricing)
           ? entry.pricing
           : undefined
       const price = (value: unknown) => {
@@ -198,6 +204,15 @@ export async function discoverProviderModels(
         outputPrice = price(prices?.completion)
       const cacheRead = price(prices?.input_cache_read),
         cacheWrite = price(prices?.input_cache_write)
+      const nativeProvider = officialPreset?.catalogProvider
+      const nativeFacts =
+        nativeProvider === "grok" || nativeProvider === "kimi-code"
+          ? parseOpenAiCompatibleModel(nativeProvider, {
+              ...entry,
+              id: entry.id,
+            })
+          : {}
+      const kind = discoveredModelKind(entry, nativeProvider)
       models.set(entry.id, {
         id: entry.id,
         defaultVisible,
@@ -228,6 +243,8 @@ export async function discoverProviderModels(
               },
             }
           : {}),
+        ...nativeFacts,
+        ...(kind === undefined ? {} : { kind }),
       })
     }
     if (gemini) {
@@ -251,8 +268,8 @@ export async function discoverProviderModels(
       "This service reports no chat models. Load a model in the local service, or check this account's access.",
     )
   const preferred =
-    providerPresets
-      .find((entry) => entry.id === configuration.preset)
+    providerServices
+      .find((entry) => entry.id === configuration.service)
       ?.models.map((model) => model.id) ?? []
   return [...models.values()].sort((a, b) => {
     const first = preferred.indexOf(a.id)

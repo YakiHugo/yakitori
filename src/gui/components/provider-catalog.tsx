@@ -13,6 +13,9 @@ export function ProviderCatalog({
   presets,
   providers,
   subscriptions,
+  chatGPTAvailable,
+  chatGPTPending,
+  onChatGPT,
   onPick,
   onSubscription,
   onClose,
@@ -21,6 +24,9 @@ export function ProviderCatalog({
   presets: readonly ProviderPreset[]
   providers: readonly ApiConfiguredProvider[]
   subscriptions: readonly SubscriptionConnection[]
+  chatGPTAvailable: boolean
+  chatGPTPending: boolean
+  onChatGPT(): void
   onPick(preset?: ProviderPreset): void
   onSubscription(subscription: SubscriptionConnection): void
   onClose?(): void
@@ -37,9 +43,9 @@ export function ProviderCatalog({
   ] as const
   let count = 0
   return (
-    <section className="provider-catalog" aria-label="Add provider">
+    <section className="provider-catalog" aria-label="Add account">
       <div className="provider-catalog-toolbar">
-        <h2>Add provider</h2>
+        <h2>Add account</h2>
         <div className="provider-search">
           <Search size={16} aria-hidden="true" />
           <Input
@@ -63,7 +69,7 @@ export function ProviderCatalog({
         </Button>
         {onClose ? (
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>
-            Close
+            Back to accounts
           </Button>
         ) : null}
       </div>
@@ -77,8 +83,9 @@ export function ProviderCatalog({
           kind === "subscription"
             ? subscriptions.filter((entry) => match(entry.name))
             : []
-        count += entries.length + logins.length
-        if (!entries.length && !logins.length) return null
+        const showChatGPT = kind === "subscription" && match("ChatGPT OpenAI")
+        count += entries.length + logins.length + Number(showChatGPT)
+        if (!entries.length && !logins.length && !showChatGPT) return null
         return (
           <section
             key={kind}
@@ -90,6 +97,21 @@ export function ProviderCatalog({
               <p>{hint}</p>
             </div>
             <div className="provider-presets">
+              {showChatGPT ? (
+                <button
+                  type="button"
+                  onClick={onChatGPT}
+                  disabled={chatGPTPending}
+                >
+                  <ProviderLogo preset="openai" />
+                  <span>ChatGPT</span>
+                  {chatGPTAvailable ? (
+                    <span className="provider-added" title="Account connected">
+                      <span className="provider-status-dot" />
+                    </span>
+                  ) : null}
+                </button>
+              ) : null}
               {logins.map((entry) => (
                 <button
                   type="button"

@@ -2478,7 +2478,7 @@ describe("Turn processor", () => {
 
   it.each([
     { provider: "grok", model: "grok-4.6" },
-    { provider: "kimi", model: "k3" },
+    { provider: "kimi-code", model: "k3" },
   ])("routes $provider use_tool through the deferred runtime captured by that Step", async ({
     provider,
     model,

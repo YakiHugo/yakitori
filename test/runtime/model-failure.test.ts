@@ -5,7 +5,7 @@ import {
 } from "../../src/runtime/model-failure.ts"
 
 const input = {
-  provider: "kimi",
+  provider: "kimi-code",
   wireApi: "anthropic_messages" as const,
   stage: "connect" as const,
   kind: "invalid_request" as const,
@@ -61,7 +61,10 @@ describe("model failure diagnostics", () => {
     )
     expect(
       providerErrorMessage({
-        error: { message: "OpenAI-shaped reason", type: "invalid_request_error" },
+        error: {
+          message: "OpenAI-shaped reason",
+          type: "invalid_request_error",
+        },
       }),
     ).toBe("OpenAI-shaped reason")
   })

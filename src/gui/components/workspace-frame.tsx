@@ -234,6 +234,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   }, [widthRatio, resizing])
   useEffect(() => {
     return window.yakitoriDesktop?.browser?.onShortcut((action) => {
+      if (useAppStore.getState().settingsSection !== undefined) return
       if (action === "toggle-workspace")
         setOpen(!useWorkspaceStore.getState().open)
       else if (!external || action !== "new-side-chat")
@@ -251,6 +252,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     const keydown = (event: KeyboardEvent) => {
       if (
         event.defaultPrevented ||
+        useAppStore.getState().settingsSection !== undefined ||
         document.querySelector("dialog[open]") ||
         event.isComposing
       )

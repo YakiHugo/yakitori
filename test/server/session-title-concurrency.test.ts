@@ -33,7 +33,6 @@ it("preserves a manual rename committed after the generated title's final read",
     )
     const generator = createSessionTitleGenerator({
       store,
-      availableProviders: ["kimi"],
       stream: async function* () {
         yield {
           type: "response",
@@ -45,7 +44,11 @@ it("preserves a manual rename committed after the generated title's final read",
       },
     })
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "Fix login" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "Fix login",
+    })
     await generator.closeSession(sessionId)
     expect((await store.sessionPresentation(sessionId)).title).toBe(
       "Manual title",

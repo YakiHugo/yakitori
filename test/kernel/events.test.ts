@@ -116,7 +116,7 @@ describe("kernel facts", () => {
           turnId: "turn_1",
           activeContextTokens: 40_000,
           capacityTokens: 200_000,
-          provider: "kimi",
+          provider: "kimi-code",
           model: "k3",
         },
       },

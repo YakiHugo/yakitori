@@ -1,15 +1,12 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, expect, it } from "vitest"
 import { DatabaseSync } from "node:sqlite"
-import { createModelRequestStream } from "../../src/runtime/model-request.ts"
-import type { StreamFn } from "../../src/runtime/model.ts"
+import { afterEach, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
-import {
-  createSessionTitleGenerator,
-  KIMI_TITLE_MODEL,
-} from "../../src/server/session-title.ts"
+import type { StreamFn } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
+import { createSessionTitleGenerator } from "../../src/server/session-title.ts"
 
 it("durably accounts title provider usage without creating a user turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-title-usage-"))
@@ -25,7 +22,6 @@ it("durably accounts title provider usage without creating a user turn", async (
     await store.persistThread(sessionId, "turn_start")
     const generator = createSessionTitleGenerator({
       store,
-      availableProviders: ["kimi"],
       stream: async function* () {
         yield {
           type: "response",
@@ -42,7 +38,11 @@ it("durably accounts title provider usage without creating a user turn", async (
       },
     })
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "Fix login" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "Fix login",
+    })
     expect((await store.sessionPresentation(sessionId)).title).toBe("Fix login")
     await store.shutdownThread(sessionId)
     const reopened = new JsonlThreadStore({ root })
@@ -56,8 +56,8 @@ it("durably accounts title provider usage without creating a user turn", async (
     })
     expect(summary.models).toEqual([
       {
-        provider: "kimi",
-        model: KIMI_TITLE_MODEL,
+        provider: "kimi-code",
+        model: "title-model",
         turns: 0,
         inputTokens: 41,
         outputTokens: 7,
@@ -92,7 +92,6 @@ async function fixture(stream: StreamFn) {
   const generator = createSessionTitleGenerator({
     store,
     stream,
-    availableProviders: ["kimi"],
   })
   generator.openSession(sessionId)
   return { root, store, sessionId, generator }
@@ -112,7 +111,7 @@ it("counts physical retries once and preserves usage when a user rename wins", a
             failure: {
               kind: "stream_disconnected",
               stage: "response_body",
-              provider: "kimi",
+              provider: "kimi-code",
               wireApi: "unknown",
               message: "synthetic disconnect",
             },
@@ -137,8 +136,16 @@ it("counts physical retries once and preserves usage when a user rename wins", a
     ),
   )
   await Promise.all([
-    f.generator.generate({ sessionId: f.sessionId, text: "rename this" }),
-    f.generator.generate({ sessionId: f.sessionId, text: "rename this" }),
+    f.generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId: f.sessionId,
+      text: "rename this",
+    }),
+    f.generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId: f.sessionId,
+      text: "rename this",
+    }),
   ])
   expect(attempts).toBe(2)
   expect((await f.store.sessionPresentation(f.sessionId)).title).toBe(
@@ -179,7 +186,7 @@ it.each([
         failure: {
           kind: "provider_error",
           stage: "response_body",
-          provider: "kimi",
+          provider: "kimi-code",
           wireApi: "unknown",
           message: "synthetic failure",
         },
@@ -195,7 +202,11 @@ it.each([
         },
       }
   })
-  await f.generator.generate({ sessionId: f.sessionId, text: "title request" })
+  await f.generator.generate({
+    modelSelection: { provider: "kimi-code", model: "title-model" },
+    sessionId: f.sessionId,
+    text: "title request",
+  })
   expect((await f.store.sessionPresentation(f.sessionId)).title).toBeUndefined()
   expect((await f.store.readUsageSummary()).totals).toMatchObject({
     turns: 0,
@@ -227,6 +238,7 @@ it("aborts and drains observed usage before closing the writer and fences late a
     ),
   )
   const pending = f.generator.generate({
+    modelSelection: { provider: "kimi-code", model: "title-model" },
     sessionId: f.sessionId,
     text: "slow title",
   })
@@ -234,7 +246,11 @@ it("aborts and drains observed usage before closing the writer and fences late a
   await f.generator.closeSession(f.sessionId)
   await f.store.shutdownThread(f.sessionId)
   await pending
-  await f.generator.generate({ sessionId: f.sessionId, text: "late event" })
+  await f.generator.generate({
+    modelSelection: { provider: "kimi-code", model: "title-model" },
+    sessionId: f.sessionId,
+    text: "late event",
+  })
   const reopened = new JsonlThreadStore({ root: f.root })
   expect((await reopened.readUsageSummary()).totals).toMatchObject({
     turns: 0,
@@ -262,7 +278,11 @@ it("rebuilds title accounting without double-counting retries of a stored record
       },
     }
   })
-  await f.generator.generate({ sessionId: f.sessionId, text: "forked title" })
+  await f.generator.generate({
+    modelSelection: { provider: "kimi-code", model: "title-model" },
+    sessionId: f.sessionId,
+    text: "forked title",
+  })
   const record = (await f.store.readThread(f.sessionId))?.rollout.find(
     (r) => r.item.type === "auxiliary_usage",
   )
@@ -311,8 +331,10 @@ it("rebuilds title accounting without double-counting retries of a stored record
   const summary = await reopened.readUsageSummary()
   expect(summary.totals).toEqual(before.totals)
   expect(summary.unavailableThreads).toBeUndefined()
-  expect(summary.models.find((row) => row.provider === "kimi")).toMatchObject({
-    model: KIMI_TITLE_MODEL,
+  expect(
+    summary.models.find((row) => row.provider === "kimi-code"),
+  ).toMatchObject({
+    model: "title-model",
     turns: 0,
     inputTokens: 41,
     outputTokens: 7,
@@ -336,7 +358,11 @@ it("rejects malformed auxiliary accounting in both executable and accounting his
       },
     }
   })
-  await f.generator.generate({ sessionId: f.sessionId, text: "title" })
+  await f.generator.generate({
+    modelSelection: { provider: "kimi-code", model: "title-model" },
+    sessionId: f.sessionId,
+    text: "title",
+  })
   await f.generator.closeSession(f.sessionId)
   await f.store.shutdownThread(f.sessionId)
   const path = join(f.root, "rollouts", f.sessionId, "rollout.jsonl")

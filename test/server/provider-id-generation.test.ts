@@ -5,12 +5,12 @@ import { expect, it, vi } from "vitest"
 import { createProviderService } from "../../src/server/provider-service.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
 
-it("generates a usable connection id when the display name starts with a reserved prefix", async () => {
+it("keeps account IDs independent of labels and explicit additional accounts", async () => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-provider-id-"))
   const fetch = vi
     .spyOn(globalThis, "fetch")
-    .mockResolvedValue(
-      new Response(JSON.stringify({ data: [{ id: "local-model" }] })),
+    .mockImplementation(async () =>
+      Response.json({ data: [{ id: "local-model" }] }),
     )
   try {
     const configPath = join(root, "config.toml")
@@ -25,17 +25,29 @@ it("generates a usable connection id when the display name starts with a reserve
         name: "ChatGPT proxy",
         baseURL: "http://127.0.0.1:1/v1",
         wireApi: "openai_chat_completions",
-        noKey: true,
+        authentication: "none",
         models: [{ id: "local-model" }],
       },
     })
-    expect(result.providers[0]?.id).toBe("provider-chatgpt-proxy")
+    const id = result.providers[0]?.id
+    expect(id).toMatch(/^account_[a-f0-9-]+$/)
+    if (!id) throw new Error("Missing account ID")
+    const configuration = result.providers[0]?.configuration
+    if (!configuration) throw new Error("Missing account configuration")
+    await service.write({
+      id,
+      configuration: { ...configuration, name: "Renamed" },
+    })
+    const second = await service.write({ configuration })
+    expect(second.providers).toHaveLength(2)
+    expect(second.providers[0]?.id).toBe(id)
+    expect(second.providers[0]?.configuration.name).toBe("Renamed")
+    expect(second.providers[1]?.id).not.toBe(id)
     expect(
-      (await userConfig.readConfiguration()).modelProviders,
-    ).toHaveProperty("provider-chatgpt-proxy")
+      Object.keys((await userConfig.readConfiguration()).modelProviders ?? {}),
+    ).toHaveLength(2)
   } finally {
     fetch.mockRestore()
     await rm(root, { recursive: true, force: true })
   }
 })
-

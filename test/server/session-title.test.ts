@@ -9,7 +9,6 @@ import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import {
   createSessionTitleGenerator,
-  KIMI_TITLE_MODEL,
   normalizeSessionTitle,
   resolveTitleTarget,
 } from "../../src/server/session-title.ts"
@@ -82,25 +81,10 @@ describe("normalizeSessionTitle", () => {
 })
 
 describe("resolveTitleTarget", () => {
-  it("prefers Kimi's cheapest model whenever that provider is registered", () => {
-    expect(
-      resolveTitleTarget(["kimi", "anthropic"], {
-        provider: "anthropic",
-        model: "claude-opus-4-6",
-      }),
-    ).toEqual({
-      provider: "kimi",
-      model: KIMI_TITLE_MODEL,
-      instructionProfileId: KIMI_TITLE_MODEL,
-      // Thinking stays off: reasoning would consume the small output budget.
-      effort: "off",
-    })
-  })
-
   it("falls back to the session model selection", () => {
-    expect(resolveTitleTarget(["anthropic"], undefined)).toBeUndefined()
+    expect(resolveTitleTarget(undefined)).toBeUndefined()
     expect(
-      resolveTitleTarget(["anthropic"], {
+      resolveTitleTarget({
         provider: "anthropic",
         model: "claude-haiku-4-5",
       }),
@@ -113,9 +97,9 @@ describe("resolveTitleTarget", () => {
 
   it("never targets the faux provider", () => {
     expect(
-      resolveTitleTarget(["faux"], { provider: "faux", model: "scripted" }),
+      resolveTitleTarget({ provider: "faux", model: "scripted" }),
     ).toBeUndefined()
-    expect(resolveTitleTarget(undefined, undefined)).toBeUndefined()
+    expect(resolveTitleTarget(undefined)).toBeUndefined()
   })
 })
 
@@ -150,18 +134,18 @@ describe("session title generator", () => {
     const generator = createSessionTitleGenerator({
       stream,
       store,
-      availableProviders: ["kimi"],
       notifySidebarChanged,
     })
     generator.openSession(sessionId)
     await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
       sessionId,
       text: "Fix the login button on mobile",
     })
     expect(await sidebarTitle(store, sessionId)).toBe("Fix login button")
     expect(notifySidebarChanged).toHaveBeenCalledOnce()
     const request = stream.mock.calls[0]?.[0]
-    expect(request?.target).toMatchObject({ provider: "kimi" })
+    expect(request?.target).toMatchObject({ provider: "kimi-code" })
     expect(JSON.stringify(request?.system)).not.toContain(
       "Fix the login button on mobile",
     )
@@ -175,13 +159,20 @@ describe("session title generator", () => {
     const generator = createSessionTitleGenerator({
       stream,
       store,
-      availableProviders: ["kimi"],
     })
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "first request" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "first request",
+    })
     expect(stream).toHaveBeenCalledOnce()
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "second request" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "second request",
+    })
     expect(stream).toHaveBeenCalledOnce()
     expect(await sidebarTitle(store, sessionId)).toBe("Second title")
   })
@@ -198,10 +189,13 @@ describe("session title generator", () => {
     const generator = createSessionTitleGenerator({
       stream,
       store,
-      availableProviders: ["kimi"],
     })
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "some request" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "some request",
+    })
     expect(await sidebarTitle(store, sessionId)).toBe("User chosen name")
   })
 
@@ -212,20 +206,26 @@ describe("session title generator", () => {
     const generator = createSessionTitleGenerator({
       stream: failing,
       store,
-      availableProviders: ["kimi"],
     })
     generator.openSession(sessionId)
-    await generator.generate({ sessionId, text: "request" })
+    await generator.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "request",
+    })
     expect(await sidebarTitle(store, sessionId)).toBeUndefined()
 
     const stream = titleStream('{"title":"Unused"}')
     const empty = createSessionTitleGenerator({
       stream,
       store,
-      availableProviders: ["kimi"],
     })
     empty.openSession(sessionId)
-    await empty.generate({ sessionId, text: "   " })
+    await empty.generate({
+      modelSelection: { provider: "kimi-code", model: "title-model" },
+      sessionId,
+      text: "   ",
+    })
     expect(stream).not.toHaveBeenCalled()
   })
 })

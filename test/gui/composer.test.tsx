@@ -85,20 +85,20 @@ describe("composer", () => {
   it("pairs the context snapshot with the sampled model's window across selection changes", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      defaultProvider: "kimi",
+      defaultProvider: "kimi-code",
       defaultModel: "k3",
       providers: [
         {
-          name: "kimi",
+          name: "kimi-code",
           models: [
             {
               id: "k3",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               effectiveContextWindowTokens: 258_000,
             },
             {
               id: "k4",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               effectiveContextWindowTokens: 100_000,
             },
           ],
@@ -109,7 +109,7 @@ describe("composer", () => {
         contextTokens: {
           activeContextTokens: 108_000,
           capacityTokens: 258_000,
-          provider: "kimi",
+          provider: "kimi-code",
           model: "k3",
         },
       },
@@ -135,20 +135,20 @@ describe("composer", () => {
   it("falls back to the catalog window only while the sampled model is selected", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      defaultProvider: "kimi",
+      defaultProvider: "kimi-code",
       defaultModel: "k3",
       providers: [
         {
-          name: "kimi",
+          name: "kimi-code",
           models: [
             {
               id: "k3",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               effectiveContextWindowTokens: 258_000,
             },
             {
               id: "k4",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               effectiveContextWindowTokens: 100_000,
             },
           ],
@@ -158,7 +158,7 @@ describe("composer", () => {
         ...createExecutionViewState(),
         contextTokens: {
           activeContextTokens: 108_000,
-          provider: "kimi",
+          provider: "kimi-code",
           model: "k3",
         },
       },
@@ -767,15 +767,15 @@ describe("composer", () => {
     }
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      defaultProvider: "kimi",
+      defaultProvider: "kimi-code",
       defaultModel: "k3",
       providers: [
         {
-          name: "kimi",
+          name: "kimi-code",
           models: [
             {
               id: "k3",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               inputModalities: ["text", "image"],
               imageDetailModes: [],
             },
@@ -2025,17 +2025,17 @@ describe("model selector", () => {
           ],
         },
         {
-          name: "kimi",
+          name: "kimi-code",
           models: [
             {
               id: "kimi-for-coding",
               displayName: "K2.7 Coding",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
             },
             {
               id: "k3",
               displayName: "K3",
-              instructionProfileId: "kimi",
+              instructionProfileId: "kimi-code",
               efforts: ["low", "high", "max"],
               defaultEffort: "max",
             },
@@ -2117,7 +2117,7 @@ describe("model selector", () => {
     expect(combinedSelector().textContent).toContain("Low")
   })
 
-  it("groups model rows by provider under a Select model header", async () => {
+  it("shows a unified model list under a Select model header", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -2129,8 +2129,8 @@ describe("model selector", () => {
       container.querySelector("[data-model-picker]")?.textContent,
     ).toContain("Select model")
     expect(screen.getByText("Recommended set of models")).toBeDefined()
-    expect(screen.getByText("openai")).toBeDefined()
-    expect(screen.getByText("anthropic")).toBeDefined()
+    expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
+    expect(screen.queryByText("anthropic")).toBeNull()
     expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
     expect(
       screen.getByRole("button", { name: "Claude Sonnet 4.6" }),
@@ -2158,6 +2158,75 @@ describe("model selector", () => {
     expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
   })
 
+  it("recovers an unavailable choice through the model picker without changing it implicitly", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {},
+      userPreference: { provider: "removed-account", model: "old-model" },
+    })
+    render(<Composer />)
+
+    expect(combinedSelector().textContent).toContain(
+      "removed-account/old-model",
+    )
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "removed-account",
+      model: "old-model",
+    })
+    await user.click(
+      screen.getByRole("button", { name: "Choose another model" }),
+    )
+    expect(
+      screen
+        .getByRole("button", { name: /Default.*Default model is unavailable/ })
+        .hasAttribute("disabled"),
+    ).toBe(true)
+    expect(useAppStore.getState().settingsSection).toBeUndefined()
+    await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
+    expect(
+      screen.queryByText(/Selected model is no longer available/),
+    ).toBeNull()
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "openai",
+      model: "gpt-5.1-codex",
+    })
+    await waitFor(() => {
+      expect(useAppStore.getState().userPreference).toEqual({
+        provider: "openai",
+        model: "gpt-5.1-codex",
+      })
+    })
+  })
+
+  it("keeps a selected hidden model usable while omitting it from new choices", async () => {
+    const user = userEvent.setup()
+    const state = selectModelState()
+    useAppStore.setState({
+      ...state,
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-5.1-codex" },
+      },
+      providers: state.providers.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) =>
+          model.id === "gpt-5.1-codex" ? { ...model, visible: false } : model,
+        ),
+      })),
+    })
+    render(<Composer />)
+
+    expect(combinedSelector().textContent).toContain("GPT 5.1 Codex")
+    expect(
+      screen.queryByText(/Selected model is no longer available/),
+    ).toBeNull()
+    await openModelMenu(user)
+    expect(screen.queryByRole("button", { name: "GPT 5.1 Codex" })).toBeNull()
+    expect(
+      screen.getByRole("button", { name: "Claude Sonnet 4.6" }),
+    ).toBeDefined()
+  })
+
   it("does not offer providers that require login", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
@@ -2177,7 +2246,7 @@ describe("model selector", () => {
 
     expect(screen.queryByText("codex")).toBeNull()
     expect(screen.queryByRole("button", { name: "GPT-5.6 Sol" })).toBeNull()
-    expect(screen.getByText("openai")).toBeDefined()
+    expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
   })
 
   it("persists a clicked model per session, keeping a supported effort", async () => {
@@ -2247,7 +2316,7 @@ describe("model selector", () => {
     await user.click(screen.getByRole("button", { name: "K3" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
-      session_1: { provider: "kimi", model: "k3" },
+      session_1: { provider: "kimi-code", model: "k3" },
     })
   })
 
@@ -2275,7 +2344,7 @@ describe("model selector", () => {
     expect(slider.getAttribute("aria-valuetext")).toBe("max")
     expect(document.activeElement).toBe(slider)
     expect(useAppStore.getState().modelSelections.session_1).toEqual({
-      provider: "kimi",
+      provider: "kimi-code",
       model: "k3",
     })
   })

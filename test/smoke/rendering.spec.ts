@@ -143,7 +143,7 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
               name: "Rendering fixture",
               api_backend: "chat_completions",
               base_url: `${origin}/v1`,
-              no_key: true,
+              authentication: "none",
               models: [{ id: "rendering-model" }],
             },
           },

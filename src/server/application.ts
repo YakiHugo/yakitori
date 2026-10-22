@@ -1,5 +1,3 @@
-import { providerPresets } from "../runtime/provider-presets.ts"
-import { discoverProviderModels } from "./provider-model-discovery.ts"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -42,57 +40,41 @@ import {
   sidebarChangedMethod,
   sideChatChangedMethod,
 } from "../protocol/rpc-wire.ts"
-import { defaultCodexAuthPath } from "../runtime/codex-credentials.ts"
 import { GoalRuntime } from "../runtime/goal-runtime.ts"
-import { resolveGrokCredentials } from "../runtime/grok-credentials.ts"
 import {
   type AgentRuntime,
   type ApprovalPolicy,
   acquireRuntimeLock,
-  type CodexLogin,
   createAgentRuntime,
-  createAnthropicTurnTransport,
-  createCodexProvider,
   createDefaultTools,
-  createDiscoveringModelsManager,
-  createFileModelsCacheStore,
-  createGrokProvider,
   createHookRunner,
   createMcpExtension,
   createModelProvider,
-  createOpenAITurnTransport,
   createPermissionGate,
-  createProviderContinuationScope,
   createProviderRegistry,
   createToolRegistry,
   createTurnProcessor,
   createUserShellEnv,
-  discoverCodexModels,
-  discoverOpenAiCompatibleModels,
   type McpConnectionManager,
   type ModelProvider,
   ModelStopReason,
   type ProviderRegistry,
   type RuntimeLock,
-  readCodexLogin,
-  readCodexUsage,
-  readGrokUsage,
-  readKimiUsage,
-  resolveCodexAccessToken,
-  resolveCodexAccountIdentity,
-  resolveGrokAccessToken,
   resolveModel,
   type ShellEnvironmentPolicy,
   type StreamFn,
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
+import { providerServices } from "../runtime/provider-services.ts"
 import {
   createLocalSkillsSource,
   type SkillsSource,
 } from "../runtime/skills.ts"
 import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
+import { createAccountRuntime } from "./account-runtime.ts"
+import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import {
   type ChatGPTConnections,
@@ -102,6 +84,7 @@ import {
   ChatGPTModelCatalogError,
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
+import { ConfigurationError } from "./config-errors.ts"
 import {
   type AcpEngineConfiguration,
   readAcpEngineConfiguration,
@@ -117,6 +100,7 @@ import {
 import { createYakitoriHttpServer } from "./http.ts"
 import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
+import { type AccountModelSource, createModelRouter } from "./model-router.ts"
 import { createModelSourceTool } from "./model-source-tools.ts"
 import {
   consoleOperationalFailureReporter,
@@ -128,7 +112,6 @@ import type {
   ApiProviderModel,
   ApiProviderSummary,
   ApiReadSubscriptionResponse,
-  ApiSubscriptionProvider,
 } from "./protocol.ts"
 import type { StoredProviderConfiguration } from "./provider-configuration.ts"
 import {
@@ -170,13 +153,6 @@ const defaultMateProfile = {
   role: "Assistant",
 } as const
 
-// Kimi Code subscription endpoint. The Anthropic SDK appends /v1/messages
-// itself, so this omits the /v1 suffix. Requests keep the SDK's real client
-// identity — Kimi's terms warn that spoofing another client can suspend
-// membership benefits.
-const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
-const OPENAI_API_BASE_URL = "https://api.openai.com/v1"
-const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 // Sources own cache freshness; this worker revalidates idle connections too.
 const MODELS_REFRESH_INTERVAL_MS = 300_000
 
@@ -435,6 +411,7 @@ export async function createYakitoriApplication(
       join(credentialDirectory, "..", "subscription-accounts"),
     )
     let chatGPTProviders: Readonly<Record<string, ModelProvider>> = {}
+    let refreshModelRouting = async () => {}
     let applyChatGPT = () => {}
     const chatGPTConnections = createChatGPTConnections({
       directory: join(credentialDirectory, "..", "chatgpt-connections"),
@@ -442,6 +419,7 @@ export async function createYakitoriApplication(
       async changed() {
         if (!(await refreshChatGPTProviders()))
           broadcastNotification?.("provider/configuration/changed", {})
+        await refreshModelRouting()
       },
       reportError(cause) {
         reportOperationalFailure(reporter, {
@@ -481,8 +459,13 @@ export async function createYakitoriApplication(
     let providerConfigurations: Readonly<
       Record<string, StoredProviderConfiguration>
     > = userConfiguration.modelProviders ?? {}
+    let providerFileConfiguration = JSON.stringify(
+      userConfiguration.modelProviders ?? {},
+    )
     let configuredProviders: Readonly<Record<string, ModelProvider>> = {}
-    let applyConfigured = (
+    let applyConfigured: (
+      configured: Readonly<Record<string, ModelProvider>>,
+    ) => void | Promise<void> = (
       configured: Readonly<Record<string, ModelProvider>>,
     ) => {
       configuredProviders = configured
@@ -498,9 +481,9 @@ export async function createYakitoriApplication(
       changed() {
         broadcastNotification?.("provider/configuration/changed", {})
       },
-      apply(configured, configurations) {
+      async apply(configured, configurations) {
         providerConfigurations = configurations
-        applyConfigured(configured)
+        await applyConfigured(configured)
         broadcastNotification?.("provider/configuration/changed", {})
       },
     })
@@ -520,104 +503,87 @@ export async function createYakitoriApplication(
       options.providerPlugins ?? [],
     )
     const providerName =
-      options.provider ?? process.env.YAKITORI_PROVIDER ?? "faux"
-    const provider = await configureProviders({
-      provider: providerName,
-      pluginProviders: providerRegistry.providers,
-      model: options.model ?? process.env.YAKITORI_MODEL ?? undefined,
-      fauxScenario: options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
-      primaryStream: options.stream,
-      injected: options.providerStreams,
-      configured: configuredProviders,
-      configuredDefinitions: providerConfigurations,
-      modelsCacheDir: join(rootDir, "models-cache"),
-      codexCredentialsPath: await subscriptionAccounts.codexPath(),
-      reportOperationalFailure: reporter,
-    })
-    const baseProviders = { ...provider.providers }
-    // A definition claims its ID even before credentials make it executable.
-    // Otherwise an environment provider could silently use another endpoint.
-    const executableProviders = (
-      configured: Readonly<Record<string, ModelProvider>>,
-    ) => ({
-      ...Object.fromEntries(
-        Object.entries(baseProviders).filter(
-          ([id]) => !Object.hasOwn(providerConfigurations, id),
-        ),
-      ),
-      ...configured,
-      ...chatGPTProviders,
-    })
-    const hostProviders = providerRegistry.register(
-      "application",
-      executableProviders(configuredProviders),
-    )
-    const replaceHostProviders = () => {
-      void hostProviders
-        .replace(executableProviders(configuredProviders))
-        .catch((cause: unknown) =>
-          reportOperationalFailure(reporter, {
-            component: "provider-registry",
-            operation: "retire-provider",
-            cause,
-          }),
-        )
+      options.provider ??
+      process.env.YAKITORI_PROVIDER ??
+      (options.stream ? "faux" : "")
+    const provider = {
+      ...configureProviders({
+        provider: providerName,
+        model: options.model ?? process.env.YAKITORI_MODEL ?? undefined,
+        fauxScenario:
+          options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
+        primaryStream: options.stream,
+        injected: options.providerStreams,
+      }),
     }
-    applyChatGPT = replaceHostProviders
+    const accountRuntime = createAccountRuntime(providerRegistry)
+    const publishAccounts = (
+      owner: string,
+      accounts: Readonly<Record<string, ModelProvider | StreamFn>>,
+    ) => {
+      void accountRuntime.publish(owner, accounts).catch((cause: unknown) =>
+        reportOperationalFailure(reporter, {
+          component: "account-runtime",
+          operation: "retire-account",
+          cause,
+        }),
+      )
+    }
+    publishAccounts("injected", provider.providers)
+    publishAccounts("configured", configuredProviders)
+    publishAccounts("chatgpt", chatGPTProviders)
+    applyChatGPT = () => publishAccounts("chatgpt", chatGPTProviders)
+    const connectSubscription = async (id: "codex" | "grok", text?: string) => {
+      const credential = await subscriptionAccounts.importAccount(id, text)
+      if (
+        Object.values(providerConfigurations).some(
+          (config) =>
+            config.authentication ===
+              (id === "codex" ? "codex_cli" : "grok_cli") &&
+            config.credentialPath === credential.credentialPath &&
+            config.credentialOwner === credential.credentialOwner,
+        )
+      )
+        return
+      await providerConfiguration.write({
+        configuration: {
+          name: id === "codex" ? "Codex account" : "Grok account",
+          authentication: id === "codex" ? "codex_cli" : "grok_cli",
+          ...credential,
+          preset: id === "codex" ? "codex" : "xai",
+          service: id === "codex" ? "codex" : "xai",
+          baseURL:
+            id === "codex"
+              ? "https://chatgpt.com/backend-api/codex"
+              : "https://api.x.ai/v1",
+          wireApi: "openai_responses",
+          models: [],
+        },
+      })
+    }
     subscriptionConnections = createSubscriptionConnections({
       async readAvailability() {
-        const states = await providerCredentialStates(
-          false,
-          await subscriptionAccounts.codexPath(),
-        )
         return {
-          codex: states.codex?.availability === "available",
-          grok: await resolveGrokCredentials().then(
-            () => true,
-            () => false,
+          codex: Object.entries(providerConfigurations).some(
+            ([id, config]) =>
+              config.authentication === "codex_cli" &&
+              providerRegistry.providers.includes(id),
+          ),
+          grok: Object.entries(providerConfigurations).some(
+            ([id, config]) =>
+              config.authentication === "grok_cli" &&
+              providerRegistry.providers.includes(id),
           ),
         }
       },
-      async refresh() {
-        if (
-          !options.providerStreams?.codex &&
-          !(options.stream && provider.provider === "codex")
-        ) {
-          const credentialsPath = await subscriptionAccounts.codexPath()
-          const login = await readCodexLogin({ path: credentialsPath })
-          if (login?.kind === "chatgpt")
-            await registerCodexLogin(
-              baseProviders,
-              reporter,
-              join(rootDir, "models-cache"),
-              credentialsPath,
-            )
-          else delete baseProviders.codex
-        }
-        if (
-          !options.providerStreams?.grok &&
-          !(options.stream && provider.provider === "grok")
-        ) {
-          const states = await providerCredentialStates(false)
-          if (states.grok?.availability === "available")
-            baseProviders.grok ??= createGrokProvider(
-              join(rootDir, "models-cache"),
-            )
-          else delete baseProviders.grok
-        }
-      },
-      async importAccount(id, text) {
-        await subscriptionAccounts.importAccount(id, text)
-        await providerConfiguration.reload()
-      },
-      async loginCompleted(id) {
-        await subscriptionAccounts.importAccount(id)
-        await providerConfiguration.reload()
-      },
+      async refresh() {},
+      importAccount: connectSubscription,
+      loginCompleted: (id) => connectSubscription(id),
     })
-    applyConfigured = (configured) => {
+    applyConfigured = async (configured) => {
       configuredProviders = configured
-      replaceHostProviders()
+      publishAccounts("configured", configured)
+      await refreshModelRouting()
     }
     // The configuration file is also a model-editable interface. Observe
     // only provider definitions; unrelated settings do not rebuild transports.
@@ -636,9 +602,13 @@ export async function createYakitoriApplication(
           }
           if (
             JSON.stringify(configuration.modelProviders ?? {}) !==
-            JSON.stringify(providerConfigurations)
-          )
+            providerFileConfiguration
+          ) {
             await providerConfiguration.reload()
+            providerFileConfiguration = JSON.stringify(
+              configuration.modelProviders ?? {},
+            )
+          }
         })
         .catch((cause: unknown) =>
           reportOperationalFailure(reporter, {
@@ -672,131 +642,175 @@ export async function createYakitoriApplication(
       MODELS_REFRESH_INTERVAL_MS,
     )
     modelsRefreshTimer.unref()
-    const injectedProviderNames = new Set([
-      ...Object.keys(options.providerStreams ?? {}),
-      ...(options.stream === undefined ? [] : [provider.provider]),
-    ])
-    // Auto-registered providers pick the model per request, so only the
-    // primary provider carries its configured default model. The payload is
-    // assembled per request: the model directory resolves lazily.
+    // Account catalogs describe concrete targets; the router publishes model
+    // identities separately from their credential-owning accounts.
     const modelDirectory =
       options.modelDirectory ?? createModelDirectory(providerRegistry)
+    const injectedProviderNames = new Set([
+      ...Object.keys(options.providerStreams ?? {}),
+      ...(options.stream === undefined && providerName !== "faux"
+        ? []
+        : [providerName]),
+    ])
     const unavailableModelDirectory: ModelDirectory = {
       async listModels() {
         return []
       },
     }
-    const providers = async (): Promise<ApiListProvidersResponse> => {
-      await refreshChatGPTProviders()
-      const chatGPTAccounts = (await chatGPTConnections.read()).accounts
-      const credentialStates = await providerCredentialStates(
-        false,
-        await subscriptionAccounts.codexPath(),
-      )
-      const names = [
-        ...new Set([
-          ...providerRegistry.providers,
-          ...Object.keys(providerConfigurations),
-          ...chatGPTAccounts.map((account) => account.providerId),
-          "codex",
-          "grok",
-          "kimi",
-        ]),
-      ]
-      const [summaries, userPreference] = await Promise.all([
-        Promise.all(
-          names.map((name) => {
+    const modelRouter = createModelRouter({
+      registry: providerRegistry,
+      async readAccounts() {
+        await refreshChatGPTProviders()
+        const chatGPTAccounts = (await chatGPTConnections.read()).accounts
+        const names = [
+          ...new Set([
+            ...providerRegistry.providers,
+            ...Object.keys(providerConfigurations),
+            ...chatGPTAccounts.map((account) => account.providerId),
+          ]),
+        ]
+        return Promise.all(
+          names.map(async (name): Promise<AccountModelSource> => {
+            const config = providerConfigurations[name]
             const chatGPTAccount = chatGPTAccounts.find(
               (account) => account.providerId === name,
             )
-            const state = chatGPTAccount
-              ? {
-                  availability:
-                    chatGPTAccount.state === "connected"
-                      ? ("available" as const)
-                      : ("requires_login" as const),
-                  credentialKind: "oauth" as const,
-                }
-              : providerConfigurations[name] === undefined
-                ? credentialStates[name]
-                : {
-                    availability: providerRegistry.providers.includes(name)
-                      ? ("available" as const)
-                      : ("requires_login" as const),
-                    credentialKind: "api_key" as const,
-                  }
-            const registered = providerRegistry.providers.includes(name)
-            const usesInjectedTransport = injectedProviderNames.has(name)
-            const available =
-              registered &&
-              (usesInjectedTransport ||
-                (state?.availability ?? "available") === "available")
-            const summary = providerSummary(
-              available ? modelDirectory : unavailableModelDirectory,
-              name,
-              available && name === provider.provider
-                ? provider.model
-                : undefined,
-              {
-                ...(chatGPTAccount === undefined
-                  ? {}
-                  : { displayName: chatGPTAccount.label }),
-                availability: available ? "available" : "requires_login",
-                ...(!available ||
-                usesInjectedTransport ||
-                state?.credentialKind === undefined
-                  ? {}
-                  : { credentialKind: state.credentialKind }),
-                ...(state?.rateLimits === undefined
-                  ? {}
-                  : { rateLimits: state.rateLimits }),
-              },
+            const preset = providerServices.find(
+              (entry) => entry.id === config?.service,
             )
-            return chatGPTAccount === undefined
-              ? summary
-              : summary.catch((error) => {
-                  if (!(error instanceof ChatGPTModelCatalogError)) throw error
-                  return {
-                    name,
-                    displayName: chatGPTAccount.label,
-                    availability: "available" as const,
-                    credentialKind: "oauth" as const,
-                    models: [],
-                    catalogError: error.message,
-                  }
-                })
+            const official =
+              preset &&
+              config &&
+              preset.baseURL.replace(/\/+$/, "") ===
+                config.baseURL.replace(/\/+$/, "") &&
+              preset.wireApi === config.wireApi
+            const namespace =
+              chatGPTAccount || config?.authentication === "codex_cli"
+                ? "openai"
+                : official
+                  ? preset.id === "xai"
+                    ? "xai"
+                    : preset.id
+                  : name
+            const serviceName =
+              chatGPTAccount || config?.authentication === "codex_cli"
+                ? "OpenAI"
+                : official
+                  ? preset.name
+                  : (config?.name ?? name)
+            const available = providerRegistry.providers.includes(name)
+            let summary: ApiProviderSummary
+            try {
+              summary = await providerSummary(
+                available ? modelDirectory : unavailableModelDirectory,
+                name,
+                injectedProviderNames.has(name) && name === provider.provider
+                  ? provider.model
+                  : undefined,
+                {
+                  displayName: config?.name ?? chatGPTAccount?.label ?? name,
+                  ...(chatGPTAccount ||
+                  config?.authentication === "codex_cli" ||
+                  config?.authentication === "grok_cli"
+                    ? { credentialKind: "oauth" as const }
+                    : config?.authentication === "stored" ||
+                        config?.authentication === "environment"
+                      ? { credentialKind: "api_key" as const }
+                      : {}),
+                  availability: available ? "available" : "requires_login",
+                },
+              )
+            } catch (error) {
+              if (
+                !(
+                  error instanceof ChatGPTModelCatalogError ||
+                  error instanceof ConfigurationError
+                )
+              )
+                throw error
+              summary = {
+                name,
+                models: [],
+                availability: "available",
+                catalogError: error.message,
+              }
+            }
+            return {
+              accountId: name,
+              namespace,
+              serviceName,
+              summary,
+              identities: Object.fromEntries(
+                (config?.models ?? []).flatMap((model) =>
+                  model.identity ? [[model.id, model.identity]] : [],
+                ),
+              ),
+            }
           }),
-        ),
-        userConfig.read(),
-      ])
+        )
+      },
+    })
+    refreshModelRouting = () => modelRouter.refresh()
+    await modelRouter.refresh()
+    const initialSelection =
+      modelRouter.selectionFor(provider.provider, provider.model) ??
+      (provider.model
+        ? { provider: provider.provider, model: provider.model }
+        : undefined) ??
+      userConfiguration.preference ??
+      modelRouter.list().flatMap((group) =>
+        group.models
+          .filter((model) => model.visible !== false)
+          .map((model) => ({
+            provider: group.name,
+            model: model.id,
+          })),
+      )[0]
+    if (initialSelection) {
+      provider.provider = initialSelection.provider
+      provider.model = initialSelection.model
+    }
+    const providers = async (): Promise<ApiListProvidersResponse> => {
+      await modelRouter.refresh()
+      const userPreference = await userConfig.read()
       return {
-        providers: summaries,
+        providers: modelRouter.list(),
+        accounts: modelRouter.accounts(),
         defaultProvider: provider.provider,
         defaultModel: provider.model,
-        ...(userPreference === undefined ? {} : { userPreference }),
+        ...(userPreference ? { userPreference } : {}),
       }
     }
     const subscriptionUsage = async (
-      providerName: ApiSubscriptionProvider,
+      accountId: string,
     ): Promise<ApiReadSubscriptionResponse> => {
-      const state = await providerCredentialState(
-        providerName,
-        true,
-        await subscriptionAccounts.codexPath(),
-      )
-      return {
-        subscription: {
-          provider: providerName,
-          displayName: subscriptionDisplayNames[providerName],
-          availability: state.availability ?? "requires_login",
-          ...(state.credentialKind === undefined
-            ? {}
-            : { credentialKind: state.credentialKind }),
-          ...(state.plan === undefined ? {} : { plan: state.plan }),
-          usage: state.rateLimits ?? { status: "unavailable" },
-        },
-        fetchedAt: Date.now(),
+      const configuration = Object.hasOwn(providerConfigurations, accountId)
+        ? providerConfigurations[accountId]
+        : undefined
+      if (!configuration) {
+        const account = (await chatGPTConnections.read()).accounts.find(
+          (entry) => entry.providerId === accountId,
+        )
+        if (!account) throw new ConfigurationError("Account does not exist.")
+        return {
+          subscription: {
+            provider: accountId,
+            displayName: account.label,
+            availability:
+              account.state === "connected" ? "available" : "requires_login",
+            credentialKind: "oauth",
+            usage: { status: "unavailable", reason: "not_supported" },
+          },
+          fetchedAt: Date.now(),
+        }
       }
+      const apiKey = await providerConfiguration.resolveCredential(accountId)
+      return readAccountUsage({
+        id: accountId,
+        configuration,
+        connected: providerRegistry.providers.includes(accountId),
+        ...(apiKey === undefined ? {} : { apiKey }),
+      })
     }
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
@@ -1043,6 +1057,27 @@ export async function createYakitoriApplication(
           loadSessionGoal: async () =>
             sideConversation ? undefined : goalRuntime.get(stored.metadata.id),
           modelClient: providerRegistry.createClient(),
+          resolveModelRoute(selection, input, context) {
+            // Embedders provide their own model contract. Subagents inherit
+            // concrete targets, which are converted back to a model choice here.
+            if (injectedProviderNames.has(selection.provider)) return selection
+            const choice =
+              input.source === "agent"
+                ? (modelRouter.selectionFor(
+                    selection.provider,
+                    selection.model,
+                  ) ?? selection)
+                : selection
+            return modelRouter.route(
+              { ...selection, ...choice },
+              {
+                image: context.requiresImages,
+                ...(context.preferredAccount === undefined
+                  ? {}
+                  : { preferredAccount: context.preferredAccount }),
+              },
+            )
+          },
           provider: provider.provider,
           model: provider.model,
           ...(baseInstructions === undefined ? {} : { baseInstructions }),
@@ -1223,7 +1258,12 @@ export async function createYakitoriApplication(
             stream: (request) => providerRegistry.stream(request),
             store: threadStore,
             reportOperationalFailure: reporter,
-            availableProviders: providerRegistry.providers,
+            resolveSelection(selection) {
+              const choice = selection ?? initialSelection
+              if (!choice || injectedProviderNames.has(choice.provider))
+                return choice
+              return modelRouter.route(choice)
+            },
             notifySidebarChanged: () =>
               broadcastNotification?.(sidebarChangedMethod, {}),
           })
@@ -1259,7 +1299,8 @@ export async function createYakitoriApplication(
       projectStore: ownedProjectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
-      availableProviders: providerRegistry.providers,
+      availableProviders: modelRouter.namespaces,
+      prepareModelRouting: () => modelRouter.refresh(),
       ...(sessionTitle === undefined ? {} : { sessionTitle }),
       rolloutAssets,
       releaseDraftRolloutAssets,
@@ -1392,7 +1433,7 @@ export async function createYakitoriApplication(
           chatgpt: chatGPTConnections,
           subscriptionUsage,
           userConfig: routedUserConfig,
-          availableProviders: providerRegistry.providers,
+          availableProviders: modelRouter.namespaces,
           rolloutAssets,
           reportOperationalFailure: reporter,
           userAgent: serverUserAgent,
@@ -1623,164 +1664,22 @@ async function providerSummary(
   return { name, defaultModel: configuredModel, models: ordered, ...state }
 }
 
-async function providerCredentialStates(
-  includeUsage: boolean,
-  codexCredentialsPath = defaultCodexAuthPath(),
-): Promise<Readonly<Record<string, ProviderCredentialState>>> {
-  const [codex, grok, kimi] = await Promise.all([
-    providerCredentialState("codex", includeUsage, codexCredentialsPath),
-    providerCredentialState("grok", includeUsage),
-    providerCredentialState("kimi", includeUsage),
-  ])
-  return { codex, grok, kimi }
-}
-
-async function providerCredentialState(
-  provider: ApiSubscriptionProvider,
-  includeUsage: boolean,
-  codexCredentialsPath = defaultCodexAuthPath(),
-): Promise<ProviderCredentialState> {
-  if (provider === "codex") {
-    const login = await readCodexLogin({ path: codexCredentialsPath }).catch(
-      () => undefined,
-    )
-    const shouldReadUsage = includeUsage && login?.kind === "chatgpt"
-    const usage = shouldReadUsage
-      ? await readCodexUsage({
-          resolveAccessToken: () =>
-            resolveCodexAccessToken({ path: codexCredentialsPath }),
-        }).catch(() => undefined)
-      : undefined
-    return {
-      availability: login?.kind === "chatgpt" ? "available" : "requires_login",
-      ...(login?.kind !== "chatgpt" ? {} : { credentialKind: "oauth" }),
-      ...(usage?.plan === undefined ? {} : { plan: usage.plan }),
-      rateLimits:
-        usage === undefined
-          ? unavailableUsage(
-              includeUsage,
-              shouldReadUsage ? "temporarily_unavailable" : "not_supported",
-            )
-          : { status: "available", buckets: usage.buckets },
-    }
-  }
-
-  if (provider === "grok") {
-    const apiKey = process.env.XAI_API_KEY
-    const available =
-      apiKey !== undefined ||
-      (await resolveGrokAccessToken()
-        .then(() => true)
-        .catch(() => false))
-    const shouldReadUsage = includeUsage && available && apiKey === undefined
-    const usage = shouldReadUsage
-      ? await readGrokUsage().catch(() => undefined)
-      : undefined
-    return {
-      availability: available ? "available" : "requires_login",
-      ...(available
-        ? { credentialKind: apiKey === undefined ? "oauth" : "api_key" }
-        : {}),
-      ...(usage?.plan === undefined ? {} : { plan: usage.plan }),
-      rateLimits:
-        usage === undefined
-          ? unavailableUsage(
-              includeUsage,
-              shouldReadUsage ? "temporarily_unavailable" : "not_supported",
-            )
-          : { status: "available", buckets: usage.buckets },
-    }
-  }
-
-  const apiKey = process.env.KIMI_API_KEY
-  const shouldReadUsage = includeUsage && apiKey !== undefined
-  const usage = shouldReadUsage
-    ? await readKimiUsage(apiKey).catch(() => undefined)
-    : undefined
-  return {
-    availability: apiKey === undefined ? "requires_login" : "available",
-    ...(apiKey === undefined ? {} : { credentialKind: "api_key" }),
-    rateLimits:
-      usage === undefined
-        ? unavailableUsage(
-            includeUsage,
-            shouldReadUsage ? "temporarily_unavailable" : "not_supported",
-          )
-        : { status: "available", buckets: usage.buckets },
-  }
-}
-
-function unavailableUsage(
-  includeUsage: boolean,
-  reason: "not_supported" | "temporarily_unavailable",
-) {
-  return includeUsage
-    ? ({ status: "unavailable", reason } as const)
-    : ({ status: "unavailable" } as const)
-}
-
-const subscriptionDisplayNames: Readonly<
-  Record<ApiSubscriptionProvider, string>
-> = {
-  codex: "Codex",
-  grok: "Grok",
-  kimi: "Kimi",
-}
-
-type ProviderCredentialState = Readonly<
-  Pick<ApiProviderSummary, "availability" | "credentialKind" | "rateLimits"> & {
-    plan?: string
-  }
->
-
-async function configureProviders(
+function configureProviders(
   input: Readonly<{
     provider: string
     model: string | undefined
     fauxScenario: string | undefined
-    pluginProviders: readonly string[]
     primaryStream: StreamFn | undefined
     injected: Readonly<Record<string, StreamFn>> | undefined
-    configured: Readonly<Record<string, ModelProvider>>
-    configuredDefinitions: Readonly<Record<string, StoredProviderConfiguration>>
-    modelsCacheDir: string
-    codexCredentialsPath: string
-    reportOperationalFailure: OperationalFailureReporter
   }>,
-): Promise<
-  Readonly<{
-    provider: string
-    model: string
-    providers: Readonly<Record<string, ModelProvider | StreamFn>>
-  }>
-> {
+): Readonly<{
+  provider: string
+  model: string
+  providers: Readonly<Record<string, ModelProvider | StreamFn>>
+}> {
   const providers: Record<string, ModelProvider | StreamFn> = {
     ...input.injected,
   }
-  for (const provider of apiKeyProviderNames) {
-    const apiKey = process.env[apiKeyEnvironment[provider]]
-    if (apiKey && providers[provider] === undefined) {
-      providers[provider] = createApiKeyProvider(
-        provider,
-        apiKey,
-        "selected-at-request-time",
-        input.modelsCacheDir,
-      )
-    }
-  }
-  const grokAvailable =
-    process.env.XAI_API_KEY !== undefined ||
-    (await resolveGrokAccessToken()
-      .then(() => true)
-      .catch(() => false))
-  if (grokAvailable) providers.grok ??= createGrokProvider(input.modelsCacheDir)
-  await registerCodexLogin(
-    providers,
-    input.reportOperationalFailure,
-    input.modelsCacheDir,
-    input.codexCredentialsPath,
-  )
-
   const model =
     input.model ??
     (input.provider === "faux"
@@ -1795,11 +1694,6 @@ async function configureProviders(
       model: model ?? "injected",
       providers,
     }
-  }
-  if (input.pluginProviders.includes(input.provider)) {
-    if (!model)
-      throw new Error("A model must be selected for the plugin provider.")
-    return { provider: input.provider, model, providers }
   }
   if (input.provider === "faux") {
     providers.faux = createModelProvider({
@@ -1816,216 +1710,7 @@ async function configureProviders(
       providers,
     }
   }
-  if (Object.hasOwn(input.configuredDefinitions, input.provider)) {
-    if (!Object.hasOwn(input.configured, input.provider)) {
-      throw new Error(
-        `An API key is required for configured provider ${input.provider}.`,
-      )
-    }
-    if (!model)
-      throw new Error("A model must be selected for the configured provider.")
-    return { provider: input.provider, model, providers }
-  }
-  if (input.provider === "codex") {
-    if (providers.codex === undefined) {
-      throw new Error(
-        "A Codex ChatGPT login is required when YAKITORI_PROVIDER=codex.",
-      )
-    }
-    if (!model) {
-      throw new Error(
-        "YAKITORI_MODEL is required when YAKITORI_PROVIDER=codex.",
-      )
-    }
-    return { provider: input.provider, model, providers }
-  }
-  if (isApiKeyProvider(input.provider)) {
-    const credential = apiKeyEnvironment[input.provider]
-    const apiKey = process.env[credential]
-    if (!apiKey) {
-      throw new Error(
-        `${credential} is required when YAKITORI_PROVIDER=${input.provider}.`,
-      )
-    }
-    if (!model) {
-      throw new Error(
-        `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
-      )
-    }
-    providers[input.provider] = createApiKeyProvider(
-      input.provider,
-      apiKey,
-      model,
-      input.modelsCacheDir,
-    )
-    return { provider: input.provider, model, providers }
-  }
-  if (input.provider !== "grok") {
-    throw new Error(
-      `Provider "${input.provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|codex|anthropic|grok|kimi or inject a stream.`,
-    )
-  }
-  if (!model) {
-    throw new Error(
-      `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
-    )
-  }
-  if (!grokAvailable) {
-    await resolveGrokAccessToken()
-  }
-  providers.grok = createGrokProvider(input.modelsCacheDir)
-  return { provider: input.provider, model, providers }
-}
-
-const apiKeyEnvironment = {
-  anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
-  kimi: "KIMI_API_KEY",
-} as const
-
-const apiKeyProviderNames = Object.keys(
-  apiKeyEnvironment,
-) as (keyof typeof apiKeyEnvironment)[]
-
-function isApiKeyProvider(
-  provider: string,
-): provider is keyof typeof apiKeyEnvironment {
-  return Object.hasOwn(apiKeyEnvironment, provider)
-}
-
-function createApiKeyProvider(
-  provider: keyof typeof apiKeyEnvironment,
-  apiKey: string,
-  model: string,
-  modelsCacheDir: string,
-): ModelProvider {
-  const preset = providerPresets.find(
-    (preset) => preset.id === (provider === "kimi" ? "kimi-code" : provider),
-  )
-  if (!preset) throw new Error(`Missing API provider preset for ${provider}.`)
-  const models = createDiscoveringModelsManager({
-    provider,
-    identity: async () =>
-      createProviderContinuationScope(provider, preset.baseURL, apiKey),
-    discover: () =>
-      provider === "kimi"
-        ? discoverOpenAiCompatibleModels({
-            provider: "kimi",
-            baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
-            accessToken: apiKey,
-          })
-        : discoverProviderModels({ ...preset, models: [] }, apiKey),
-    cacheStore: createFileModelsCacheStore({
-      provider,
-      directory: modelsCacheDir,
-    }),
-  })
-  if (provider === "openai") {
-    return createModelProvider({
-      models,
-      info: {
-        id: provider,
-        wireApi: "openai_responses",
-        capabilities: { remoteCompaction: false, nativePdf: true },
-      },
-      createTurnTransport: () =>
-        createOpenAITurnTransport({
-          apiKey,
-          model,
-          baseURL: OPENAI_API_BASE_URL,
-          warmup: false,
-        }),
-      continuationScope: createProviderContinuationScope(
-        provider,
-        OPENAI_API_BASE_URL,
-        apiKey,
-      ),
-    })
-  }
-  const baseURL =
-    provider === "kimi" ? KIMI_CODE_API_BASE_URL : ANTHROPIC_API_BASE_URL
-  return createModelProvider({
-    info: {
-      id: provider,
-      wireApi: "anthropic_messages",
-      capabilities: {
-        remoteCompaction: false,
-        nativePdf: provider === "anthropic",
-      },
-    },
-    createTurnTransport: () =>
-      createAnthropicTurnTransport({
-        apiKey,
-        model,
-        baseURL,
-      }),
-    continuationScope: createProviderContinuationScope(
-      provider,
-      baseURL,
-      apiKey,
-    ),
-    models,
-  })
-}
-
-// Registers the codex provider from the local codex CLI login, or the plain
-// openai provider for API-key logins when no environment key already claims
-// it. A missing or unreadable login disables codex without breaking startup.
-async function registerCodexLogin(
-  providers: Record<string, ModelProvider | StreamFn>,
-  reporter: OperationalFailureReporter,
-  modelsCacheDir: string,
-  credentialsPath = defaultCodexAuthPath(),
-): Promise<void> {
-  let login: CodexLogin | undefined
-  try {
-    login = await readCodexLogin({ path: credentialsPath })
-  } catch (error) {
-    reportOperationalFailure(reporter, {
-      component: "codex-credentials",
-      operation: "read-login",
-      cause: error,
-    })
-    return
-  }
-  if (login === undefined) return
-  if (login.kind === "chatgpt") {
-    providers.codex = createModelProvider({
-      info: {
-        id: "codex",
-        wireApi: "openai_responses",
-        capabilities: { remoteCompaction: "codex_remote", nativePdf: false },
-      },
-      createTurnStream: () => createCodexProvider({ credentialsPath }),
-      models: createDiscoveringModelsManager({
-        provider: "codex",
-        identity: () => resolveCodexAccountIdentity({ path: credentialsPath }),
-        async discover() {
-          const token = await resolveCodexAccessToken({ path: credentialsPath })
-          return discoverCodexModels({
-            baseUrl: "https://chatgpt.com/backend-api/codex",
-            accessToken: token.accessToken,
-            ...(token.accountId === undefined
-              ? {}
-              : { accountId: token.accountId }),
-          })
-        },
-        cacheStore: createFileModelsCacheStore({
-          provider: "codex",
-          directory: modelsCacheDir,
-        }),
-      }),
-    })
-    return
-  }
-  if (providers.openai === undefined) {
-    providers.openai = createApiKeyProvider(
-      "openai",
-      login.apiKey,
-      "selected-at-request-time",
-      modelsCacheDir,
-    )
-  }
+  return { provider: input.provider, model: model ?? "", providers }
 }
 
 async function closeApplicationResources(

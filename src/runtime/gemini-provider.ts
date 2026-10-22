@@ -186,7 +186,7 @@ async function* streamGemini(
       redirect: "error",
       headers: {
         "content-type": "application/json",
-        "x-goog-api-key": options.apiKey,
+        ...(options.apiKey ? { "x-goog-api-key": options.apiKey } : {}),
       },
       body,
       ...(request.signal === undefined ? {} : { signal: request.signal }),

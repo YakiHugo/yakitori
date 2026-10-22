@@ -4,8 +4,8 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   resolveGrokAccessToken,
-  resolveGrokAccountIdentity,
   resolveGrokCredentials,
+  resolveGrokModelCredentials,
 } from "../../src/runtime/grok-credentials.ts"
 
 describe("Grok OIDC credentials (read-only)", () => {
@@ -103,9 +103,11 @@ describe("Grok OIDC credentials (read-only)", () => {
       userId: "public-user",
       expiresAt: 1_000_000,
     })
-    await expect(resolveGrokAccountIdentity({ path })).resolves.toBe(
-      "public-user",
-    )
+    await expect(
+      resolveGrokModelCredentials({ path, now: () => 500_000 }).then(
+        (credentials) => credentials.ownerIdentity,
+      ),
+    ).resolves.toBe("account:public-user")
   })
 
   it("requires the public scope when only unrelated logins exist", async () => {
@@ -120,9 +122,11 @@ describe("Grok OIDC credentials (read-only)", () => {
     await expect(
       resolveGrokAccessToken({ path, now: () => 500_000 }),
     ).rejects.toThrow(/no login/)
-    await expect(resolveGrokAccountIdentity({ path })).rejects.toThrow(
-      /no login/,
-    )
+    await expect(
+      resolveGrokModelCredentials({ path, now: () => 500_000 }).then(
+        (credentials) => credentials.ownerIdentity,
+      ),
+    ).rejects.toThrow(/no login/)
   })
 
   it.each([
@@ -162,11 +166,11 @@ describe("Grok OIDC credentials (read-only)", () => {
     ).rejects.toThrow(/expired/)
   })
 
-  it("uses the environment API key identity without reading a CLI login", async () => {
+  it("does not substitute an environment key for a bound CLI credential source", async () => {
     vi.stubEnv("XAI_API_KEY", "environment-key")
     await writeFile(path, "invalid JSON")
-    await expect(resolveGrokAccountIdentity({ path })).resolves.toBe(
-      "a0ef3e034d912dcbe888a0a45df972d7458960e910c0947d6141b6d36dd885e6",
+    await expect(resolveGrokModelCredentials({ path })).rejects.toThrow(
+      "invalid JSON",
     )
   })
 
