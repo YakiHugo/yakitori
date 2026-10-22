@@ -335,8 +335,10 @@ function ChildTrace({
             )}
             {view.activeRetry ? (
               <p role="status" className="subagent-notice">
-                Retrying · attempt {view.activeRetry.nextAttempt} of{" "}
-                {view.activeRetry.maxAttempts}. {view.activeRetry.message}
+                {view.activeRetry.maxAttempts === undefined
+                  ? "Waiting for network. "
+                  : `Retrying · attempt ${view.activeRetry.nextAttempt} of ${view.activeRetry.maxAttempts}. `}
+                {view.activeRetry.message}
               </p>
             ) : null}
           </div>

@@ -98,6 +98,8 @@ export type ModelRequest = Readonly<{
   streamOutputItems?: boolean
   // After committed output, retry only from the consumer's updated history.
   rebuildMessagesAfterOutput?: () => Promise<readonly ModelMessage[]>
+  // Only interactive sampling may wait for connectivity without a retry limit.
+  waitForConnection?: boolean
   // Request-only control; the resulting native item enters normal history.
   compaction?: "local" | "codex_remote" | "responses_compact"
   target: ModelTarget
@@ -255,7 +257,7 @@ export type ModelStreamRetryEvent = Readonly<{
   committedOutput?: boolean
   attempt: number
   nextAttempt: number
-  maxAttempts: number
+  maxAttempts?: number
   delayMs: number
   failure: ModelFailure
   usage?: ModelUsage

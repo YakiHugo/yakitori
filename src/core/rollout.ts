@@ -148,7 +148,7 @@ export type RolloutItem =
   | Readonly<{
       type: "turn_started"
       turnId: string
-      inputItemId: string
+      inputItemId?: string
       source?: import("./session-io.ts").InputSource
       purpose?: import("./session-io.ts").InputPurpose
       requestFingerprint?: string

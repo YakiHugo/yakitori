@@ -24,7 +24,11 @@ export function isThreadMessageProvenance(
   )
 }
 
-export type InputPurpose = "message" | "task" | "question_answer"
+export type InputPurpose =
+  | "message"
+  | "task"
+  | "question_answer"
+  | "continuation"
 export type InputSource = "human" | "agent" | "runtime"
 
 export type TurnInput = Readonly<{

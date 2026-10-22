@@ -247,6 +247,7 @@ export type AppStoreActions = {
     mode?: "auto" | "queue",
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
+  resumeTurn(turnId: string, modelSelection?: ModelSelection): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   refreshQueuedInputs(): Promise<void>
   updateQueuedInput(inputId: string, parts: InputDraft): Promise<boolean>
@@ -2783,6 +2784,32 @@ export const useAppStore = create<AppStore>()((set, get) => {
           if (!isCurrentSelection(selection)) return
           if (queueAdmission) await get().refreshQueuedInputs()
           await get().refreshSidebar()
+        },
+        () => isCurrentSelection(selection),
+      )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
+    },
+
+    resumeTurn: async (turnId, modelSelection) => {
+      const selection = currentSelection()
+      if (!selection) return
+      const key = `resume:${selection.sessionId}`
+      if (get().inFlightActions.has(key)) return
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      await runTask(
+        async () => {
+          await getAppRpcClient(get().apiBase).request("session/turn/resume", {
+            sessionId: selection.sessionId,
+            requestId: createRequestId(),
+            expectedTurnId: turnId,
+            ...(modelSelection === undefined ? {} : { modelSelection }),
+          })
         },
         () => isCurrentSelection(selection),
       )

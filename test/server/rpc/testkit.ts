@@ -144,6 +144,8 @@ export function createFakeHandlers(
   overrides: Partial<ServerHandlers> = {},
 ): ServerHandlers {
   const base: ServerHandlers = {
+    resumeTurn: async () =>
+      okResult({ requestId: "request_resume", turnId: "turn_resume" }),
     readSidebar: async () => okResult({ sections: [], entries: {} }),
     updateSidebar: async () => okResult({ sections: [], entries: {} }),
     readGoal: async () => okResult({ goal: null }),

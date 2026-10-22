@@ -2406,7 +2406,9 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "purpose",
       ]) &&
       typeof value.turnId === "string" &&
-      typeof value.inputItemId === "string" &&
+      (value.purpose === "continuation"
+        ? value.inputItemId === undefined && value.source === "runtime"
+        : typeof value.inputItemId === "string") &&
       isInputSource(value.source) &&
       isInputPurpose(value.purpose) &&
       (value.requestFingerprint === undefined ||
@@ -2822,6 +2824,7 @@ function isInputPurpose(value: unknown): boolean {
     value === undefined ||
     value === "message" ||
     value === "task" ||
-    value === "question_answer"
+    value === "question_answer" ||
+    value === "continuation"
   )
 }

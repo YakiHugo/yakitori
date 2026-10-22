@@ -1625,6 +1625,27 @@ describe("OpenAI Responses provider", () => {
 })
 
 describe("OpenAI provider error classification", () => {
+  it.each([
+    "insufficient_quota",
+    "usage_limit_reached",
+  ])("does not retry a quota failure with code %s", async (code) => {
+    const error = new OpenAI.APIError(
+      429,
+      { code },
+      "quota exhausted",
+      new Headers({ "x-should-retry": "true" }),
+    )
+    expect(await collectWithThrowingClient(error)).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "rate_limited",
+          serverShouldRetry: false,
+          providerCode: code,
+        }),
+      }),
+    ])
+  })
   it("marks a 429 API error as retryable with its status", async () => {
     const error = new OpenAI.APIError(429, undefined, undefined, new Headers())
 

@@ -88,6 +88,23 @@ function retryingState() {
   })
 }
 
+it("retains connectivity waits without inventing an attempt limit", () => {
+  const state = reduceExecutionView(runningState(), {
+    type: "transient",
+    event: {
+      ...warning,
+      details: { kind: "connection_failed", nextAttempt: 12, delayMs: 60_000 },
+    },
+  })
+  expect(projectExecutionView(state).activeRetry).toMatchObject({
+    kind: "connection_failed",
+    nextAttempt: 12,
+  })
+  expect(projectExecutionView(state).activeRetry).not.toHaveProperty(
+    "maxAttempts",
+  )
+})
+
 describe("model retry execution state", () => {
   it("projects structured retry diagnostics without adding transcript entries", () => {
     const before = runningState()

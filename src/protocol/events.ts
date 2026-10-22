@@ -154,15 +154,15 @@ export type InputAdmittedEvent = {
   }
 }
 
-export type TurnStartedEvent = {
-  readonly type: typeof EventType.TurnStarted
-  readonly data: {
-    readonly turnId: string
-    readonly inputId: string
-    readonly parentTurnId?: string
-    readonly metadata?: EventMetadata
-  }
-}
+export type TurnStartedEvent = Readonly<{
+  type: typeof EventType.TurnStarted
+  data: Readonly<{
+    turnId: string
+    inputId?: string
+    parentTurnId?: string
+    metadata?: EventMetadata
+  }>
+}>
 
 export type TurnCompletedEvent = {
   readonly type: typeof EventType.TurnCompleted

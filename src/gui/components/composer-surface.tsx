@@ -161,6 +161,7 @@ export function ComposerSurface({
   updatePromptExcerpt,
   onSubmit,
   onCancel,
+  onResume,
   modelControls,
   importAttachments,
   readingAttachments,
@@ -199,6 +200,7 @@ export function ComposerSurface({
   updatePromptExcerpt(excerpt: ContextExcerpt): void
   onSubmit(parts: InputDraft, mode?: "auto" | "queue"): void
   onCancel(): void
+  onResume?: (() => void) | undefined
   modelControls: ReactNode
   importAttachments: ComposerAttachmentImport
   readingAttachments: boolean
@@ -459,6 +461,8 @@ export function ComposerSurface({
     (attachments.length > 0 || excerpts.length > 0)
   const canSend =
     containsInput && !busy && !sending && !readingAttachments && !compactBlocked
+  const canResume =
+    !containsInput && onResume !== undefined && activeTurnId === undefined
 
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) return
@@ -979,7 +983,25 @@ export function ComposerSurface({
 
             <div className="flex min-w-0 items-center gap-1">
               {modelControls}
-              {activeTurnId === undefined ? (
+              {canResume ? (
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  disabled={busy || sending || readingAttachments}
+                  aria-busy={sending}
+                  aria-label={sending ? "Resuming" : "Resume"}
+                  title="Resume the interrupted turn"
+                  className="rounded-full"
+                  onClick={onResume}
+                >
+                  {sending ? (
+                    <LoaderCircle className="animate-spin motion-reduce:animate-none" />
+                  ) : (
+                    <ArrowUp />
+                  )}
+                  <span className="sr-only">Resume</span>
+                </Button>
+              ) : activeTurnId === undefined ? (
                 <Button
                   type="submit"
                   size="icon-sm"

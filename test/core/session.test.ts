@@ -322,9 +322,15 @@ describe("live Session actor", () => {
       const items =
         (await store.readThread(thread.id))?.rollout.map(({ item }) => item) ??
         []
-      expect(items.slice(-3)).toEqual([
+      expect(items.slice(-4)).toEqual([
         { type: "response_item", item: response },
         { type: "item_completed", turnId: "turn_drain", item: completion },
+        expect.objectContaining({
+          type: "response_item",
+          item: expect.objectContaining({
+            item: expect.objectContaining({ role: "developer" }),
+          }),
+        }),
         {
           type: "turn_completed",
           turnId: "turn_drain",
@@ -332,7 +338,7 @@ describe("live Session actor", () => {
           usage: { inputTokens: 5, outputTokens: 2 },
         },
       ])
-      expect(thread.snapshot().context.history.at(-1)).toEqual(response)
+      expect(thread.snapshot().context.history.at(-2)).toEqual(response)
       await expect(
         runtime.recordToolResult(response, completion),
       ).rejects.toThrow("no longer active")

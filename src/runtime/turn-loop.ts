@@ -162,6 +162,7 @@ export type TurnLoopOptions = Readonly<{
   ): ModelSelection
   modelClient?: ModelClient
   stream?: StreamFn
+  waitForConnection?: boolean
   toolRegistry: ToolRegistry
   permissionGate?: PermissionGate
   provider?: string
@@ -1275,6 +1276,10 @@ async function executeTurnModelLoop(
         .executionSnapshot(input.execution)
         .context.history.at(-1)?.id
       const request: ModelRequest = {
+        waitForConnection:
+          input.options.waitForConnection === true &&
+          (inputSource(input.input) === "human" ||
+            input.input.purpose === "continuation"),
         assets: {
           read: (source, signal) =>
             readAssetSource(source, input.options.rolloutAssets, signal),
@@ -2243,7 +2248,9 @@ async function consumeModelStream(input: {
         trailingHighSurrogate.reasoning = ""
         if (event.usage !== undefined) await input.onUsage(event.usage)
         input.emitWarning?.(
-          `Model request failed (${event.failure.kind}); retrying attempt ${String(event.nextAttempt)} of ${String(event.maxAttempts)} in ${String(Math.round(event.delayMs))} ms.`,
+          event.maxAttempts === undefined
+            ? `Waiting for network; reconnecting in ${String(Math.round(event.delayMs / 1000))} seconds.`
+            : `Model request failed (${event.failure.kind}); retrying attempt ${String(event.nextAttempt)} of ${String(event.maxAttempts)} in ${String(Math.round(event.delayMs))} ms.`,
           {
             message: event.failure.message,
             code: "model.retry",
@@ -2253,7 +2260,9 @@ async function consumeModelStream(input: {
                 : { discardedResponseItemIds }),
               attempt: event.attempt,
               nextAttempt: event.nextAttempt,
-              maxAttempts: event.maxAttempts,
+              ...(event.maxAttempts === undefined
+                ? {}
+                : { maxAttempts: event.maxAttempts }),
               delayMs: event.delayMs,
               kind: event.failure.kind,
               stage: event.failure.stage,

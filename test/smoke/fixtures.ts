@@ -230,6 +230,28 @@ export async function runProviderFlow(
             })}\n\ndata: [DONE]\n\n`,
           )
         } else {
+          if (
+            sent.messages?.some(
+              (message) =>
+                message.role === "system" &&
+                typeof message.content === "string" &&
+                message.content.includes("The previous turn was interrupted"),
+            )
+          ) {
+            expect(
+              sent.messages.filter(
+                (message) =>
+                  message.role === "user" &&
+                  message.content ===
+                    "Verify approval and interrupted streaming.",
+              ),
+            ).toHaveLength(1)
+            expect(commandResult.content).toContain("smoke-approved-command")
+            response.end(
+              `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: { role: "assistant", content: "Mock provider reply" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+            )
+            return
+          }
           approvedCommandResults += 1
           // The actual command result must cross the native engine and provider
           // boundary. Merely showing an approval fixture cannot satisfy this.
@@ -780,7 +802,7 @@ export async function runProviderFlow(
       { type: "text", text: "Before PDF. [Document 1]After PDF." },
     ])
 
-    await runApprovalAndInterruption(page)
+    await runApprovalAndInterruption(page, testInfo)
     expect(approvedCommandResults).toBe(1)
     await expect.poll(() => interruptedStreamClosed).toBe(true)
 
@@ -876,7 +898,10 @@ export async function runProviderFlow(
 
 // Run unchanged against the built browser app and the packaged Electron app.
 // Reload while approval and streaming are pending to exercise real socket replay.
-async function runApprovalAndInterruption(page: Page): Promise<void> {
+async function runApprovalAndInterruption(
+  page: Page,
+  testInfo: TestInfo,
+): Promise<void> {
   const replies = page
     .getByRole("region", { name: "Response", exact: true })
     .getByText("Mock provider reply", { exact: true })
@@ -917,10 +942,26 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
       .filter({ hasText: /^Verify approval and interrupted streaming\.$/ }),
   ).toBeVisible()
   await expect(interrupt).toHaveCount(0)
-  // Starting another turn detects a stale busy engine after cancellation.
+  await expect(
+    page.getByRole("button", { name: "Resume", exact: true }),
+  ).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath("resume-ready.png") })
+  await page.getByRole("button", { name: "Resume", exact: true }).click()
+  await expect(replies).toHaveCount(previousReplyCount + 1)
+  await expect(
+    page.getByRole("button", { name: "Resume", exact: true }),
+  ).toHaveCount(0)
+  await expect(
+    page
+      .getByRole("main")
+      .getByRole("paragraph")
+      .filter({ hasText: /^Verify approval and interrupted streaming\.$/ }),
+  ).toHaveCount(1)
+  await page.screenshot({ path: testInfo.outputPath("resume-completed.png") })
+  // An ordinary new input still starts another Turn after the continuation.
   await composer.fill("Verify a new turn after interruption.")
   await page.getByRole("button", { name: "Send", exact: true }).click()
-  await expect(replies).toHaveCount(previousReplyCount + 1)
+  await expect(replies).toHaveCount(previousReplyCount + 2)
   await expect(interrupt).toHaveCount(0)
 }
 

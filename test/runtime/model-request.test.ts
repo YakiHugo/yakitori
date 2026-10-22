@@ -12,6 +12,111 @@ import {
 } from "../../src/runtime/model-request.ts"
 
 describe("model request runtime", () => {
+  it("gives transient rate limits the ordinary default retry budget", async () => {
+    const provider = scriptedStream([
+      [failure("rate_limited")],
+      [failure("rate_limited")],
+      [failure("rate_limited")],
+      [success],
+    ])
+    const events = await collect(
+      createModelRequestStream(provider.stream, {
+        wireApi: "unknown",
+        sleep: async () => {},
+      }),
+    )
+    expect(events.at(-1)).toEqual(success)
+    expect(provider.calls()).toBe(4)
+  })
+
+  it("waits for connectivity without spending the transient failure budget", async () => {
+    const provider = scriptedStream([
+      ...Array.from({ length: 7 }, () => [failure("connection_failed")]),
+      [failure("server_error")],
+      [success],
+    ])
+    const waits: number[] = []
+    const events = await collect(
+      createModelRequestStream(provider.stream, {
+        wireApi: "unknown",
+        maxAttempts: 2,
+        random: () => 1,
+        sleep: async (delay) => {
+          waits.push(delay)
+        },
+      }),
+      undefined,
+      { ...requestFixture(), waitForConnection: true },
+    )
+    expect(waits).toEqual([
+      5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000, 500,
+    ])
+    expect(events[0]).not.toHaveProperty("maxAttempts")
+    expect(events.at(-2)).toMatchObject({
+      type: "retry",
+      nextAttempt: 9,
+      maxAttempts: 9,
+    })
+    expect(events.at(-1)).toEqual(success)
+  })
+
+  it("stops an interactive connectivity wait on caller cancellation", async () => {
+    const controller = new AbortController()
+    const provider = scriptedStream([[failure("connection_failed")], [success]])
+    const events = await collect(
+      createModelRequestStream(provider.stream, {
+        wireApi: "unknown",
+        sleep: async (_delay, signal) => {
+          expect(signal).toBe(controller.signal)
+          controller.abort()
+        },
+      }),
+      controller.signal,
+      {
+        ...requestFixture(),
+        waitForConnection: true,
+        signal: controller.signal,
+      },
+    )
+    expect(events.at(-1)).toMatchObject({ type: "cancelled" })
+    expect(provider.calls()).toBe(1)
+  })
+
+  it.each([
+    "http",
+    "compaction",
+    "veto",
+  ])("keeps %s failures bounded during interactive sampling", async (mode) => {
+    const event = failure("connection_failed")
+    const provider = scriptedStream([
+      [
+        {
+          ...event,
+          failure: {
+            ...event.failure,
+            ...(mode === "http" ? { status: 408 } : {}),
+            ...(mode === "veto" ? { serverShouldRetry: false } : {}),
+          },
+        },
+      ],
+      [success],
+    ])
+    const events = await collect(
+      createModelRequestStream(provider.stream, {
+        wireApi: "unknown",
+        maxAttempts: 1,
+      }),
+      undefined,
+      {
+        ...requestFixture(),
+        waitForConnection: true,
+        ...(mode === "compaction" ? { compaction: "local" as const } : {}),
+      },
+    )
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: "failure" })
+    expect(provider.calls()).toBe(1)
+  })
   it.each([
     "cancel",
     "throw",

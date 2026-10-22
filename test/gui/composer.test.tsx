@@ -83,6 +83,69 @@ afterEach(() => {
 })
 
 describe("composer", () => {
+  it("resumes an interrupted turn without submitting or clearing a user message", async () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: {
+        ...createExecutionViewState(),
+        turnTimings: {
+          turn_interrupted: { outcome: { status: "interrupted" } },
+        },
+      },
+    })
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/turn/resume")
+        return {
+          requestId: (params as { requestId: string }).requestId,
+          turnId: "turn_resumed",
+        }
+      throw new Error(`Unexpected RPC: ${method}`)
+    }
+    render(<Composer />)
+    const button = screen.getByRole("button", { name: "Resume" })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    await waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/turn/resume")).toHaveLength(
+        1,
+      ),
+    )
+    expect(
+      fakeRef.current.requestsFor("session/turn/resume")[0]?.params,
+    ).toMatchObject({
+      sessionId: "session_1",
+      expectedTurnId: "turn_interrupted",
+    })
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    act(() =>
+      useAppStore.getState().setPromptDraft(inputParts("A new request")),
+    )
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull()
+    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy()
+  })
+
+  it("does not offer Resume for a quota failure", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: {
+        ...createExecutionViewState(),
+        turnTimings: {
+          turn_quota: {
+            outcome: {
+              status: "failed",
+              error: {
+                code: "model.rate_limited",
+                message: "Quota exhausted",
+                details: { serverShouldRetry: false },
+              },
+            },
+          },
+        },
+      },
+    })
+    render(<Composer />)
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull()
+  })
   it("pairs the context snapshot with the sampled model's window across selection changes", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createRequestId } from "../../src/kernel/ids.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
@@ -32,6 +33,74 @@ afterEach(async () => {
 })
 
 describe("Turn recovery", () => {
+  it.each([
+    "stream_disconnected",
+    "authentication",
+    "quota",
+  ] as const)("allows only recoverable %s failures to resume through the server", async (kind) => {
+    let recovering = false
+    let calls = 0
+    const runtime = await fixture(async function* (request) {
+      calls += 1
+      if (!recovering) {
+        yield {
+          type: "failure",
+          failure: {
+            kind: kind === "quota" ? "rate_limited" : kind,
+            stage: "response_body",
+            provider: "faux",
+            wireApi: "unknown",
+            message: "Model failed",
+            ...(kind === "quota" ? { serverShouldRetry: false } : {}),
+          },
+        }
+        return
+      }
+      expect(
+        request.messages.filter(
+          (message) => message.role === "user" && message.context === undefined,
+        ),
+      ).toHaveLength(1)
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "recovered" }],
+        },
+      }
+    }, [])
+    const thread = await runtime.createThread()
+    const started = await thread.startIfIdle({
+      content: inputFixture([{ type: "text", text: "Do the task" }]),
+    })
+    if (started.type !== "started") throw new Error("Turn did not start")
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ errored: expect.any(String) })
+    recovering = true
+    const handlers = createThreadServerHandlers({
+      manager: runtime.manager,
+      store: runtime.store,
+    })
+    try {
+      const result = await handlers.resumeTurn({
+        sessionId: thread.id,
+        requestId: createRequestId(),
+        expectedTurnId: started.turnId,
+      })
+      expect(result.ok).toBe(kind === "stream_disconnected")
+      if (kind === "stream_disconnected") {
+        await expect
+          .poll(() => thread.agentStatus)
+          .toEqual({ completed: "recovered" })
+        expect(calls).toBe(9)
+      } else {
+        expect(calls).toBe(1)
+      }
+    } finally {
+      await handlers.close()
+    }
+  })
   it.each([
     "completed",
     "disconnected",
@@ -155,7 +224,7 @@ describe("Turn recovery", () => {
     expect(requests).toBe(2)
   })
 
-  it("keeps results from separate streamed items after cancellation and pairs them in the next request", async () => {
+  it("resumes saved interrupted history without new user input or repeating completed tools", async () => {
     const waiting = deferred()
     const finished = deferred()
     let requests = 0
@@ -177,6 +246,7 @@ describe("Turn recovery", () => {
               { type: "tool_call", id: "read", name: "read", input: {} },
             ],
           }
+          yield { type: "delta", text: "unfinished provisional text" }
           await new Promise<void>((resolve) => {
             if (request.signal?.aborted) resolve()
             else
@@ -189,6 +259,25 @@ describe("Turn recovery", () => {
         }
         const results = request.messages.filter(
           (message) => message.role === "tool",
+        )
+        expect(
+          request.messages.filter(
+            (message) =>
+              message.role === "user" && message.context === undefined,
+          ),
+        ).toHaveLength(1)
+        expect(JSON.stringify(request.messages)).not.toContain(
+          "unfinished provisional text",
+        )
+        expect(request.messages).toContainEqual(
+          expect.objectContaining({
+            role: "developer",
+            content: [
+              expect.objectContaining({
+                text: expect.stringContaining("may have partially executed"),
+              }),
+            ],
+          }),
         )
         expect(results).toHaveLength(2)
         expect(results).toContainEqual(
@@ -225,22 +314,71 @@ describe("Turn recovery", () => {
       ],
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({
+    const started = await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "run" }]),
     })
+    if (started.type !== "started") throw new Error("Turn did not start")
     await waiting.promise
     await finished.promise
+    expect(
+      await thread.resumeTurn({
+        requestId: "resume_busy",
+        expectedTurnId: started.turnId,
+      }),
+    ).toEqual({ type: "not_submitted", reason: "not_idle" })
     await thread.interrupt("stop")
     await expect.poll(() => thread.agentStatus).toBe("interrupted")
     await runtime.manager.closeThread(thread.id)
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (!resumed) throw new Error("Missing thread")
-    await resumed.startIfIdle({
-      content: inputFixture([{ type: "text" as const, text: "continue" }]),
-    })
+    const continuation = {
+      requestId: "resume_saved",
+      expectedTurnId: started.turnId,
+    }
+    const submissions = await Promise.all([
+      resumed.resumeTurn(continuation),
+      resumed.resumeTurn(continuation),
+    ])
+    expect(submissions).toEqual([
+      { type: "started", turnId: "resume_saved" },
+      { type: "replayed", turnId: "resume_saved" },
+    ])
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "resumed" })
+    expect(requests).toBe(2)
+    const stored = await runtime.store.readThread(thread.id)
+    expect(
+      stored?.rollout.filter(
+        ({ item }) =>
+          item.type === "response_item" &&
+          item.item.item.role === "user" &&
+          item.item.item.context === undefined,
+      ),
+    ).toHaveLength(1)
+    expect(
+      stored?.rollout.filter(({ item }) => item.type === "turn_started"),
+    ).toHaveLength(2)
+    expect(
+      resumed
+        .snapshot()
+        .context.history.filter(
+          ({ item }) =>
+            item.role === "developer" &&
+            JSON.stringify(item).includes("may have partially executed"),
+        ),
+    ).toHaveLength(1)
+    await runtime.manager.closeThread(thread.id)
+    const reopened = await runtime.manager.resumeThread(thread.id)
+    if (!reopened) throw new Error("Missing restored thread")
+    expect(await reopened.resumeTurn(continuation)).toEqual({
+      type: "replayed",
+      turnId: "resume_saved",
+    })
+    expect(
+      await reopened.resumeTurn({ ...continuation, requestId: "resume_stale" }),
+    ).toEqual({ type: "not_submitted", reason: "turn_mismatch" })
+    expect(requests).toBe(2)
   })
 
   it.each([

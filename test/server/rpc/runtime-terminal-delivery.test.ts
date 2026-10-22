@@ -104,6 +104,17 @@ describe("runtime terminal delivery", () => {
             content: inputFixture([{ type: "text" as const, text: "finish" }]),
           })
           if (!admitted.ok) throw new Error(admitted.error.message)
+          await client.waitForFrame(
+            (frame) =>
+              "method" in frame &&
+              frame.method === "session/transient" &&
+              (frame.params as LiveSessionEvent).type === "assistant.delta",
+          )
+          const durableBeforeTerminal = client
+            .notifications("session/event")
+            .map(
+              (frame) => (frame.params as { event: StoredEventEnvelope }).event,
+            )
           store.failNextAppend = failure !== "flush"
           store.failNextFlush = failure !== "append"
           if (outcome === "interrupted") {
@@ -183,11 +194,7 @@ describe("runtime terminal delivery", () => {
               (frame) => (frame.params as { event: StoredEventEnvelope }).event,
             )
           expect(durable).toEqual(
-            failure === "append"
-              ? history.value.events.filter(
-                  (event) => event.type !== "turn.completed",
-                )
-              : history.value.events,
+            failure === "append" ? durableBeforeTerminal : history.value.events,
           )
           expect(
             history.value.events.some(

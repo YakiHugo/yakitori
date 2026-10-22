@@ -7,6 +7,8 @@ import type {
   ApiCancelTurnResponse,
   ApiClearGoalResponse,
   ApiCompactSessionResponse,
+  ApiResumeTurnRequest,
+  ApiResumeTurnResponse,
   ApiCreateProjectResponse,
   ApiCreateSessionRequest,
   ApiCreateSessionResponse,
@@ -234,6 +236,7 @@ export type RpcMethodParams = Readonly<
       "session/input/steer": ApiSteerInputRequest
       "session/input/cancel": ApiCancelInputRequest
       "session/turn/cancel": ApiCancelTurnRequest
+      "session/turn/resume": ApiResumeTurnRequest
       "session/subscribe": SessionSubscribeParams
       "session/unsubscribe": SessionUnsubscribeParams
       "project/list": ProjectListParams
@@ -292,6 +295,7 @@ export type RpcMethodResponses = Readonly<
       "session/input/steer": ApiSteerInputResponse
       "session/input/cancel": ApiCancelInputResponse
       "session/turn/cancel": ApiCancelTurnResponse
+      "session/turn/resume": ApiResumeTurnResponse
       "session/subscribe": SessionSubscribeResponse
       "session/unsubscribe": Readonly<Record<string, never>>
       "project/list": ApiListProjectsResponse

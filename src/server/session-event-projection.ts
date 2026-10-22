@@ -98,7 +98,12 @@ export function mapRolloutEvent(
       ...base,
       event: {
         type: "turn.started",
-        data: { turnId: item.turnId, inputId: item.inputItemId },
+        data: {
+          turnId: item.turnId,
+          ...(item.inputItemId === undefined
+            ? {}
+            : { inputId: item.inputItemId }),
+        },
       },
     })
   }

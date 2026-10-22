@@ -65,6 +65,7 @@ import {
 } from "./operational-errors.ts"
 import type {
   ApiClearGoalResponse,
+  ApiResumeTurnResponse,
   ApiReadGoalResponse,
   ApiSetGoalResponse,
 } from "./protocol.ts"
@@ -222,6 +223,7 @@ export type ServerHandlers = {
   compactSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiCompactSessionResponse>>
+  resumeTurn(input: unknown): Promise<ApplicationResult<ApiResumeTurnResponse>>
   cancelInput(
     input: unknown,
   ): Promise<ApplicationResult<ApiCancelInputResponse>>
@@ -245,7 +247,7 @@ type RolloutPublication = {
   rolloutId: string
   firstUserInputId: string | undefined
   processedThrough: number
-  turns: Map<string, { inputItemId: string; accepted: boolean }>
+  turns: Map<string, { inputItemId?: string; accepted: boolean }>
 }
 
 // App-server projection over the live Session actor and canonical rollout.
@@ -459,7 +461,7 @@ export function createThreadServerHandlers(
         firstUserInputId:
           stored?.rollout.find(isInitialUserInput)?.item.item.id,
         processedThrough: publishedThrough.get(thread.id) ?? 0,
-        turns: new Map<string, { inputItemId: string; accepted: boolean }>(),
+        turns: new Map<string, { inputItemId?: string; accepted: boolean }>(),
       }
       for (const record of stored?.rollout ?? []) {
         if (hostSeq(record) > (publishedThrough.get(thread.id) ?? 0)) break
@@ -926,6 +928,8 @@ export function createThreadServerHandlers(
             )
           }
         }
+        if (submitted.inputItemId === undefined)
+          throw internalError("Input admission did not return an input item.")
         rollbackPromotion = undefined
         return ok({
           requestId: request.requestId,
@@ -1889,6 +1893,8 @@ export function createThreadServerHandlers(
             throw internalError("Queue start returned an unexpected result.")
           return { item, submission }
         })
+        if (result.submission.inputItemId === undefined)
+          throw internalError("Queued input did not return an input item.")
         return ok({
           requestId: result.item.input.submissionId,
           turnId: result.submission.turnId,
@@ -1991,6 +1997,50 @@ export function createThreadServerHandlers(
         })
       } catch (error) {
         return fail(error, reporter, "steer-input")
+      }
+    },
+
+    async resumeTurn(input) {
+      try {
+        await options.prepareModelRouting?.()
+        const record = requireRecord(
+          input,
+          "Turn resume request must be an object.",
+        )
+        const sessionId = requireSessionId(record.sessionId, "sessionId")
+        const requestId = requireRequestId(record.requestId)
+        const expectedTurnId = requireString(
+          record.expectedTurnId,
+          "expectedTurnId",
+        )
+        const { modelSelection } = optionalModelSelectionField(
+          record,
+          "modelSelection",
+        )
+        if ((await options.store.sessionPresentation(sessionId)).archived)
+          throw conflict("Restore this conversation before resuming.")
+        const submitted = await withAdmissionLock(
+          sessionId,
+          requestId,
+          async () => {
+            const thread = await resumeRequired(sessionId)
+            return thread.resumeTurn({
+              requestId,
+              expectedTurnId,
+              ...(modelSelection === undefined ? {} : { modelSelection }),
+            })
+          },
+        )
+        if (submitted.type !== "started" && submitted.type !== "replayed")
+          throw conflict("This Turn can no longer be resumed.", {
+            reason:
+              submitted.type === "not_submitted"
+                ? submitted.reason
+                : "unexpected_steering",
+          })
+        return ok({ requestId, turnId: submitted.turnId })
+      } catch (error) {
+        return fail(error, reporter, "resume-turn")
       }
     },
 
@@ -2309,7 +2359,9 @@ function recordTurnInput(
 ): void {
   if (item.type === "turn_started") {
     publication.turns.set(item.turnId, {
-      inputItemId: item.inputItemId,
+      ...(item.inputItemId === undefined
+        ? {}
+        : { inputItemId: item.inputItemId }),
       accepted: false,
     })
   } else if (item.type === "response_item" && item.item.item.role === "user") {

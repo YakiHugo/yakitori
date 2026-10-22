@@ -207,7 +207,9 @@ export class QueuedItemService {
       return {
         type: "replayed",
         turnId: accepted.turnId,
-        inputItemId: accepted.inputItemId,
+        ...(accepted.inputItemId === undefined
+          ? {}
+          : { inputItemId: accepted.inputItemId }),
       }
     }
     this.#onStarting?.(item)

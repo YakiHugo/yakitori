@@ -7,6 +7,7 @@ export {
   type ApiCancelTurnResponse,
   type ApiClearGoalResponse,
   type ApiCompactSessionResponse,
+  type ApiResumeTurnResponse,
   type ApiCreateProjectResponse,
   type ApiCreateSessionRequest,
   type ApiCreateSessionResponse,

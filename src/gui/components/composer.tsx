@@ -1,5 +1,6 @@
 import { useCallback, useContext, useRef, useState } from "react"
 import { GOAL_DIRECTIVE } from "../../protocol/directives.ts"
+import { canResumeTurn } from "../../protocol/turn-recovery.ts"
 import {
   inputContent,
   inputContentAttachments,
@@ -72,10 +73,12 @@ export function Composer() {
   const setPromptDraft = useAppStore((state) => state.setPromptDraft)
   const admitInput = useAppStore((state) => state.admitInput)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
+  const resumeTurn = useAppStore((state) => state.resumeTurn)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
   const setGoal = useAppStore((state) => state.setGoal)
   const openGoalDialog = useAppStore((state) => state.openGoalDialog)
   const view = useExecutionView()
+  const lastTurn = Object.entries(view.turnTimings).at(-1)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingAttachments, setReadingAttachments] = useState(false)
   const fileSearchCwd = useAppStore(
@@ -257,7 +260,8 @@ export function Composer() {
       sending={
         sessionId === undefined
           ? inFlightActions.has(`queue-first-input:${selectionRevision}`)
-          : inFlightActions.has(`admit:${sessionId}`)
+          : inFlightActions.has(`admit:${sessionId}`) ||
+            inFlightActions.has(`resume:${sessionId}`)
       }
       stopping={
         activeTurnId !== undefined &&
@@ -412,6 +416,16 @@ export function Composer() {
       onCancel={() => {
         if (activeTurnId) void cancelTurn(activeTurnId)
       }}
+      onResume={
+        sessionId !== undefined &&
+        lastTurn !== undefined &&
+        canResumeTurn(lastTurn[1].outcome)
+          ? () => {
+              conversationScroll?.jumpToBottom()
+              void resumeTurn(lastTurn[0], effectiveModel)
+            }
+          : undefined
+      }
       modelControls={
         <>
           <ContextWindowIndicator
