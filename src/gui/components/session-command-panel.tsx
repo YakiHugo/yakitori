@@ -8,7 +8,6 @@ import { useAppStore, useExecutionView } from "../store/app-store.ts"
 type McpServers = RpcMethodResponses["mcp/status"]["servers"]
 type Subscription = RpcMethodResponses["subscription/read"]["subscription"]
 
-const subscriptionProviders = new Set(["codex", "grok", "kimi"])
 const number = new Intl.NumberFormat()
 
 export function SessionCommandPanel() {
@@ -27,7 +26,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
   const apiBase = useAppStore((state) => state.apiBase)
   const session = useAppStore((state) => state.selectedSession)
   const selectedId = useAppStore((state) => state.selection.sessionId)
-  const providers = useAppStore((state) => state.providers)
+  const providers = useAppStore((state) => state.accounts)
   const close = useAppStore((state) => state.closeCommandPanel)
   const view = useExecutionView()
   const [servers, setServers] = useState<McpServers>()
@@ -59,8 +58,9 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
       ? Math.min(100, (activeTokens / capacity) * 100)
       : undefined
   const subscriptionProvider =
-    model?.provider && subscriptionProviders.has(model.provider)
-      ? (model.provider as ApiSubscriptionProvider)
+    view.lastModel?.provider &&
+    providers.some((account) => account.name === view.lastModel?.provider)
+      ? view.lastModel.provider
       : undefined
 
   const currentSubscriptionResult =

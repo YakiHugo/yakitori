@@ -1,4 +1,4 @@
-import { Plug, RefreshCw } from "lucide-react"
+import { Plug } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -38,7 +38,6 @@ function McpServerList({
   const [statusError, setStatusError] = useState<string>()
   const [actionError, setActionError] = useState<string>()
   const [refreshRevision, setRefreshRevision] = useState(0)
-  const [refreshing, setRefreshing] = useState(false)
   const [pendingAction, setPendingAction] = useState<{
     name: string
     action: McpAction
@@ -57,7 +56,6 @@ function McpServerList({
     let current = true
     let timer: ReturnType<typeof setTimeout> | undefined
     const refresh = async () => {
-      setRefreshing(true)
       let delay = 5_000
       try {
         const response = await getAppRpcClient(apiBase).request(
@@ -83,7 +81,6 @@ function McpServerList({
         )
       } finally {
         if (current) {
-          setRefreshing(false)
           // Schedule after completion so a slow server cannot stack requests.
           timer = setTimeout(() => void refresh(), delay)
         }
@@ -148,20 +145,10 @@ function McpServerList({
             : "Tool connections configured for the current conversation."}
         </p>
       </div>
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-4">
         <p className="text-xs text-muted-foreground">
           Connection status refreshes while this page is open.
         </p>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={refreshing}
-          onClick={() => setRefreshRevision((revision) => revision + 1)}
-        >
-          <RefreshCw data-icon="inline-start" />
-          Refresh
-        </Button>
       </div>
       {statusError ? (
         <p role="alert" className="mb-3 text-sm text-destructive">

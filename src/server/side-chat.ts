@@ -22,8 +22,8 @@ import type {
   RolloutAssets,
 } from "../core/rollout-assets.ts"
 import { Session } from "../core/session.ts"
-import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
+import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
   inputContentAttachments,
@@ -231,7 +231,8 @@ export function createSideChatService(options: {
         const modelSelection =
           input.modelSelection ??
           (sourceSelection?.type === "turn_context"
-            ? sourceSelection.context.selection
+            ? (sourceSelection.context.configuration.modelChoice ??
+              sourceSelection.context.selection)
             : options.defaultModel)
         const requestedCwd =
           input.cwd ?? source?.metadata.workingDirectory ?? options.defaultCwd

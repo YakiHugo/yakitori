@@ -52,9 +52,9 @@ describe("model image adaptation", () => {
     ).toBe("high")
 
     const kimi = adaptImagesForModel([imageMessage], {
-      provider: "kimi",
+      provider: "kimi-code",
       model: "k3",
-      instructionProfileId: "kimi",
+      instructionProfileId: "kimi-code",
     })
     expect(kimi.downgradedOriginalCount).toBe(1)
     expect(imageMessage.content[1]).toMatchObject({ detail: "original" })

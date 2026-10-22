@@ -172,7 +172,7 @@ describe("provider model discovery", () => {
       },
     ])
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://chatgpt.example/backend-api/codex/models?client_version=0.0.0",
+      "https://chatgpt.example/backend-api/codex/models?client_version=0.163.0",
       expect.objectContaining({
         headers: {
           authorization: "Bearer access-token",
@@ -338,11 +338,11 @@ describe("provider model discovery", () => {
 
   it("uses Kimi's returned capacities, modalities and effort levels throughout the model manager", async () => {
     const manager = createDiscoveringModelsManager({
-      provider: "kimi",
+      provider: "kimi-code",
       identity: async () => "account",
       discover: () =>
         discoverOpenAiCompatibleModels({
-          provider: "kimi",
+          provider: "kimi-code",
           baseUrl: "https://kimi.example/v1",
           accessToken: "test",
           fetchFn: async () =>
@@ -373,21 +373,23 @@ describe("provider model discovery", () => {
       effortStyle: "levels",
       inputModalities: ["text", "image"],
     })
-    expect(manager.resolve({ provider: "kimi", model: "k3" })).toMatchObject({
+    expect(
+      manager.resolve({ provider: "kimi-code", model: "k3" }),
+    ).toMatchObject({
       instructionProfileId: "k3",
       inputModalities: ["text", "image"],
     })
-    expect(manager.capacity({ provider: "kimi", model: "k3" })).toEqual({
+    expect(manager.capacity({ provider: "kimi-code", model: "k3" })).toEqual({
       contextWindowTokens: 262144,
       maxContextWindowTokens: 262144,
       effectiveContextWindowPercent: 100,
       contextWindowScope: "total",
     })
     expect(() =>
-      manager.validate({ provider: "kimi", model: "k3", effort: "high" }),
+      manager.validate({ provider: "kimi-code", model: "k3", effort: "high" }),
     ).not.toThrow()
     expect(() =>
-      manager.validate({ provider: "kimi", model: "k3", effort: "max" }),
+      manager.validate({ provider: "kimi-code", model: "k3", effort: "max" }),
     ).toThrow("not supported")
   })
 
@@ -474,13 +476,13 @@ describe("provider model discovery", () => {
   })
 })
 
-it("exposes new coding models with generic app defaults and keeps other models inspectable", async () => {
+it("exposes unknown models while keeping generation models out of the chat directory", async () => {
   const grok = createDiscoveringModelsManager({
     provider: "grok",
     identity: async () => "account",
     discover: async () => [
       { id: "grok-4.6" },
-      { id: "grok-imagine-image" },
+      { id: "grok-imagine-image", kind: "image" },
       { id: "unknown-model" },
     ],
   })
@@ -492,7 +494,7 @@ it("exposes new coding models with generic app defaults and keeps other models i
     (await grok.listModels({ includeHidden: true })).map(
       (model) => model.model,
     ),
-  ).toEqual(["grok-4.6", "grok-imagine-image", "unknown-model"])
+  ).toEqual(["grok-4.6", "unknown-model"])
   const codex = createDiscoveringModelsManager({
     provider: "codex",
     identity: async () => "account",

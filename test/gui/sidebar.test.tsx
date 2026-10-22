@@ -145,7 +145,7 @@ describe("sidebar", () => {
         usage: { status: "unavailable" },
       },
       {
-        provider: "kimi",
+        provider: "kimi-code",
         displayName: "Kimi",
         availability: "requires_login",
         usage: { status: "unavailable" },
@@ -163,7 +163,7 @@ describe("sidebar", () => {
           loading: true,
           updatedAt: Date.now(),
         },
-        kimi: {
+        "kimi-code": {
           subscription: subscriptions[2],
           loading: false,
           updatedAt: Date.now(),
@@ -225,7 +225,7 @@ describe("sidebar", () => {
   it("does not present an API key connection as a subscription account", async () => {
     const loadSubscriptions = vi.fn().mockResolvedValue(undefined)
     const kimi: ApiSubscriptionSummary = {
-      provider: "kimi",
+      provider: "kimi-code",
       displayName: "Kimi",
       availability: "available",
       credentialKind: "api_key",
@@ -235,7 +235,7 @@ describe("sidebar", () => {
       subscriptionsByProvider: {
         codex: { loading: false },
         grok: { loading: false },
-        kimi: { subscription: kimi, loading: false },
+        "kimi-code": { subscription: kimi, loading: false },
       },
       loadSubscriptions,
     })

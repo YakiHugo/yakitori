@@ -17,7 +17,12 @@ afterEach(() => {
 
 it("keeps native reasoning replay across same-account CLI token rotation and a new Turn", async () => {
   const fixture = await setup()
-  const provider = createGrokProvider(fixture.root)
+  vi.stubEnv("XAI_API_KEY", "unrelated-api-key")
+  const provider = createGrokProvider(fixture.root, {
+    id: "grok",
+    credentialsPath: fixture.path,
+    ownerIdentity: "account:account_a",
+  })
   let session = provider.startTurn()
   try {
     const first = await collect(session.stream, request)
@@ -55,7 +60,11 @@ it("keeps native reasoning replay across same-account CLI token rotation and a n
 
 it("stops an in-flight Turn before sending history to a changed Grok account", async () => {
   const fixture = await setup()
-  const session = createGrokProvider(fixture.root).startTurn()
+  const session = createGrokProvider(fixture.root, {
+    id: "grok",
+    credentialsPath: fixture.path,
+    ownerIdentity: "account:account_a",
+  }).startTurn()
   try {
     const first = await collect(session.stream, request)
     if (first.native === undefined) throw new Error("Missing native output")
@@ -155,5 +164,5 @@ async function setup() {
       { headers: { "content-type": "text/event-stream" } },
     )
   })
-  return { root, login, calls }
+  return { root, path, login, calls }
 }

@@ -1,5 +1,12 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { McpSettings } from "../../src/gui/components/mcp-settings.tsx"
@@ -93,6 +100,7 @@ it("opens MCP settings with global status when no conversation is selected", asy
   render(<SettingsPage />)
   await user.click(screen.getByRole("button", { name: "MCP servers" }))
   expect(await screen.findByText("docs")).toBeDefined()
+  expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull()
   expect(
     screen.getByRole("region", { name: "MCP server settings" }),
   ).toBeDefined()
@@ -128,7 +136,8 @@ it("ignores status pushes for other sessions when one is selected", async () => 
   expect(request.mock.calls.length).toBeGreaterThan(before)
 })
 
-it("refreshes server states while mounted and stops polling when closed", async () => {vi.useFakeTimers()
+it("refreshes server states while mounted and stops polling when closed", async () => {
+  vi.useFakeTimers()
   request.mockResolvedValueOnce({ servers: [docsServer] }).mockResolvedValue({
     servers: [{ ...docsServer, state: "ready", toolCount: 3 }],
   })
@@ -277,12 +286,14 @@ it("shows request and server errors, retaining prior status and allowing retry",
   await user.click(screen.getByRole("button", { name: "Reconnect docs" }))
   expect(screen.queryByText("docs: Server refused the connection")).toBeNull()
   failRefresh = true
-  await user.click(screen.getByRole("button", { name: "Refresh" }))
+  act(() => mcpStatusChanged.emit({ sessionId: "visible" }))
   expect(await screen.findByText(/Server status unavailable/)).toBeDefined()
   expect(screen.getByText("docs")).toBeDefined()
   failRefresh = false
-  await user.click(screen.getByRole("button", { name: "Refresh" }))
-  expect(screen.queryByText(/Server status unavailable/)).toBeNull()
+  act(() => mcpStatusChanged.emit({ sessionId: "visible" }))
+  await waitFor(() =>
+    expect(screen.queryByText(/Server status unavailable/)).toBeNull(),
+  )
 })
 
 it("reports failed browser opening and offers no login action for local processes", async () => {

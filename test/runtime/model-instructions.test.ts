@@ -148,7 +148,7 @@ it("persists discovered model instructions before sampling and updates them acro
 
 it.each([
   ["codex", "gpt-6-astra"],
-  ["kimi", "k3-256k"],
+  ["kimi-code", "k3-256k"],
   ["grok", "grok-4.6"],
 ])("keeps %s request prefixes stable across tools, turns, and restart", async (provider, model) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-cache-prefix-"))

@@ -10,6 +10,7 @@ import { registerProjectPicker } from "./project-picker.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
 import { registerWorkspaceBrowser } from "./workspace-browser.ts"
+import { registerWindowFocus } from "./window-focus.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -244,6 +245,7 @@ function openMainWindow(
   registerProjectPicker(window)
   registerResourceOpener(workspace, window)
   registerClipboardWriter(window)
+  registerWindowFocus(window)
   registerCompletionNotifications(window)
   registerAttachmentImporter(server, window)
   registerWorkspaceBrowser(window)

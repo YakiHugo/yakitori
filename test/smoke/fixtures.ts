@@ -4,6 +4,7 @@ import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { expect, type Page, type TestInfo } from "@playwright/test"
+import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import type { PdfAttachment } from "../../src/kernel/events.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 
@@ -145,8 +146,15 @@ export async function runProviderFlow(
     authorization: string | undefined
     body: string
   }[] = []
-  let catalogModels = [
+  let catalogModels: {
+    id: string
+    input_modalities: string[]
+    kind?: "image" | "video"
+  }[] = [
     { id: "smoke-model", input_modalities: ["text", "image"] },
+    { id: "extra-coding", input_modalities: ["text"] },
+    { id: "image-generation", input_modalities: ["text"], kind: "image" },
+    { id: "video-generation", input_modalities: ["text"], kind: "video" },
   ]
   let interruptedStreamClosed = false
   let approvedCommandResults = 0
@@ -494,10 +502,15 @@ export async function runProviderFlow(
     await search.focus()
     await page.keyboard.press("Escape")
     await expect(search).toHaveValue("")
+    await page.getByRole("button", { name: "Go back", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "Accounts", exact: true }),
+    ).toBeVisible()
+    await page.getByRole("button", { name: "Go forward", exact: true }).click()
     await page.getByRole("button", { name: /^Custom provider/ }).click()
     await page.getByText("Advanced settings", { exact: true }).click()
     await page
-      .getByRole("textbox", { name: "Connection name", exact: true })
+      .getByRole("textbox", { name: "Account name", exact: true })
       .fill("Smoke API")
     await page
       .getByRole("textbox", { name: "API key", exact: true })
@@ -514,9 +527,7 @@ export async function runProviderFlow(
         .filter({ hasText: "Connection test succeeded." }),
     ).toBeVisible()
     expect(requests).toHaveLength(1)
-    await page
-      .getByRole("button", { name: "Add provider", exact: true })
-      .click()
+    await page.getByRole("button", { name: "Add account", exact: true }).click()
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
     await expect(
       page.getByRole("form", { name: "New provider", exact: true }),
@@ -527,62 +538,86 @@ export async function runProviderFlow(
     await expect(enabled).toHaveAttribute("aria-checked", "false")
     await page.getByRole("button", { name: "Undo", exact: true }).click()
     await expect(enabled).toHaveAttribute("aria-checked", "true")
-    await page.getByRole("tab", { name: "Models", exact: true }).click()
-    await page
-      .getByLabel("Provider connection", { exact: true })
-      .selectOption("smoke-api")
+    await page.getByRole("button", { name: /^Smoke API/ }).click()
+    await expect(page.getByRole("tab")).toHaveCount(0)
     await expect(
-      page.getByRole("checkbox", { name: "smoke-model", exact: true }),
-    ).toBeChecked()
-    await page.getByText("Add an unlisted model", { exact: true }).click()
-    await page.getByLabel("Model ID", { exact: true }).fill("manual-coding")
-    await page.getByRole("button", { name: "Add model", exact: true }).click()
-    const manual = page.locator(".provider-model-item").filter({
-      has: page.getByRole("checkbox", { name: "manual-coding", exact: true }),
-    })
-    await manual.getByText("Model settings", { exact: true }).click()
-    await manual.getByLabel("Context window", { exact: true }).fill("64000")
+      page.getByRole("switch", { name: "Enable smoke-model", exact: true }),
+    ).toHaveAttribute("aria-checked", "true")
+    await expect(
+      page.getByRole("switch", { name: /image-generation|video-generation/ }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByText("Add an unlisted model", { exact: true }),
+    ).toHaveCount(0)
     await page
-      .getByRole("button", { name: "Save model settings", exact: true })
+      .getByRole("button", {
+        name: "Edit settings for extra-coding",
+        exact: true,
+      })
       .click()
+    const modelEditor = page.getByRole("textbox", {
+      name: /Edit .*config\.toml/,
+    })
+    await modelEditor.press("ControlOrMeta+End")
+    await modelEditor.press("Enter")
+    await modelEditor.pressSequentially("contextWindowTokens = 64000")
     await expect(
-      page.getByRole("status").filter({ hasText: "Model settings saved." }),
-    ).toBeVisible()
+      page.getByText("Applying changes…", { exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByRole("alert")).toHaveCount(0)
+    await page.getByRole("button", { name: "Go back", exact: true }).click()
+    await expect(
+      page.getByRole("complementary", { name: "Model configuration" }),
+    ).toHaveCount(0)
+    await page.getByRole("button", { name: "Go forward", exact: true }).click()
+    await expect(modelEditor).toContainText("contextWindowTokens = 64000")
     await page.reload()
     await openProviderSettings(page)
-    await page.getByRole("tab", { name: "Models", exact: true }).click()
+    await page.getByRole("button", { name: /^Smoke API/ }).click()
     await page
-      .getByLabel("Provider connection", { exact: true })
-      .selectOption("smoke-api")
-    await expect(
-      page.getByRole("checkbox", { name: "manual-coding", exact: true }),
-    ).toBeChecked()
-    await manual.getByText("Model settings", { exact: true }).click()
-    await expect(
-      manual.getByLabel("Context window", { exact: true }),
-    ).toHaveValue("64000")
+      .getByRole("button", {
+        name: "Edit settings for extra-coding",
+        exact: true,
+      })
+      .click()
+    await expect(modelEditor).toContainText("contextWindowTokens = 64000")
+    await page
+      .getByRole("button", { name: "Close model configuration" })
+      .click()
     catalogModels = [
       ...catalogModels,
       { id: "future-coding", input_modalities: ["text"] },
     ]
+    // The background discovery boundary publishes the new catalog; the user
+    // never needs a refresh action to receive the provider-change notification.
+    const catalogClient = createAppRpcClient({
+      apiBase: new URL(page.url()).origin,
+    })
+    try {
+      const directory = await catalogClient.request("provider/list", {})
+      const accountId = directory.accounts.find(
+        (account) => account.displayName === "Smoke API",
+      )?.name
+      if (!accountId) throw new Error("Missing smoke account")
+      await catalogClient.request("provider/models/refresh", {
+        provider: accountId,
+      })
+    } finally {
+      catalogClient.close()
+    }
+    await expect(
+      page.getByRole("switch", { name: "Enable future-coding", exact: true }),
+    ).toHaveAttribute("aria-checked", "true")
     await page
-      .getByRole("button", { name: "Refresh models", exact: true })
+      .getByRole("switch", { name: "Enable future-coding", exact: true })
+      .click()
+    await page
+      .getByRole("switch", { name: "Enable extra-coding", exact: true })
       .click()
     await expect(
-      page.getByRole("checkbox", { name: "future-coding", exact: true }),
-    ).toBeChecked()
-    await page
-      .getByRole("checkbox", { name: "future-coding", exact: true })
-      .uncheck()
-    await page
-      .getByRole("checkbox", { name: "manual-coding", exact: true })
-      .uncheck()
-    await page
-      .getByRole("button", { name: "Save model settings", exact: true })
-      .click()
-    await expect(
-      page.getByRole("status").filter({ hasText: "Model settings saved." }),
-    ).toBeVisible()
+      page.getByText("Applying changes…", { exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByRole("alert")).toHaveCount(0)
     await page
       .getByRole("heading", { name: "Models", exact: true })
       .scrollIntoViewIfNeeded()
@@ -592,7 +627,10 @@ export async function runProviderFlow(
       path: modelsScreenshot,
       contentType: "image/png",
     })
-    await page.getByRole("tab", { name: "Providers", exact: true }).click()
+    await page
+      .getByRole("button", { name: "Back to accounts", exact: true })
+      .click()
+    await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
     const screenshotPath = testInfo.outputPath("provider-connection.png")
     await page.screenshot({ path: screenshotPath })
     await testInfo.attach("provider-connection", {
@@ -748,7 +786,7 @@ export async function runProviderFlow(
 
     await openProviderSettings(page)
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toBeVisible()
-    await page.getByRole("tab", { name: "Usage", exact: true }).click()
+    await page.getByRole("button", { name: /^Smoke API/ }).click()
     const usage = page.getByRole("region", { name: "Provider usage" })
     await expect(
       usage.getByRole("cell").filter({ hasText: "Smoke API" }),
@@ -759,18 +797,29 @@ export async function runProviderFlow(
         .filter({ hasText: "Smoke API" })
         .getByRole("cell", { name: "—", exact: true }),
     ).toBeVisible()
-    await page.getByRole("tab", { name: "Providers", exact: true }).click()
+    await page
+      .getByRole("button", { name: "Back to accounts", exact: true })
+      .click()
     await page.getByRole("button", { name: /^Smoke API/ }).click()
+    await page
+      .getByRole("button", { name: "Edit connection", exact: true })
+      .click()
     await expect(
       page.getByRole("textbox", { name: "API key", exact: true }),
     ).toHaveValue("")
     await page
-      .getByRole("button", { name: "Save changes", exact: true })
-      .click()
+      .getByRole("textbox", { name: "Account name", exact: true })
+      .fill("Smoke API updated")
+    await expect(
+      page.getByText("Applying changes…", { exact: true }),
+    ).toHaveCount(0)
+    await page.getByRole("button", { name: "Done", exact: true }).click()
     await expect(
       page.getByRole("form", { name: "Edit provider", exact: true }),
     ).toHaveCount(0)
-    await page.getByRole("button", { name: /^Smoke API/ }).click()
+    await page
+      .getByRole("button", { name: "Edit connection", exact: true })
+      .click()
     await expect(
       page.getByRole("textbox", { name: "API key", exact: true }),
     ).toHaveValue("")
@@ -789,7 +838,7 @@ export async function runProviderFlow(
     await expect(page.getByRole("button", { name: /^Smoke API/ })).toHaveCount(
       0,
     )
-    await expect(page.getByText("Add provider", { exact: true })).toBeVisible()
+    await expect(page.getByText("Add account", { exact: true })).toBeVisible()
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
@@ -878,6 +927,15 @@ async function runApprovalAndInterruption(page: Page): Promise<void> {
 async function openProviderSettings(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Settings", exact: true }).click()
   await page.getByRole("button", { name: "Providers", exact: true }).click()
+  await expect(
+    page.getByRole("button", { name: "Add account", exact: true }),
+  ).toBeEnabled()
+  if (
+    await page
+      .getByText("No accounts connected yet.", { exact: true })
+      .isVisible()
+  )
+    await page.getByRole("button", { name: "Add account", exact: true }).click()
   await expect(
     page.getByRole("region", { name: "Provider settings", exact: true }),
   ).toBeVisible()

@@ -5,13 +5,13 @@ import type {
   ModelWireApi,
   StreamFn,
 } from "./model.ts"
-import type { ModelsManager } from "./models-manager.ts"
-import { createStaticModelsManager } from "./models-manager.ts"
 import {
   createModelRequestStream,
   type ModelRequestOptions,
   type ModelRequestPolicy,
 } from "./model-request.ts"
+import type { ModelsManager } from "./models-manager.ts"
+import { createStaticModelsManager } from "./models-manager.ts"
 
 export type ModelProviderCapabilities = Readonly<{
   remoteCompaction: false | "codex_remote" | "responses_compact"
@@ -21,6 +21,7 @@ export type ModelProviderCapabilities = Readonly<{
 
 export type ModelProviderInfo = Readonly<{
   id: string
+  serviceId?: string
   wireApi: ModelWireApi
   capabilities: ModelProviderCapabilities
   retry?: Omit<ModelRequestOptions, "wireApi" | "streamIdleTimeoutMs">
@@ -30,6 +31,7 @@ export type ModelProviderInfo = Readonly<{
 export type ModelClientSession = {
   // Captured with this Turn's transport and capabilities, including after reload.
   readonly models: ModelsManager
+  readonly serviceId?: string
   readonly wireApi?: ModelWireApi
   readonly remoteCompaction?: ModelProviderCapabilities["remoteCompaction"]
   readonly nativePdf?: boolean
@@ -175,6 +177,9 @@ export function createModelProvider(
       })
       return {
         models,
+        ...(input.info.serviceId === undefined
+          ? {}
+          : { serviceId: input.info.serviceId }),
         wireApi: input.info.wireApi,
         remoteCompaction: input.info.capabilities.remoteCompaction,
         nativePdf: input.info.capabilities.nativePdf === true,

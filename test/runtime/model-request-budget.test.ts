@@ -99,10 +99,12 @@ describe("complete model request budgeting", () => {
     )
   })
 
-  it("does not invent an output parameter reserve for the Codex transport", () => {
+  it("reserves the explicit output budget without inferring a policy from the account ID", () => {
     const budget = estimateModelRequestBudget(requestWithImage("high"))
-    expect(budget.outputReserveTokens).toBe(0)
-    expect(budget.requiredContextTokens).toBe(budget.estimatedInputTokens)
+    expect(budget.outputReserveTokens).toBe(4_096)
+    expect(budget.requiredContextTokens).toBe(
+      budget.estimatedInputTokens + 4_096,
+    )
   })
 
   it.each([
@@ -119,29 +121,6 @@ describe("complete model request budgeting", () => {
     })
     expect(budget.outputReserveTokens).toBe(0)
     expect(budget.requiredContextTokens).toBe(budget.estimatedInputTokens)
-  })
-
-  it.each([
-    "anthropic",
-    "kimi",
-  ])("reserves the required Messages application budget and respects an explicit override for %s", (provider) => {
-    const base = requestWithImage("high")
-    const request = {
-      ...base,
-      target: { ...base.target, provider },
-    }
-    const fallbackRequest = { ...request }
-    delete fallbackRequest.maxOutputTokens
-    const fallback = estimateModelRequestBudget(fallbackRequest)
-    expect(fallback.outputReserveTokens).toBe(32_000)
-    expect(fallback.requiredContextTokens).toBe(
-      fallback.estimatedInputTokens + 32_000,
-    )
-    const configured = estimateModelRequestBudget(request)
-    expect(configured.outputReserveTokens).toBe(4_096)
-    expect(configured.requiredContextTokens).toBe(
-      configured.estimatedInputTokens + 4_096,
-    )
   })
 
   it("does not charge native deferred definitions to the initial prompt", () => {

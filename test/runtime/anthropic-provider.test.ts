@@ -1,4 +1,3 @@
-import { withSDKResponse } from "../support/sdk-response.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
@@ -14,6 +13,7 @@ import {
 } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
+import { withSDKResponse } from "../support/sdk-response.ts"
 
 describe("anthropic provider conversion", () => {
   it.each([
@@ -89,12 +89,12 @@ describe("anthropic provider conversion", () => {
   it.each([
     ["anthropic", "claude-sonnet-4-6", undefined, 32000],
     ["anthropic", "unknown-model", undefined, 32000],
-    ["kimi", "kimi-for-coding", undefined, 32000],
-    ["kimi", "unknown-model", undefined, 32000],
+    ["kimi-code", "kimi-for-coding", undefined, 32000],
+    ["kimi-code", "unknown-model", undefined, 32000],
     ["anthropic", "claude-sonnet-4-6", 1234, 1234],
     ["anthropic", "unknown-model", 1234, 1234],
-    ["kimi", "kimi-for-coding", 1234, 1234],
-    ["kimi", "unknown-model", 1234, 1234],
+    ["kimi-code", "kimi-for-coding", 1234, 1234],
+    ["kimi-code", "unknown-model", 1234, 1234],
   ] as const)("sends the required Messages output budget for %s/%s (override %s)", async (provider, model, maxOutputTokens, expectedBudget) => {
     let body: Record<string, unknown> | undefined
     const client = new Anthropic({
@@ -229,7 +229,7 @@ describe("anthropic provider conversion", () => {
 
   it.each([
     "anthropic",
-    "kimi",
+    "kimi-code",
   ])("replays fragmented assistant tool batches as one %s wire message", async (provider) => {
     let body: Record<string, unknown> | undefined
     const client = new Anthropic({
@@ -646,7 +646,7 @@ describe("anthropic provider conversion", () => {
       ]),
     )
 
-    const compatible = await capture("kimi")
+    const compatible = await capture("kimi-code")
     expect(
       (compatible?.tools as ReadonlyArray<{ name: string }>).map(
         ({ name }) => name,
@@ -985,7 +985,7 @@ describe("anthropic provider conversion", () => {
                 text: "Private continuation state.",
                 providerMetadata: {
                   anthropic: {
-                    provider: "kimi",
+                    provider: "kimi-code",
                     signature: "signature_1",
                   },
                 },
@@ -1368,7 +1368,7 @@ describe("anthropic provider conversion", () => {
     })
 
     for await (const _event of stream({
-      ...effortRequest("kimi", "max"),
+      ...effortRequest("kimi-code", "max"),
       cacheKey: "conversation_1",
     }))
       void _event
@@ -1408,7 +1408,7 @@ describe("anthropic provider conversion", () => {
       client,
     })
 
-    for await (const _event of stream(effortRequest("kimi", undefined)))
+    for await (const _event of stream(effortRequest("kimi-code", undefined)))
       void _event
 
     expect(body).not.toHaveProperty("output_config")
@@ -1437,7 +1437,8 @@ describe("anthropic provider conversion", () => {
       client,
     })
 
-    for await (const _event of stream(effortRequest("kimi", "off"))) void _event
+    for await (const _event of stream(effortRequest("kimi-code", "off")))
+      void _event
 
     expect(body).toMatchObject({ thinking: { type: "disabled" } })
     expect(body).not.toHaveProperty("output_config")
@@ -1467,7 +1468,8 @@ describe("anthropic provider conversion", () => {
       client,
     })
 
-    for await (const _event of stream(effortRequest("kimi", "on"))) void _event
+    for await (const _event of stream(effortRequest("kimi-code", "on")))
+      void _event
 
     expect(body).not.toHaveProperty("output_config")
     expect(body).not.toHaveProperty("thinking")
@@ -1491,6 +1493,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicProvider({
+      profile: "generic",
       apiKey: "test",
       model: "other-model",
       client,
@@ -1513,7 +1516,10 @@ function effortRequest(
     { readonly model: string; readonly instructionProfileId: string }
   > = {
     anthropic: { model: "claude-test", instructionProfileId: "anthropic" },
-    kimi: { model: "kimi-for-coding", instructionProfileId: "kimi" },
+    "kimi-code": {
+      model: "kimi-for-coding",
+      instructionProfileId: "kimi-code",
+    },
   }
   const target = known[provider] ?? {
     model: "other-model",

@@ -27,6 +27,7 @@ import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import type { QueuedInput } from "../../protocol/input-queue.ts"
 import type { LiveSessionEvent } from "../../protocol/live-events.ts"
 import { createRequestId } from "../../protocol/request-id.ts"
+import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import type { SessionSidebar, SidebarChange } from "../../protocol/sidebar.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
@@ -48,9 +49,9 @@ import {
 } from "../input-draft.ts"
 import {
   inputRecoveryMemory,
-  UNCONFIRMED_INPUT_NOTICE,
   type PendingAdmission,
   type StoredSteer,
+  UNCONFIRMED_INPUT_NOTICE,
 } from "../input-recovery-memory.ts"
 import {
   ApiRequestError,
@@ -119,6 +120,15 @@ export type UsageState = Readonly<{
   error?: string
 }>
 
+export type ProviderSettingsPage =
+  | Readonly<{ kind: "accounts" | "catalog" }>
+  | Readonly<{
+      kind: "account"
+      accountKind: "configured" | "chatgpt"
+      accountId: string
+      modelId?: string
+    }>
+
 export type AppStoreData = {
   sidebar: SessionSidebar
   collapsedSections: Record<string, boolean>
@@ -153,8 +163,10 @@ export type AppStoreData = {
   // Last project-list load failure; the sidebar keeps the last good list and
   // shows a retry note while this is set.
   projectsError: string | undefined
+  accounts: ApiProviderSummary[]
   providers: ApiProviderSummary[]
   providersError: string | undefined
+  subscriptionsError: string | undefined
   subscriptionsByProvider: Record<
     ApiSubscriptionProvider,
     SubscriptionUsageState
@@ -173,6 +185,7 @@ export type AppStoreData = {
   collapsedProjects: Record<string, boolean>
   // The settings page replaces the main conversation area while set.
   settingsSection: SettingsSection | undefined
+  providerSettingsPage: ProviderSettingsPage
   usage: UsageState
   // Incremented to ask the session header to open its goal editor.
   goalDialogRevision: number
@@ -255,6 +268,7 @@ export type AppStoreActions = {
   openSettings(section?: SettingsSection): void
   closeSettings(): void
   setSettingsSection(section: SettingsSection): void
+  setProviderSettingsPage(page: ProviderSettingsPage): void
   loadUsage(): Promise<void>
   openGoalDialog(): void
   setGoal(input: ApiSetGoalRequest): Promise<boolean>
@@ -273,15 +287,11 @@ function createInitialSubscriptionUsage(): Record<
   ApiSubscriptionProvider,
   SubscriptionUsageState
 > {
-  return {
-    codex: { loading: false },
-    grok: { loading: false },
-    kimi: { loading: false },
-  }
+  return {}
 }
 
 function subscriptionUsageLoading(
-  state: SubscriptionUsageState,
+  state: SubscriptionUsageState = { loading: false },
 ): SubscriptionUsageState {
   return {
     ...(state.subscription === undefined
@@ -321,9 +331,11 @@ export function createInitialAppState(): AppStoreData {
     hydratingSessionId: undefined,
     projects: [],
     projectsError: undefined,
+    accounts: [],
     providers: [],
     providersError: undefined,
     subscriptionsByProvider: createInitialSubscriptionUsage(),
+    subscriptionsError: undefined,
     userPreference: undefined,
     selection: {},
     sessionSelectionIntentRevision: 0,
@@ -333,6 +345,7 @@ export function createInitialAppState(): AppStoreData {
     currentProject: undefined,
     collapsedProjects: initialCollapsedFlags("yakitori.collapsedProjects"),
     settingsSection: undefined,
+    providerSettingsPage: { kind: "accounts" },
     usage: { loading: false },
     goalDialogRevision: 0,
     modelPickerRevision: 0,
@@ -392,12 +405,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
   // Set only after a complete replay or a durable terminal event. A live
   // snapshot alone may still have subsequent history to deliver.
   const authoritativeTurns = new Map<string, string | undefined>()
-  const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
-    codex: 0,
-    grok: 0,
-    kimi: 0,
-  }
+  const subscriptionReadRevisions: Record<string, number> = {}
   let projectChangesSubscribedClient: AppRpcClient | undefined
+  let subscriptionsListRevision = 0
   let providersReadRevision = 0
   let usageReadRevision = 0
   let queueReadRevision = 0
@@ -1681,6 +1691,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         if (revision !== providersReadRevision || apiBase !== get().apiBase)
           return
         set({
+          accounts: [...response.accounts],
           providers: [...response.providers],
           providersError: undefined,
           defaultProvider: response.defaultProvider,
@@ -1697,19 +1708,45 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     loadSubscriptions: async () => {
       const apiBase = get().apiBase
-      const providers = ["codex", "grok", "kimi"] as const
+      const listRevision = ++subscriptionsListRevision
+      let accounts: RpcMethodResponses["provider/configuration/read"]
+      try {
+        accounts = await getAppRpcClient(apiBase).request(
+          "provider/configuration/read",
+          {},
+        )
+      } catch (error) {
+        if (!(error instanceof ApiRequestError)) throw error
+        if (
+          apiBase === get().apiBase &&
+          listRevision === subscriptionsListRevision
+        )
+          set({ subscriptionsError: error.message })
+        return
+      }
+      if (
+        apiBase !== get().apiBase ||
+        listRevision !== subscriptionsListRevision
+      )
+        return
+      set({ subscriptionsError: undefined })
+      const providers = accounts.providers
+        .filter((account) => account.configuration.enabled !== false)
+        .map((account) => account.id)
       const revisions = Object.fromEntries(
-        providers.map((provider) => [
-          provider,
-          ++subscriptionReadRevisions[provider],
-        ]),
-      ) as Record<ApiSubscriptionProvider, number>
+        providers.map((provider) => {
+          const revision = (subscriptionReadRevisions[provider] ?? 0) + 1
+          subscriptionReadRevisions[provider] = revision
+          return [provider, revision]
+        }),
+      )
       set((state) => ({
-        subscriptionsByProvider: {
-          codex: subscriptionUsageLoading(state.subscriptionsByProvider.codex),
-          grok: subscriptionUsageLoading(state.subscriptionsByProvider.grok),
-          kimi: subscriptionUsageLoading(state.subscriptionsByProvider.kimi),
-        },
+        subscriptionsByProvider: Object.fromEntries(
+          providers.map((provider) => [
+            provider,
+            subscriptionUsageLoading(state.subscriptionsByProvider[provider]),
+          ]),
+        ),
       }))
       await Promise.all(
         providers.map(async (provider) => {
@@ -1718,7 +1755,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
               "subscription/read",
               { provider },
             )
-            if (revisions[provider] !== subscriptionReadRevisions[provider])
+            if (
+              apiBase !== get().apiBase ||
+              listRevision !== subscriptionsListRevision ||
+              revisions[provider] !== subscriptionReadRevisions[provider]
+            )
               return
             set((state) => ({
               subscriptionsByProvider: {
@@ -1731,7 +1772,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
               },
             }))
           } catch {
-            if (revisions[provider] !== subscriptionReadRevisions[provider])
+            if (
+              apiBase !== get().apiBase ||
+              listRevision !== subscriptionsListRevision ||
+              revisions[provider] !== subscriptionReadRevisions[provider]
+            )
               return
             set((state) => ({
               subscriptionsByProvider: {
@@ -1918,7 +1963,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const intentRevision = get().sessionSelectionIntentRevision + 1
       const sourceSelection = { ...current, revision: intentRevision }
       const state = get()
-      const sourceModelSelection = normalizeKimiModelSelection(
+      const sourceModelSelection = normalizeModelSelection(
         resolveEffectiveModel({
           sessionCurrent: state.modelSelections[sourceSelection.sessionId],
           userPreference: state.userPreference,
@@ -2310,7 +2355,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             : undefined
         queuedForCreation = true
         const state = get()
-        queuedModelSelection = normalizeKimiModelSelection(
+        queuedModelSelection = normalizeModelSelection(
           resolveEffectiveModel({
             sessionCurrent: state.draftModelSelection,
             userPreference: state.userPreference,
@@ -2633,7 +2678,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           })
           const admittedModelSelection = queuedForCreation
             ? queuedModelSelection
-            : normalizeKimiModelSelection(modelSelection, state.providers)
+            : normalizeModelSelection(modelSelection, state.providers)
           const pendingAdmission = inputRecoveryMemory.reserveAdmission({
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
@@ -3023,18 +3068,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     openSettings: (section = "general") => {
-      set({ settingsSection: section })
+      set({
+        settingsSection: section,
+        providerSettingsPage: { kind: "accounts" },
+      })
       if (section === "subscriptions" && !get().subscriptionsFresh())
         void get().loadSubscriptions()
       if (section === "usage") void get().loadUsage()
     },
     closeSettings: () => set({ settingsSection: undefined }),
     setSettingsSection: (section) => {
-      set({ settingsSection: section })
+      set({
+        settingsSection: section,
+        providerSettingsPage: { kind: "accounts" },
+      })
       if (section === "subscriptions" && !get().subscriptionsFresh())
         void get().loadSubscriptions()
       if (section === "usage") void get().loadUsage()
     },
+    setProviderSettingsPage: (page) =>
+      set({ settingsSection: "providers", providerSettingsPage: page }),
     openGoalDialog: () =>
       set((state) => ({ goalDialogRevision: state.goalDialogRevision + 1 })),
     setGoal: async (input) => {
@@ -3123,14 +3176,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
     closeCommandPanel: () => set({ commandPanel: undefined }),
     subscriptionsFresh: () => {
       const states = get().subscriptionsByProvider
-      return (["codex", "grok", "kimi"] as const).every((provider) => {
-        const state = states[provider]
-        return (
-          (state.subscription !== undefined || state.error !== undefined) &&
-          state.updatedAt !== undefined &&
-          Date.now() - state.updatedAt < 30_000
-        )
-      })
+      return (
+        Object.values(states).length > 0 &&
+        Object.values(states).every((state) => {
+          return (
+            (state.subscription !== undefined || state.error !== undefined) &&
+            state.updatedAt !== undefined &&
+            Date.now() - state.updatedAt < 30_000
+          )
+        })
+      )
     },
     loadUsage: async () => {
       const apiBase = get().apiBase
@@ -3377,48 +3432,13 @@ export function resolveEffectiveModel(input: {
   readonly defaultModel: string | undefined
   readonly providers: readonly ApiProviderSummary[]
 }): ModelSelection | undefined {
-  // A ChatGPT selection names a billing/account boundary. Losing its grant or
-  // catalog must never silently send the next input through another provider.
-  if (
-    input.sessionCurrent?.provider.startsWith("chatgpt-") ||
-    isAvailableModel(input.sessionCurrent, input.providers)
-  ) {
-    return input.sessionCurrent
-  }
-  if (
-    input.userPreference?.provider.startsWith("chatgpt-") ||
-    isAvailableModel(input.userPreference, input.providers)
-  ) {
-    return input.userPreference
-  }
-  if (input.defaultProvider === undefined || input.defaultModel === undefined) {
-    return undefined
-  }
-  const fallback = {
-    provider: input.defaultProvider,
-    model: input.defaultModel,
-  }
-  return fallback.provider.startsWith("chatgpt-") ||
-    isAvailableModel(fallback, input.providers)
-    ? fallback
-    : undefined
+  if (input.sessionCurrent) return input.sessionCurrent
+  if (input.userPreference) return input.userPreference
+  if (!input.defaultProvider || !input.defaultModel) return undefined
+  return { provider: input.defaultProvider, model: input.defaultModel }
 }
 
-function isAvailableModel(
-  selection: ModelSelection | undefined,
-  providers: readonly ApiProviderSummary[],
-): selection is ModelSelection {
-  if (selection === undefined) return false
-  if (providers.length === 0) return true
-  const provider = providers.find((entry) => entry.name === selection.provider)
-  return (
-    provider !== undefined &&
-    provider.availability !== "requires_login" &&
-    provider.models.some((model) => model.id === selection.model)
-  )
-}
-
-export function normalizeKimiModelSelection(
+export function normalizeModelSelection(
   selection: ModelSelection | undefined,
   providers: readonly ApiProviderSummary[],
 ): ModelSelection | undefined {
@@ -3426,9 +3446,9 @@ export function normalizeKimiModelSelection(
     .find((provider) => provider.name === selection?.provider)
     ?.models.find((model) => model.id === selection?.model)?.effortStyle
   if (
-    selection?.provider !== "kimi" ||
+    selection === undefined ||
     effortStyle !== "none" ||
-    (selection.effort !== "on" && selection.effort !== "off")
+    selection.effort === undefined
   ) {
     return selection
   }

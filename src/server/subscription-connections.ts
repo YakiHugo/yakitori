@@ -3,11 +3,15 @@ import type { SubscriptionConnection } from "../protocol/providers.ts"
 export type { SubscriptionConnection } from "../protocol/providers.ts"
 
 import { type ChildProcess, spawn } from "node:child_process"
+import { LoginRequiredError } from "../runtime/login-required.ts"
 import { ConfigurationError } from "./config-errors.ts"
 
 export type SubscriptionConnections = {
   read(): Promise<readonly SubscriptionConnection[]>
-  login(id: string): Promise<readonly SubscriptionConnection[]>
+  login(
+    id: string,
+    reauthenticate?: boolean,
+  ): Promise<readonly SubscriptionConnection[]>
   cancel(id: string): Promise<readonly SubscriptionConnection[]>
   importAccount(
     id: string,
@@ -18,7 +22,8 @@ export type SubscriptionConnections = {
 }
 
 // The first-party CLI owns browser authentication and its credential file.
-// Yakitori owns only this short-lived login process and imports its result.
+// Yakitori binds the original file first, and owns a short-lived CLI login
+// only when interaction is needed or explicitly requested.
 export function createSubscriptionConnections(input: {
   readAvailability(): Promise<Readonly<Record<"codex" | "grok", boolean>>>
   refresh(): Promise<void>
@@ -84,6 +89,9 @@ export function createSubscriptionConnections(input: {
       imports.add(importing)
       try {
         await importing
+      } catch (cause) {
+        if (!(cause instanceof LoginRequiredError)) throw cause
+        throw new ConfigurationError(cause.message)
       } finally {
         imports.delete(importing)
       }
@@ -100,30 +108,59 @@ export function createSubscriptionConnections(input: {
       if (job?.state === "running") {
         job.state = "failed"
         if (job.child) await stop(job.child)
-        await job.completion
+        // The initiating request owns a local-check failure; cancellation
+        // still waits for any credential/configuration write to finish.
+        if (job.completion) await Promise.allSettled([job.completion])
         if (jobs.get(id) === job) jobs.delete(id)
       }
       return read()
     },
-    async login(id) {
+    async login(id, reauthenticate = false) {
       if (closed) throw new ConfigurationError("Subscription login is closed.")
       if (id !== "codex" && id !== "grok")
         throw new ConfigurationError(
           "Unknown subscription. Choose ChatGPT or Grok.",
         )
       if (jobs.get(id)?.state === "running") return read()
-      const child = spawn(id, ["login"], {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: process.env,
-      })
       const job: {
         child?: ChildProcess
         completion?: Promise<void>
         state: "running" | "succeeded" | "failed"
         url?: string
         message?: string
-      } = { child, state: "running" }
+      } = { state: "running" }
       jobs.set(id, job)
+      if (!reauthenticate) {
+        const connecting = input.importAccount(id)
+        job.completion = connecting
+        imports.add(connecting)
+        try {
+          await connecting
+          const available = await input.readAvailability()
+          if (!available[id])
+            throw new ConfigurationError(
+              "The local account could not be connected.",
+            )
+          if (job.state === "running" && !closed) job.state = "succeeded"
+          return read()
+        } catch (cause) {
+          if (!(cause instanceof LoginRequiredError)) {
+            if (jobs.get(id) === job) jobs.delete(id)
+            throw cause
+          }
+          // A missing/revoked login may need the browser. A transient network
+          // error or unreadable file must retain its own actionable error.
+        } finally {
+          imports.delete(connecting)
+          delete job.completion
+        }
+        if (closed || job.state !== "running") return read()
+      }
+      const child = spawn(id, ["login"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: process.env,
+      })
+      job.child = child
       let tail = ""
       const receive = (chunk: Buffer) => {
         tail = (tail + chunk.toString("utf8")).slice(-16_384)
@@ -191,6 +228,9 @@ export function createSubscriptionConnections(input: {
     },
     async close() {
       closed = true
+      for (const job of jobs.values()) {
+        if (job.state === "running") job.state = "failed"
+      }
       await Promise.all(
         [...jobs.values()].map(async (job) => {
           const child = job.child

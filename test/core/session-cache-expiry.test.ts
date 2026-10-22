@@ -7,6 +7,7 @@ function context(
   turnId: string,
   provider: string,
   model: string,
+  serviceId = provider === "grok" ? "xai" : provider,
 ): StoredRolloutItem {
   return {
     threadId: "session_test",
@@ -18,7 +19,7 @@ function context(
       context: {
         turnId,
         selection: { provider, model },
-        configuration: {} as never,
+        configuration: { serviceId } as never,
       },
     },
   }
@@ -51,7 +52,13 @@ describe("session cache expiry", () => {
     const lastRequestStartedAt = "2026-09-20T10:00:00.000Z"
     expect(
       sessionCacheExpiry([
-        context(1, "turn_one", "anthropic", "claude-sonnet-4-6"),
+        context(
+          1,
+          "turn_one",
+          "account_personal",
+          "claude-sonnet-4-6",
+          "anthropic",
+        ),
         completion(
           2,
           "turn_one",
@@ -62,7 +69,7 @@ describe("session cache expiry", () => {
         context(3, "turn_two", "grok", "grok-4.7"),
       ]),
     ).toEqual({
-      provider: "anthropic",
+      provider: "account_personal",
       lastTurnCompletedAt,
       lastRequestStartedAt,
       ttlDescription: "5 minutes after last use",
@@ -97,7 +104,7 @@ describe("session cache expiry", () => {
     ["openai", "gpt-5.5", "Retention varies by model and organization"],
     ["codex", "gpt-6-sol", "Cache lifetime unknown"],
     ["grok", "grok-4.7", "Cache may be evicted at any time"],
-    ["kimi", "kimi-k2", "Cache lifetime managed by provider"],
+    ["kimi-code", "kimi-k2", "Cache lifetime managed by provider"],
   ])("reports %s %s as unknown without inventing a timestamp", (provider, model, ttlDescription) => {
     expect(
       sessionCacheExpiry([

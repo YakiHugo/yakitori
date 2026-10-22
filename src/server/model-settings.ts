@@ -32,6 +32,10 @@ export function requireProviderModelSettings(
       throw new ConfigurationError("Model visible must be a boolean.")
     if (record.defaultVisible !== undefined)
       throw new ConfigurationError("Use visible to override model visibility.")
+    if (record.kind !== undefined)
+      throw new ConfigurationError(
+        "Model purpose comes from the provider catalog.",
+      )
     const parsed = requireConfiguredModels([{ ...record, id }], {
       inheritEfforts: true,
     })[0]

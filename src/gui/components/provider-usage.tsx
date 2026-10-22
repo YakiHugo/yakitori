@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react"
 import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
 import { estimateModelCost } from "../provider-usage-view.ts"
-import { useAppStore } from "../store/app-store.ts"
+import { useAppStore, type SubscriptionUsageState } from "../store/app-store.ts"
+import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { totalTokens, type UsageRange, usageView } from "../usage-view.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
-import { SubscriptionsSection } from "./subscription-panel.tsx"
+import { SubscriptionUsageCard } from "./subscription-panel.tsx"
 
 const compact = new Intl.NumberFormat("en", {
   notation: "compact",
@@ -17,40 +19,79 @@ const currency = new Intl.NumberFormat("en", {
 })
 
 export function ProviderUsage({
-  providers,
-}: Readonly<{ providers: readonly ApiConfiguredProvider[] }>) {
+  apiBase,
+  accountId,
+  name,
+  configuration,
+  chatGPT,
+}: Readonly<{
+  apiBase: string
+  accountId: string
+  name: string
+  configuration?: ApiConfiguredProvider
+  chatGPT: boolean
+}>) {
   const usage = useAppStore((state) => state.usage)
   const loadUsage = useAppStore((state) => state.loadUsage)
-  const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
+  const [subscription, setSubscription] = useState<SubscriptionUsageState>({
+    loading: true,
+  })
   const [range, setRange] = useState<UsageRange>(30)
   useEffect(() => {
     void loadUsage()
-    void loadSubscriptions()
-  }, [loadUsage, loadSubscriptions])
+  }, [loadUsage])
+  useEffect(() => {
+    if (chatGPT) return
+    let current = true
+    void getAppRpcClient(apiBase)
+      .request("subscription/read", { provider: accountId })
+      .then(
+        (response) => {
+          if (current)
+            setSubscription({
+              loading: false,
+              subscription: response.subscription,
+              updatedAt: response.fetchedAt,
+            })
+        },
+        () => {
+          if (current)
+            setSubscription({
+              loading: false,
+              error: "Could not update this account's subscription usage.",
+            })
+        },
+      )
+    return () => {
+      current = false
+    }
+  }, [apiBase, accountId, chatGPT])
   const view = usage.summary && usageView(usage.summary, range)
   const rows =
-    view?.models.map((row) => {
-      const provider = providers.find((entry) => entry.id === row.provider)
-      const model = {
-        ...provider?.catalog?.models.find((entry) => entry.id === row.model),
-        ...provider?.configuration.models.find(
-          (entry) => entry.id === row.model,
-        ),
-      }
-      return {
-        ...row,
-        sourceName: provider?.configuration.name ?? row.provider,
-        preset: provider?.configuration.preset,
-        displayName: model.displayName ?? row.model,
-        cost: estimateModelCost(row, model.pricing),
-      }
-    }) ?? []
+    view?.models
+      .filter((row) => row.provider === accountId)
+      .map((row) => {
+        const provider = configuration
+        const model = {
+          ...provider?.catalog?.models.find((entry) => entry.id === row.model),
+          ...provider?.configuration.models.find(
+            (entry) => entry.id === row.model,
+          ),
+        }
+        return {
+          ...row,
+          sourceName: name,
+          preset: provider?.configuration.preset,
+          displayName: model.displayName ?? row.model,
+          cost: estimateModelCost(row, model.pricing),
+        }
+      }) ?? []
   const knownCost = rows.reduce((sum, row) => sum + (row.cost ?? 0), 0)
   const unknown = rows.filter((row) => row.cost === undefined).length
   return (
     <section aria-label="Provider usage">
       <div className="provider-usage-toolbar">
-        <h2>Usage</h2>
+        <h3>Usage</h3>
         <select
           aria-label="Usage period"
           value={range}
@@ -71,7 +112,10 @@ export function ProviderUsage({
       </div>
       <p className="provider-field-hint">
         Recorded in Yakitori ·{" "}
-        {compact.format(view ? totalTokens(view.totals) : 0)} tokens ·{" "}
+        {compact.format(
+          view ? rows.reduce((sum, row) => sum + totalTokens(row), 0) : 0,
+        )}{" "}
+        tokens ·{" "}
         {rows.length && unknown !== rows.length
           ? `${unknown ? "At least " : ""}${currency.format(knownCost)} estimated`
           : "Cost unknown"}
@@ -131,8 +175,16 @@ export function ProviderUsage({
         means pricing is unavailable.
       </p>
       <div className="provider-usage-limits">
-        <h3>Subscription limits</h3>
-        <SubscriptionsSection />
+        <h4>Subscription limits</h4>
+        {chatGPT ? (
+          <ChatGPTUsageLink />
+        ) : (
+          <SubscriptionUsageCard
+            provider={accountId}
+            displayName={name}
+            state={subscription}
+          />
+        )}
       </div>
     </section>
   )

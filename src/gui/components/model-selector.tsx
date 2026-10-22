@@ -13,11 +13,10 @@ import type {
 import type { ModelSelection } from "../../protocol/events.ts"
 import { cn } from "../lib/utils.ts"
 import {
-  normalizeKimiModelSelection,
+  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../store/app-store.ts"
-import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 
 function displayName(
   providers: readonly ApiProviderSummary[],
@@ -153,7 +152,7 @@ export function ModelSelector({
       ...provider,
       models: provider.models.filter((model) => model.visible !== false),
     }))
-  const effective = normalizeKimiModelSelection(
+  const effective = normalizeModelSelection(
     resolveEffectiveModel({
       sessionCurrent: current,
       userPreference,
@@ -169,6 +168,26 @@ export function ModelSelector({
       : providers
           .find((provider) => provider.name === effective.provider)
           ?.models.find((model) => model.id === effective.model)
+  const hasAvailableModels = availableProviders.some(
+    (provider) => provider.models.length > 0,
+  )
+  const defaultSelection = normalizeModelSelection(
+    resolveEffectiveModel({
+      sessionCurrent: undefined,
+      userPreference,
+      defaultProvider,
+      defaultModel,
+      providers,
+    }),
+    providers,
+  )
+  const defaultEntry = providers
+    .find(
+      (provider) =>
+        provider.name === defaultSelection?.provider &&
+        provider.availability !== "requires_login",
+    )
+    ?.models.find((model) => model.id === defaultSelection?.model)
   const efforts =
     effectiveEntry?.effortStyle === "none" ? undefined : effectiveEntry?.efforts
   const speeds = effectiveEntry?.speeds
@@ -397,120 +416,97 @@ export function ModelSelector({
                 <button
                   type="button"
                   aria-pressed={current === undefined}
+                  disabled={defaultEntry === undefined}
                   onClick={() => {
                     changeSelection(undefined)
-                    const defaultSelection = normalizeKimiModelSelection(
-                      resolveEffectiveModel({
-                        sessionCurrent: undefined,
-                        userPreference,
-                        defaultProvider,
-                        defaultModel,
-                        providers,
-                      }),
-                      providers,
+                    setMenu(
+                      hasEffortControls(defaultEntry) ? "effort" : undefined,
                     )
-                    const entry = providers
-                      .find(
-                        (provider) =>
-                          provider.name === defaultSelection?.provider,
-                      )
-                      ?.models.find(
-                        (model) => model.id === defaultSelection?.model,
-                      )
-                    setMenu(hasEffortControls(entry) ? "effort" : undefined)
                   }}
-                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">Default</span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      Recommended set of models
+                      {defaultEntry === undefined
+                        ? "Default model is unavailable"
+                        : "Recommended set of models"}
                     </span>
                   </span>
                 </button>
-                {[...availableProviders]
-                  .sort((left, right) => {
-                    if (left.name === defaultProvider) return -1
-                    if (right.name === defaultProvider) return 1
-                    return 0
-                  })
-                  .map((provider) =>
-                    provider.models.length === 0 &&
-                    !provider.catalogError ? null : (
-                      <div key={provider.name}>
-                        {availableProviders.length > 1 ||
-                        provider.catalogError ? (
-                          <div className="px-2.5 pt-2.5 pb-0.5 text-[10px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
-                            {provider.displayName ?? provider.name}
-                          </div>
+                {availableProviders.flatMap((provider) =>
+                  provider.models.map((model) => {
+                    const selected =
+                      effective?.provider === provider.name &&
+                      effective.model === model.id
+                    const duplicateLabel = availableProviders.some(
+                      (other) =>
+                        other.name !== provider.name &&
+                        other.models.some(
+                          (entry) =>
+                            (entry.displayName ?? entry.id) ===
+                            (model.displayName ?? model.id),
+                        ),
+                    )
+                    return (
+                      <button
+                        key={JSON.stringify([provider.name, model.id])}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => selectModel(provider.name, model.id)}
+                        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {model.displayName ?? model.id}
+                          {duplicateLabel ? (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              {provider.displayName ?? provider.name}
+                            </span>
+                          ) : null}
+                        </span>
+                        {selected ? (
+                          <Check
+                            aria-hidden="true"
+                            className="size-4 shrink-0"
+                          />
                         ) : null}
-                        {provider.catalogError ? (
-                          <div className="px-2.5 py-2 text-xs text-muted-foreground">
-                            <p role="status">{provider.catalogError}</p>
-                            <button
-                              type="button"
-                              className="mt-1 underline"
-                              onClick={() => {
-                                setMenu(undefined)
-                                useAppStore.getState().openSettings("providers")
-                              }}
-                            >
-                              Manage connection
-                            </button>
-                          </div>
-                        ) : null}
-                        {provider.models.map((model) => {
-                          const selected =
-                            effective?.provider === provider.name &&
-                            effective.model === model.id
-                          return (
-                            <button
-                              key={`${provider.name}/${model.id}`}
-                              type="button"
-                              aria-pressed={selected}
-                              onClick={() =>
-                                selectModel(provider.name, model.id)
-                              }
-                              className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <span className="min-w-0 flex-1 truncate">
-                                {model.displayName ?? model.id}
-                              </span>
-                              {selected ? (
-                                <Check
-                                  aria-hidden="true"
-                                  className="size-4 shrink-0"
-                                />
-                              ) : null}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    ),
-                  )}
+                      </button>
+                    )
+                  }),
+                )}
+                {availableProviders.some(
+                  (provider) => provider.catalogError,
+                ) ? (
+                  <button
+                    type="button"
+                    className="px-2.5 py-2 text-xs underline"
+                    onClick={() => {
+                      setMenu(undefined)
+                      useAppStore.getState().openSettings("providers")
+                    }}
+                  >
+                    Some accounts need attention
+                  </button>
+                ) : null}
               </div>
             )}
           </div>
         ) : null}
       </div>
-      {effective?.provider.startsWith("chatgpt-") ? (
-        <div className="flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground">
-          {effectiveEntry ? (
-            <span>Using ChatGPT plan</span>
-          ) : (
-            <>
-              <span>ChatGPT connection needs attention</span>
-              <button
-                type="button"
-                className="underline"
-                onClick={() => useAppStore.getState().openSettings("providers")}
-              >
-                Manage connection
-              </button>
-            </>
-          )}
-          <ChatGPTUsageLink />
-        </div>
+      {effective && !effectiveEntry ? (
+        <span className="text-xs text-muted-foreground">
+          Selected model is no longer available.{" "}
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              if (hasAvailableModels) setMenu("model")
+              else useAppStore.getState().openSettings("providers")
+            }}
+          >
+            {hasAvailableModels ? "Choose another model" : "Manage accounts"}
+          </button>
+        </span>
       ) : null}
     </div>
   )

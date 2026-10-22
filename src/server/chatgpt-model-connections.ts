@@ -1,9 +1,8 @@
-import { ChatGPTCredentialStoreError } from "./chatgpt-credential-store.ts"
 import {
+  type ChatGPTPlanAccess,
   chatGPTPlanIdentity,
   createChatGPTPlanProvider,
   discoverChatGPTPlanModels,
-  type ChatGPTPlanAccess,
 } from "../runtime/chatgpt-plan-provider.ts"
 import { createConfiguredModelsManager } from "../runtime/configured-models-manager.ts"
 import { ModelFailureError } from "../runtime/errors.ts"
@@ -12,6 +11,7 @@ import {
   type ModelProvider,
 } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
+import { ChatGPTCredentialStoreError } from "./chatgpt-credential-store.ts"
 
 export class ChatGPTModelCatalogError extends Error {
   constructor() {
@@ -141,6 +141,7 @@ export function createChatGPTModelConnections(input: {
       return createModelProvider({
         info: {
           id: providerId,
+          serviceId: "chatgpt-plan",
           wireApi: "openai_responses",
           capabilities: { remoteCompaction: false, nativePdf: false },
         },

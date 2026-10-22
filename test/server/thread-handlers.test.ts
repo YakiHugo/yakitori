@@ -327,7 +327,10 @@ describe("thread server handlers", () => {
       sessionId,
       requestId: "request_manual_compact",
     })
-    expect(resumedReplay).toMatchObject({ ok: false, error: { code: "conflict" } })
+    expect(resumedReplay).toMatchObject({
+      ok: false,
+      error: { code: "conflict" },
+    })
     expect(requests).toBe(2)
   })
 
@@ -365,7 +368,7 @@ describe("thread server handlers", () => {
         context: {
           turnId: "turn_anthropic",
           selection: { provider: "anthropic", model: "claude-sonnet-4-6" },
-          configuration: {} as never,
+          configuration: { serviceId: "anthropic" } as never,
         },
       },
       {

@@ -1,4 +1,3 @@
-import { modelVisibleByDefault } from "./model-policy.ts"
 import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
 import {
   type CatalogModel,
@@ -9,6 +8,8 @@ import {
   requireInstructionProfileId,
   resolveModel,
 } from "./model-catalog.ts"
+import { isChatModel, NonChatModelError } from "./model-kind.ts"
+import { modelVisibleByDefault } from "./model-policy.ts"
 import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
 import type { ConfiguredModel, ProviderPreset } from "./provider-presets.ts"
 
@@ -42,6 +43,7 @@ export function createConfiguredModelsManager(input: {
     }
   >()
   for (const configured of input.models) {
+    if (!isChatModel(configured)) continue
     if (configured.id.trim() === "" || models.has(configured.id)) {
       throw new Error(
         `Invalid or duplicate configured model ID: ${configured.id}`,
@@ -224,6 +226,11 @@ export function createConfiguredModelsManager(input: {
         `Models manager for ${input.provider} cannot resolve provider ${selection.provider}.`,
       )
     }
+    const configured = input.models.find(
+      (model) => model.id.toLowerCase() === selection.model.toLowerCase(),
+    )
+    if (configured && !isChatModel(configured))
+      throw new NonChatModelError(input.provider, selection.model)
     const model = models.get(selection.model)
     if (model === undefined) {
       throw new ModelNotConfiguredError(input.provider, selection.model)

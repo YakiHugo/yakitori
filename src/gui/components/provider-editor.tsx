@@ -1,11 +1,13 @@
 import { Check } from "lucide-react"
-import { type FormEvent, useState } from "react"
+import { type FormEvent, useEffect, useRef, useState } from "react"
 import type {
   ProviderConfiguration,
   ProviderPreset,
 } from "../../protocol/providers.ts"
 import { supportsOpenAIRequestWarmup } from "../../shared/request-warmup-policy.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
+import { createSettingsWriter } from "../lib/settings-writer.ts"
+import { useAppStore } from "../store/app-store.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { ProviderModels } from "./provider-models.tsx"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
@@ -32,10 +34,10 @@ export function ProviderEditor({
   onChange,
   onClose,
   onSubmit,
+  onApply,
   onTest,
   onRemove,
   onAddAnother,
-  catalog,
 }: Readonly<{
   draft: ProviderDraft
   preset?: ProviderPreset
@@ -48,13 +50,82 @@ export function ProviderEditor({
   onChange(draft: ProviderDraft): void
   onClose(): void
   onSubmit(event: FormEvent<HTMLFormElement>): void
+  onApply(draft: ProviderDraft): Promise<void>
   onTest(): void
   onRemove(): void
   onAddAnother?(): void
-  catalog?: import("../../protocol/providers.ts").ApiConfiguredProvider["catalog"]
 }>) {
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [openError, setOpenError] = useState<string>()
+  const [modelsOpen, setModelsOpen] = useState(false)
+  const [applyStatus, setApplyStatus] = useState<
+    Readonly<{ pending: boolean; error?: string }>
+  >({ pending: false })
+  const mounted = useRef(true)
+  const [writer] = useState(() =>
+    createSettingsWriter<ProviderDraft>({
+      write: onApply,
+      changed(status) {
+        if (mounted.current) setApplyStatus(status)
+        else if (status.error) useAppStore.setState({ message: status.error })
+      },
+    }),
+  )
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      if (!writer.failed()) void writer.flush()
+    }
+  }, [writer])
+  const authentication = draft.configuration.authentication ?? "stored"
+  const canLoadModels = Boolean(
+    draft.configuration.baseURL.trim() &&
+      (authentication === "stored"
+        ? draft.apiKey.trim() || draft.existing
+        : authentication === "environment"
+          ? draft.configuration.envKey?.trim()
+          : authentication === "none" || draft.existing),
+  )
+  const accountModels = draft.availableModels
+  const serviceDefaults =
+    !draft.existing &&
+    accountModels === undefined &&
+    preset &&
+    draft.configuration.service === preset.id &&
+    draft.configuration.wireApi === preset.wireApi &&
+    draft.configuration.baseURL.replace(/\/+$/, "") ===
+      preset.baseURL.replace(/\/+$/, "")
+      ? preset.models
+      : []
+  const modelLoadHint = !draft.configuration.baseURL.trim()
+    ? "Enter the API base URL to discover this account's models."
+    : authentication === "stored" && !canLoadModels
+      ? "Models will be discovered automatically after you enter an API key."
+      : authentication === "environment" && !canLoadModels
+        ? "Models will be discovered automatically after you choose an environment variable."
+        : undefined
+  useEffect(() => {
+    if (
+      !modelsOpen ||
+      draft.existing ||
+      !canLoadModels ||
+      accountModels !== undefined ||
+      pending ||
+      error
+    )
+      return
+    const timer = setTimeout(onFetchModels, 250)
+    return () => clearTimeout(timer)
+  }, [
+    modelsOpen,
+    draft,
+    canLoadModels,
+    accountModels,
+    pending,
+    error,
+    onFetchModels,
+  ])
   const custom = draft.configuration.preset === undefined
   const update = (patch: Partial<ProviderConfiguration>) => {
     const configuration = { ...draft.configuration, ...patch }
@@ -64,7 +135,16 @@ export function ProviderEditor({
         !supportsOpenAIRequestWarmup(configuration.baseURL))
     )
       configuration.requestWarmup = false
-    onChange({ ...draft, configuration })
+    const next = {
+      ...draft,
+      configuration,
+      ...(patch.authentication !== undefined &&
+      patch.authentication !== "stored"
+        ? { apiKey: "" }
+        : {}),
+    }
+    onChange(next)
+    if (draft.existing) writer.update(next)
   }
   return (
     <SidebarDialog
@@ -81,10 +161,10 @@ export function ProviderEditor({
         <ProviderLogo preset={draft.configuration.preset} />
         <p>
           {draft.existing
-            ? "Manage this provider's key and models."
+            ? "Manage this account and its available models."
             : custom
               ? "Connect an OpenAI, Anthropic or Gemini compatible API."
-              : "Add your API key to start using this provider."}
+              : "Add the API key for this account."}
         </p>
         {preset ? (
           <a
@@ -112,17 +192,55 @@ export function ProviderEditor({
       </div>
       <form
         aria-label={draft.existing ? "Edit provider" : "New provider"}
-        onSubmit={onSubmit}
+        onSubmit={(event) => {
+          if (draft.existing) event.preventDefault()
+          else onSubmit(event)
+        }}
       >
         <fieldset disabled={pending} className="provider-editor-fields">
           <FieldGroup>
-            {custom || draft.configuration.noKey ? (
+            <Field>
+              <FieldLabel htmlFor="provider-name">Account name</FieldLabel>
+              <Input
+                id="provider-name"
+                value={draft.configuration.name}
+                onChange={(event) => update({ name: event.target.value })}
+              />
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="provider-authentication">
+                Authentication
+              </FieldLabel>
+              <select
+                id="provider-authentication"
+                value={draft.configuration.authentication ?? "stored"}
+                onChange={(event) =>
+                  update({
+                    authentication: event.target.value as NonNullable<
+                      ProviderConfiguration["authentication"]
+                    >,
+                  })
+                }
+              >
+                {draft.configuration.authentication === "codex_cli" ||
+                draft.configuration.authentication === "grok_cli" ? (
+                  <option value={draft.configuration.authentication}>
+                    External CLI account
+                  </option>
+                ) : null}
+                <option value="stored">Saved API key</option>
+                <option value="environment">Environment variable</option>
+                <option value="none">No authentication</option>
+              </select>
+            </Field>
+            {custom || draft.configuration.authentication === "none" ? (
               <EndpointField
                 value={draft.configuration.baseURL}
                 onChange={(baseURL) => update({ baseURL })}
               />
             ) : null}
-            {!draft.configuration.noKey ? (
+            {(draft.configuration.authentication ?? "stored") === "stored" ? (
               <Field>
                 <FieldLabel htmlFor="provider-api-key">API key</FieldLabel>
                 <Input
@@ -136,9 +254,11 @@ export function ProviderEditor({
                       ? "Leave blank to keep the saved key"
                       : "Paste your API key"
                   }
-                  onChange={(event) =>
-                    onChange({ ...draft, apiKey: event.target.value })
-                  }
+                  onChange={(event) => {
+                    const next = { ...draft, apiKey: event.target.value }
+                    onChange(next)
+                    if (draft.existing) writer.update(next)
+                  }}
                 />
                 <p className="provider-field-hint">
                   {draft.existing
@@ -146,60 +266,82 @@ export function ProviderEditor({
                     : "Stored on this machine, separately from your configuration."}
                 </p>
               </Field>
+            ) : draft.configuration.authentication === "environment" ? (
+              <Field>
+                <FieldLabel htmlFor="provider-env-key">
+                  Environment variable
+                </FieldLabel>
+                <Input
+                  id="provider-env-key"
+                  value={draft.configuration.envKey ?? ""}
+                  placeholder="PROVIDER_API_KEY"
+                  onChange={(event) => update({ envKey: event.target.value })}
+                />
+                <p className="provider-field-hint">
+                  This account uses only this variable. Missing credentials
+                  require reconnecting.
+                </p>
+              </Field>
+            ) : draft.configuration.authentication === "codex_cli" ||
+              draft.configuration.authentication === "grok_cli" ? (
+              <p className="provider-field-hint">
+                Authentication is bound to this CLI account. Reconnect it if the
+                CLI changes accounts.
+              </p>
             ) : (
               <p className="provider-field-hint">
                 No API key needed. Start the local server, then connect.
               </p>
             )}
-            <details
-              className="provider-model-selection"
-              open={draft.existing || undefined}
-              onToggle={(event) => {
-                if (
-                  event.currentTarget.open &&
-                  !draft.existing &&
-                  !catalog &&
-                  !draft.availableModels &&
-                  (draft.apiKey || draft.configuration.noKey)
-                )
-                  onFetchModels()
-              }}
-            >
-              <summary>
-                {draft.existing ? "Models" : "Model defaults (optional)"}
-              </summary>
-              <p className="provider-field-hint">
-                The service's models are discovered automatically when you
-                connect. Set connection defaults here, or manage all connections
-                in the Models tab.
-              </p>
-              {catalog?.error ? (
-                <p role="alert" className="provider-message">
-                  {catalog.error}
-                  {catalog.models.length ? " Showing the saved catalog." : ""}
+            {!draft.existing ? (
+              <details
+                className="provider-model-selection"
+                open={draft.existing || undefined}
+                onToggle={(event) => setModelsOpen(event.currentTarget.open)}
+              >
+                <summary>Model defaults (optional)</summary>
+                <p className="provider-field-hint">
+                  Connect to discover the models available to this account.
+                  Model defaults are optional; you can also manage them on the
+                  account's details page.
                 </p>
-              ) : null}
-              <ProviderModels
-                configuration={draft.configuration}
-                available={draft.availableModels ?? catalog?.models ?? []}
-                onChange={update}
-                fetchingModels={fetchingModels}
-              />
-            </details>
+                {serviceDefaults.length > 0 ? (
+                  <p className="provider-field-hint">
+                    Service defaults shown below. Account access has not been
+                    checked.
+                  </p>
+                ) : null}
+                {error && canLoadModels && accountModels === undefined ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={pending || !canLoadModels}
+                    onClick={onFetchModels}
+                  >
+                    Retry models
+                  </Button>
+                ) : null}
+                {modelLoadHint ? (
+                  <p className="provider-field-hint">{modelLoadHint}</p>
+                ) : null}
+                <ProviderModels
+                  configuration={draft.configuration}
+                  available={accountModels ?? serviceDefaults}
+                  emptyMessage={
+                    accountModels === undefined
+                      ? "This account's models are discovered automatically, or you can add a model ID."
+                      : "No chat models returned by this account. Check account access or add a model ID."
+                  }
+                  onChange={update}
+                  fetchingModels={fetchingModels}
+                />
+              </details>
+            ) : null}
             <details className="provider-advanced">
               <summary>Advanced settings</summary>
               <FieldGroup>
-                <Field>
-                  <FieldLabel htmlFor="provider-name">
-                    Connection name
-                  </FieldLabel>
-                  <Input
-                    id="provider-name"
-                    value={draft.configuration.name}
-                    onChange={(event) => update({ name: event.target.value })}
-                  />
-                </Field>
-                {!custom && !draft.configuration.noKey ? (
+                {!custom && !(draft.configuration.authentication === "none") ? (
                   <>
                     <EndpointField
                       value={draft.configuration.baseURL}
@@ -211,34 +353,11 @@ export function ProviderEditor({
                     />
                   </>
                 ) : null}
-                <Field>
-                  <FieldLabel htmlFor="provider-env-key">
-                    API key environment variable
-                  </FieldLabel>
-                  <Input
-                    id="provider-env-key"
-                    value={draft.configuration.envKey ?? ""}
-                    placeholder="Optional, e.g. PROVIDER_API_KEY"
-                    onChange={(event) => update({ envKey: event.target.value })}
-                  />
-                </Field>
-                {custom || draft.configuration.noKey ? (
+                {custom || draft.configuration.authentication === "none" ? (
                   <ProtocolField
                     value={draft.configuration.wireApi}
                     onChange={(wireApi) => update({ wireApi })}
                   />
-                ) : null}
-                {custom ? (
-                  <label className="provider-model-option">
-                    <input
-                      type="checkbox"
-                      checked={draft.configuration.noKey ?? false}
-                      onChange={(event) =>
-                        update({ noKey: event.target.checked })
-                      }
-                    />
-                    This service needs no API key
-                  </label>
                 ) : null}
                 {draft.configuration.wireApi === "openai_responses" &&
                 supportsOpenAIRequestWarmup(draft.configuration.baseURL) ? (
@@ -269,7 +388,7 @@ export function ProviderEditor({
                         update({ enabled: event.target.checked })
                       }
                     />
-                    Enable this connection
+                    Enable this account
                   </label>
                 ) : null}
               </FieldGroup>
@@ -292,8 +411,18 @@ export function ProviderEditor({
             type="button"
             variant="ghost"
             size="sm"
-            disabled={pending}
-            onClick={onTest}
+            disabled={
+              pending ||
+              draft.configuration.authentication === "codex_cli" ||
+              draft.configuration.authentication === "grok_cli"
+            }
+            onClick={() => {
+              if (draft.existing)
+                void writer.flush().then((ok) => {
+                  if (ok && mounted.current) onTest()
+                })
+              else onTest()
+            }}
           >
             {testing ? "Testing…" : "Test connection"}
           </Button>
@@ -321,7 +450,12 @@ export function ProviderEditor({
               variant="destructive"
               size="sm"
               disabled={pending}
-              onClick={onRemove}
+              onClick={() => {
+                writer.discardQueued()
+                void writer.flush().then(() => {
+                  if (mounted.current) onRemove()
+                })
+              }}
             >
               Remove
             </Button>
@@ -360,19 +494,32 @@ export function ProviderEditor({
                 disabled={pending && !fetchingModels}
                 onClick={onClose}
               >
-                Cancel
+                {draft.existing ? "Done" : "Cancel"}
               </Button>
-              <Button type="submit" size="sm" disabled={pending}>
-                {pending && !testing && !fetchingModels
-                  ? "Saving…"
-                  : draft.existing
-                    ? "Save changes"
-                    : "Add provider"}
-              </Button>
+              {!draft.existing ? (
+                <Button type="submit" size="sm" disabled={pending}>
+                  {pending && !testing && !fetchingModels
+                    ? "Connecting…"
+                    : "Add account"}
+                </Button>
+              ) : null}
             </div>
           </div>
         )}
       </form>
+      {applyStatus.pending ? <p role="status">Applying changes…</p> : null}
+      {applyStatus.error ? (
+        <div className="provider-message">
+          <p role="alert">{applyStatus.error}</p>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => void writer.flush()}
+          >
+            Retry changes
+          </Button>
+        </div>
+      ) : null}
     </SidebarDialog>
   )
 }

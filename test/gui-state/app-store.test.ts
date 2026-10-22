@@ -10,7 +10,7 @@ import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
-  normalizeKimiModelSelection,
+  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
@@ -463,7 +463,7 @@ describe("app store event stream", () => {
     ])
   })
 
-  it("falls back from stale selections to the available default model", () => {
+  it("preserves an unavailable selected model until the user chooses another", () => {
     const providers: readonly ApiProviderSummary[] = [
       {
         name: "codex",
@@ -491,7 +491,7 @@ describe("app store event stream", () => {
         defaultModel: "scripted",
         providers,
       }),
-    ).toEqual({ provider: "faux", model: "scripted" })
+    ).toEqual({ provider: "codex", model: "stale-session" })
   })
 
   it("streams durable execution events into the store", async () => {
@@ -1343,6 +1343,7 @@ describe("project state", () => {
       if (method === "session/list") return { sessions: [] }
       if (method === "provider/list")
         return {
+          accounts: [],
           providers: listed,
           defaultProvider: "faux",
           defaultModel: "scripted",
@@ -1370,7 +1371,12 @@ describe("project state", () => {
     fakeRef.current.respond = (method) => {
       if (method === "project/list") return { projects: listed }
       if (method === "provider/list") {
-        return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+        return {
+          accounts: [],
+          providers: [],
+          defaultProvider: "faux",
+          defaultModel: "m",
+        }
       }
       if (method === "session/list") return { sessions: [] }
       return notFound()
@@ -1695,47 +1701,47 @@ describe("project state", () => {
 describe("model selection", () => {
   it("drops obsolete boolean thinking values from K2.7 selections", () => {
     expect(
-      normalizeKimiModelSelection(
+      normalizeModelSelection(
         {
-          provider: "kimi",
+          provider: "kimi-code",
           model: "kimi-for-coding-highspeed",
           effort: "off",
         },
         [
           {
-            name: "kimi",
+            name: "kimi-code",
             models: [
               {
                 id: "kimi-for-coding-highspeed",
-                instructionProfileId: "kimi",
+                instructionProfileId: "kimi-code",
                 effortStyle: "none",
               },
             ],
           },
         ],
       ),
-    ).toEqual({ provider: "kimi", model: "kimi-for-coding-highspeed" })
+    ).toEqual({ provider: "kimi-code", model: "kimi-for-coding-highspeed" })
     expect(
-      normalizeKimiModelSelection(
+      normalizeModelSelection(
         {
-          provider: "kimi",
+          provider: "kimi-code",
           model: "k3",
           effort: "max",
         },
         [
           {
-            name: "kimi",
+            name: "kimi-code",
             models: [
               {
                 id: "k3",
-                instructionProfileId: "kimi",
+                instructionProfileId: "kimi-code",
                 effortStyle: "levels",
               },
             ],
           },
         ],
       ),
-    ).toEqual({ provider: "kimi", model: "k3", effort: "max" })
+    ).toEqual({ provider: "kimi-code", model: "k3", effort: "max" })
   })
 
   it("persists selections per session and rehydrates from localStorage", () => {
@@ -1748,11 +1754,11 @@ describe("model selection", () => {
     })
     useAppStore
       .getState()
-      .setModelSelection("session_2", { provider: "kimi", model: "k2" })
+      .setModelSelection("session_2", { provider: "kimi-code", model: "k2" })
 
     const expected = {
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "high" },
-      session_2: { provider: "kimi", model: "k2" },
+      session_2: { provider: "kimi-code", model: "k2" },
     }
     expect(useAppStore.getState().modelSelections).toEqual(expected)
     expect(
@@ -1764,10 +1770,10 @@ describe("model selection", () => {
 
     useAppStore.getState().setModelSelection("session_1", undefined)
     expect(useAppStore.getState().modelSelections).toEqual({
-      session_2: { provider: "kimi", model: "k2" },
+      session_2: { provider: "kimi-code", model: "k2" },
     })
     expect(createInitialAppState().modelSelections).toEqual({
-      session_2: { provider: "kimi", model: "k2" },
+      session_2: { provider: "kimi-code", model: "k2" },
     })
   })
 
@@ -1775,6 +1781,7 @@ describe("model selection", () => {
     fakeRef.current.respond = (method) => {
       if (method === "provider/list") {
         return {
+          accounts: [],
           providers: [
             {
               name: "faux",
@@ -1849,6 +1856,7 @@ describe("model selection", () => {
     expect(useAppStore.getState().providers).toHaveLength(2)
     expect(useAppStore.getState().providersError).toBe("not found")
     fakeRef.current.respond = () => ({
+      accounts: [],
       providers: [],
       defaultProvider: "faux",
       defaultModel: "scripted",
@@ -1879,6 +1887,7 @@ describe("model selection", () => {
     const firstRead = useAppStore.getState().loadProviders()
     const lastRead = useAppStore.getState().loadProviders()
     newer.resolve({
+      accounts: [],
       providers: [{ name: "new-provider", models: [] }],
       defaultProvider: "new-provider",
       defaultModel: "new-model",
@@ -1888,6 +1897,7 @@ describe("model selection", () => {
       older.reject(new ApiRequestError("Old catalog failed", "internal_error"))
     else
       older.resolve({
+        accounts: [],
         providers: [{ name: "old-provider", models: [] }],
         defaultProvider: "old-provider",
         defaultModel: "old-model",
@@ -1905,9 +1915,16 @@ describe("model selection", () => {
     const pending = {
       codex: deferredResponse(),
       grok: deferredResponse(),
-      kimi: deferredResponse(),
+      "kimi-code": deferredResponse(),
     }
     fakeRef.current.respond = (method, params) => {
+      if (method === "provider/configuration/read")
+        return {
+          providers: Object.keys(pending).map((id) => ({
+            id,
+            configuration: { enabled: true },
+          })),
+        }
       if (method !== "subscription/read") return notFound()
       return pending[(params as { provider: keyof typeof pending }).provider]
         .promise
@@ -1925,17 +1942,19 @@ describe("model selection", () => {
             usage: { status: "unavailable" },
           },
         },
-        kimi: { loading: false },
+        "kimi-code": { loading: false },
       },
     })
 
     const loading = useAppStore.getState().loadSubscriptions()
 
-    expect(fakeRef.current.requestsFor("subscription/read")).toEqual([
-      { method: "subscription/read", params: { provider: "codex" } },
-      { method: "subscription/read", params: { provider: "grok" } },
-      { method: "subscription/read", params: { provider: "kimi" } },
-    ])
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("subscription/read")).toEqual([
+        { method: "subscription/read", params: { provider: "codex" } },
+        { method: "subscription/read", params: { provider: "grok" } },
+        { method: "subscription/read", params: { provider: "kimi-code" } },
+      ]),
+    )
     pending.codex.resolve({
       subscription: {
         provider: "codex",
@@ -1950,21 +1969,21 @@ describe("model selection", () => {
       fetchedAt: 123_456,
     })
     await vi.waitFor(() => {
-      expect(useAppStore.getState().subscriptionsByProvider.codex.loading).toBe(
-        false,
-      )
+      expect(
+        useAppStore.getState().subscriptionsByProvider.codex?.loading,
+      ).toBe(false)
     })
-    expect(useAppStore.getState().subscriptionsByProvider.grok.loading).toBe(
+    expect(useAppStore.getState().subscriptionsByProvider.grok?.loading).toBe(
       true,
     )
-    expect(useAppStore.getState().subscriptionsByProvider.kimi.loading).toBe(
-      true,
-    )
+    expect(
+      useAppStore.getState().subscriptionsByProvider["kimi-code"]?.loading,
+    ).toBe(true)
 
     pending.grok.reject(new Error("billing unavailable"))
-    pending.kimi.resolve({
+    pending["kimi-code"].resolve({
       subscription: {
-        provider: "kimi",
+        provider: "kimi-code",
         displayName: "Kimi",
         availability: "requires_login",
         usage: { status: "unavailable" },
@@ -1974,7 +1993,7 @@ describe("model selection", () => {
     await loading
 
     expect(
-      useAppStore.getState().subscriptionsByProvider.codex.subscription,
+      useAppStore.getState().subscriptionsByProvider.codex?.subscription,
     ).toMatchObject({
       provider: "codex",
       plan: "pro",
@@ -1989,10 +2008,12 @@ describe("model selection", () => {
       updatedAt: 100,
       subscription: { provider: "grok" },
     })
-    expect(useAppStore.getState().subscriptionsByProvider.kimi).toMatchObject({
+    expect(
+      useAppStore.getState().subscriptionsByProvider["kimi-code"],
+    ).toMatchObject({
       loading: false,
       updatedAt: 123_457,
-      subscription: { provider: "kimi" },
+      subscription: { provider: "kimi-code" },
     })
   })
 
@@ -3362,7 +3383,12 @@ describe("new session drafts", () => {
     })
     fakeRef.current.respond = (method) => {
       if (method === "provider/list")
-        return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+        return {
+          accounts: [],
+          providers: [],
+          defaultProvider: "faux",
+          defaultModel: "m",
+        }
       if (method === "project/list") return { projects: [] }
       if (method === "session/list") return { sessions: [] }
       if (method === "session/create")
@@ -4108,7 +4134,12 @@ it("moves a session into pinned before persistence completes", async () => {
 it("projects rich sidebar notifications without refetching session lists", async () => {
   fakeRef.current.respond = (method) => {
     if (method === "provider/list") {
-      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+      return {
+        accounts: [],
+        providers: [],
+        defaultProvider: "faux",
+        defaultModel: "m",
+      }
     }
     if (method === "project/list") return { projects: [] }
     if (method === "session/list") return { sessions: [] }
@@ -4149,7 +4180,12 @@ it("keeps a pin confirmed by notification when its response is lost", async () =
   const gate = deferredResponse()
   fakeRef.current.respond = (method) => {
     if (method === "provider/list") {
-      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+      return {
+        accounts: [],
+        providers: [],
+        defaultProvider: "faux",
+        defaultModel: "m",
+      }
     }
     if (method === "project/list") return { projects: [] }
     if (method === "session/list") return { sessions: [] }
@@ -4196,7 +4232,12 @@ it("keeps a newer external section when local pin persistence fails", async () =
   const gate = deferredResponse()
   fakeRef.current.respond = (method) => {
     if (method === "provider/list") {
-      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+      return {
+        accounts: [],
+        providers: [],
+        defaultProvider: "faux",
+        defaultModel: "m",
+      }
     }
     if (method === "project/list") return { projects: [] }
     if (method === "session/list") return { sessions: [] }
@@ -5040,7 +5081,7 @@ describe("goal projections", () => {
   }
   async function boot() {
     fakeRef.current.respond = (method) => {
-      if (method === "provider/list") return { providers: [] }
+      if (method === "provider/list") return { accounts: [], providers: [] }
       if (method === "project/list") return { projects: [] }
       if (method === "session/list") return { sessions: [] }
       throw new Error(`Unexpected request: ${method}`)

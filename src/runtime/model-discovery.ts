@@ -1,11 +1,12 @@
-import type { DiscoveredModel } from "./models-manager.ts"
 import type {
   ModelCapabilities,
   ModelToolOutputTruncation,
 } from "./model-catalog.ts"
+import { discoveredModelKind } from "./model-kind.ts"
+import type { DiscoveredModel } from "./models-manager.ts"
 
 export async function discoverOpenAiCompatibleModels(input: {
-  provider: "grok" | "kimi"
+  provider: "grok" | "kimi-code"
   baseUrl: string
   accessToken: string
   fetchFn?: typeof fetch
@@ -28,43 +29,78 @@ export async function discoverOpenAiCompatibleModels(input: {
   }
   return payload.data.flatMap((entry) => {
     if (!isRecord(entry) || typeof entry.id !== "string") return []
-    const contextWindowTokens = positiveInteger(entry.context_length)
-    const displayName =
-      stringValue(entry.display_name) ?? grokDisplayName(entry.id)
-    const efforts = discoverOpenAiCompatibleEfforts(input.provider, entry)
-    const defaultEffort = discoverOpenAiCompatibleDefaultEffort(
-      input.provider,
-      entry,
-      efforts,
-    )
-    const inputModalities: ("text" | "image" | "video")[] = ["text"]
-    if (input.provider === "kimi") {
-      if (entry.supports_image_in === true) inputModalities.push("image")
-      if (entry.supports_video_in === true) inputModalities.push("video")
-    }
     return [
-      {
-        id: entry.id,
-        ...(displayName === undefined ? {} : { displayName }),
-        ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
-        ...(efforts === undefined ? {} : { efforts }),
-        ...(defaultEffort === undefined ? {} : { defaultEffort }),
-        ...(input.provider === "kimi" &&
-        typeof entry.supports_image_in === "boolean" &&
-        typeof entry.supports_video_in === "boolean"
-          ? { inputModalities }
-          : {}),
-      },
+      parseOpenAiCompatibleModel(input.provider, { ...entry, id: entry.id }),
     ]
   })
 }
 
+export function parseOpenAiCompatibleModel(
+  provider: "grok" | "kimi-code",
+  entry: Readonly<Record<string, unknown>> & { id: string },
+): DiscoveredModel {
+  const contextWindowTokens = positiveInteger(entry.context_length)
+  const architecture = isRecord(entry.architecture)
+    ? entry.architecture
+    : undefined
+  const topProvider = isRecord(entry.top_provider)
+    ? entry.top_provider
+    : undefined
+  const maxOutputTokens = positiveInteger(
+    entry.max_output_tokens ?? topProvider?.max_completion_tokens,
+  )
+  const displayName =
+    stringValue(entry.display_name) ??
+    stringValue(entry.name) ??
+    grokDisplayName(entry.id)
+  const reportedEfforts = entry.supported_reasoning_efforts
+  const efforts =
+    discoverOpenAiCompatibleEfforts(provider, entry) ??
+    (Array.isArray(reportedEfforts) &&
+    reportedEfforts.every(
+      (effort) => typeof effort === "string" && effort.length,
+    )
+      ? (reportedEfforts as string[])
+      : undefined)
+  const defaultEffort = discoverOpenAiCompatibleDefaultEffort(
+    provider,
+    entry,
+    efforts,
+  )
+  const modalities = architecture?.input_modalities ?? entry.input_modalities
+  let inputModalities = Array.isArray(modalities)
+    ? modalities.filter((value): value is "text" | "image" | "video" =>
+        ["text", "image", "video"].includes(String(value)),
+      )
+    : undefined
+  const kind = discoveredModelKind(entry, provider)
+  if (
+    provider === "kimi-code" &&
+    typeof entry.supports_image_in === "boolean" &&
+    typeof entry.supports_video_in === "boolean"
+  ) {
+    inputModalities = ["text"]
+    if (entry.supports_image_in === true) inputModalities.push("image")
+    if (entry.supports_video_in === true) inputModalities.push("video")
+  }
+  return {
+    id: entry.id,
+    ...(kind === undefined ? {} : { kind }),
+    ...(displayName === undefined ? {} : { displayName }),
+    ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    ...(efforts === undefined ? {} : { efforts }),
+    ...(defaultEffort === undefined ? {} : { defaultEffort }),
+    ...(inputModalities?.length ? { inputModalities } : {}),
+  }
+}
+
 function discoverOpenAiCompatibleEfforts(
-  provider: "grok" | "kimi",
+  provider: "grok" | "kimi-code",
   entry: Readonly<Record<string, unknown>>,
 ): readonly string[] | undefined {
   if (
-    provider === "kimi" &&
+    provider === "kimi-code" &&
     isRecord(entry.think_efforts) &&
     entry.think_efforts.support === true &&
     Array.isArray(entry.think_efforts.valid_efforts) &&
@@ -99,7 +135,7 @@ function discoverOpenAiCompatibleEfforts(
 }
 
 function discoverOpenAiCompatibleDefaultEffort(
-  provider: "grok" | "kimi",
+  provider: "grok" | "kimi-code",
   entry: Readonly<Record<string, unknown>>,
   efforts: readonly string[] | undefined,
 ): string | undefined {
@@ -124,14 +160,16 @@ function grokDisplayName(modelId: string): string | undefined {
   if (words.length === 0) return undefined
   const parts: string[] = []
   for (let index = 0; index < words.length; index += 1) {
-    const word = words[index]!
+    const word = words[index]
+    if (word === undefined) throw new Error("Missing model name token.")
     if (/^\d+(?:\.\d+)*$/.test(word)) {
       parts.push(word)
       continue
     }
     // Keep "non-reasoning" as one hyphenated title token.
     if (word.toLowerCase() === "non" && index + 1 < words.length) {
-      const next = words[index + 1]!
+      const next = words[index + 1]
+      if (next === undefined) throw new Error("Missing model name suffix.")
       parts.push(`Non-${next.slice(0, 1).toUpperCase()}${next.slice(1)}`)
       index += 1
       continue
@@ -141,6 +179,10 @@ function grokDisplayName(modelId: string): string | undefined {
   return parts.join(" ")
 }
 
+// Catalog behavior was verified against Codex CLI 0.163.0. This is the
+// backend catalog protocol version, independent of Yakitori's app version.
+export const CODEX_CATALOG_CLIENT_VERSION = "0.163.0"
+
 export async function discoverCodexModels(input: {
   baseUrl: string
   accessToken: string
@@ -148,7 +190,7 @@ export async function discoverCodexModels(input: {
   fetchFn?: typeof fetch
 }): Promise<readonly DiscoveredModel[]> {
   const response = await (input.fetchFn ?? fetch)(
-    `${input.baseUrl.replace(/\/$/, "")}/models?client_version=0.0.0`,
+    `${input.baseUrl.replace(/\/$/, "")}/models?client_version=${CODEX_CATALOG_CLIENT_VERSION}`,
     {
       headers: {
         authorization: `Bearer ${input.accessToken}`,

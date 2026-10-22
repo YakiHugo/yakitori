@@ -42,7 +42,7 @@ it("routes verified ChatGPT accounts through live RPC/model selection and remove
     if (!account) throw new Error("Missing fixture account")
     const providers = await rpc.request("provider/list", {})
     expect(
-      providers.providers.find((p) => p.name === account.providerId),
+      providers.accounts.find((p) => p.name === account.providerId),
     ).toMatchObject({
       displayName: "Personal",
       credentialKind: "oauth",
@@ -58,7 +58,7 @@ it("routes verified ChatGPT accounts through live RPC/model selection and remove
       partial.providers.find((p) => p.name === "faux")?.models.length,
     ).toBeGreaterThan(0)
     expect(
-      partial.providers.find((p) => p.name === account.providerId),
+      partial.accounts.find((p) => p.name === account.providerId),
     ).toMatchObject({
       models: [],
       catalogError:
@@ -68,7 +68,7 @@ it("routes verified ChatGPT accounts through live RPC/model selection and remove
     await rpc.request("chatgpt/signOut", { accountId: account.id })
     const signedOut = await rpc.request("provider/list", {})
     expect(
-      signedOut.providers.find((p) => p.name === account.providerId),
+      signedOut.accounts.find((p) => p.name === account.providerId),
     ).toMatchObject({ availability: "requires_login", models: [] })
     expect(rpc.frames.join("\n")).not.toMatch(
       /fixture-access|fixture-refresh|id_token_hint|dynamic_agent_client|api\/accounts\/authorize/,
@@ -86,7 +86,7 @@ it("routes verified ChatGPT accounts through live RPC/model selection and remove
       )
       const refreshed = await rpc.request("provider/list", {})
       expect(
-        refreshed.providers.find(
+        refreshed.accounts.find(
           (provider) => provider.name === externallyConnected?.providerId,
         ),
       ).toMatchObject({

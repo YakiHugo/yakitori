@@ -100,7 +100,7 @@ it("uses the last model context and the provider's reported quota window", async
         tools: 0,
       },
     },
-    providers: [
+    accounts: [
       {
         name: "codex",
         models: [
@@ -150,6 +150,10 @@ it("keeps quota values and errors with their provider while the same status pane
     })
   })
   useAppStore.setState({
+    accounts: ["codex", "grok", "kimi-code"].map((name) => ({
+      name,
+      models: [],
+    })),
     selection: { sessionId: "session_a" },
     commandPanel: { kind: "status", sessionId: "session_a" },
     execution: {
@@ -206,13 +210,13 @@ it("keeps quota values and errors with their provider while the same status pane
     useAppStore.setState((state) => ({
       execution: {
         ...state.execution,
-        lastModel: { provider: "kimi", model: "kimi-model" },
+        lastModel: { provider: "kimi-code", model: "kimi-model" },
       },
     })),
   )
-  await act(async () => answer("kimi", 0, "Kimi quota"))
+  await act(async () => answer("kimi-code", 0, "Kimi quota"))
   await act(async () => answer("codex", 1, "Stale ChatGPT quota"))
-  expect(screen.getByText("kimi usage limits")).toBeDefined()
+  expect(screen.getByText("kimi-code usage limits")).toBeDefined()
   expect(screen.getByText("Kimi quota")).toBeDefined()
   expect(screen.queryByText("Stale ChatGPT quota")).toBeNull()
 })

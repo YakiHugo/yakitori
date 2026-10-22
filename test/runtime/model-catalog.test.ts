@@ -143,12 +143,12 @@ describe("model catalog context windows", () => {
         ?.contextWindowTokens,
     ).toBe(500_000)
     expect(
-      catalogModelCapacity({ provider: "kimi", model: "k3" })
+      catalogModelCapacity({ provider: "kimi-code", model: "k3" })
         ?.contextWindowTokens,
     ).toBe(1_048_576)
     expect(
       catalogModelCapacity({
-        provider: "kimi",
+        provider: "kimi-code",
         model: "kimi-for-coding",
       })?.contextWindowTokens,
     ).toBe(1_048_576)
@@ -211,11 +211,13 @@ describe("model catalog context windows", () => {
         usedFallbackModelMetadata: true,
       },
     )
-    expect(resolveModel({ provider: "kimi", model: "k30" })).toMatchObject({
-      instructionProfileId: "default",
-      fileEditingToolType: "edit_write",
-      usedFallbackModelMetadata: true,
-    })
+    expect(resolveModel({ provider: "kimi-code", model: "k30" })).toMatchObject(
+      {
+        instructionProfileId: "default",
+        fileEditingToolType: "edit_write",
+        usedFallbackModelMetadata: true,
+      },
+    )
     expect(
       resolveModel({ provider: "codex", model: "gpt-future" }),
     ).toMatchObject({
@@ -320,12 +322,12 @@ describe("model catalog context windows", () => {
         model: "gpt-5.5",
       }),
     ).toBe("medium")
-    expect(resolveModelWireEffort({ provider: "kimi", model: "k3" })).toBe(
+    expect(resolveModelWireEffort({ provider: "kimi-code", model: "k3" })).toBe(
       "high",
     )
-    expect(resolveModelWireEffort({ provider: "kimi", model: "k3-256k" })).toBe(
-      "high",
-    )
+    expect(
+      resolveModelWireEffort({ provider: "kimi-code", model: "k3-256k" }),
+    ).toBe("high")
     expect(
       resolveModelWireEffort({ provider: "openai", model: "gpt-6-astra" }),
     ).toBe("low")

@@ -3,6 +3,7 @@ import { open, readFile, rename, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { flock } from "fs-ext"
+import { LoginRequiredError } from "./login-required.ts"
 
 // ChatGPT OAuth login shared with the official codex CLI
 // (~/.codex/auth.json, or $CODEX_HOME/auth.json). Refresh consumes a rotating
@@ -63,9 +64,15 @@ async function readCodexAuthDocument(
     }
     throw error
   }
-  const parsed: unknown = JSON.parse(raw)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause
+    throw new LoginRequiredError(`Codex login at ${path} is invalid JSON.`)
+  }
   if (!isRecord(parsed)) {
-    throw new Error(`Codex login at ${path} is malformed.`)
+    throw new LoginRequiredError(`Codex login at ${path} is malformed.`)
   }
   return parsed
 }
@@ -76,7 +83,7 @@ function parseCodexLogin(
 ): CodexLogin {
   if (isRecord(parsed.tokens) && isString(parsed.tokens.access_token)) {
     if (!isString(parsed.tokens.refresh_token)) {
-      throw new Error(
+      throw new LoginRequiredError(
         `Codex login at ${path} holds tokens without a refresh token.`,
       )
     }
@@ -95,7 +102,7 @@ function parseCodexLogin(
   if (isString(parsed.OPENAI_API_KEY)) {
     return { kind: "apiKey", apiKey: parsed.OPENAI_API_KEY }
   }
-  throw new Error(
+  throw new LoginRequiredError(
     `Codex login at ${path} holds no tokens. Run \`codex\` and log in first.`,
   )
 }
@@ -136,7 +143,7 @@ export function createCodexAuthProvider(input?: {
       if (
         !options?.forceRefresh &&
         !accessInvalidated &&
-        !isStale(login.lastRefresh, now())
+        !needsRefresh(login, now())
       ) {
         return { accessToken: login.accessToken, accountId: login.accountId }
       }
@@ -204,12 +211,12 @@ export async function resolveCodexAccountIdentity(input?: {
 async function requireChatGptLogin(path: string) {
   const login = await readCodexLogin({ path })
   if (login === undefined) {
-    throw new Error(
+    throw new LoginRequiredError(
       `Codex login not found at ${path}. Run \`codex\` and log in first.`,
     )
   }
   if (login.kind === "apiKey") {
-    throw new Error(
+    throw new LoginRequiredError(
       `Codex login at ${path} is an API-key login, not a ChatGPT login.`,
     )
   }
@@ -235,6 +242,29 @@ function isStale(lastRefresh: string | undefined, nowMs: number): boolean {
   const at = Date.parse(lastRefresh)
   if (Number.isNaN(at)) return true
   return nowMs - at >= TOKEN_REFRESH_INTERVAL_MS
+}
+
+function needsRefresh(
+  login: Extract<CodexLogin, { kind: "chatgpt" }>,
+  nowMs: number,
+): boolean {
+  if (isStale(login.lastRefresh, nowMs)) return true
+  // JWT claims only schedule refresh; they do not establish account identity
+  // or authenticate the token. Opaque access tokens retain the CLI policy.
+  const payload = login.accessToken.split(".")[1]
+  if (!payload) return false
+  let claims: unknown
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause
+    return false
+  }
+  return (
+    isRecord(claims) &&
+    typeof claims.exp === "number" &&
+    claims.exp * 1_000 <= nowMs
+  )
 }
 
 async function refreshAndPersistTokens(input: {
@@ -473,6 +503,30 @@ async function refreshTokens(
     }),
   })
   if (!response.ok) {
+    let body: unknown
+    if (response.status === 400) {
+      try {
+        body = await response.json()
+      } catch (cause) {
+        if (!(cause instanceof SyntaxError)) throw cause
+      }
+    }
+    const error = isRecord(body) ? body.error : undefined
+    const code = isRecord(error) ? error.code : error
+    if (
+      response.status === 401 ||
+      response.status === 403 ||
+      (response.status === 400 &&
+        [
+          "invalid_grant",
+          "refresh_token_expired",
+          "refresh_token_reused",
+          "refresh_token_invalid",
+        ].includes(String(code)))
+    )
+      throw new LoginRequiredError(
+        `Codex sign-in has expired or was revoked (HTTP ${response.status}). Sign in again.`,
+      )
     // The error body can quote request data; report the status only so token
     // material never reaches logs.
     throw new Error(

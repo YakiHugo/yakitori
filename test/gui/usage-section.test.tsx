@@ -105,7 +105,7 @@ describe("usage periods", () => {
 describe("usage dashboard", () => {
   it("shows auxiliary-only token activity without inventing recorded turns", () => {
     const totals = { ...emptyUsage, inputTokens: 41, outputTokens: 7 }
-    const model = { ...totals, provider: "kimi", model: "title-model" }
+    const model = { ...totals, provider: "kimi-code", model: "title-model" }
     useAppStore.setState({
       usage: {
         loading: false,
@@ -177,7 +177,7 @@ describe("usage dashboard", () => {
       "Showing the previous result",
     )
     const button = screen.getByRole("button", {
-      name: "Refresh usage",
+      name: "Retry usage",
     }) as HTMLButtonElement
     expect(button.disabled).toBe(true)
     fireEvent.click(button)

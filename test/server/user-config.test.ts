@@ -411,7 +411,7 @@ describe("user config", () => {
           "[model_transport]",
           "max_attempts = 4",
           "stream_idle_timeout_ms = 300000",
-          "[model_transport.providers.kimi]",
+          "[model_transport.providers.kimi-code]",
           "max_attempts = 6",
           `[projects."${workspace}"]`,
           'trust_level = "trusted"',
@@ -431,7 +431,7 @@ describe("user config", () => {
       expect(snapshot.configuration.modelTransport).toEqual({
         maxAttempts: 2,
         streamIdleTimeoutMs: 300_000,
-        providers: { kimi: { maxAttempts: 6 } },
+        providers: { "kimi-code": { maxAttempts: 6 } },
       })
       expect(snapshot.origins["model_transport.max_attempts"]?.source).toBe(
         "project",
@@ -464,7 +464,7 @@ describe("user config", () => {
         [
           "[model_transport]",
           "max_attempts = 4",
-          '[model_transport.providers."kimi"]',
+          '[model_transport.providers."kimi-code"]',
           "max_attempts = 0",
           "",
         ].join("\n"),

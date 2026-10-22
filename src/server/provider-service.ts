@@ -1,29 +1,31 @@
+import { createModelSettingsManager } from "../runtime/model-settings-manager.ts"
 import type {
   ModelCatalogResponse,
   ModelSettingsConfiguration,
+  ProviderConfigurationResponse,
   ProviderModelSettings,
+  ProviderWriteInput,
 } from "../protocol/providers.ts"
 import type { ProviderRegistry } from "../runtime/provider-registry.ts"
 import {
   requireModelSettingsProvider,
   requireProviderModelSettings,
 } from "./model-settings.ts"
-import type {
-  ProviderConfigurationResponse,
-  ProviderWriteInput,
-} from "../protocol/providers.ts"
 
 export type {
   ProviderConfigurationResponse,
   ProviderWriteInput,
 } from "../protocol/providers.ts"
 
+import { randomUUID } from "node:crypto"
 import { join } from "node:path"
+import { ModelNotConfiguredError } from "../runtime/configured-models-manager.ts"
 import {
   createProviderContinuationScope,
   type ModelProvider,
   providerPresets,
 } from "../runtime/index.ts"
+import { NonChatModelError } from "../runtime/model-kind.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import { createConfiguredProvider } from "./configured-provider.ts"
@@ -43,9 +45,11 @@ import type {
   SubscriptionConnection,
   SubscriptionConnections,
 } from "./subscription-connections.ts"
+import { createSubscriptionProvider } from "./subscription-provider.ts"
 import type { UserConfigStore } from "./user-config.ts"
 
 export type ProviderService = {
+  resolveCredential(id: string): Promise<string | undefined>
   readModels(provider: string): Promise<ModelCatalogResponse>
   writeModels(
     provider: string,
@@ -73,7 +77,10 @@ export type ProviderService = {
   >
   restore(undoId: string): Promise<ProviderConfigurationResponse>
   move(id: string, beforeId?: string): Promise<ProviderConfigurationResponse>
-  login(id: string): Promise<readonly SubscriptionConnection[]>
+  login(
+    id: string,
+    reauthenticate?: boolean,
+  ): Promise<readonly SubscriptionConnection[]>
   cancelLogin(id: string): Promise<readonly SubscriptionConnection[]>
   importSubscription(
     id: string,
@@ -94,7 +101,7 @@ export function createProviderService(
     apply(
       providers: Readonly<Record<string, ModelProvider>>,
       configurations: Readonly<Record<string, StoredProviderConfiguration>>,
-    ): void
+    ): void | Promise<void>
   }>,
 ): ProviderService {
   const credentials = createProviderCredentialStore(input.credentialDirectory)
@@ -125,8 +132,9 @@ export function createProviderService(
     const identity = JSON.stringify([
       createProviderContinuationScope(id, configuration.baseURL, key),
       configuration.wireApi,
-      configuration.preset ?? null,
-      configuration.noKey === true,
+      configuration.service ?? "generic",
+      configuration.authentication === "none",
+      "model-kinds-v1",
     ])
     let catalog = catalogs.get(identity)
     if (!catalog) {
@@ -145,34 +153,69 @@ export function createProviderService(
     return catalog
   }
   const resolveKey = async (configuration: StoredProviderConfiguration) => {
+    const source = configuration.authentication ?? "stored"
+    if (source === "none") return "local-no-key"
+    if (source === "codex_cli" || source === "grok_cli") return undefined
+    if (source === "environment")
+      return configuration.envKey === undefined
+        ? undefined
+        : process.env[configuration.envKey]?.trim() || undefined
     const stored =
       configuration.credentialRef === undefined
         ? undefined
         : await credentials.read(configuration.credentialRef)
-    return (
-      stored ??
-      (configuration.envKey === undefined
-        ? undefined
-        : process.env[configuration.envKey]?.trim() || undefined) ??
-      (configuration.noKey ? "local-no-key" : undefined)
-    )
+    return stored
+  }
+  const readConfigurations = async () => {
+    return (await input.userConfig.readConfiguration()).modelProviders ?? {}
   }
   const reload = async () => {
     const generation = ++reloadGeneration
     await input.subscriptions?.()?.refresh()
-    const configurations =
-      (await input.userConfig.readConfiguration()).modelProviders ?? {}
+    const configurations = await readConfigurations()
     const entries = await Promise.all(
       Object.entries(configurations).map(async ([id, configuration]) => {
+        if (configuration.enabled === false) return []
+        if (
+          configuration.authentication === "codex_cli" ||
+          configuration.authentication === "grok_cli"
+        ) {
+          const provider = await createSubscriptionProvider(
+            id,
+            configuration,
+            join(input.credentialDirectory, "..", "models-cache"),
+          )
+          if (!provider) return []
+          const models = createModelSettingsManager(provider.models, () =>
+            Object.fromEntries(
+              configuration.models.map(
+                ({
+                  id,
+                  identity: _identity,
+                  kind: _kind,
+                  defaultVisible: _defaultVisible,
+                  ...settings
+                }) => [id, settings],
+              ),
+            ),
+          )
+          const configured: ModelProvider = {
+            ...provider,
+            models,
+            startTurn(policy) {
+              return { ...provider.startTurn(policy), models }
+            },
+          }
+          return [[id, configured] as const]
+        }
         const key = await resolveKey(configuration)
-        if (key === undefined || configuration.enabled === false) return []
+        if (key === undefined) return []
         const catalog = catalogFor(id, configuration, key)
         let discovered: readonly ConfiguredModel[]
         try {
           discovered = await catalog.models()
         } catch (error) {
           if (!(error instanceof ConfigurationError)) throw error
-          if (!configuration.models.length) return []
           discovered = []
         }
         const resolved = {
@@ -233,12 +276,11 @@ export function createProviderService(
     if (generation !== reloadGeneration) return activeProviders
     activeIdentities = identities
     activeProviders = providers
-    input.apply(providers, configurations)
+    await input.apply(providers, configurations)
     return providers
   }
   const read = async (): Promise<ProviderConfigurationResponse> => {
-    const configurations =
-      (await input.userConfig.readConfiguration()).modelProviders ?? {}
+    const configurations = await readConfigurations()
     return {
       presets: providerPresets,
       subscriptions: (await input.subscriptions?.()?.read()) ?? [],
@@ -267,14 +309,20 @@ export function createProviderService(
             ...(catalog ? { catalog } : {}),
             ...(connection ? { connection } : {}),
             credential:
-              storedKey !== undefined
-                ? "stored"
-                : configuration.envKey !== undefined &&
-                    process.env[configuration.envKey]?.trim()
-                  ? "environment"
-                  : configuration.noKey
-                    ? "optional"
-                    : "missing",
+              configuration.authentication === "codex_cli" ||
+              configuration.authentication === "grok_cli"
+                ? Object.hasOwn(activeProviders, id)
+                  ? "external"
+                  : "missing"
+                : configuration.authentication === "none"
+                  ? "optional"
+                  : configuration.authentication === "environment"
+                    ? key === undefined
+                      ? "missing"
+                      : "environment"
+                    : storedKey !== undefined
+                      ? "stored"
+                      : "missing",
           }
         }),
       ),
@@ -285,6 +333,7 @@ export function createProviderService(
     const configuration = requireProviderConfiguration(value.configuration)
     if (
       configuration.preset !== undefined &&
+      configuration.preset !== "codex" &&
       !providerPresets.some((preset) => preset.id === configuration.preset)
     )
       throw new ConfigurationError("Unknown provider preset.")
@@ -295,6 +344,10 @@ export function createProviderService(
         /[\r\n]/.test(value.apiKey))
     )
       throw new ConfigurationError("API key must be a non-empty single line.")
+    if (value.apiKey !== undefined && configuration.authentication !== "stored")
+      throw new ConfigurationError(
+        "Choose saved API key authentication before entering a key.",
+      )
     return { id, configuration, apiKey: value.apiKey }
   }
   const discoverInput = async (value: ProviderWriteInput) => {
@@ -303,6 +356,23 @@ export function createProviderService(
       id === undefined
         ? undefined
         : (await input.userConfig.readConfiguration()).modelProviders?.[id]
+    if (
+      configuration.authentication === "codex_cli" ||
+      configuration.authentication === "grok_cli"
+    ) {
+      if (
+        !id ||
+        !previous ||
+        previous.authentication !== configuration.authentication ||
+        previous.credentialPath !== configuration.credentialPath ||
+        previous.credentialOwner !== configuration.credentialOwner
+      )
+        throw new ConfigurationError(
+          "Connect this CLI account before loading its models.",
+        )
+      await modelManager(id).refresh({ force: true })
+      return (await readModels(id)).models
+    }
     const key =
       apiKey ??
       (await resolveKey({
@@ -369,13 +439,30 @@ export function createProviderService(
     return {
       provider,
       models,
-      settings: snapshot.configuration.models?.[provider] ?? {},
+      settings: Object.fromEntries(
+        Object.entries(snapshot.configuration.models?.[provider] ?? {}).filter(
+          ([id]) => {
+            try {
+              manager.resolve({ provider, model: id })
+              return true
+            } catch (error) {
+              if (error instanceof NonChatModelError) return false
+              if (error instanceof ModelNotConfiguredError) return true
+              throw error
+            }
+          },
+        ),
+      ),
       version:
         snapshot.layers.find((layer) => layer.source === "user")?.version ?? "",
       ...manager.status?.(),
     }
   }
   return {
+    async resolveCredential(id) {
+      const configuration = (await readConfigurations())[requireProviderId(id)]
+      return configuration === undefined ? undefined : resolveKey(configuration)
+    },
     read,
     readModels,
     async writeModels(provider, value, version) {
@@ -383,6 +470,13 @@ export function createProviderService(
       const settings = requireProviderModelSettings(value)
       const models = await manager.listModels({ includeHidden: true })
       for (const [id, override] of Object.entries(settings)) {
+        try {
+          manager.resolve({ provider, model: id })
+        } catch (error) {
+          if (error instanceof NonChatModelError)
+            throw new ConfigurationError(error.message)
+          if (!(error instanceof ModelNotConfiguredError)) throw error
+        }
         const base = models.find(
           (model) => model.model.toLowerCase() === id.toLowerCase(),
         )
@@ -415,9 +509,7 @@ export function createProviderService(
     async move(id, beforeId) {
       if (beforeId !== undefined) requireProviderId(beforeId)
       const snapshot = await input.userConfig.readSnapshot()
-      const entries = Object.entries(
-        snapshot.configuration.modelProviders ?? {},
-      )
+      const entries = Object.entries(await readConfigurations())
       const source = entries.find((entry) => entry[0] === requireProviderId(id))
       if (
         !source ||
@@ -484,10 +576,16 @@ export function createProviderService(
       return { ...(await read()), undoId: redoId }
     },
     async refreshModels(id) {
-      const configuration = (await input.userConfig.readConfiguration())
-        .modelProviders?.[requireProviderId(id)]
+      const configuration = (await readConfigurations())[requireProviderId(id)]
       if (!configuration)
         throw new ConfigurationError("Provider connection does not exist.")
+      if (
+        configuration.authentication === "codex_cli" ||
+        configuration.authentication === "grok_cli"
+      ) {
+        await modelManager(id).refresh({ force: true })
+        return read()
+      }
       const key = await resolveKey(configuration)
       if (!key)
         throw new ConfigurationError("This connection needs an API key.")
@@ -495,13 +593,13 @@ export function createProviderService(
       await reload()
       return read()
     },
-    async login(id) {
+    async login(id, reauthenticate) {
       const subscriptions = input.subscriptions?.()
       if (!subscriptions)
         throw new ConfigurationError(
           "Subscription login is unavailable in this host.",
         )
-      return subscriptions.login(id)
+      return subscriptions.login(id, reauthenticate)
     },
     async cancelLogin(id) {
       const subscriptions = input.subscriptions?.()
@@ -520,21 +618,43 @@ export function createProviderService(
     async write(value) {
       const validated = validateInput(value)
       const configuration = validated.configuration
-      const discovered = configuration.models.length
-        ? undefined
-        : await discoverInput(value)
+      let snapshot = await input.userConfig.readSnapshot()
+      const before =
+        validated.id === undefined
+          ? undefined
+          : snapshot.configuration.modelProviders?.[validated.id]
+      const sameSource =
+        before !== undefined &&
+        validated.apiKey === undefined &&
+        (
+          [
+            "service",
+            "wireApi",
+            "baseURL",
+            "authentication",
+            "envKey",
+            "credentialPath",
+            "credentialOwner",
+          ] as const
+        ).every((key) => before[key] === configuration[key])
+      const discovered =
+        sameSource ||
+        configuration.models.length ||
+        configuration.enabled === false ||
+        configuration.authentication === "codex_cli" ||
+        configuration.authentication === "grok_cli"
+          ? undefined
+          : await discoverInput(value)
       const apiKey = validated.apiKey
-      const snapshot = await input.userConfig.readSnapshot()
+      if (discovered) snapshot = await input.userConfig.readSnapshot()
       const previous = snapshot.configuration.modelProviders ?? {}
-      const id =
-        validated.id ??
-        availableProviderId(
-          configuration.preset ?? configuration.name,
-          Object.keys(previous),
-        )
+      const id = validated.id ?? `account_${randomUUID()}`
       const newReference =
         apiKey === undefined ? undefined : await credentials.write(apiKey)
-      const credentialRef = newReference ?? previous[id]?.credentialRef
+      const credentialRef =
+        configuration.authentication === "stored"
+          ? (newReference ?? previous[id]?.credentialRef)
+          : undefined
       const stored = {
         ...configuration,
         ...(credentialRef === undefined ? {} : { credentialRef }),
@@ -573,7 +693,7 @@ export function createProviderService(
       const previous = snapshot.configuration.modelProviders ?? {}
       const removed = previous[id]
       if (removed === undefined)
-        throw new ConfigurationError("Provider connection does not exist.")
+        throw new ConfigurationError("Account does not exist.")
       const next = Object.fromEntries(
         Object.entries(previous)
           .filter(([name]) => name !== id)
@@ -671,24 +791,6 @@ export function createProviderService(
       }
     },
   }
-}
-
-function availableProviderId(name: string, ids: readonly string[]) {
-  const slug =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "custom"
-  let base = /^[a-z]/.test(slug) ? slug : `provider-${slug}`
-  if (
-    base.startsWith("chatgpt-") ||
-    ["faux", "codex", "kimi", "constructor", "prototype"].includes(base)
-  )
-    base = `provider-${base}`
-  let id = base
-  let suffix = 2
-  while (ids.includes(id)) id = `${base}-${suffix++}`
-  return id
 }
 
 function exposedModels(

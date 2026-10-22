@@ -2,6 +2,7 @@
 
 type YakitoriDesktopBridge = {
   platform: string
+  focusWindow(): Promise<void>
   notifications: import("../desktop/completion-notification-types.ts").CompletionNotificationBridge
   writeClipboardText(text: string): Promise<void>
   browser: import("../desktop/workspace-browser-types.ts").WorkspaceBrowserBridge

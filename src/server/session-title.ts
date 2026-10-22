@@ -1,9 +1,9 @@
+import type { ThreadStore } from "../core/thread-store.ts"
 import { createRequestId } from "../kernel/ids.ts"
 import type { ModelSelection } from "../kernel/index.ts"
-import type { ThreadStore } from "../core/thread-store.ts"
 import type {
-  ModelTarget,
   ModelStreamEvent,
+  ModelTarget,
   ModelUsage,
   StreamFn,
 } from "../runtime/model.ts"
@@ -31,24 +31,9 @@ const TITLE_MAX_DISPLAY_WIDTH = 36
 const TITLE_TIMEOUT_MS = 30_000
 const TITLE_MAX_OUTPUT_TOKENS = 128
 
-// Kimi's cheapest coding tier; used for titles whenever that provider is
-// registered, regardless of the Session's working model.
-export const KIMI_TITLE_MODEL = "kimi-for-coding-highspeed"
-
 export function resolveTitleTarget(
-  availableProviders: readonly string[] | undefined,
   modelSelection: ModelSelection | undefined,
 ): ModelTarget | undefined {
-  if (availableProviders?.includes("kimi")) {
-    return {
-      provider: "kimi",
-      model: KIMI_TITLE_MODEL,
-      instructionProfileId: KIMI_TITLE_MODEL,
-      // Title calls disable thinking entirely: reasoning would burn the small
-      // output budget and can leave the response without any text block.
-      effort: "off",
-    }
-  }
   if (modelSelection === undefined || modelSelection.provider === "faux") {
     return undefined
   }
@@ -183,7 +168,9 @@ export type SessionTitleGenerator = {
 export function createSessionTitleGenerator(options: {
   readonly stream: StreamFn
   readonly store: ThreadStore
-  readonly availableProviders?: readonly string[]
+  readonly resolveSelection?: (
+    selection: ModelSelection | undefined,
+  ) => ModelSelection | undefined
   readonly notifySidebarChanged?: () => void
   readonly reportOperationalFailure?: OperationalFailureReporter
 }): SessionTitleGenerator & {
@@ -232,8 +219,9 @@ export function createSessionTitleGenerator(options: {
           if (text === "") return
           if (!(await untitled())) return
           const target = resolveTitleTarget(
-            options.availableProviders,
-            input.modelSelection,
+            options.resolveSelection
+              ? options.resolveSelection(input.modelSelection)
+              : input.modelSelection,
           )
           if (target === undefined || controller.signal.aborted) return
           const title = await streamSessionTitle(

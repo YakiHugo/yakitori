@@ -32,26 +32,35 @@ export function ProviderSubscription({
   const file = useRef<HTMLInputElement>(null)
   const started = useRef(false)
   const connected = useRef(false)
+  const requested = useRef(false)
   const running = connection.login?.state === "running"
-  const signIn = useCallback(async () => {
-    setPending("login")
-    setError(undefined)
-    setImporting(false)
-    connected.current = false
-    try {
-      onChange(
-        await getAppRpcClient(apiBase).request("provider/subscription/login", {
-          id: connection.id,
-        }),
-      )
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Could not start sign-in.",
-      )
-    } finally {
-      setPending(undefined)
-    }
-  }, [apiBase, connection.id, onChange])
+  const signIn = useCallback(
+    async (reauthenticate = false) => {
+      setPending("login")
+      setError(undefined)
+      setImporting(false)
+      connected.current = false
+      requested.current = false
+      try {
+        const next = await getAppRpcClient(apiBase).request(
+          "provider/subscription/login",
+          {
+            id: connection.id,
+            ...(reauthenticate ? { reauthenticate: true } : {}),
+          },
+        )
+        requested.current = true
+        onChange(next)
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Could not start sign-in.",
+        )
+      } finally {
+        setPending(undefined)
+      }
+    },
+    [apiBase, connection.id, onChange],
+  )
   useEffect(() => {
     if (!startLogin || started.current) return
     started.current = true
@@ -61,12 +70,22 @@ export function ProviderSubscription({
     if (
       connection.login?.state !== "succeeded" ||
       !connection.available ||
+      !requested.current ||
       connected.current
     )
       return
     connected.current = true
+    void window.yakitoriDesktop
+      ?.focusWindow()
+      .catch((cause: unknown) =>
+        onError(
+          cause instanceof Error
+            ? cause.message
+            : "Could not return to Yakitori.",
+        ),
+      )
     onConnected()
-  }, [connection.login?.state, connection.available, onConnected])
+  }, [connection.login?.state, connection.available, onConnected, onError])
   const cancel = async (close: boolean) => {
     setPending("cancel")
     setError(undefined)
@@ -227,7 +246,7 @@ export function ProviderSubscription({
           {pending === "login" || running ? (
             <p role="status">
               {pending === "login"
-                ? "Starting sign-in…"
+                ? "Checking the local account…"
                 : "Waiting for browser sign-in…"}
             </p>
           ) : connection.available ? (
@@ -237,8 +256,9 @@ export function ProviderSubscription({
             </p>
           ) : (
             <p className="provider-field-hint">
-              Sign in with your {connection.name} subscription. Yakitori uses
-              the official CLI to open the browser and complete sign-in.
+              Yakitori uses the local {connection.name} credential file first.
+              If sign-in is needed, the official CLI opens the browser. Return
+              to Yakitori after completing sign-in.
             </p>
           )}
           {running && connection.login?.url ? (
@@ -293,9 +313,9 @@ export function ProviderSubscription({
               <Button
                 type="button"
                 disabled={pending !== undefined}
-                onClick={() => void signIn()}
+                onClick={() => void signIn(connection.available)}
               >
-                {connection.available ? "Sign in again" : "Sign in"}
+                {connection.available ? "Sign in again" : "Connect account"}
               </Button>
             )}
           </div>

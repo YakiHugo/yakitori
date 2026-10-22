@@ -79,8 +79,10 @@ pnpm dev
 
 Both `pnpm dev:server` and the desktop shell load a gitignored `.env` from the
 checkout root. Copy `.env.example` to `.env` and fill in only the provider
-credentials you use; real process environment variables always override the
-file.
+credentials you explicitly bind to an account; real process environment
+variables always override the file. Keys in the environment do not create
+accounts. Add accounts in Settings → Providers → Accounts, then choose a model
+in the composer. An empty installation starts with account setup available.
 
 | Name | Purpose |
 | --- | --- |
@@ -90,14 +92,14 @@ file.
 | `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when present) |
 | `YAKITORI_ASSET_BASE_URL` | Optional externally accessible asset route base, including any deployment path prefix |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
-| `YAKITORI_PROVIDER` | `faux` (default), `openai`, `codex`, `anthropic`, `grok`, or `kimi` |
+| `YAKITORI_PROVIDER` | Optional initial model namespace or saved account ID; `faux` enables the scripted development transport |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, or `error` |
-| `YAKITORI_MODEL` | Required when a network provider is selected |
-| `OPENAI_API_KEY` | Configures OpenAI as the default or a next-Turn provider |
-| `ANTHROPIC_API_KEY` | Configures Anthropic as the default or a next-Turn provider |
-| `XAI_API_KEY` | Configures Grok; when unset, each Grok Turn tries the Grok CLI OIDC login |
+| `YAKITORI_MODEL` | Initial model ID, used with `YAKITORI_PROVIDER` after accounts are configured |
+| `OPENAI_API_KEY` | Available to accounts explicitly using this environment variable |
+| `ANTHROPIC_API_KEY` | Available to accounts explicitly using this environment variable |
+| `XAI_API_KEY` | Available to accounts explicitly using this environment variable |
 | `GROK_CREDENTIALS` | Grok CLI credentials file (default `~/.grok/auth.json`) |
-| `KIMI_API_KEY` | Configures Kimi with an official Kimi Code console key |
+| `KIMI_API_KEY` | Available to Kimi Code accounts explicitly using this environment variable |
 | `EXA_API_KEY` | Optional; raises the Exa free-tier quota used by `web_search` |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
@@ -115,49 +117,27 @@ include_only = ["PATH", "HOME", "MY_FLAG"]
 MY_FLAG = "1"
 ```
 
-Every provider example specifies a model so provider-default changes cannot
-silently change the model recorded on a Turn. Model slugs below are examples,
-not application defaults.
+To connect a network model, add an account with a saved key, one named
+environment variable, or the explicit subscription sign-in/import flow. A
+missing credential requires reconnecting that account. There is no fallback
+between saved keys, environment variables, and CLI login files. Existing CLI
+credentials are used only after the user connects them from Accounts.
 
-Example faux command flow, which runs immediately with host authority:
+For a scripted command flow that runs immediately with host authority:
 
 ```sh
 YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev
 ```
 
-Example GPT-6 Astra through the existing Codex CLI ChatGPT login:
+The model picker lists model identities across connected accounts. The host
+chooses an eligible account before creating a Turn and retains that account for
+its requests and retries. Account-local deployment aliases are equivalent only
+when their model configuration explicitly declares the same identity. External
+ACP engines remain separate execution owners.
 
-```sh
-YAKITORI_PROVIDER=codex YAKITORI_MODEL=gpt-6-astra pnpm start:desktop
-```
-
-Example GPT-6 Astra through OpenAI Responses with an API key:
-
-```sh
-YAKITORI_PROVIDER=openai YAKITORI_MODEL=gpt-6-astra OPENAI_API_KEY=… pnpm dev
-```
-
-Example Anthropic Messages:
-
-```sh
-YAKITORI_PROVIDER=anthropic YAKITORI_MODEL=claude-sonnet-4-20250514 ANTHROPIC_API_KEY=… pnpm dev
-```
-
-Example Grok through its OpenAI-Responses-compatible API. Without
-`XAI_API_KEY`, Yakitori reads the official Grok CLI OIDC login. This is an
-undocumented subscription path for testing only and may break or be revoked.
-When the login expires, run `grok` and sign in again:
-
-```sh
-YAKITORI_PROVIDER=grok YAKITORI_MODEL=grok-4.5 pnpm dev
-```
-
-Example Kimi Code subscription using an official API key from the Kimi Code
-console (`sk-kimi-…`):
-
-```sh
-YAKITORI_PROVIDER=kimi YAKITORI_MODEL=kimi-for-coding KIMI_API_KEY=… pnpm dev
-```
+This account model intentionally replaces automatic provider registration.
+Older configurations that relied on environment detection or a provider's name
+must be recreated with an explicit service and authentication source.
 
 Never commit API key values. `pnpm test` and `pnpm check` never require network
 access or credentials.

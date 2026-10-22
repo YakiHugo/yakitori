@@ -488,3 +488,33 @@ function deferred<T>(): {
   })
   return { promise, resolve }
 }
+
+it("revalidates a persisted catalog when the discovery protocol version changes", async () => {
+  const writes: unknown[] = []
+  const manager = createDiscoveringModelsManager({
+    provider: "codex",
+    identity: async () => "account",
+    catalogVersion: "new-protocol",
+    discover: async () => [{ id: "new-coder" }],
+    cacheStore: {
+      load: async () => ({
+        identity: "account",
+        fetchedAt: Date.now(),
+        catalogVersion: "old-protocol",
+        models: [{ id: "old-coder" }],
+      }),
+      save: async (entry) => {
+        writes.push(entry)
+      },
+    },
+  })
+  expect((await manager.listModels()).map((m) => m.model)).toEqual([
+    "new-coder",
+  ])
+  expect(writes).toEqual([
+    expect.objectContaining({
+      catalogVersion: "new-protocol",
+      models: [{ id: "new-coder" }],
+    }),
+  ])
+})

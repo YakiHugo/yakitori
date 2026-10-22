@@ -207,6 +207,9 @@ export function createProviderRegistry(
     }
     return {
       models: turnModels,
+      ...(session.serviceId === undefined
+        ? {}
+        : { serviceId: session.serviceId }),
       wireApi: entry.provider.info.wireApi,
       remoteCompaction: session.remoteCompaction ?? false,
       nativePdf: entry.provider.info.capabilities.nativePdf === true,

@@ -51,15 +51,16 @@ import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
-export type AnthropicProviderOptions = {
-  readonly apiKey: string
-  readonly model: string
-  readonly client?: Anthropic
+export type AnthropicProviderOptions = Readonly<{
+  apiKey: string
+  model: string
+  client?: Anthropic
   // Compatible endpoints (e.g. Kimi Code at https://api.kimi.com/coding/v1)
   // override the default and may require extra identity headers.
-  readonly baseURL?: string
-  readonly defaultHeaders?: Record<string, string>
-}
+  baseURL?: string
+  defaultHeaders?: Record<string, string | null>
+  profile?: "generic" | "anthropic" | "kimi-code"
+}>
 
 export function createAnthropicProvider(
   options: AnthropicProviderOptions,
@@ -112,6 +113,12 @@ function anthropicTransport(
       request,
       options.baseURL ?? "https://api.anthropic.com",
       upload,
+      options.profile ??
+        (URL.parse(
+          client.baseURL ?? options.baseURL ?? "https://api.anthropic.com",
+        )?.origin === "https://api.anthropic.com"
+          ? "anthropic"
+          : "generic"),
     )
   return {
     stream,
@@ -127,6 +134,7 @@ async function* streamAnthropic(
   request: ModelRequest,
   fallbackBaseURL: string,
   upload?: ReturnType<typeof createFileUploadCache>,
+  profile: "generic" | "anthropic" | "kimi-code" = "generic",
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield { type: "cancelled" }
@@ -152,9 +160,7 @@ async function* streamAnthropic(
   try {
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "anthropic"
-    const explicitPromptCaching =
-      request.target.provider === "anthropic" ||
-      request.target.provider === "kimi"
+    const explicitPromptCaching = profile !== "generic"
     if (
       request.tools.some(
         (tool) =>
@@ -175,9 +181,7 @@ async function* streamAnthropic(
     // Kimi's Anthropic-compatible coding endpoint. Kimi boolean-thinking
     // models take "on"/"off": "off" maps to thinking.disabled, "on" is the
     // endpoint default and sends nothing; real levels use the effort beta.
-    const effort = EFFORT_BETA_PROVIDERS.has(request.target.provider)
-      ? request.target.effort
-      : undefined
+    const effort = profile !== "generic" ? request.target.effort : undefined
     const effortLevel =
       effort === undefined || effort === "on" || effort === "off"
         ? undefined
@@ -185,7 +189,7 @@ async function* streamAnthropic(
     const thinking =
       effort === "off"
         ? ({ type: "disabled" } as const)
-        : request.target.provider === "anthropic" &&
+        : profile === "anthropic" &&
             supportsAdaptiveThinking(request.target.model || defaultModel)
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
@@ -1279,12 +1283,6 @@ function terminalFailure(
     cause: error,
   }
 }
-
-// Providers whose Anthropic-compatible endpoint accepts the effort beta.
-const EFFORT_BETA_PROVIDERS: ReadonlySet<string> = new Set([
-  "anthropic",
-  "kimi",
-])
 
 // Mid-stream SSE error events carry no HTTP status; these error types are the
 // transient ones worth retrying.

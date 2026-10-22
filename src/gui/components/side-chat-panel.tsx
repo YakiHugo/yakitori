@@ -24,7 +24,7 @@ import {
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
-  normalizeKimiModelSelection,
+  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../store/app-store.ts"
@@ -72,7 +72,7 @@ export function SideChatPanel({
   const [stopping, setStopping] = useState(false)
   const [selection, setSelection] = useState<ModelSelection | undefined>(() => {
     const state = useAppStore.getState()
-    return normalizeKimiModelSelection(
+    return normalizeModelSelection(
       resolveEffectiveModel({
         sessionCurrent:
           tab.sourceSessionId === undefined
@@ -693,7 +693,7 @@ export function SideChatPanel({
                 const state = useAppStore.getState()
                 setSelection(
                   next ??
-                    normalizeKimiModelSelection(
+                    normalizeModelSelection(
                       resolveEffectiveModel({
                         sessionCurrent: undefined,
                         userPreference: state.userPreference,

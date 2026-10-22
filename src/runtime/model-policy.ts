@@ -20,6 +20,5 @@ export function modelVisibleByDefault(
       /^(gpt-|chatgpt-|o[1-9](?:-|$)|codex-)/.test(model) &&
       !/-(audio|realtime|image|transcribe|tts)(-|$)/.test(model)
     )
-  if (provider === "grok") return !/^grok-imagine(?:-|$)/.test(model)
   return true
 }

@@ -7,6 +7,7 @@ export type {
 
 import { requireInstructionProfileId } from "../runtime/model-catalog.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
+import { providerServices } from "../runtime/provider-services.ts"
 import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { ConfigurationError } from "./config-errors.ts"
 
@@ -20,12 +21,10 @@ export function requireProviderId(value: unknown): string {
     typeof value !== "string" ||
     !/^[a-z][a-z0-9_-]*$/.test(value) ||
     value.startsWith("chatgpt-") ||
-    ["__proto__", "constructor", "prototype", "faux", "codex", "kimi"].includes(
-      value,
-    )
+    ["__proto__", "constructor", "prototype", "faux", "codex"].includes(value)
   ) {
     throw new ConfigurationError(
-      "Provider id must start with a lowercase letter and contain only lowercase letters, numbers, underscores or hyphens. faux, codex, kimi and the chatgpt- prefix are reserved.",
+      "Provider id must start with a lowercase letter and contain only lowercase letters, numbers, underscores or hyphens. faux, codex and the chatgpt- prefix are reserved.",
     )
   }
   return value
@@ -73,16 +72,52 @@ export function requireProviderConfiguration(
       : requireString(record.envKey, "envKey")
   if (envKey !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey))
     throw new ConfigurationError("envKey must be an environment variable name.")
+  const authentication = record.authentication ?? "stored"
+  if (
+    !["stored", "environment", "none", "codex_cli", "grok_cli"].includes(
+      String(authentication),
+    )
+  )
+    throw new ConfigurationError("Unknown account authentication source.")
+  if (authentication === "environment" && envKey === undefined)
+    throw new ConfigurationError("Environment authentication requires envKey.")
+  const external =
+    authentication === "codex_cli" || authentication === "grok_cli"
+  const credentialPath = external
+    ? requireString(record.credentialPath, "credentialPath")
+    : undefined
+  const credentialOwner = external
+    ? requireString(record.credentialOwner, "credentialOwner")
+    : undefined
+  if (
+    external &&
+    (wireApi !== "openai_responses" ||
+      baseURL !==
+        (authentication === "codex_cli"
+          ? "https://chatgpt.com/backend-api/codex"
+          : "https://api.x.ai/v1"))
+  )
+    throw new ConfigurationError(
+      "CLI authentication must use its documented service endpoint and protocol.",
+    )
   const preset =
     record.preset === undefined
       ? undefined
       : requireString(record.preset, "preset")
+  const service =
+    record.service === undefined
+      ? "generic"
+      : requireString(record.service, "service")
+  if (
+    service !== "generic" &&
+    service !== "codex" &&
+    !providerServices.some((entry) => entry.id === service)
+  )
+    throw new ConfigurationError("Unknown account service.")
   if (!Array.isArray(record.models))
     throw new ConfigurationError(
       "models must be an array; leave it empty to discover models.",
     )
-  if (record.noKey !== undefined && typeof record.noKey !== "boolean")
-    throw new ConfigurationError("noKey must be a boolean.")
   if (record.enabled !== undefined && typeof record.enabled !== "boolean")
     throw new ConfigurationError("enabled must be a boolean.")
   if (
@@ -100,12 +135,18 @@ export function requireProviderConfiguration(
   const models = requireConfiguredModels(record.models)
   return {
     name,
+    service,
     wireApi,
     baseURL,
+    authentication: authentication as NonNullable<
+      ProviderConfiguration["authentication"]
+    >,
+    ...(credentialPath === undefined || credentialOwner === undefined
+      ? {}
+      : { credentialPath, credentialOwner }),
     models,
     ...(envKey === undefined ? {} : { envKey }),
     ...(preset === undefined ? {} : { preset }),
-    ...(record.noKey === undefined ? {} : { noKey: record.noKey }),
     ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
     ...(record.requestWarmup === undefined
       ? {}
@@ -122,6 +163,21 @@ export function requireConfiguredModels(
   const models = value.map((value): ConfiguredModel => {
     const model = requireRecord(value, "Model")
     const id = requireString(model.id, "Model id")
+    let identity: ConfiguredModel["identity"]
+    if (model.identity !== undefined) {
+      const record = requireRecord(model.identity, "Model identity")
+      identity = {
+        namespace: requireString(record.namespace, "identity.namespace"),
+        model: requireString(record.model, "identity.model"),
+      }
+    }
+    if (
+      model.kind !== undefined &&
+      !["chat", "image", "video", "other"].includes(String(model.kind))
+    )
+      throw new ConfigurationError(
+        "Model kind must be chat, image, video or other.",
+      )
     if (
       model.defaultVisible !== undefined &&
       typeof model.defaultVisible !== "boolean"
@@ -254,6 +310,10 @@ export function requireConfiguredModels(
     }
     return {
       id,
+      ...(identity === undefined ? {} : { identity }),
+      ...(model.kind === undefined
+        ? {}
+        : { kind: model.kind as NonNullable<ConfiguredModel["kind"]> }),
       ...(model.defaultVisible === undefined
         ? {}
         : { defaultVisible: model.defaultVisible as boolean }),
@@ -321,9 +381,12 @@ export function providersFromConfig(
                   ? "gemini_generate_content"
                   : backend,
         envKey: record.env_key,
+        authentication: record.authentication,
+        credentialPath: record.credential_path,
+        credentialOwner: record.credential_owner,
         preset: record.preset,
+        service: record.service,
         models: record.models,
-        noKey: record.no_key,
         enabled: record.enabled,
         requestWarmup: record.request_warmup,
       })
@@ -336,6 +399,13 @@ export function providersFromConfig(
         !/^key_[a-zA-Z0-9-]+$/.test(credentialRef)
       )
         throw new ConfigurationError("Invalid provider credential_ref.")
+      if (
+        credentialRef !== undefined &&
+        configuration.authentication !== "stored"
+      )
+        throw new ConfigurationError(
+          "Only saved-key accounts may reference a stored credential.",
+        )
       if (record.api_key !== undefined)
         throw new ConfigurationError(
           "Use env_key or save the API key through Providers settings instead of placing api_key in config.toml.",
@@ -356,6 +426,14 @@ export function providerConfigValue(
 ): Record<string, unknown> {
   return {
     name: configuration.name,
+    service: configuration.service ?? "generic",
+    authentication: configuration.authentication ?? "stored",
+    ...(configuration.credentialPath === undefined
+      ? {}
+      : {
+          credential_path: configuration.credentialPath,
+          credential_owner: configuration.credentialOwner,
+        }),
     base_url: configuration.baseURL,
     api_backend:
       configuration.wireApi === "openai_responses"
@@ -366,9 +444,6 @@ export function providerConfigValue(
             ? "generate_content"
             : "chat_completions",
     models: configuration.models,
-    ...(configuration.noKey === undefined
-      ? {}
-      : { no_key: configuration.noKey }),
     ...(configuration.enabled === undefined
       ? {}
       : { enabled: configuration.enabled }),

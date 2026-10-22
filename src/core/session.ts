@@ -57,6 +57,11 @@ import {
   type RolloutAppend,
   type SessionRolloutStore,
 } from "./thread-store.ts"
+import {
+  inputPurpose,
+  inputSource,
+  turnInputSubmissionMetadata,
+} from "./turn-input-metadata.ts"
 import { createUserInput, inputContentToModelMessage } from "./user-input.ts"
 
 export type { TurnCompletion } from "../kernel/events.ts"
@@ -1798,26 +1803,6 @@ export class Session {
   }
 }
 
-export function inputPurpose(input: TurnInput): InputPurpose {
-  return (
-    input.purpose ??
-    (input.goalId !== undefined || input.source === "agent"
-      ? "task"
-      : "message")
-  )
-}
-
-export function inputSource(input: TurnInput): InputSource {
-  return (
-    input.source ??
-    (input.provenance !== undefined
-      ? "agent"
-      : input.goalId === undefined
-        ? "human"
-        : "runtime")
-  )
-}
-
 export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
   let status: AgentStatus = "pending_init"
   const responseItems = stored.rollout.flatMap((record) =>
@@ -1903,32 +1888,6 @@ function buildInputItem(
       input.provenance,
     ),
     ...submissionMetadata,
-  }
-}
-
-function turnInputSubmissionMetadata(
-  input: TurnInput,
-): Pick<ResponseItemEnvelope, "submissionMetadata"> {
-  return {
-    submissionMetadata: {
-      source: inputSource(input),
-      purpose: inputPurpose(input),
-      ...(inputSource(input) === "human" &&
-      inputPurpose(input) !== "question_answer"
-        ? {}
-        : { requestFingerprint: fingerprintTurnInput(input) }),
-      content: input.content,
-      ...(input.provenance === undefined
-        ? {}
-        : { provenance: input.provenance }),
-      ...(input.modelSelection === undefined
-        ? {}
-        : { modelSelection: input.modelSelection }),
-      ...(input.parentInputId === undefined
-        ? {}
-        : { parentInputId: input.parentInputId }),
-      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-    },
   }
 }
 

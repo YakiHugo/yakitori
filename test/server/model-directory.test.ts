@@ -9,7 +9,7 @@ describe("model directory", () => {
   it("is case-insensitive and returns no speculative unknown models", async () => {
     const directory = createModelDirectory()
 
-    const kimi = await directory.listModels("KIMI")
+    const kimi = await directory.listModels("KIMI-CODE")
     expect(kimi).toHaveLength(4)
     expect(kimi.map((model) => model.effortStyle)).toEqual([
       "levels",

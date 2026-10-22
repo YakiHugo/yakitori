@@ -131,9 +131,15 @@ export const providerMethods: readonly RpcMethodDefinition[] = [
       const record = requireRecord(params)
       if (typeof record.id !== "string")
         throw new ConfigurationError("Subscription id is required.")
+      if (
+        record.reauthenticate !== undefined &&
+        typeof record.reauthenticate !== "boolean"
+      )
+        throw new ConfigurationError("reauthenticate must be a boolean.")
       return {
         result: await requireService(context.providerConfiguration).login(
           record.id,
+          record.reauthenticate,
         ),
       }
     },

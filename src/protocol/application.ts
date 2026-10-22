@@ -214,7 +214,8 @@ export type ApiProviderSummary = Readonly<{
   models: readonly ApiProviderModel[]
 }>
 
-export type ApiSubscriptionProvider = "codex" | "grok" | "kimi"
+// An account ID, not a vendor name. Usage belongs to the account actually used.
+export type ApiSubscriptionProvider = string
 
 export type ApiSubscriptionSummary = Readonly<{
   provider: ApiSubscriptionProvider
@@ -241,12 +242,14 @@ export type ApiUserModelPreference = {
   readonly speed?: string
 }
 
-export type ApiListProvidersResponse = {
-  readonly providers: readonly ApiProviderSummary[]
-  readonly defaultProvider: string
-  readonly defaultModel: string
-  readonly userPreference?: ApiUserModelPreference
-}
+export type ApiListProvidersResponse = Readonly<{
+  // Physical access accounts are managed separately from model namespaces.
+  accounts: readonly ApiProviderSummary[]
+  providers: readonly ApiProviderSummary[]
+  defaultProvider: string
+  defaultModel: string
+  userPreference?: ApiUserModelPreference
+}>
 
 export type ApiUpdateUserModelPreferenceResponse = {
   readonly userPreference: ApiUserModelPreference

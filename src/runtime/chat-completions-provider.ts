@@ -45,7 +45,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
   model: string
   baseURL: string
-  defaultHeaders?: Record<string, string>
+  defaultHeaders?: Record<string, string | null>
   flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral"
 }>
 

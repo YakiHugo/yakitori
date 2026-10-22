@@ -3,18 +3,11 @@ import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
 } from "../../protocol/application.ts"
-import { useAppStore } from "../store/app-store.ts"
-
-const subscriptionProviders = [
-  { provider: "codex", displayName: "Codex" },
-  { provider: "grok", displayName: "Grok" },
-  { provider: "kimi", displayName: "Kimi" },
-] as const satisfies readonly Readonly<{
-  provider: ApiSubscriptionProvider
-  displayName: string
-}>[]
+import { useAppStore, type SubscriptionUsageState } from "../store/app-store.ts"
 
 export function SubscriptionsSection() {
+  const states = useAppStore((state) => state.subscriptionsByProvider)
+  const error = useAppStore((state) => state.subscriptionsError)
   return (
     <>
       <div className="subscription-intro">
@@ -23,8 +16,15 @@ export function SubscriptionsSection() {
       </div>
 
       <div className="subscription-list">
-        {subscriptionProviders.map((provider) => (
-          <ProviderUsageCard key={provider.provider} {...provider} />
+        {error ? <p role="alert">{error}</p> : null}
+        {Object.keys(states).map((provider) => (
+          <ProviderUsageCard
+            key={provider}
+            provider={provider}
+            displayName={
+              states[provider]?.subscription?.displayName ?? "Account usage"
+            }
+          />
         ))}
       </div>
     </>
@@ -39,6 +39,25 @@ function ProviderUsageCard({
   displayName: string
 }>) {
   const state = useAppStore((store) => store.subscriptionsByProvider[provider])
+  if (!state) return null
+  return (
+    <SubscriptionUsageCard
+      provider={provider}
+      displayName={displayName}
+      state={state}
+    />
+  )
+}
+
+export function SubscriptionUsageCard({
+  provider,
+  displayName,
+  state,
+}: Readonly<{
+  provider: string
+  displayName: string
+  state: SubscriptionUsageState
+}>) {
   const summary = state.subscription
   const firstLoad = summary === undefined
 

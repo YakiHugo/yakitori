@@ -1,16 +1,18 @@
 import type { ConfiguredModel } from "../protocol/providers.ts"
-import { modelVisibleByDefault } from "./model-policy.ts"
+import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
 import {
-  catalogModelCapacity,
   type CatalogModel,
+  catalogModelCapacity,
   listCatalogModels,
-  type ModelCapacity,
   type ModelCapabilities,
+  type ModelCapacity,
   type ModelToolOutputTruncation,
   type ResolvedModel,
   resolveModel,
   validateModelSelection,
 } from "./model-catalog.ts"
+import { isChatModel, NonChatModelError } from "./model-kind.ts"
+import { modelVisibleByDefault } from "./model-policy.ts"
 
 export type ModelSelectionInput = Readonly<{
   provider: string
@@ -54,6 +56,7 @@ export type DiscoveredModel = Omit<
 // the same models_cache.json per identity). Expired entries can serve while
 // revalidating; entries for a different identity are evicted before use.
 export type PersistedModelsCache = Readonly<{
+  catalogVersion?: string
   identity: string | undefined
   fetchedAt: number
   models: readonly DiscoveredModel[]
@@ -75,13 +78,18 @@ export type ModelsCacheStore = {
 // in the first sampled prompt.
 export function createDiscoveringModelsManager(input: {
   provider: string
+  catalogProvider?: string
   discover(): Promise<readonly DiscoveredModel[]>
   identity(): Promise<string | undefined>
   cacheStore?: ModelsCacheStore
+  catalogVersion?: string
   now?: () => number
   ttlMs?: number
 }): ModelsManager {
-  const fallback = createStaticModelsManager(input.provider)
+  const fallback = createStaticModelsManager(
+    input.provider,
+    input.catalogProvider,
+  )
   const listeners = new Set<() => void>()
   let error: string | undefined
   const now = input.now ?? Date.now
@@ -116,6 +124,7 @@ export function createDiscoveringModelsManager(input: {
       // readers await the same load before any of them can refresh.
       const persisted = await input.cacheStore.load().catch(() => undefined)
       if (persisted === undefined) return
+      if (persisted.catalogVersion !== input.catalogVersion) return
       cache = {
         identity: persisted.identity,
         fetchedAt: persisted.fetchedAt,
@@ -156,6 +165,9 @@ export function createDiscoveringModelsManager(input: {
           identity: before,
           fetchedAt,
           models,
+          ...(input.catalogVersion === undefined
+            ? {}
+            : { catalogVersion: input.catalogVersion }),
         }),
       )
       .catch(() => undefined)
@@ -183,7 +195,12 @@ export function createDiscoveringModelsManager(input: {
     }
     if (cache === undefined || options?.force) await (await task)?.saveTask
   }
-  const discovered = (model: string) => cache?.models.get(model.toLowerCase())
+  const discovered = (model: string) => {
+    const entry = cache?.models.get(model.toLowerCase())
+    if (entry && !isChatModel(entry))
+      throw new NonChatModelError(input.provider, model)
+    return entry
+  }
 
   return {
     provider: input.provider,
@@ -205,73 +222,77 @@ export function createDiscoveringModelsManager(input: {
         staticModels.map((model) => [model.model.toLowerCase(), model]),
       )
       return [
-        ...[...(cache?.models.values() ?? [])].map((model) => {
-          const base = staticById.get(model.id.toLowerCase())
-          const resolved = {
-            ...(base ??
-              fallback.resolve({
-                provider: input.provider,
-                model: model.id,
-              })),
-            model: model.id,
-            visible: modelVisibleByDefault(
-              input.provider,
-              model.id,
-              model.defaultVisible,
-            ),
-            ...(model.contextWindowScope === undefined
-              ? {}
-              : { contextWindowScope: model.contextWindowScope }),
-            ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
-            ...(model.imageDetailModes === undefined
-              ? {}
-              : { imageDetailModes: model.imageDetailModes }),
-            ...(model.contextWindowTokens === undefined
-              ? {}
-              : { contextWindowTokens: model.contextWindowTokens }),
-            ...(model.maxContextWindowTokens === undefined
-              ? {}
-              : { maxContextWindowTokens: model.maxContextWindowTokens }),
-            ...(model.maxOutputTokens === undefined
-              ? {}
-              : { maxOutputTokens: model.maxOutputTokens }),
-            ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
-            ...(model.efforts === undefined
-              ? {}
-              : model.efforts.length === 0
-                ? { effortStyle: "none" as const, efforts: [] }
-                : {
-                    efforts: model.efforts,
-                    effortStyle: "levels" as const,
-                    ...(model.defaultEffort !== undefined &&
-                    model.efforts.includes(model.defaultEffort)
-                      ? { defaultEffort: model.defaultEffort }
-                      : {}),
-                  }),
-            ...(model.inputModalities === undefined
-              ? {}
-              : { inputModalities: model.inputModalities }),
-            ...model.capabilities,
-            ...(model.toolOutputTruncation === undefined
-              ? {}
-              : { toolOutputTruncation: model.toolOutputTruncation }),
-            ...(model.displayName === undefined
-              ? {}
-              : { displayName: model.displayName }),
-            ...(model.autoCompactTokenLimit === undefined
-              ? {}
-              : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
-            ...(model.compactionHash === undefined
-              ? {}
-              : { compactionHash: model.compactionHash }),
-          }
-          if (
-            model.capabilities !== undefined &&
-            model.capabilities.applyPatchToolType === undefined
-          )
-            delete resolved.applyPatchToolType
-          return resolved
-        }),
+        ...[...(cache?.models.values() ?? [])]
+          .filter(isChatModel)
+          .map((model) => {
+            const base = staticById.get(model.id.toLowerCase())
+            const resolved = {
+              ...(base ??
+                fallback.resolve({
+                  provider: input.provider,
+                  model: model.id,
+                })),
+              model: model.id,
+              visible: modelVisibleByDefault(
+                input.catalogProvider ?? input.provider,
+                model.id,
+                model.defaultVisible,
+              ),
+              ...(model.contextWindowScope === undefined
+                ? {}
+                : { contextWindowScope: model.contextWindowScope }),
+              ...(model.pricing === undefined
+                ? {}
+                : { pricing: model.pricing }),
+              ...(model.imageDetailModes === undefined
+                ? {}
+                : { imageDetailModes: model.imageDetailModes }),
+              ...(model.contextWindowTokens === undefined
+                ? {}
+                : { contextWindowTokens: model.contextWindowTokens }),
+              ...(model.maxContextWindowTokens === undefined
+                ? {}
+                : { maxContextWindowTokens: model.maxContextWindowTokens }),
+              ...(model.maxOutputTokens === undefined
+                ? {}
+                : { maxOutputTokens: model.maxOutputTokens }),
+              ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
+              ...(model.efforts === undefined
+                ? {}
+                : model.efforts.length === 0
+                  ? { effortStyle: "none" as const, efforts: [] }
+                  : {
+                      efforts: model.efforts,
+                      effortStyle: "levels" as const,
+                      ...(model.defaultEffort !== undefined &&
+                      model.efforts.includes(model.defaultEffort)
+                        ? { defaultEffort: model.defaultEffort }
+                        : {}),
+                    }),
+              ...(model.inputModalities === undefined
+                ? {}
+                : { inputModalities: model.inputModalities }),
+              ...model.capabilities,
+              ...(model.toolOutputTruncation === undefined
+                ? {}
+                : { toolOutputTruncation: model.toolOutputTruncation }),
+              ...(model.displayName === undefined
+                ? {}
+                : { displayName: model.displayName }),
+              ...(model.autoCompactTokenLimit === undefined
+                ? {}
+                : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+              ...(model.compactionHash === undefined
+                ? {}
+                : { compactionHash: model.compactionHash }),
+            }
+            if (
+              model.capabilities !== undefined &&
+              model.capabilities.applyPatchToolType === undefined
+            )
+              delete resolved.applyPatchToolType
+            return resolved
+          }),
         ...(cache === undefined ? staticModels : []),
       ].filter((model) => options?.includeHidden || model.visible !== false)
     },
@@ -347,35 +368,46 @@ export function createDiscoveringModelsManager(input: {
           model.effectiveContextWindowPercent ?? 100,
         contextWindowScope:
           model.contextWindowScope ??
-          (input.provider === "codex" ? "input" : "total"),
+          ((input.catalogProvider ?? input.provider) === "codex"
+            ? "input"
+            : "total"),
       }
     },
   }
 }
 
-export function createStaticModelsManager(provider: string): ModelsManager {
+export function createStaticModelsManager(
+  provider: string,
+  catalogProvider = provider,
+): ModelsManager {
   return {
     provider,
     async refresh() {},
     async listModels(options) {
-      return listCatalogModels(provider)
+      return listCatalogModels(catalogProvider)
         .map((model) => ({
           ...model,
-          visible: modelVisibleByDefault(provider, model.model),
+          visible: modelVisibleByDefault(catalogProvider, model.model),
         }))
         .filter((model) => options?.includeHidden || model.visible)
     },
     resolve(selection) {
       requireProvider(provider, selection.provider)
-      return resolveModel(selection)
+      return {
+        ...resolveModel({ ...selection, provider: catalogProvider }),
+        ...(catalogProvider === "anthropic" || catalogProvider === "kimi-code"
+          ? { defaultOutputTokens: DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS }
+          : {}),
+        provider,
+      }
     },
     validate(selection) {
       requireProvider(provider, selection.provider)
-      validateModelSelection(selection)
+      validateModelSelection({ ...selection, provider: catalogProvider })
     },
     capacity(selection) {
       requireProvider(provider, selection.provider)
-      return catalogModelCapacity(selection)
+      return catalogModelCapacity({ ...selection, provider: catalogProvider })
     },
   }
 }

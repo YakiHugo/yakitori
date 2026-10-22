@@ -261,8 +261,8 @@ describe("session configuration", () => {
 
   it.each([
     { provider: "anthropic", model: "unknown-claude" },
-    { provider: "kimi", model: "k3" },
-    { provider: "kimi", model: "unknown-kimi" },
+    { provider: "kimi-code", model: "k3" },
+    { provider: "kimi-code", model: "unknown-kimi" },
   ])("requests the application Messages budget for $provider/$model without inventing a model capability", ({
     provider,
     model,
@@ -274,7 +274,7 @@ describe("session configuration", () => {
       approvalPolicy: "always_approve",
     })
     expect(configuration.maxOutputTokens).toBe(32_000)
-    expect(configuration.modelInfo.defaultOutputTokens).toBeUndefined()
+    expect(configuration.modelInfo.defaultOutputTokens).toBe(32_000)
     expect(configuration.modelInfo.maxOutputTokens).toBeUndefined()
     if (model === "k3") {
       expect(configuration.modelCapacity?.inputContextLimitTokens).toBe(
@@ -286,7 +286,7 @@ describe("session configuration", () => {
   it("resolves provider transport overrides from the persisted Turn snapshot", () => {
     const session = SessionConfiguration.create({
       promptCacheKey: "session-cache",
-      selection: { provider: "kimi", model: "k3" },
+      selection: { provider: "kimi-code", model: "k3" },
       workspaceRoot: "/workspace",
       enabledTools: [],
       approvalPolicy: "always_approve",
@@ -294,7 +294,7 @@ describe("session configuration", () => {
         maxAttempts: 4,
         streamIdleTimeoutMs: 300_000,
         providers: {
-          kimi: { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
+          "kimi-code": { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
         },
       },
     })
@@ -303,11 +303,12 @@ describe("session configuration", () => {
       maxAttempts: 4,
       streamIdleTimeoutMs: 300_000,
       providers: {
-        kimi: { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
+        "kimi-code": { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
       },
     })
     expect(
-      session.resolveStep({ provider: "kimi", model: "k3" }).modelRequestPolicy,
+      session.resolveStep({ provider: "kimi-code", model: "k3" })
+        .modelRequestPolicy,
     ).toEqual({ maxAttempts: 6, streamIdleTimeoutMs: 420_000 })
     expect(
       session.resolveStep({ provider: "openai", model: "gpt-5" })
@@ -316,16 +317,16 @@ describe("session configuration", () => {
   })
 
   it.each([
-    { provider: "kimi", model: "k3", window: 1048576, limit: 943718 },
-    { provider: "kimi", model: "k3-256k", window: 262144, limit: 235929 },
+    { provider: "kimi-code", model: "k3", window: 1048576, limit: 943718 },
+    { provider: "kimi-code", model: "k3-256k", window: 262144, limit: 235929 },
     {
-      provider: "kimi",
+      provider: "kimi-code",
       model: "kimi-for-coding",
       window: 1048576,
       limit: 943718,
     },
     {
-      provider: "kimi",
+      provider: "kimi-code",
       model: "kimi-for-coding-highspeed",
       window: 262144,
       limit: 235929,
@@ -354,7 +355,7 @@ describe("session configuration", () => {
     const step = session.resolveStep(selection, models)
     expect(step.target.instructionProfileId).toBe(model)
     expect(step.baseInstructions.text).toContain(
-      provider === "kimi"
+      provider === "kimi-code"
         ? "You are Kimi Code CLI"
         : `You are Grok ${model.split("-")[1]}`,
     )

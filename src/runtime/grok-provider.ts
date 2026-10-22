@@ -1,8 +1,6 @@
 import { Agent as UndiciAgent } from "undici"
 import {
   GROK_API_BASE_URL,
-  resolveGrokAccessToken,
-  resolveGrokAccountIdentity,
   resolveGrokModelCredentials,
 } from "./grok-credentials.ts"
 import { discoverOpenAiCompatibleModels } from "./model-discovery.ts"
@@ -15,14 +13,21 @@ import { createFileModelsCacheStore } from "./models-cache-store.ts"
 import { createDiscoveringModelsManager } from "./models-manager.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
 
-export function createGrokProvider(modelsCacheDir: string): ModelProvider {
-  // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
-  // tokens expire, so resolve per model call rather than freezing one token at
-  // application startup. The same lazy stream supports primary and switched
-  // Grok Turns.
+export function createGrokProvider(
+  modelsCacheDir: string,
+  account: {
+    id: string
+    credentialsPath: string
+    ownerIdentity: string
+  },
+): ModelProvider {
+  const provider = account.id
+  // Resolve the bound CLI source per call so token renewal stays visible, while
+  // its authenticated owner must remain the account selected for this Turn.
   return createModelProvider({
     info: {
-      id: "grok",
+      id: provider,
+      serviceId: "xai",
       wireApi: "openai_responses",
       capabilities: { remoteCompaction: false, nativePdf: false },
     },
@@ -41,43 +46,42 @@ export function createGrokProvider(modelsCacheDir: string): ModelProvider {
           let apiKey: string
           let ownerIdentity: string
           try {
-            const envKey = process.env.XAI_API_KEY
-            if (envKey !== undefined) {
-              apiKey = envKey
-              ownerIdentity = `api_key:${envKey}`
-            } else {
-              const credentials = await resolveGrokModelCredentials()
-              apiKey = credentials.accessToken
-              ownerIdentity = credentials.ownerIdentity
-            }
+            const credentials = await resolveGrokModelCredentials({
+              path: account.credentialsPath,
+            })
+            apiKey = credentials.accessToken
+            ownerIdentity = credentials.ownerIdentity
           } catch (cause) {
             yield {
               type: "failure",
               failure: {
                 kind: "authentication",
                 stage: "request_build",
-                provider: "grok",
+                provider,
                 wireApi: "openai_responses",
                 providerCode: "grok_login_unavailable",
                 message:
-                  "Grok login is unavailable. Run `grok` and log in again, or set XAI_API_KEY, then retry.",
+                  "The selected Grok account is unavailable. Reconnect this account, then retry.",
               },
               cause,
             }
             return
           }
           const scope = createProviderContinuationScope(
-            "grok",
+            provider,
             GROK_API_BASE_URL,
             ownerIdentity,
           )
-          if (expectedOwner !== undefined && expectedOwner !== scope) {
+          if (
+            ownerIdentity !== account.ownerIdentity ||
+            (expectedOwner !== undefined && expectedOwner !== scope)
+          ) {
             yield {
               type: "failure",
               failure: {
                 kind: "authentication",
                 stage: "request_build",
-                provider: "grok",
+                provider,
                 wireApi: "openai_responses",
                 providerCode: "grok_account_changed",
                 message:
@@ -88,6 +92,7 @@ export function createGrokProvider(modelsCacheDir: string): ModelProvider {
           }
           expectedOwner = scope
           yield* createOpenAIProvider({
+            responseProfile: "grok",
             apiKey,
             model: request.target.model,
             baseURL: GROK_API_BASE_URL,
@@ -104,19 +109,37 @@ export function createGrokProvider(modelsCacheDir: string): ModelProvider {
       }
     },
     models: createDiscoveringModelsManager({
-      provider: "grok",
-      identity: () => resolveGrokAccountIdentity(),
+      provider,
+      catalogProvider: "grok",
+      catalogVersion: "model-kinds-v1",
+      identity: async () => {
+        const credentials = await resolveGrokModelCredentials({
+          path: account.credentialsPath,
+        })
+        if (credentials.ownerIdentity !== account.ownerIdentity)
+          throw new Error(
+            "The configured Grok account changed. Reconnect it before use.",
+          )
+        return account.ownerIdentity
+      },
       async discover() {
-        const accessToken =
-          process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
-        return discoverOpenAiCompatibleModels({
+        const credentials = await resolveGrokModelCredentials({
+          path: account.credentialsPath,
+        })
+        if (credentials.ownerIdentity !== account.ownerIdentity)
+          throw new Error(
+            "The configured Grok account changed during model discovery.",
+          )
+        const accessToken = credentials.accessToken
+        const models = await discoverOpenAiCompatibleModels({
           provider: "grok",
           baseUrl: GROK_API_BASE_URL,
           accessToken,
         })
+        return models.map((model) => ({ ...model, provider }))
       },
       cacheStore: createFileModelsCacheStore({
-        provider: "grok",
+        provider,
         directory: modelsCacheDir,
       }),
     }),

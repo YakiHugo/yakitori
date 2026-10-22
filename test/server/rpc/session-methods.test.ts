@@ -1,4 +1,3 @@
-import { bindExecution } from "../../support/session-execution.ts"
 import {
   mkdir,
   mkdtemp,
@@ -50,6 +49,7 @@ import {
 import { createUserConfigStore } from "../../../src/server/user-config.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
 import { inputFixture } from "../../fixtures/user-input.ts"
+import { bindExecution } from "../../support/session-execution.ts"
 import {
   initializeConnection,
   openTestConnection,
@@ -899,6 +899,7 @@ describe("project methods over a real store", () => {
 describe("provider and config methods", () => {
   it("serves provider/list from the configured catalog", async () => {
     const providers: ApiListProvidersResponse = {
+      accounts: [],
       providers: [
         {
           name: "faux",

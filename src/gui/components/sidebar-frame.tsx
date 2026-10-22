@@ -50,6 +50,7 @@ export function SidebarFrame({
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (
+        useAppStore.getState().settingsSection !== undefined ||
         (!event.metaKey && !event.ctrlKey) ||
         event.altKey ||
         event.shiftKey ||

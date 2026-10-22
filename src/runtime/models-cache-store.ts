@@ -46,6 +46,11 @@ function isPersistedModelsCache(value: unknown): value is PersistedModelsCache {
   }
   const record = value as Record<string, unknown>
   if (
+    record.catalogVersion !== undefined &&
+    typeof record.catalogVersion !== "string"
+  )
+    return false
+  if (
     typeof record.fetchedAt !== "number" ||
     !Number.isFinite(record.fetchedAt)
   )
@@ -61,6 +66,11 @@ function isPersistedModelsCache(value: unknown): value is PersistedModelsCache {
 // optional fields otherwise bypass discovery validation on a warm start.
 function isDiscoveredModel(value: unknown): value is DiscoveredModel {
   if (!isRecord(value) || typeof value.id !== "string") return false
+  if (
+    value.kind !== undefined &&
+    !["chat", "image", "video", "other"].includes(String(value.kind))
+  )
+    return false
   for (const key of ["instructions", "displayName", "compactionHash"]) {
     if (value[key] !== undefined && typeof value[key] !== "string") return false
   }

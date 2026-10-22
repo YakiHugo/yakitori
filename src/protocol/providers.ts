@@ -6,9 +6,14 @@ export type ProviderConfiguration = Readonly<{
     | "anthropic_messages"
     | "gemini_generate_content"
   baseURL: string
+  // Runtime service binding. `preset` below records only the creation template.
+  service?: string
+  // Selects exactly one credential source. Keys never fall back to another source.
+  authentication?: "stored" | "environment" | "none" | "codex_cli" | "grok_cli"
+  credentialPath?: string
+  credentialOwner?: string
   envKey?: string
   preset?: string
-  noKey?: boolean
   enabled?: boolean
   // Explicit opt-in: request preparation may have provider-reported usage.
   requestWarmup?: boolean
@@ -18,7 +23,7 @@ export type ProviderConfiguration = Readonly<{
 export type ApiConfiguredProvider = Readonly<{
   id: string
   configuration: ProviderConfiguration
-  credential: "stored" | "environment" | "missing" | "optional"
+  credential: "stored" | "environment" | "external" | "missing" | "optional"
   catalog?: Readonly<{
     models: readonly ConfiguredModel[]
     fetchedAt?: number
@@ -56,6 +61,10 @@ export type ProviderWriteInput = Readonly<{
 }>
 
 export type ConfiguredModel = Readonly<{
+  // Explicit equivalence, never inferred from a display name or an alias.
+  identity?: Readonly<{ namespace: string; model: string }>
+  // Missing means the catalog did not identify the model's output purpose.
+  kind?: "chat" | "image" | "video" | "other"
   defaultVisible?: boolean
   visible?: boolean
   id: string
@@ -97,7 +106,10 @@ export type ProviderPreset = Readonly<{
 }>
 
 // User overrides are separate from the provider's discovered catalog.
-export type ModelSettings = Omit<ConfiguredModel, "id" | "defaultVisible">
+export type ModelSettings = Omit<
+  ConfiguredModel,
+  "id" | "defaultVisible" | "kind" | "identity"
+>
 export type ProviderModelSettings = Readonly<Record<string, ModelSettings>>
 export type ModelSettingsConfiguration = Readonly<
   Record<string, ProviderModelSettings>
