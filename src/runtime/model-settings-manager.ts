@@ -6,6 +6,7 @@ import {
   requireInstructionProfileId,
   resolveModel,
 } from "./model-catalog.ts"
+import { mergeModelEfforts } from "./model-effort.ts"
 import { NonChatModelError } from "./model-kind.ts"
 import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
 
@@ -51,22 +52,8 @@ export function createModelSettingsManager(
       ...(configured.maxOutputTokens === undefined
         ? {}
         : { maxOutputTokens: configured.maxOutputTokens }),
-      ...(configured.efforts === undefined
-        ? {}
-        : { efforts: configured.efforts }),
-      ...(configured.defaultEffort === undefined
-        ? {}
-        : { defaultEffort: configured.defaultEffort }),
     }
-    if (
-      result.defaultEffort !== undefined &&
-      result.efforts !== undefined &&
-      !result.efforts.includes(result.defaultEffort)
-    ) {
-      const { defaultEffort: _, ...withoutDefault } = result
-      return withoutDefault
-    }
-    return result
+    return mergeModelEfforts(result, configured, selection.provider)
   }
   return {
     provider: source.provider,
@@ -98,19 +85,19 @@ export function createModelSettingsManager(
       return [...byId.values()]
         .map((model): CatalogModel => {
           const configured = configuration(model.model)
-          const { instructionProfileId: _, ...override } = configured ?? {}
+          const {
+            instructionProfileId: _,
+            efforts: __,
+            defaultEffort: ___,
+            ...override
+          } = configured ?? {}
           const result = {
-            ...model,
+            ...mergeModelEfforts(model, configured ?? {}, source.provider),
             ...override,
             visible: configured?.visible ?? model.visible ?? true,
           }
           if (result.efforts !== undefined) {
             result.effortStyle = result.efforts.length ? "levels" : "none"
-            if (
-              result.defaultEffort !== undefined &&
-              !result.efforts.includes(result.defaultEffort)
-            )
-              delete result.defaultEffort
           }
           return result
         })

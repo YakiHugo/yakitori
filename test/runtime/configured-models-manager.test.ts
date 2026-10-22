@@ -135,7 +135,12 @@ describe("configured models manager", () => {
     )
   })
 
-  it("lets configuration replace inherited limits and disable inherited effort controls", async () => {
+  it.each([
+    { efforts: [] },
+    { efforts: ["low"] },
+  ])("replaces inherited limits and removes defaults outside configured efforts $efforts", async ({
+    efforts,
+  }) => {
     const manager = createConfiguredModelsManager({
       provider: "work",
       catalogProvider: "openai",
@@ -145,7 +150,7 @@ describe("configured models manager", () => {
           contextWindowTokens: 100_000,
           maxOutputTokens: 4_000,
           inputModalities: ["text"],
-          efforts: [],
+          efforts,
         },
       ],
     })
@@ -154,11 +159,13 @@ describe("configured models manager", () => {
     expect(manager.resolve(selection)).toMatchObject({
       inputModalities: ["text"],
       maxOutputTokens: 4_000,
+      efforts,
     })
+    expect(manager.resolve(selection).defaultEffort).toBeUndefined()
     expect(manager.capacity(selection)?.contextWindowTokens).toBe(100_000)
     expect((await manager.listModels())[0]).toMatchObject({
-      efforts: [],
-      effortStyle: "none",
+      efforts,
+      effortStyle: efforts.length === 0 ? "none" : "levels",
     })
     expect((await manager.listModels())[0]?.defaultEffort).toBeUndefined()
     expect(() => manager.validate({ ...selection, effort: "medium" })).toThrow(

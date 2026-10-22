@@ -11,6 +11,7 @@ import {
   resolveModel,
   validateModelSelection,
 } from "./model-catalog.ts"
+import { mergeModelEfforts } from "./model-effort.ts"
 import { isChatModel, NonChatModelError } from "./model-kind.ts"
 import { modelVisibleByDefault } from "./model-policy.ts"
 
@@ -225,13 +226,17 @@ export function createDiscoveringModelsManager(input: {
         ...[...(cache?.models.values() ?? [])]
           .filter(isChatModel)
           .map((model) => {
-            const base = staticById.get(model.id.toLowerCase())
-            const resolved = {
-              ...(base ??
+            const base = mergeModelEfforts(
+              staticById.get(model.id.toLowerCase()) ??
                 fallback.resolve({
                   provider: input.provider,
                   model: model.id,
-                })),
+                }),
+              model,
+              input.provider,
+            )
+            const resolved = {
+              ...base,
               model: model.id,
               visible: modelVisibleByDefault(
                 input.catalogProvider ?? input.provider,
@@ -257,18 +262,6 @@ export function createDiscoveringModelsManager(input: {
                 ? {}
                 : { maxOutputTokens: model.maxOutputTokens }),
               ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
-              ...(model.efforts === undefined
-                ? {}
-                : model.efforts.length === 0
-                  ? { effortStyle: "none" as const, efforts: [] }
-                  : {
-                      efforts: model.efforts,
-                      effortStyle: "levels" as const,
-                      ...(model.defaultEffort !== undefined &&
-                      model.efforts.includes(model.defaultEffort)
-                        ? { defaultEffort: model.defaultEffort }
-                        : {}),
-                    }),
               ...(model.inputModalities === undefined
                 ? {}
                 : { inputModalities: model.inputModalities }),
@@ -291,7 +284,17 @@ export function createDiscoveringModelsManager(input: {
               model.capabilities.applyPatchToolType === undefined
             )
               delete resolved.applyPatchToolType
-            return resolved
+            return {
+              ...resolved,
+              ...(resolved.efforts === undefined
+                ? {}
+                : {
+                    effortStyle:
+                      resolved.efforts.length === 0
+                        ? ("none" as const)
+                        : ("levels" as const),
+                  }),
+            }
           }),
         ...(cache === undefined ? staticModels : []),
       ].filter((model) => options?.includeHidden || model.visible !== false)
@@ -303,10 +306,6 @@ export function createDiscoveringModelsManager(input: {
       if (model === undefined) return base
       const resolved = {
         ...base,
-        ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
-        ...(model.defaultEffort === undefined
-          ? {}
-          : { defaultEffort: model.defaultEffort }),
         ...(model.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: model.maxOutputTokens }),
@@ -330,17 +329,11 @@ export function createDiscoveringModelsManager(input: {
           model.capabilities === undefined && base.usedFallbackModelMetadata,
       }
       if (
-        resolved.defaultEffort !== undefined &&
-        resolved.efforts !== undefined &&
-        !resolved.efforts.includes(resolved.defaultEffort)
-      )
-        delete resolved.defaultEffort
-      if (
         model.capabilities !== undefined &&
         model.capabilities.applyPatchToolType === undefined
       )
         delete resolved.applyPatchToolType
-      return resolved
+      return mergeModelEfforts(resolved, model, input.provider)
     },
     validate(selection) {
       requireProvider(input.provider, selection.provider)
