@@ -21,6 +21,7 @@ export function ImageLightbox({
   const [fittedWidth, setFittedWidth] = useState<number>()
   const [naturalWidth, setNaturalWidth] = useState<number>()
   const imageRef = useRef<HTMLImageElement>(null)
+  const dialogRef = useRef<HTMLDialogElement>(null)
   const measure = useCallback(() => {
     const image = imageRef.current
     const viewport = image?.parentElement
@@ -57,15 +58,15 @@ export function ImageLightbox({
     return () => window.removeEventListener("resize", measure)
   }, [measure])
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation()
-        onClose()
-      }
+    const previous = document.activeElement
+    const dialog = dialogRef.current
+    dialog?.showModal()
+    return () => {
+      dialog?.close()
+      if (previous instanceof HTMLElement && previous.isConnected)
+        previous.focus()
     }
-    document.addEventListener("keydown", onKeyDown, true)
-    return () => document.removeEventListener("keydown", onKeyDown, true)
-  }, [onClose])
+  }, [])
   const zoomFactor =
     zoom === "actual"
       ? naturalWidth === undefined || fittedWidth === undefined
@@ -73,12 +74,15 @@ export function ImageLightbox({
         : naturalWidth / fittedWidth
       : zoom
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Backdrop dismissal has no keyboard equivalent; Escape and the close button cover it.
-    <div
-      role="dialog"
-      aria-modal="true"
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Native cancel and the close button handle keyboard dismissal.
+    <dialog
+      ref={dialogRef}
       aria-label={`Preview ${name}`}
-      className="fixed inset-0 z-50 flex flex-col bg-black/85"
+      className="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 bg-black/85 p-0 open:flex open:flex-col"
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
       onClick={(event) => {
         if (
           event.target instanceof HTMLElement &&
@@ -162,6 +166,6 @@ export function ImageLightbox({
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }

@@ -765,7 +765,6 @@ function groupTurnTimeline(
 function ActionGroup({
   entries,
 }: Readonly<{ entries: readonly ExecutionEntry[] }>) {
-  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
   const tools = entries.filter(
     (entry): entry is Extract<ExecutionEntry, { kind: "tool" }> =>
       entry.kind === "tool",
@@ -787,7 +786,7 @@ function ActionGroup({
   }, [hasProblem])
   const verbCounts = new Map<string, number>()
   for (const tool of tools) {
-    const verb = presentTool(tool, workspaceRoot).verb
+    const verb = presentTool(tool).verb
     verbCounts.set(verb, (verbCounts.get(verb) ?? 0) + 1)
   }
   const summary = [
@@ -865,13 +864,19 @@ const EntryCell = memo(function EntryCell({
 }: Readonly<{ entry: ExecutionEntry }>) {
   const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const apiBase = useAppStore((state) => state.apiBase)
   const openAgent = async (agentId: string) => {
     if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
   }
   switch (entry.kind) {
     case "assistant":
       return (
-        <AssistantMessageCell entry={entry} workspaceRoot={workspaceRoot} />
+        <AssistantMessageCell
+          entry={entry}
+          workspaceRoot={workspaceRoot}
+          sessionId={sessionId}
+          apiBase={apiBase}
+        />
       )
     case "reasoning":
       return <ReasoningCell entry={entry} workspaceRoot={workspaceRoot} />

@@ -65,6 +65,7 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
   type ModelToolCallBlock,
+  type ModelToolDefinition,
   type ModelUsage,
   type ModelWireApi,
   type StreamFn,
@@ -1026,7 +1027,10 @@ async function executeTurnModelLoop(
               )
         try {
           const sourceModels = sourceSession?.models
-          await sourceModels?.refresh()
+          await waitForToolReadiness(
+            Promise.resolve().then(() => sourceModels?.refresh()),
+            input.signal,
+          )
           const {
             modelContextWindowTokens: _contextWindowOverride,
             ...sourceSnapshot
@@ -1483,8 +1487,14 @@ async function executeTurnModelLoop(
                   ...(call.toolKind === "tool_search"
                     ? {
                         toolSearch: {
+                          // Search is host-owned; its output is the executed selection,
+                          // including any PreToolUse rewrite.
                           tools: result.ok
-                            ? discoveredTools(toolPlan, call.input)
+                            ? (
+                                result.output as {
+                                  tools: readonly ModelToolDefinition[]
+                                }
+                              ).tools
                             : [],
                         },
                       }
@@ -3472,19 +3482,6 @@ function completeToolCallHistory(
   }
   if (pending.length > 0) flushMissing()
   return completed
-}
-
-function discoveredTools(
-  toolPlan: ReturnType<ToolRegistry["finalize"]>,
-  input: import("../kernel/index.ts").JsonValue,
-): readonly import("./model.ts").ModelToolDefinition[] {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return []
-  }
-  const query = Reflect.get(input, "query")
-  const limit = Reflect.get(input, "limit")
-  if (typeof query !== "string") return []
-  return toolPlan.search(query, typeof limit === "number" ? limit : undefined)
 }
 
 function previousModelId(

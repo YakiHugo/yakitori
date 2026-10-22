@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { readPdf } from "../../src/runtime/tools/read-pdf.ts"

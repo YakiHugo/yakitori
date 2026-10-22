@@ -15,7 +15,7 @@ afterEach(() => {
   useAppStore.setState(createInitialAppState())
 })
 
-it("restores replayed session metrics and pairs TPS with the completed turn during live usage updates", async () => {
+it("restores completed-turn usage and timing metrics", async () => {
   const user = userEvent.setup()
   useAppStore.setState(createInitialAppState())
   useAppStore.setState((state) => ({
@@ -59,27 +59,6 @@ it("restores replayed session metrics and pairs TPS with the completed turn duri
   expect(within(details).getByText("200")).toBeDefined()
   expect(within(details).getByText("750")).toBeDefined()
   expect(within(details).getByText("100")).toBeDefined()
-  act(() =>
-    useAppStore.setState((state) => ({
-      execution: reduceExecutionView(state.execution, {
-        type: "transient",
-        event: {
-          type: "session.usage",
-          sessionId: "session-metrics",
-          turnId: "turn-2",
-          createdAt: "2026-09-20T12:00:00Z",
-          usage: {
-            inputTokens: 2_000,
-            outputTokens: 600,
-            cacheReadInputTokens: 1_000,
-          },
-        },
-      }),
-    })),
-  )
-  expect(summary?.textContent).toContain("Tokens 2.6K")
-  expect(summary?.textContent).toContain("Cache hit 50.0%")
-  expect(summary?.textContent).toContain("TPS 50.0")
 })
 
 it("shows unavailable timing without reusing measurements from a previous turn", () => {

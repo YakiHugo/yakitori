@@ -1,6 +1,6 @@
 import { createServer } from "node:http"
 import { describe, expect, it } from "vitest"
-import { createAnthropicProvider } from "../../src/runtime/anthropic-provider.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
@@ -54,7 +54,7 @@ describe("provider error diagnostics", () => {
         : api === "chat"
           ? createChatCompletionsProvider(options)
           : api === "messages"
-            ? createAnthropicProvider(options)
+            ? createAnthropicTestStream(options)
             : createGeminiProvider(options)
     try {
       const events: ModelStreamEvent[] = []

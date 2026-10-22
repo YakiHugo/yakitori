@@ -1,7 +1,7 @@
 import { createServer } from "node:http"
 import { expect, it } from "vitest"
 import { isJsonObject, type JsonObject } from "../../src/kernel/index.ts"
-import { createAnthropicProvider } from "../../src/runtime/anthropic-provider.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type { ModelNativeItem, ModelRequest } from "../../src/runtime/model.ts"
@@ -46,7 +46,7 @@ it.each(
     api === "openai_responses"
       ? createOpenAIProvider(options)
       : api === "anthropic_messages"
-        ? createAnthropicProvider({ ...options, profile: "anthropic" })
+        ? createAnthropicTestStream({ ...options, profile: "anthropic" })
         : api === "openai_chat_completions"
           ? createChatCompletionsProvider(options)
           : createGeminiProvider(options)

@@ -95,26 +95,6 @@ export type ExecutionEntry =
 
 export type ToolDiff = { readonly text: string; readonly truncated: boolean }
 
-export type CommandResult = {
-  readonly exitCode: number | null
-  readonly signal: string | null
-  readonly stdout: string
-  readonly stderr: string
-  readonly truncated: boolean
-  readonly timedOut: boolean
-  readonly durationMs?: number
-  readonly cwd?: string
-  readonly shell?: string
-  readonly warnings?: readonly string[]
-  readonly blocked?: { readonly rule: string }
-  readonly binary?: {
-    readonly stdout: boolean
-    readonly stderr: boolean
-    readonly stdoutBytes: number
-    readonly stderrBytes: number
-  }
-}
-
 export type SessionTelemetry = {
   readonly turns: number
   readonly steps: number
@@ -710,8 +690,6 @@ function applyTransient(
     }
   }
 
-  if (event.type === "session.usage")
-    return { ...state, telemetry: replaceUsage(state.telemetry, event.usage) }
   if (event.type === "permission.requested")
     return upsertPermission(clearActiveRetry(state, event.turnId), event)
   if (event.type === "permission.resolved") {
@@ -793,31 +771,26 @@ function applyDurable(
       const timeToFirstTokenSamples =
         next.timeToFirstTokenSamples + (hasTimeToFirstToken ? samples : 0)
       const telemetry = addUsage(
-        replaceUsage(
-          {
-            ...next.telemetry,
-            turns: next.telemetry.turns + 1,
-            steps:
-              next.telemetry.steps +
-              (metrics?.modelCalls ?? 0) +
-              (metrics?.toolCalls ?? 0),
-            modelDurationMs:
-              next.telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
-            toolDurationMs:
-              next.telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
-            ...(timeToFirstTokenSamples === 0
-              ? {}
-              : {
-                  averageTimeToFirstTokenMs: Math.round(
-                    timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
-                  ),
-                }),
-          },
-          event.data.sessionUsage,
-        ),
-        // Without a cumulative session usage, accumulate the turn's own
-        // usage; snapshots replace the totals from the session authority.
-        event.data.sessionUsage === undefined ? event.data.usage : undefined,
+        {
+          ...next.telemetry,
+          turns: next.telemetry.turns + 1,
+          steps:
+            next.telemetry.steps +
+            (metrics?.modelCalls ?? 0) +
+            (metrics?.toolCalls ?? 0),
+          modelDurationMs:
+            next.telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
+          toolDurationMs:
+            next.telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
+          ...(timeToFirstTokenSamples === 0
+            ? {}
+            : {
+                averageTimeToFirstTokenMs: Math.round(
+                  timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
+                ),
+              }),
+        },
+        event.data.usage,
       )
       next = {
         ...next,
@@ -1238,20 +1211,6 @@ function projectActiveActivity(
   }
   if (streamingAssistant) return { kind: "responding" }
   return { kind: "reasoning" }
-}
-
-function replaceUsage(
-  telemetry: SessionTelemetry,
-  usage: TokenUsage | undefined,
-): SessionTelemetry {
-  if (usage === undefined) return telemetry
-  return {
-    ...telemetry,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
-    cacheWriteInputTokens: usage.cacheWriteInputTokens ?? 0,
-  }
 }
 
 function addUsage(

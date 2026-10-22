@@ -55,17 +55,6 @@ export function completeFileChangeExecution(
   }
 }
 
-export function completeCommandExecution(
-  started: ToolExecutionDescriptor,
-  output: JsonValue,
-): ToolExecutionDescriptor {
-  if (started.type !== "command_execution") return started
-  const fields = recordOf(output)
-  if (fields === undefined) return started
-  const result = commandResultOf(fields)
-  return result === undefined ? started : { ...started, result }
-}
-
 export function completeFileReadExecution(
   started: ToolExecutionDescriptor,
   output: JsonValue,
@@ -238,51 +227,6 @@ function unifiedDiffOf(value: JsonValue | undefined):
     format: "unified",
     text: fields.text,
     truncated: fields.truncated,
-  }
-}
-
-function commandResultOf(fields: Record<string, JsonValue>) {
-  if (
-    typeof fields.stdout !== "string" ||
-    typeof fields.stderr !== "string" ||
-    typeof fields.truncated !== "boolean"
-  ) {
-    return undefined
-  }
-  const warnings = stringArrayOf(fields.warnings)
-  const blockedFields = recordOf(fields.blocked)
-  const binaryFields = recordOf(fields.binary)
-  const blocked = stringOf(blockedFields?.rule)
-  const binary =
-    typeof binaryFields?.stdout === "boolean" &&
-    typeof binaryFields.stderr === "boolean" &&
-    typeof binaryFields.stdoutBytes === "number" &&
-    typeof binaryFields.stderrBytes === "number"
-      ? {
-          stdout: binaryFields.stdout,
-          stderr: binaryFields.stderr,
-          stdoutBytes: binaryFields.stdoutBytes,
-          stderrBytes: binaryFields.stderrBytes,
-        }
-      : undefined
-  return {
-    exitCode:
-      typeof fields.exitCode === "number" || fields.exitCode === null
-        ? fields.exitCode
-        : null,
-    signal: typeof fields.signal === "string" ? fields.signal : null,
-    stdout: fields.stdout,
-    stderr: fields.stderr,
-    truncated: fields.truncated,
-    timedOut: fields.timedOut === true,
-    ...(typeof fields.durationMs === "number"
-      ? { durationMs: fields.durationMs }
-      : {}),
-    ...(typeof fields.cwd === "string" ? { cwd: fields.cwd } : {}),
-    ...(typeof fields.shell === "string" ? { shell: fields.shell } : {}),
-    ...(warnings === undefined || warnings.length === 0 ? {} : { warnings }),
-    ...(blocked === undefined ? {} : { blocked: { rule: blocked } }),
-    ...(binary === undefined ? {} : { binary }),
   }
 }
 

@@ -28,13 +28,6 @@ export function defaultGrokCredentialsPath(): string {
   return process.env.GROK_CREDENTIALS ?? join(homedir(), ".grok", "auth.json")
 }
 
-// Returns the stored access token when it is fresh enough to use.
-export async function resolveGrokAccessToken(
-  options: GrokCredentialsOptions = {},
-): Promise<string> {
-  return (await resolveStoredGrokCredentials(options)).accessToken
-}
-
 // Read credential and owner together so a concurrent CLI token rotation cannot
 // associate one account's token with another account's continuation history.
 export async function resolveGrokModelCredentials(

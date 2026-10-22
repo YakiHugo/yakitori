@@ -261,8 +261,8 @@ export function readElicitationValues(
         )
       )
         fail("Choose from the listed options.")
-      else if (value.length < (field.minItems ?? (field.required ? 1 : 0)))
-        fail(`Choose at least ${field.minItems ?? 1} option(s).`)
+      else if (field.minItems !== undefined && value.length < field.minItems)
+        fail(`Choose at least ${field.minItems} option(s).`)
       else if (field.maxItems !== undefined && value.length > field.maxItems)
         fail(`Choose at most ${field.maxItems} option(s).`)
     } else if (typeof value !== "string") {

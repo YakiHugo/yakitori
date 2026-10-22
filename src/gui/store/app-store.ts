@@ -283,13 +283,6 @@ export type AppStoreActions = {
 
 export type AppStore = AppStoreData & AppStoreActions
 
-function createInitialSubscriptionUsage(): Record<
-  ApiSubscriptionProvider,
-  SubscriptionUsageState
-> {
-  return {}
-}
-
 function subscriptionUsageLoading(
   state: SubscriptionUsageState = { loading: false },
 ): SubscriptionUsageState {
@@ -334,7 +327,7 @@ export function createInitialAppState(): AppStoreData {
     accounts: [],
     providers: [],
     providersError: undefined,
-    subscriptionsByProvider: createInitialSubscriptionUsage(),
+    subscriptionsByProvider: {},
     subscriptionsError: undefined,
     userPreference: undefined,
     selection: {},
@@ -584,7 +577,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
   }
 
   const activateSession = (sessionId: string): SessionSelection => {
-    set({ selection: { sessionId } })
+    queueReadRevision += 1
+    set({ selection: { sessionId }, queuedItems: [] })
     return {
       revision: get().sessionSelectionIntentRevision,
       sessionId,
@@ -603,6 +597,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const isCurrentSelection = (selection: SessionSelection): boolean =>
     get().sessionSelectionIntentRevision === selection.revision &&
     get().selection.sessionId === selection.sessionId
+
+  const projectQueuedInputs = (items: readonly QueuedInput[]): void => {
+    const pendingInputs = items.map((item) => ({
+      id: item.id,
+      text: inputContentText(item.input.content),
+      admittedAt: item.createdAt,
+    }))
+    set((state) => ({
+      queuedItems: items,
+      execution: {
+        ...state.execution,
+        queuedInputs: Object.fromEntries(
+          pendingInputs.map((item) => [item.id, item]),
+        ),
+      },
+    }))
+  }
 
   const sameResolvedDraft = (left: InputDraft, right: InputDraft) =>
     sameInputDraft(
@@ -1075,10 +1086,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
               )
               let queuedRequestIds = new Set<string>()
               try {
+                const revision = ++queueReadRevision
                 const queue = await getAppRpcClient(get().apiBase).request(
                   "session/queue/list",
                   { sessionId: selection.sessionId },
                 )
+                if (!isCurrentSelection(selection)) return
+                if (revision === queueReadRevision)
+                  projectQueuedInputs(queue.items)
                 queuedRequestIds = new Set(
                   queue.items.map((item) => item.input.submissionId),
                 )
@@ -1431,6 +1446,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             selection: {},
             selectedSession: undefined,
             execution: createExecutionViewState(),
+            queuedItems: [],
             promptDraft: inputAttachmentOwnership.resolveDraft(
               get().apiBase,
               pending.content,
@@ -1452,6 +1468,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         selection: {},
         selectedSession: undefined,
         execution: createExecutionViewState(),
+        queuedItems: [],
       })
     },
 
@@ -1802,6 +1819,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         selection: {},
         selectedSession: undefined,
         execution: createExecutionViewState(),
+        queuedItems: [],
         sessionSkills: [],
         sessionSkillsError: undefined,
         commandPanel: undefined,
@@ -1828,6 +1846,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         selection: {},
         selectedSession: undefined,
         execution: createExecutionViewState(),
+        queuedItems: [],
         hydratingSessionId: undefined,
         sessionSkills: [],
         commandPanel: undefined,
@@ -1969,7 +1988,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
           userPreference: state.userPreference,
           defaultProvider: state.defaultProvider,
           defaultModel: state.defaultModel,
-          providers: state.providers,
         }),
         state.providers,
       )
@@ -2068,6 +2086,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 state.sessionSelectionIntentRevision + 1,
               selectedSession: undefined,
               execution: createExecutionViewState(),
+              queuedItems: [],
               promptDraft: undefined,
               promptExcerpts: [],
               sessionSkills: [],
@@ -2310,7 +2329,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
         sessionDrafts: stashSessionDraft(state),
       }))
-      queueReadRevision += 1
       set({
         restoringModelSelectionFor:
           get().modelSelections[sessionId] === undefined
@@ -2321,7 +2339,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
       closeStream()
       set({
         execution: createExecutionViewState(),
-        queuedItems: [],
         selectedSession: undefined,
         sessionSkills: [],
         commandPanel: undefined,
@@ -2361,7 +2378,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             userPreference: state.userPreference,
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
-            providers: state.providers,
           }),
           state.providers,
         )
@@ -2674,7 +2690,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             userPreference: state.userPreference,
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
-            providers: state.providers,
           })
           const admittedModelSelection = queuedForCreation
             ? queuedModelSelection
@@ -2828,20 +2843,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         )
         if (!isCurrentSelection(selection) || revision !== queueReadRevision)
           return
-        const pendingInputs = items.map((item) => ({
-          id: item.id,
-          text: inputContentText(item.input.content),
-          admittedAt: item.createdAt,
-        }))
-        set((state) => ({
-          queuedItems: items,
-          execution: {
-            ...state.execution,
-            queuedInputs: Object.fromEntries(
-              pendingInputs.map((item) => [item.id, item]),
-            ),
-          },
-        }))
+        projectQueuedInputs(items)
         for (const item of items) {
           const admission = inputRecoveryMemory.readAdmissionByRequestId(
             get().apiBase,
@@ -3430,7 +3432,6 @@ export function resolveEffectiveModel(input: {
   readonly userPreference: ApiUserModelPreference | undefined
   readonly defaultProvider: string | undefined
   readonly defaultModel: string | undefined
-  readonly providers: readonly ApiProviderSummary[]
 }): ModelSelection | undefined {
   if (input.sessionCurrent) return input.sessionCurrent
   if (input.userPreference) return input.userPreference

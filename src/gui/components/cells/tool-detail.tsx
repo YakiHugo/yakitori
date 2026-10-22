@@ -1,6 +1,5 @@
 import { Copy, ExternalLink } from "lucide-react"
 import { useState } from "react"
-import type { CommandResult } from "../../execution-view.ts"
 import {
   fileActionLabel,
   openFileTarget,
@@ -144,7 +143,6 @@ export function ToolDetailView({
       return (
         <CommandOutput
           command={detail.command}
-          result={detail.result}
           resultText={detail.resultText}
           errorMessage={detail.errorMessage}
         />
@@ -297,73 +295,21 @@ function TextOutput({ text }: { readonly text: string }) {
 
 function CommandOutput({
   command,
-  result,
   resultText,
   errorMessage,
-}: {
-  readonly command: string
-  readonly result?: CommandResult | undefined
-  readonly resultText?: string | undefined
-  readonly errorMessage?: string | undefined
-}) {
-  if (result === undefined) {
-    return (
-      <pre className="max-h-96 overflow-auto rounded-sm bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
-        {`$ ${command}`}
-        {resultText === undefined ? "" : `\n${resultText}`}
-        {errorMessage === undefined || errorMessage === resultText ? null : (
-          <span className="block text-red-300">{errorMessage}</span>
-        )}
-      </pre>
-    )
-  }
-  const status = [
-    result.exitCode === null ? undefined : `exit ${String(result.exitCode)}`,
-    result.signal === null ? undefined : `signal ${result.signal}`,
-    result.timedOut ? "timed out" : undefined,
-    result.truncated ? "partial" : undefined,
-    result.blocked === undefined ? undefined : "blocked",
-    result.binary?.stdout === true || result.binary?.stderr === true
-      ? "binary"
-      : undefined,
-    result.durationMs === undefined
-      ? undefined
-      : formatDuration(result.durationMs),
-  ].filter((part): part is string => part !== undefined)
+}: Readonly<{
+  command: string
+  resultText?: string | undefined
+  errorMessage?: string | undefined
+}>) {
   return (
-    <div className="overflow-hidden rounded-sm bg-zinc-950 font-mono text-xs leading-5 text-zinc-50 shadow-inner">
-      <div className="bg-zinc-900/80 px-3 py-1.5 text-[11px] text-zinc-500">
-        {result.cwd === undefined ? "workspace" : result.cwd}
-      </div>
-      <div className="max-h-96 overflow-auto p-3 whitespace-pre-wrap">
-        <div className="text-zinc-100">{`$ ${command}`}</div>
-        {result.stdout.length > 0 ? <div>{result.stdout}</div> : null}
-        {result.stderr.length > 0 ? (
-          <div className="text-zinc-400">{`[stderr]\n${result.stderr}`}</div>
-        ) : null}
-        {(errorMessage ??
-          (result.blocked === undefined ? undefined : resultText)) !==
-        undefined ? (
-          <div
-            className={
-              result.blocked === undefined ? "text-red-300" : "text-amber-300"
-            }
-          >
-            {errorMessage ?? resultText}
-          </div>
-        ) : null}
-        {result.warnings?.map((warning) => (
-          <div key={warning} className="text-amber-300/80">
-            {`[warning] ${warning}`}
-          </div>
-        ))}
-        {status.length === 0 ? null : (
-          <div className="mt-2 text-[11px] text-zinc-500">
-            {status.join(" · ")}
-          </div>
-        )}
-      </div>
-    </div>
+    <pre className="max-h-96 overflow-auto rounded-sm bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
+      {`$ ${command}`}
+      {resultText === undefined ? "" : `\n${resultText}`}
+      {errorMessage === undefined || errorMessage === resultText ? null : (
+        <span className="block text-red-300">{errorMessage}</span>
+      )}
+    </pre>
   )
 }
 
@@ -374,9 +320,4 @@ function displayUrl(value: string): string {
   } catch {
     return value
   }
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${Math.round(durationMs)}ms`
-  return `${(durationMs / 1_000).toFixed(1)}s`
 }

@@ -3,6 +3,15 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { useState } from "react"
 import { SidebarFrame } from "../../src/gui/components/sidebar-frame.tsx"
+import {
+  createInitialAppState,
+  useAppStore,
+} from "../../src/gui/store/app-store.ts"
+import {
+  chooseNewEngine,
+  initializeEngineSessions,
+  useEngineStore,
+} from "../../src/gui/store/engine-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
 vi.mock("../../src/gui/components/sidebar.tsx", () => ({
@@ -10,6 +19,17 @@ vi.mock("../../src/gui/components/sidebar.tsx", () => ({
 }))
 vi.mock("../../src/gui/components/session-search.tsx", () => ({
   SessionSearch: () => <div>Session search</div>,
+}))
+vi.mock("../../src/gui/lib/rpc-client.ts", async (original) => ({
+  ...(await original<typeof import("../../src/gui/lib/rpc-client.ts")>()),
+  getAppRpcClient: () => ({
+    subscribeToEngineSessionChanges: () => () => {},
+    request: async (method: string) => {
+      if (method === "engine/list") return { engines: [] }
+      if (method === "engineSession/list") return { sessions: [] }
+      throw new Error(`Unexpected request: ${method}`)
+    },
+  }),
 }))
 
 function Frame() {
@@ -177,4 +197,15 @@ it("resizes relative to the sidebar edge and saves the clamped width on release"
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("275")
   fireEvent.pointerUp(divider, { pointerId: 1 })
   expect(localStorage.getItem("yakitori.sidebarWidth")).toBe("520")
+})
+
+it("keeps the selected external engine when the new-session shortcut clears native selection", async () => {
+  useAppStore.setState(createInitialAppState())
+  await initializeEngineSessions()
+  chooseNewEngine("external")
+  render(<Frame />)
+  fireEvent.keyDown(window, { key: "n", metaKey: true })
+  expect(useEngineStore.getState().engineId).toBe("external")
+  expect(useEngineStore.getState().sessionId).toBeUndefined()
+  expect(useAppStore.getState().selection.sessionId).toBeUndefined()
 })

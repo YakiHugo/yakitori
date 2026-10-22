@@ -25,7 +25,11 @@ export function ProviderModels({
   )
   const choices = available
     .filter((model) => model.kind === undefined || model.kind === "chat")
-    .map((model) => ({ ...model, ...overrides.get(model.id.toLowerCase()) }))
+    .map((model) => ({
+      ...model,
+      ...overrides.get(model.id.toLowerCase()),
+      id: model.id,
+    }))
   const filtered = choices.filter((model) =>
     `${model.id} ${model.displayName ?? ""}`
       .toLowerCase()

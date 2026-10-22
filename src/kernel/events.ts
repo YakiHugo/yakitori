@@ -43,7 +43,6 @@ export {
   type AgentMessageExecutionItem,
   type CollaborationAction,
   type CollaborationReceiver,
-  type CommandExecutionResult,
   type CompletedExecutionItem,
   type ContextCompactionCompletedItem,
   type ContextCompactionStartedItem,
@@ -234,9 +233,6 @@ export type WorldStateFragment = {
   readonly role: "user" | "developer"
   readonly text: string
 }
-
-export type KernelFact = KernelEvent
-export type RuntimeEventEnvelope = EventEnvelopeBase & KernelEvent
 
 export type OpaqueEventEnvelope = EventEnvelopeBase & {
   readonly type: string
@@ -494,10 +490,9 @@ function isToolExecutionItemWithLifecycle(
   switch (value.type) {
     case "command_execution":
       return (
-        onlyKeys(value, [...commonKeys, "command", "description", "result"]) &&
+        onlyKeys(value, [...commonKeys, "command", "description"]) &&
         isString(value.command) &&
-        (value.description === undefined || isString(value.description)) &&
-        (value.result === undefined || isCommandExecutionResult(value.result))
+        (value.description === undefined || isString(value.description))
       )
     case "file_change":
       return (
@@ -637,50 +632,6 @@ function isUnifiedDiff(value: unknown): boolean {
     value.format === "unified" &&
     isString(value.text) &&
     typeof value.truncated === "boolean"
-  )
-}
-
-function isCommandExecutionResult(value: unknown): boolean {
-  if (!isRecord(value)) return false
-  const binary = value.binary
-  const blocked = value.blocked
-  return (
-    onlyKeys(value, [
-      "exitCode",
-      "signal",
-      "stdout",
-      "stderr",
-      "truncated",
-      "timedOut",
-      "durationMs",
-      "cwd",
-      "shell",
-      "warnings",
-      "blocked",
-      "binary",
-    ]) &&
-    (value.exitCode === null || typeof value.exitCode === "number") &&
-    (value.signal === null || isString(value.signal)) &&
-    isString(value.stdout) &&
-    isString(value.stderr) &&
-    typeof value.truncated === "boolean" &&
-    typeof value.timedOut === "boolean" &&
-    (value.durationMs === undefined || typeof value.durationMs === "number") &&
-    (value.cwd === undefined || isString(value.cwd)) &&
-    (value.shell === undefined || isString(value.shell)) &&
-    (value.warnings === undefined ||
-      (Array.isArray(value.warnings) && value.warnings.every(isString))) &&
-    (blocked === undefined ||
-      (isRecord(blocked) &&
-        onlyKeys(blocked, ["rule"]) &&
-        isString(blocked.rule))) &&
-    (binary === undefined ||
-      (isRecord(binary) &&
-        onlyKeys(binary, ["stdout", "stderr", "stdoutBytes", "stderrBytes"]) &&
-        typeof binary.stdout === "boolean" &&
-        typeof binary.stderr === "boolean" &&
-        typeof binary.stdoutBytes === "number" &&
-        typeof binary.stderrBytes === "number"))
   )
 }
 

@@ -59,6 +59,13 @@ export function chooseNewEngine(engineId: string) {
   clearEngineSelection()
   useEngineStore.setState({ engineId: engineId || undefined })
 }
+
+export function startNewEngineSession(): void {
+  const engineId = useEngineStore.getState().engineId
+  if (engineId === undefined) useAppStore.getState().startNewSession()
+  else chooseNewEngine(engineId)
+}
+
 export async function selectEngineSession(
   session: Pick<EngineSessionSummary, "id" | "engineId" | "projectId">,
 ) {

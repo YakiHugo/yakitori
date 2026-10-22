@@ -13,10 +13,7 @@ import {
 } from "../user-shell-env.ts"
 import { commandApprovalRequirement } from "./approval-requirements.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
-import {
-  commandExecution,
-  completeCommandExecution,
-} from "./execution-descriptors.ts"
+import { commandExecution } from "./execution-descriptors.ts"
 import { resolveCommandCwd } from "./path-policy.ts"
 import { fitText, headTailPreview } from "./result-output.ts"
 import { plainToolName } from "./tool-name.ts"
@@ -80,6 +77,7 @@ type ProcessEntry = {
   interaction: Promise<void>
   interactionCount: number
   lastUsedAt: number
+  stopping?: boolean
   exited?: ProcessExit
 }
 
@@ -152,7 +150,6 @@ export function createUnifiedExecTools(
           : ""
       return commandExecution({ command: cmd })
     },
-    completeExecution: completeCommandExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -306,8 +303,12 @@ export function createUnifiedExecProcessManager(
   const backgroundTimeoutMs = options.backgroundTimeoutMs
   const killGraceMs = options.killGraceMs ?? 2_000
   const entries = new Map<number, ProcessEntry>()
+  const ownedProcesses = new Set<ProcessEntry>()
   let closed = false
+  let closing: Promise<void> | undefined
   const terminateEntry = (entry: ProcessEntry, signal: NodeJS.Signals) => {
+    if (entry.stopping || entry.exited !== undefined) return
+    entry.stopping = true
     entry.handle.terminate(signal)
     const force = setTimeout(
       () => entry.handle.terminate("SIGKILL"),
@@ -396,10 +397,12 @@ export function createUnifiedExecProcessManager(
         lastUsedAt: Date.now(),
       }
       entries.set(id, entry)
+      ownedProcesses.add(entry)
       void entry.exit.then((exit) => {
         output.finish()
         entry.exited = exit
         clearTimeout(timeout)
+        ownedProcesses.delete(entry)
       })
 
       const onAbort = () => terminateEntry(entry, "SIGTERM")
@@ -475,14 +478,19 @@ export function createUnifiedExecProcessManager(
       )
       return interaction
     },
-    async close() {
-      if (closed) return
+    close() {
+      if (closing !== undefined) return closing
       closed = true
-      const active = [...entries.values()]
+      // Pruning withdraws a public session ID, not ownership of its process.
+      const active = [...ownedProcesses]
       for (const entry of active) terminateEntry(entry, "SIGTERM")
-      await Promise.allSettled(active.map((entry) => entry.exit))
-      for (const entry of active) clearTimeout(entry.timeout)
-      entries.clear()
+      closing = Promise.allSettled(active.map((entry) => entry.exit)).then(
+        () => {
+          for (const entry of active) clearTimeout(entry.timeout)
+          entries.clear()
+        },
+      )
+      return closing
     },
   }
   return manager

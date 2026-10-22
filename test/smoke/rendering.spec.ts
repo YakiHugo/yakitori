@@ -720,6 +720,39 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
       }
     })
   await expect(preview).toBeVisible()
+  const closePreview = preview.getByRole("button", {
+    name: "Close preview",
+    exact: true,
+  })
+  await expect(closePreview).toBeFocused()
+  await page
+    .getByRole("textbox", { name: "Message the Mate", includeHidden: true })
+    .evaluate((composer) => composer.focus())
+  await expect(closePreview).toBeFocused()
+  await page.keyboard.press("Shift+Tab")
+  // Chromium can move focus to browser chrome (reported as body). Background
+  // page controls must remain inert throughout keyboard navigation.
+  await expect
+    .poll(() =>
+      preview.evaluate(
+        (dialog) =>
+          document.activeElement === document.body ||
+          dialog.contains(document.activeElement),
+      ),
+    )
+    .toBe(true)
+  for (let index = 0; index < 7; index += 1) {
+    await page.keyboard.press("Tab")
+    await expect
+      .poll(() =>
+        preview.evaluate(
+          (dialog) =>
+            document.activeElement === document.body ||
+            dialog.contains(document.activeElement),
+        ),
+      )
+      .toBe(true)
+  }
   await expect(
     preview.getByRole("button", { name: "Actual size", exact: true }),
   ).toBeEnabled()
@@ -754,6 +787,7 @@ test("large Mermaid previews expose every edge at actual size and reset when reo
   await expect.poll(async () => (await geometry()).actualSize).toBe(true)
   await page.keyboard.press("Escape")
   await expect(preview).toHaveCount(0)
+  await expect(expand).toBeFocused()
   await expand.click()
   await expect(preview).toBeVisible()
   await expect(

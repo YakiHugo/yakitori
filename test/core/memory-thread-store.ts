@@ -134,6 +134,8 @@ export class MemoryThreadStore implements ThreadStore {
 
   async resumeThread(threadId: string): Promise<StoredThread | undefined> {
     await this.resumeBarrier
+    if (this.#writers.has(threadId))
+      throw new Error(`Thread ${threadId} already has a live writer.`)
     const thread = this.#threads.get(threadId)
     if (thread === undefined) return undefined
     const last = thread.rollout.at(-1)

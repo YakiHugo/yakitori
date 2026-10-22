@@ -2,7 +2,6 @@ import { ChevronRight, LoaderCircle, Wrench } from "lucide-react"
 import { type ReactNode, useId } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 import { cn } from "../lib/utils.ts"
-import { useAppStore } from "../store/app-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { reasoningSections } from "./reasoning-trace.tsx"
 import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
@@ -23,7 +22,6 @@ export function ActivityGroup({
   onExpandedChange: (expanded: boolean) => void
   children: ReactNode
 }>) {
-  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
   const tools = entries.filter((entry) => entry.kind === "tool")
   const failed = tools.some(
     (entry) => entry.state === "failed" || entry.state === "interrupted",
@@ -35,7 +33,7 @@ export function ActivityGroup({
     )
   const counts = new Map<string, number>()
   for (const tool of tools) {
-    const verb = presentTool(tool, workspaceRoot).verb
+    const verb = presentTool(tool).verb
     counts.set(verb, (counts.get(verb) ?? 0) + 1)
   }
   const actions = [...counts]

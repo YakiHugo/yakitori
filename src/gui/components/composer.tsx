@@ -141,7 +141,6 @@ export function Composer() {
       userPreference,
       defaultProvider,
       defaultModel,
-      providers,
     }),
     providers,
   )
@@ -336,6 +335,9 @@ export function Composer() {
             }).then((changed) => {
               if (
                 changed &&
+                useAppStore.getState().selection.sessionId === sessionId &&
+                useAppStore.getState().sessionSelectionIntentRevision ===
+                  selectionRevision &&
                 sameInputDraft(
                   trimInputDraft(
                     useAppStore.getState().promptDraft ?? textInputDraft(""),

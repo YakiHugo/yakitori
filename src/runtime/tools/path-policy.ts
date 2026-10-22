@@ -139,7 +139,7 @@ export async function resolveWritePath(
       kind: "file",
     }
   } catch {
-    // New file: parent must exist and stay inside the workspace.
+    // New files resolve through an existing canonical parent.
     const parentCandidate = dirname(candidate)
     try {
       const parentPath = await realpath(parentCandidate)

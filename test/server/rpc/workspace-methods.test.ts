@@ -3,13 +3,15 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
@@ -27,9 +29,17 @@ import {
   type TestConnection,
 } from "./testkit.ts"
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>()
+  return { ...actual, open: vi.fn(actual.open) }
+})
+
 const executeFile = promisify(execFile)
 const roots: string[] = []
 afterEach(async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")
+  vi.mocked(open).mockImplementation(actual.open)
   vi.unstubAllEnvs()
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -78,6 +88,39 @@ async function rpc<T>(
 }
 
 describe("workspace RPC against the filesystem and Git", () => {
+  it("rejects a text preview when its parent is redirected outside during open", async () => {
+    const { root, cwd, connection } = await setup()
+    const parent = join(cwd, "nested")
+    const outside = join(root, "outside")
+    await mkdir(parent)
+    await mkdir(outside)
+    await writeFile(join(parent, "file.txt"), "inside")
+    await writeFile(join(outside, "file.txt"), "outside-secret")
+    const actual =
+      await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      )
+    let redirected = false
+    vi.mocked(open).mockImplementation(async (path, ...args) => {
+      if (
+        !redirected &&
+        typeof path === "string" &&
+        basename(path) === "file.txt"
+      ) {
+        redirected = true
+        await rename(parent, join(cwd, "previous"))
+        await symlink(outside, parent, "dir")
+      }
+      return actual.open(path, ...args)
+    })
+    expect(
+      await connection.sendRequest("workspace/read", {
+        cwd,
+        path: "nested/file.txt",
+      }),
+    ).toMatchObject({ error: { data: { code: "invalid_input" } } })
+  })
+
   it("lists hidden files and nested directories while keeping reads within the workspace", async () => {
     const { root, cwd, connection } = await setup()
     await mkdir(join(cwd, ".git"))

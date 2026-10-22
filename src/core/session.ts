@@ -119,7 +119,10 @@ type ForkBarrierCommand = Readonly<{
   reject: (error: unknown) => void
 }>
 
-type SessionCommand = SessionOp | ForkBarrierCommand
+type SessionCommand =
+  | SessionOp
+  | ForkBarrierCommand
+  | Readonly<{ type: "shutdown_if_idle"; resolve: (closed: boolean) => void }>
 
 type AcceptedAgentMessage = {
   readonly envelope: ResponseItemEnvelope
@@ -170,6 +173,7 @@ export class Session {
   readonly #store: SessionRolloutStore
   readonly #processor: SessionTaskRunner
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
+  #idleShutdown: Promise<boolean> | undefined
   readonly #events = new AsyncQueue<SessionEvent>()
   readonly #statusListeners = new Set<
     (status: SessionStatus, idleCause?: SessionIdleCause) => void
@@ -250,16 +254,34 @@ export class Session {
     this.#onPersistenceError = input.onPersistenceError
     this.#submissionLoop = this.#runSubmissionLoop()
     this.endpoints = {
-      send: (operation) =>
-        this.#closing
-          ? Promise.reject(new Error("Session is shutting down."))
-          : this.#submissions.send(operation),
+      send: (operation) => this.#sendCommand(operation),
       shutdown: () => {
         if (!this.#closing) {
           this.#closing = true
           void this.#submissions.send({ type: "shutdown" })
         }
         return this.#submissionLoop
+      },
+      shutdownIfIdle: () => {
+        if (this.#idleShutdown !== undefined) return this.#idleShutdown
+        if (this.#closing) return Promise.resolve(false)
+        const requested = new Promise<boolean>((resolve, reject) => {
+          void this.#submissions
+            .send({ type: "shutdown_if_idle", resolve })
+            .catch(reject)
+        })
+        this.#idleShutdown = Promise.race([
+          requested,
+          this.#submissionLoop.then(() => false),
+        ])
+          .then(async (closed) => {
+            if (closed) await this.#submissionLoop
+            return closed
+          })
+          .finally(() => {
+            this.#idleShutdown = undefined
+          })
+        return this.#idleShutdown
       },
       events: createSessionEventReceiver(() => this.#events.receive()),
       readStatus: () => this.#status,
@@ -295,15 +317,26 @@ export class Session {
     if (this.#closing)
       return Promise.reject(new Error("Session is shutting down."))
     return new Promise<T>((resolve, reject) => {
-      void this.#submissions
-        .send({
-          type: "fork_barrier",
-          run,
-          resolve: (value) => resolve(value as T),
-          reject,
-        })
-        .catch(reject)
+      void this.#sendCommand({
+        type: "fork_barrier",
+        run,
+        resolve: (value) => resolve(value as T),
+        reject,
+      }).catch(reject)
     })
+  }
+
+  #sendCommand(
+    operation: Exclude<
+      SessionCommand,
+      { type: "shutdown" | "shutdown_if_idle" }
+    >,
+  ): Promise<void> {
+    if (this.#idleShutdown !== undefined)
+      return this.#idleShutdown.then(() => this.#sendCommand(operation))
+    return this.#closing
+      ? Promise.reject(new Error("Session is shutting down."))
+      : this.#submissions.send(operation)
   }
 
   async #runSubmissionLoop(): Promise<void> {
@@ -311,6 +344,17 @@ export class Session {
       for (;;) {
         const operation = await this.#submissions.receive()
         if (operation === undefined) break
+        if (operation.type === "shutdown_if_idle") {
+          // Admission queued before maintenance must run before this check.
+          if (this.#activeTurn !== undefined || this.#closing) {
+            operation.resolve(false)
+            continue
+          }
+          this.#closing = true
+          this.#submissions.close()
+          operation.resolve(true)
+          break
+        }
         if (operation.type === "shutdown") {
           this.#submissions.close()
           this.#interruptActiveTurn("shutdown")

@@ -4,7 +4,6 @@ import {
   parsePromptParts,
   promptOffset,
   promptPosition,
-  serializePrompt,
   serializePromptParts,
 } from "../../src/gui/components/prompt-document.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
@@ -12,7 +11,7 @@ import { inputFixture } from "../fixtures/user-input.ts"
 it("roundtrips multiline text and inline path-qualified skills without moving them", () => {
   const text = "请用 [$review](/skills/review/SKILL.md) 检查\n\n然后测试 🐣"
   const doc = parsePrompt(text)
-  expect(serializePrompt(doc)).toBe(text)
+  expect(serializePromptParts(doc).text).toBe(text)
   expect(doc.firstChild?.child(1).type.name).toBe("skill")
   expect(doc.firstChild?.child(1).nodeSize).toBe(1)
 })
@@ -38,7 +37,7 @@ it("leaves ordinary dollar expressions and incomplete mentions as editable text"
 it("roundtrips inline file mentions and maps caret offsets across them", () => {
   const text = "看看 [@app.tsx](src/gui/app.tsx) 这页"
   const doc = parsePrompt(text)
-  expect(serializePrompt(doc)).toBe(text)
+  expect(serializePromptParts(doc).text).toBe(text)
   expect(doc.firstChild?.child(1).type.name).toBe("file")
   expect(doc.firstChild?.child(1).nodeSize).toBe(1)
 
@@ -83,5 +82,4 @@ it("keeps images out of the document while roundtripping text and an inline PDF"
       { type: "text", text: "b" },
     ]),
   )
-  expect(serializePrompt(doc)).toBe("a\uFFFCb")
 })

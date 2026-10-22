@@ -35,8 +35,6 @@ describe("runtime terminal delivery", () => {
                 async run(session, execution) {
                   await session.beginExecution(execution, context)
                   const runtime = bindExecution(session, execution)
-                  const _input = input
-                  const _context = context
                   const control = {
                     signal: execution.signal,
                     takeSteering: () => session.takeSteering(execution),

@@ -2,7 +2,6 @@ import { citationURL } from "../../citation-sources.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { openUrlTarget } from "../../lib/open-resource.ts"
-import { useAppStore } from "../../store/app-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { MarkdownView } from "../markdown.tsx"
 import { LiveTextNotice } from "./live-text-notice.tsx"
@@ -10,18 +9,25 @@ import { LiveTextNotice } from "./live-text-notice.tsx"
 export function AssistantMessageCell({
   entry,
   workspaceRoot,
-}: {
-  readonly entry: Extract<ExecutionEntry, { kind: "assistant" }>
-  readonly workspaceRoot?: string | undefined
-}) {
-  const sessionId = useAppStore((state) => state.selection.sessionId)
+  sessionId,
+  apiBase,
+  className,
+  sourceLabel = "Assistant message",
+}: Readonly<{
+  entry: Extract<ExecutionEntry, { kind: "assistant" }>
+  workspaceRoot?: string | undefined
+  sessionId: string | undefined
+  apiBase: string
+  className?: string
+  sourceLabel?: string
+}>) {
   return (
     <div
       {...contextSourceAttributes(
         sessionId
           ? {
               kind: "message",
-              label: "Assistant message",
+              label: sourceLabel,
               messageId: entry.itemId,
               sessionId,
             }
@@ -30,6 +36,8 @@ export function AssistantMessageCell({
     >
       <LiveTextNotice entry={entry} />
       <MarkdownView
+        apiBase={apiBase}
+        {...(className === undefined ? {} : { className })}
         text={entry.text}
         streaming={entry.status === "streaming"}
         workspaceRoot={workspaceRoot}

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import { type MateEvent, MateEventType } from "../../src/mates/events.ts"
 import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
-import { projectMate } from "../../src/mates/mate-projector.ts"
 import type { MateStore } from "../../src/mates/mate-store.ts"
 
 export function defineMateStoreContract(options: {
@@ -15,14 +14,36 @@ export function defineMateStoreContract(options: {
     it("persists events and lists summaries", async () => {
       await options.withStore(async (store) => {
         const mateId = createMateId()
-        await store.appendEvent(mateId, createdEvent(), { expectedSeq: 0 })
+        const event = createdEvent()
+        const created = await store.appendEvent(mateId, event, {
+          expectedSeq: 0,
+        })
         const events = await store.readEvents(mateId)
-        const mate = projectMate(events)
-        if (!mate) throw new Error("Expected a mate projection.")
-
-        expect(events).toHaveLength(1)
+        expect(events).toEqual([
+          {
+            id: created.id,
+            mateId,
+            seq: 1,
+            version: 1,
+            createdAt: created.createdAt,
+            ...event,
+          },
+        ])
         expect(await store.listMates()).toEqual({
-          mates: [mate],
+          mates: [
+            {
+              id: mateId,
+              seq: 1,
+              createdAt: created.createdAt,
+              updatedAt: created.createdAt,
+              currentRevision: {
+                ...event.data.profile,
+                id: event.data.revisionId,
+                revision: 1,
+                createdAt: created.createdAt,
+              },
+            },
+          ],
         })
       })
     })
@@ -66,6 +87,23 @@ export function defineMateStoreContract(options: {
           code: YakitoriErrorCode.InvalidState,
         })
         expect(await store.readEvents(mateId)).toHaveLength(1)
+      })
+    })
+
+    it("keeps the committed history and summary unchanged when replay rejects an append", async () => {
+      await options.withStore(async (store) => {
+        const mateId = createMateId()
+        const created = await store.appendEvent(mateId, createdEvent(), {
+          expectedSeq: 0,
+        })
+        const before = await store.listMates()
+
+        await expect(
+          store.appendEvent(mateId, createdEvent(), { expectedSeq: 1 }),
+        ).rejects.toMatchObject({ code: YakitoriErrorCode.InvalidEventLog })
+
+        expect(await store.readEvents(mateId)).toEqual([created])
+        expect(await store.listMates()).toEqual(before)
       })
     })
   })

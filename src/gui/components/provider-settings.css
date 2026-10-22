@@ -691,8 +691,7 @@ button.provider-model-main {
   flex-wrap: wrap;
   gap: 6px;
 }
-.chatgpt-account-actions a,
-.chatgpt-usage-summary a {
+.chatgpt-account-actions a {
   color: var(--foreground);
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -705,13 +704,6 @@ button.provider-model-main {
   max-width: 52ch;
   font-size: 12px;
   line-height: 1.6;
-}
-.chatgpt-usage-summary {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 24px;
-  font-size: 13px;
 }
 
 .model-catalog-settings {

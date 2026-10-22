@@ -277,13 +277,47 @@ it("replays a continued code block as one completed answer", () => {
       },
     })
     emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
-    answer("first", "```text\nconst x = ")
-    answer("last", "1\n```\n\nDone.")
+    for (const [itemId, text, title] of [
+      ["answer", "```text\nconst x = ", "First source"],
+      ["answer_part_1", "1\n```\n\nDone.", "Second source"],
+    ] as const) {
+      emit({
+        type: "item.completed",
+        data: {
+          turnId: "turn",
+          item: {
+            type: "agent_message",
+            itemId,
+            source: { callId: "call", itemId: "answer" },
+            content: [
+              {
+                type: "text",
+                text,
+                purpose: "final_answer",
+                providerMetadata: {
+                  openai: {
+                    part: {
+                      annotations: [
+                        {
+                          type: "url_citation",
+                          url: `https://example.com/${itemId}`,
+                          title,
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      })
+    }
     emit({
       type: "turn.completed",
       data: {
         turnId: "turn",
-        outcome: { status: "completed", answerItemIds: ["first", "last"] },
+        outcome: { status: "completed", answerItemIds: ["answer"] },
       },
     })
     stream.emitReplayComplete()
@@ -291,12 +325,18 @@ it("replays a continued code block as one completed answer", () => {
   expect(container.querySelector("pre code")?.textContent).toBe("const x = 1\n")
   expect(container.querySelectorAll("pre")).toHaveLength(1)
   expect(screen.getByText("Done.")).toBeDefined()
+  expect(
+    screen.getByRole("link", { name: "First source" }).getAttribute("href"),
+  ).toBe("https://example.com/answer")
+  expect(
+    screen.getByRole("link", { name: "Second source" }).getAttribute("href"),
+  ).toBe("https://example.com/answer_part_1")
   expect(screen.getByText("Completed")).toBeDefined()
   expect(
-    container.querySelector('[data-context-message-id="first"]'),
+    container.querySelector('[data-context-message-id="answer"]'),
   ).toBeNull()
   expect(
-    container.querySelector('[data-context-message-id="last"]'),
+    container.querySelector('[data-context-message-id="answer_part_1"]'),
   ).not.toBeNull()
 })
 

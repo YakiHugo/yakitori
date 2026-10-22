@@ -2,7 +2,7 @@ import { existsSync, watch } from "node:fs"
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it, onTestFinished, vi } from "vitest"
 import {
   createUnifiedExecProcessManager,
   createUnifiedExecTools,
@@ -612,6 +612,59 @@ describe("unified exec tools", () => {
     ).resolves.toMatchObject({ exit_code: 0 })
     await manager.close()
   })
+
+  it.skipIf(process.platform === "win32")(
+    "joins a pruned live process before releasing its owner",
+    async () => {
+      const manager = createUnifiedExecProcessManager({ killGraceMs: 100 })
+      const input = {
+        cwd: process.cwd(),
+        shell: "/bin/sh",
+        env: process.env,
+        tty: false,
+        yieldTimeMs: 250,
+        maxOutputTokens: 100,
+      }
+      let pid: number | undefined
+      onTestFinished(async () => {
+        await manager.close()
+        if (pid !== undefined) {
+          try {
+            process.kill(pid, "SIGKILL")
+          } catch (error) {
+            if (
+              !(
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "ESRCH"
+              )
+            )
+              throw error
+          }
+        }
+      })
+
+      const first = await manager.exec({
+        ...input,
+        command: `exec '${process.execPath}' -e 'process.on("SIGTERM", () => {}); console.log(process.pid); setInterval(() => {}, 1000)'`,
+      })
+      pid = Number(first.output.trim())
+      expect(pid).toBeGreaterThan(0)
+      await Promise.all(
+        Array.from({ length: 63 }, () =>
+          manager.exec({
+            ...input,
+            command: "sleep 30",
+          }),
+        ),
+      )
+      await manager.exec({ ...input, command: "true" })
+      const closing = manager.close()
+      expect(manager.close()).toBe(closing)
+      await closing
+      expect(() => process.kill(pid ?? 0, 0)).toThrow()
+    },
+  )
 
   it.each([
     false,

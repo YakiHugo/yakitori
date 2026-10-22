@@ -507,7 +507,7 @@ export function reconcileBufferedSessionDeliveries(
         if (event.code !== "model.retry") continue
         if (progressedTurns.has(event.turnId)) supersededRetries.add(delivery)
         progressedTurns.add(event.turnId)
-      } else if ("turnId" in event && event.type !== "session.usage") {
+      } else if ("turnId" in event) {
         progressedTurns.add(event.turnId)
       }
     }

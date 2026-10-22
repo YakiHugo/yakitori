@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { requireStoredAssetSource } from "../../src/core/asset-types.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 

@@ -1,5 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
+import { startNewEngineSession } from "../store/engine-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { SessionSearch } from "./session-search.tsx"
 import { Sidebar } from "./sidebar.tsx"
@@ -28,7 +29,6 @@ export function SidebarFrame({
     setPreferredWidth(Math.max(240, Math.min(maximumWidth, value)))
   const [resizing, setResizing] = useState(false)
   const [searching, setSearching] = useState(false)
-  const startNewSession = useAppStore((state) => state.startNewSession)
   useEffect(() => {
     localStorage.setItem("yakitori.sidebarOpen", String(open))
   }, [open])
@@ -71,12 +71,12 @@ export function SidebarFrame({
       }
       if (event.key.toLowerCase() === "n") {
         event.preventDefault()
-        startNewSession()
+        startNewEngineSession()
       }
     }
     window.addEventListener("keydown", keydown)
     return () => window.removeEventListener("keydown", keydown)
-  }, [startNewSession, open, setOpen])
+  }, [open, setOpen])
   return (
     <>
       <aside

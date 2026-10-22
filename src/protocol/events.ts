@@ -170,8 +170,6 @@ export type TurnCompletedEvent = {
     readonly turnId: string
     readonly outcome: TurnOutcome
     readonly usage?: TokenUsage
-    /** Cumulative Session usage at this durable Turn boundary. */
-    readonly sessionUsage?: TokenUsage
     readonly metrics?: TurnMetrics
     readonly metadata?: EventMetadata
   }
@@ -231,26 +229,6 @@ export type FileChange =
       movePath?: string
       diff?: FileChangeDiff
     }>
-
-export type CommandExecutionResult = Readonly<{
-  exitCode: number | null
-  signal: string | null
-  stdout: string
-  stderr: string
-  truncated: boolean
-  timedOut: boolean
-  durationMs?: number
-  cwd?: string
-  shell?: string
-  warnings?: ReadonlyArray<string>
-  blocked?: Readonly<{ rule: string }>
-  binary?: Readonly<{
-    stdout: boolean
-    stderr: boolean
-    stdoutBytes: number
-    stderrBytes: number
-  }>
-}>
 
 export type FileReadResult = Readonly<{
   path: string
@@ -335,7 +313,6 @@ export type ToolExecutionDescriptor =
       type: "command_execution"
       command: string
       description?: string
-      result?: CommandExecutionResult
     }>
   | Readonly<{
       type: "file_change"

@@ -1564,7 +1564,7 @@ async function resolveProjectConfigRoot(
     const root =
       project === undefined
         ? undefined
-        : closestRoot(project.roots, canonicalCwd)
+        : await closestRoot(project.roots, canonicalCwd)
     return root ?? canonicalCwd
   }
 
@@ -1578,16 +1578,37 @@ async function resolveProjectConfigRoot(
     roots.push(...page.projects.flatMap((project) => project.roots))
     cursor = page.nextCursor
   } while (cursor !== undefined)
-  return closestRoot(roots, canonicalCwd) ?? canonicalCwd
+  return (await closestRoot(roots, canonicalCwd)) ?? canonicalCwd
 }
 
-function closestRoot(
+async function closestRoot(
   roots: readonly string[],
   cwd: string,
-): string | undefined {
-  return roots
+): Promise<string | undefined> {
+  const canonicalRoots = await Promise.all(
+    roots.map(async (root) => {
+      try {
+        return await realpath(root)
+      } catch (error) {
+        // Stored projects may name unavailable sources. Matching one cwd must
+        // not depend on permission to traverse unrelated project roots.
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          (error.code === "ENOENT" ||
+            error.code === "ENOTDIR" ||
+            error.code === "EACCES" ||
+            error.code === "EPERM")
+        )
+          return undefined
+        throw error
+      }
+    }),
+  )
+  return canonicalRoots
+    .filter((root) => root !== undefined)
     .filter((root) => containsDirectory(root, cwd))
-    .sort((left, right) => resolve(right).length - resolve(left).length)[0]
+    .sort((left, right) => right.length - left.length)[0]
 }
 
 function isSubagentThread(stored: StoredThread): boolean {

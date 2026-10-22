@@ -44,6 +44,11 @@ function AccountModels({
     page.kind === "account"
       ? catalog?.models.find((model) => model.id === page.modelId)
       : undefined
+  const editingKey = editing
+    ? (Object.keys(settings).find(
+        (id) => id.toLowerCase() === editing.id.toLowerCase(),
+      ) ?? editing.id)
+    : undefined
   const [writer] = useState(() =>
     createSettingsWriter<ProviderModelSettings>({
       async write(next) {
@@ -163,13 +168,13 @@ function AccountModels({
           writer.update(next)
         }}
       />
-      {editing && page.kind === "account" ? (
+      {editing && editingKey && page.kind === "account" ? (
         <ModelConfigurationPanel
           key={editing.id}
           apiBase={apiBase}
           provider={provider}
           model={editing}
-          settings={settings[editing.id] ?? {}}
+          settings={settings[editingKey] ?? {}}
           onClose={() =>
             navigate({
               kind: "account",
@@ -179,7 +184,7 @@ function AccountModels({
           }
           onChange={(override) => {
             request.current++
-            const next = { ...settings, [editing.id]: override }
+            const next = { ...settings, [editingKey]: override }
             setSettings(next)
             writer.update(next)
           }}

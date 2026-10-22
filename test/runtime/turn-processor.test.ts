@@ -1,3 +1,4 @@
+import type { TurnLoopOperationalFailure } from "../../src/runtime/turn-loop.ts"
 import { execFileSync } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -46,7 +47,6 @@ import {
 } from "../../src/runtime/tools/registry.ts"
 import {
   createTurnProcessor,
-  type TurnProcessorOperationalFailure,
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
@@ -2239,7 +2239,7 @@ describe("Turn processor", () => {
         },
       },
     ])
-    const failures: TurnProcessorOperationalFailure[] = []
+    const failures: TurnLoopOperationalFailure[] = []
     const runtime = await createRuntime(provider.stream, tools, {
       async onOperationalFailure(failure) {
         failures.push(failure)
@@ -2258,7 +2258,7 @@ describe("Turn processor", () => {
     expect(failures).toEqual([{ operation: "execute-tool", cause }])
   })
 
-  it("carries a deferred search hit through the next model request and dispatches it", async () => {
+  it("carries the executed hook-rewritten search hit into the next request and dispatches it", async () => {
     const registry = createToolRegistry([])
     registry.replaceExternalSource("calendar-server", [
       {
@@ -2289,7 +2289,7 @@ describe("Turn processor", () => {
             type: "tool_call",
             id: "search_1",
             name: "tool_search",
-            input: { query: "calendar events" },
+            input: { query: "unrelated" },
             toolKind: "tool_search",
           },
         ],
@@ -2332,6 +2332,19 @@ describe("Turn processor", () => {
     ])
     const runtime = await createRuntime(provider.stream, registry, {
       modelContextWindowTokens: 100_000,
+      hookRunner: {
+        async run(request) {
+          return {
+            continue: true,
+            additionalContext: [],
+            ...(request.event === HookEvent.PreToolUse &&
+            request.matcher === "tool_search"
+              ? { updatedInput: { query: "calendar events" } }
+              : {}),
+          }
+        },
+        async dispose() {},
+      },
     })
     const thread = await runtime.createThread()
 
@@ -3664,14 +3677,20 @@ describe("Turn processor", () => {
       .toEqual({ completed: "collected" })
   })
 
-  it("handles cancellation and shutdown while shared model discovery is stalled", async () => {
+  it.each([
+    "current",
+    "previous",
+  ] as const)("cancels and shuts down while the %s model catalog is stalled", async (phase) => {
     const entered = deferred<void>()
     const release = deferred<void>()
     let closed = 0
     let samples = 0
+    let turns = 0
+    let catalogInvalidated = false
     const models = {
       ...createStaticModelsManager("faux"),
       async refresh() {
+        if (phase === "previous" && !catalogInvalidated) return
         entered.resolve()
         await release.promise
       },
@@ -3680,11 +3699,12 @@ describe("Turn processor", () => {
       hasProvider: () => true,
       models: () => models,
       startTurn() {
+        turns++
         return {
           models,
           stream: async function* () {
             samples++
-            yield responseEvent("unreachable")
+            yield responseEvent("ready")
           },
           close() {
             closed++
@@ -3698,10 +3718,22 @@ describe("Turn processor", () => {
         throw new Error("unreachable")
       },
       createToolRegistry([]),
-      { modelClient },
+      {
+        modelClient,
+        async prepareStepExtensions() {
+          // A catalog can become cold after current-model readiness while
+          // asynchronous Step extensions prepare the next request.
+          if (phase === "previous" && turns === 2) catalogInvalidated = true
+          return {}
+        },
+      },
     )
     const thread = await runtime.createThread()
     try {
+      if (phase === "previous") {
+        await thread.startIfIdle({ content: createUserInput("first") })
+        await expect.poll(() => thread.status).toBe("idle")
+      }
       const accepted = await thread.startIfIdle({
         content: createUserInput("prepare"),
       })
@@ -3709,8 +3741,8 @@ describe("Turn processor", () => {
       await entered.promise
       expect(await thread.interruptTurn(accepted.turnId)).toBe(true)
       await thread.shutdownAndWait()
-      expect(closed).toBe(1)
-      expect(samples).toBe(0)
+      expect(closed).toBe(phase === "previous" ? 2 : 1)
+      expect(samples).toBe(phase === "previous" ? 1 : 0)
       expect(thread.status).toBe("shutdown")
     } finally {
       release.resolve()
@@ -4058,7 +4090,7 @@ describe("Turn processor", () => {
   it("stops late stream publications and observes iterator cleanup failures", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
-    const runtimeErrors: TurnProcessorOperationalFailure[] = []
+    const runtimeErrors: TurnLoopOperationalFailure[] = []
     let nextCalls = 0
     const iterator: AsyncIterableIterator<ModelStreamEvent> = {
       [Symbol.asyncIterator]() {
@@ -4448,7 +4480,7 @@ describe("Turn processor", () => {
   it("shrinks overflowed local compaction by removing the oldest input and retaining later history", async () => {
     let normalCalls = 0
     let compactionCalls = 0
-    const operationalFailures: TurnProcessorOperationalFailure[] = []
+    const operationalFailures: TurnLoopOperationalFailure[] = []
     const compactionRequests: ModelRequest[] = []
     const stream: StreamFn = async function* (request) {
       const compacting = request.compaction === "local"

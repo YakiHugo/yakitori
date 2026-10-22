@@ -62,21 +62,8 @@ export type AnthropicProviderOptions = Readonly<{
   profile?: "generic" | "anthropic" | "kimi-code"
 }>
 
-export function createAnthropicProvider(
-  options: AnthropicProviderOptions,
-): StreamFn {
-  return anthropicTransport(options, false).stream
-}
-
 export function createAnthropicTurnTransport(
   options: AnthropicProviderOptions,
-) {
-  return anthropicTransport(options, true)
-}
-
-function anthropicTransport(
-  options: AnthropicProviderOptions,
-  ownsFiles: boolean,
 ) {
   // SDK-internal retries stay disabled: the model request runtime owns policy.
   const client =
@@ -89,7 +76,6 @@ function anthropicTransport(
     })
 
   const upload =
-    ownsFiles &&
     URL.parse(client.baseURL)?.origin === "https://api.anthropic.com"
       ? createFileUploadCache(
           async (document, bytes, signal) =>

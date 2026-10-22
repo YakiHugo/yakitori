@@ -1,10 +1,8 @@
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 import { describe, expect, it } from "vitest"
-import {
-  createAnthropicProvider,
-  toAnthropicMessages,
-} from "../../src/runtime/anthropic-provider.ts"
+import { toAnthropicMessages } from "../../src/runtime/anthropic-provider.ts"
 import {
   type ModelRequest,
   ModelStopReason,
@@ -232,7 +230,7 @@ describe("provider output completeness", () => {
         )
       },
     })
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client: new Anthropic({
@@ -1080,7 +1078,7 @@ function anthropicStream(frames: readonly SseFrame[]): StreamFn {
         headers: { "content-type": "text/event-stream" },
       }),
   })
-  return createAnthropicProvider({
+  return createAnthropicTestStream({
     apiKey: "test",
     model: "claude-test",
     client,
@@ -1130,7 +1128,7 @@ function streamWithFetch(
   fetch: () => Promise<Response>,
 ): StreamFn {
   if (provider === "anthropic")
-    return createAnthropicProvider({
+    return createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client: new Anthropic({ apiKey: "test", maxRetries: 0, fetch }),

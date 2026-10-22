@@ -320,3 +320,49 @@ it("rejects invalid or unrelated TOML edits before applying model overrides", as
   expect(screen.queryByRole("alert")).toBeNull()
   expect(screen.queryByText("Add an unlisted model")).toBeNull()
 })
+
+it("edits a model using its catalog identity while retaining the existing override key", async () => {
+  request.mockImplementation(async (method, params) => {
+    if (method === "config/read")
+      return {
+        layers: [
+          { source: "user", path: "/home/config.toml", version: "first" },
+        ],
+      }
+    return {
+      ...source,
+      settings:
+        method === "provider/models/write"
+          ? params.settings
+          : { "FUTURE-CODER": { displayName: "Mine" } },
+    }
+  })
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Edit settings for future-coder",
+    }),
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Edit /home/config.toml",
+  })
+  expect(editor).toHaveProperty(
+    "value",
+    expect.stringContaining('displayName = "Mine"'),
+  )
+  fireEvent.change(editor, {
+    target: {
+      value:
+        '[models.codex.future-coder]\ndisplayName = "Mine"\ndefaultEffort = "low"',
+    },
+  })
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("provider/models/write", {
+      provider: "codex",
+      version: "first",
+      settings: {
+        "FUTURE-CODER": { displayName: "Mine", defaultEffort: "low" },
+      },
+    }),
+  )
+})

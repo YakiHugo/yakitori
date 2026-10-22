@@ -1,7 +1,7 @@
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
-  createAnthropicProvider,
   fromAnthropicMessage,
   toAnthropicMessages,
   toAnthropicTools,
@@ -50,7 +50,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const provider = createAnthropicProvider({
+    const provider = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -133,7 +133,7 @@ describe("anthropic provider conversion", () => {
         )
       },
     })
-    const stream = createAnthropicProvider({ apiKey: "test", model, client })
+    const stream = createAnthropicTestStream({ apiKey: "test", model, client })
     const events = []
     for await (const event of stream({
       target: { provider, model, instructionProfileId: model },
@@ -302,7 +302,7 @@ describe("anthropic provider conversion", () => {
       },
     ]
     const original = structuredClone(messages)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "test",
       client,
@@ -598,7 +598,7 @@ describe("anthropic provider conversion", () => {
           },
         },
       } as unknown as Anthropic)
-      const stream = createAnthropicProvider({
+      const stream = createAnthropicTestStream({
         apiKey: "test",
         model: "claude-test",
         client,
@@ -1084,7 +1084,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-sonnet-4-6",
       client,
@@ -1128,7 +1128,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -1214,7 +1214,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -1298,7 +1298,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -1332,7 +1332,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -1361,7 +1361,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1402,7 +1402,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1431,7 +1431,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1462,7 +1462,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1492,7 +1492,7 @@ describe("anthropic provider conversion", () => {
         },
       },
     } as unknown as Anthropic)
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       profile: "generic",
       apiKey: "test",
       model: "other-model",
@@ -1578,7 +1578,7 @@ describe("anthropic PDF request size", () => {
     client: Anthropic,
     baseURL?: string,
   ): Promise<ModelStreamEvent[]> {
-    const stream = createAnthropicProvider({
+    const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "claude-test",
       client,
@@ -2021,7 +2021,7 @@ async function collectWithThrowingClient(
 async function collectWithClient(
   client: Anthropic,
 ): Promise<ModelStreamEvent[]> {
-  const stream = createAnthropicProvider({
+  const stream = createAnthropicTestStream({
     apiKey: "test",
     model: "claude-test",
     client,

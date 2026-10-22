@@ -67,9 +67,7 @@ export async function createSubscriptionProvider(
     createTurnStream: () =>
       createCodexProvider({
         credentialsPath: path,
-        ...(login.accountId === undefined
-          ? {}
-          : { accountId: login.accountId }),
+        ownerIdentity: owner,
       }),
     models: createDiscoveringModelsManager({
       provider: id,
@@ -84,7 +82,10 @@ export async function createSubscriptionProvider(
         return owner
       },
       async discover() {
-        const token = await resolveCodexAccessToken({ path })
+        const token = await resolveCodexAccessToken({
+          path,
+          ownerIdentity: owner,
+        })
         if ((await resolveCodexAccountIdentity({ path })) !== owner)
           throw new ConfigurationError(
             "The Codex account changed during model discovery.",

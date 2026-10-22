@@ -19,13 +19,7 @@ import {
   createTurnLoop,
   type PreparedStepContext,
   type TurnLoopOptions,
-  type TurnLoopOperationalFailure,
-  type TurnLoopOperationalFailureReporter,
 } from "./turn-loop.ts"
-
-export type TurnProcessorOperationalFailure = TurnLoopOperationalFailure
-export type TurnProcessorOperationalFailureReporter =
-  TurnLoopOperationalFailureReporter
 
 export type TurnProcessorOptions = Omit<
   TurnLoopOptions,

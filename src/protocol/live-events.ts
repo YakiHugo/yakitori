@@ -1,7 +1,6 @@
 import type {
   EventMetadata,
   StartedExecutionItem,
-  TokenUsage,
   TurnOutcome,
 } from "./events.ts"
 import type { RuntimePermissionEvent } from "./permission-events.ts"
@@ -56,15 +55,6 @@ export type LiveDisplayItemStarted = {
   readonly createdAt: string
 }
 
-export type LiveSessionUsage = {
-  readonly type: "session.usage"
-  readonly sessionId: string
-  readonly turnId: string
-  /** Whole cumulative snapshot. Clients replace rather than aggregate it. */
-  readonly usage: TokenUsage
-  readonly createdAt: string
-}
-
 export type LiveDisplayItemDiscarded = Readonly<{
   type: "item.discarded"
   sessionId: string
@@ -106,7 +96,6 @@ export type LiveSessionEvent =
   | LiveDisplayItemDiscarded
   | LiveAssistantDelta
   | LiveReasoningDelta
-  | LiveSessionUsage
   | LiveTurnFinished
   | LiveSessionError
   | LiveRuntimeWarning

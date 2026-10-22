@@ -129,7 +129,11 @@ export function createGrepTool(
           maxBytes: limits.maxRawBytes,
           maxRecordBytes: MAX_RECORD_BYTES,
           delimiter:
-            parsed.outputMode === "files_with_matches" ? "null" : "newline",
+            parsed.outputMode === "files_with_matches"
+              ? "null"
+              : parsed.outputMode === "count"
+                ? "filename_count"
+                : "newline",
           onRecord(record) {
             return parseRecord(record, parsed).every(accept)
           },
@@ -420,6 +424,14 @@ function boundLine(entry: SearchEntry, maxCharacters: number) {
   const suffix = Math.floor(available / 2)
   return {
     ...entry,
+    ...(entry.match === undefined || entry.match.text.length <= maxCharacters
+      ? {}
+      : {
+          match: {
+            ...entry.match,
+            text: `${entry.match.text.slice(0, prefix)}${marker}${entry.match.text.slice(entry.match.text.length - suffix)}`,
+          },
+        }),
     content: `${entry.content.slice(0, prefix)}${marker}${entry.content.slice(
       entry.content.length - suffix,
     )}`,
