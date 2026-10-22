@@ -10,7 +10,10 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../../src/gui/store/workspace-store.ts"
 import type { ApiProject, ApiSessionDetail } from "../../src/server/protocol.ts"
 import { inputParts } from "./input-fixtures.ts"
 
@@ -148,11 +151,10 @@ beforeEach(() => {
   )
   useWorkspaceStore.setState({
     tabs: [{ id: "changes", kind: "changes" }],
-    activeId: "changes",
     sessionId: undefined,
-    open: true,
-    expanded: false,
-    presentationBySession: {},
+    presentationBySession: {
+      "": { open: true, expanded: false, activeId: "changes" },
+    },
   })
   useAppStore.setState({
     ...createInitialAppState(),
@@ -428,7 +430,9 @@ it("restores each session's workspace visibility and expansion", async () => {
     }),
   )
   expect(screen.getByRole("button", { name: "Show workspace" })).toBeDefined()
-  expect(useWorkspaceStore.getState().expanded).toBe(false)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).expanded,
+  ).toBe(false)
 })
 
 it("hides file and side chat tabs from other sessions and restores their drafts", async () => {
@@ -745,13 +749,17 @@ it("attaches side excerpts immediately and edits their comments without changing
     screen.getByRole("button", { name: "Open excerpt 1: Saved side source" }),
   )
   await user.click(screen.getByRole("button", { name: "Go to source" }))
-  expect(useWorkspaceStore.getState().activeId).toBe(tabId)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(tabId)
   act(() => useAppStore.getState().removePromptExcerpt("main-copy"))
   await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
   expect(side()).toMatchObject({ excerpts: [] })
   selectQuote(response)
   await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
-  expect(useWorkspaceStore.getState().activeId).not.toBe(tabId)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).not.toBe(tabId)
   expect(
     rpc.request.mock.calls.filter(([method]) => method === "sideChat/send"),
   ).toEqual([])
@@ -848,7 +856,9 @@ it("Escape dismisses the selection toolbar without closing a narrow side workspa
   selectQuote(screen.getByText("Quote"))
   fireEvent.keyDown(document, { key: "Escape" })
   expect(screen.queryByRole("toolbar")).toBeNull()
-  expect(useWorkspaceStore.getState().open).toBe(true)
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    true,
+  )
   expect(window.getSelection()?.isCollapsed).toBe(true)
 })
 

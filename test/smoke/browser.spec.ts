@@ -494,8 +494,32 @@ test("window history restores sessions and drafts without creating duplicate con
     const composer = page.getByRole("textbox", { name: "Message the Mate" })
     const reply = page.getByText("Hello from faux.", { exact: true })
     await composer.fill("Keep the first unfinished draft")
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Files/ }).click()
+    await page
+      .getByRole("button", { name: "Expand workspace", exact: true })
+      .click()
+    const workspace = page.getByRole("complementary", {
+      name: "Workspace",
+      exact: true,
+    })
+    const files = page.getByRole("tab", { name: "Files", exact: true })
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(project).toBeDisabled()
+    // Creation passes through the draft workspace, which has its own layout.
+    await expect(workspace).toBeHidden()
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await expect(workspace).toHaveAttribute("data-expanded", "false")
+    await page
+      .getByRole("button", { name: "Hide workspace", exact: true })
+      .click()
     await composer.fill("Keep the second unfinished draft")
     const back = page.getByRole("button", { name: "Go back", exact: true })
     const forward = page.getByRole("button", {
@@ -503,11 +527,29 @@ test("window history restores sessions and drafts without creating duplicate con
       exact: true,
     })
     await back.click()
+    await expect(workspace).toHaveAttribute("data-expanded", "true")
+    await expect(files).toHaveAttribute("aria-selected", "true")
+    await page
+      .getByRole("button", { name: "Restore workspace size", exact: true })
+      .click()
     await expect(reply).toBeVisible()
     await expect(composer).toHaveText("Keep the first unfinished draft")
     await forward.click()
     await expect(reply).toHaveCount(0)
     await expect(composer).toHaveText("Keep the second unfinished draft")
+    await expect(workspace).toBeHidden()
+    await page.keyboard.press("ControlOrMeta+Shift+b")
+    await expect(workspace).toBeVisible()
+    await expect(workspace).toHaveAttribute("data-expanded", "false")
+    await page
+      .getByRole("button", { name: "Close Changes", exact: true })
+      .click()
+    await expect(workspace.getByRole("tab")).toHaveCount(0)
+    await back.click()
+    await expect(files).toHaveAttribute("aria-selected", "true")
+    await forward.click()
+    await expect(workspace).toBeVisible()
+    await expect(workspace.getByRole("tab")).toHaveCount(0)
     expect(creations).toBe(2)
     await page.getByRole("button", { name: "Settings", exact: true }).click()
     await page

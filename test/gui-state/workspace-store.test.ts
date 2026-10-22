@@ -1,5 +1,6 @@
 import "./setup-store-environment.ts"
 import { beforeEach, expect, it, vi } from "vitest"
+import { selectWorkspacePresentation } from "../../src/gui/store/workspace-store.ts"
 import { inputParts } from "../gui/input-fixtures.ts"
 
 beforeEach(() => {
@@ -9,12 +10,89 @@ beforeEach(() => {
 
 it("starts each app window closed even when the previous window had an open workspace", async () => {
   const first = await import("../../src/gui/store/workspace-store.ts")
-  expect(first.useWorkspaceStore.getState().open).toBe(false)
+  expect(
+    selectWorkspacePresentation(first.useWorkspaceStore.getState()).open,
+  ).toBe(false)
   first.useWorkspaceStore.getState().setOpen(true)
-  expect(first.useWorkspaceStore.getState().open).toBe(true)
+  expect(
+    selectWorkspacePresentation(first.useWorkspaceStore.getState()).open,
+  ).toBe(true)
   vi.resetModules()
   const next = await import("../../src/gui/store/workspace-store.ts")
-  expect(next.useWorkspaceStore.getState().open).toBe(false)
+  expect(
+    selectWorkspacePresentation(next.useWorkspaceStore.getState()).open,
+  ).toBe(false)
+})
+
+it("inherits pane sizing only on first entry and remembers an empty new-session workspace", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.closeTab("changes")
+  store.setOpen(true)
+  store.setExpanded(true)
+  store.setSession("first")
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
+    open: true,
+    expanded: true,
+  })
+  store.setOpen(false)
+  store.setExpanded(false)
+  store.setSession("second")
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
+    open: false,
+    expanded: false,
+  })
+  store.setSession(undefined)
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState())).toEqual({
+    open: true,
+    expanded: true,
+    activeId: undefined,
+  })
+  expect(
+    useWorkspaceStore
+      .getState()
+      .tabs.filter((tab) => tab.workspaceSessionId === undefined),
+  ).toEqual([])
+  store.setSession("first")
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
+    open: false,
+    expanded: false,
+  })
+})
+
+it("keeps the selected tab when closing another and can empty an inactive new-session workspace", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  const selected = store.addTab("files")
+  store.closeTab("changes")
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(selected)
+  store.setSession("first")
+  const active = store.addTab("computer")
+  store.closeTab(selected)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(active)
+  store.setSession(undefined)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBeUndefined()
+  expect(
+    useWorkspaceStore
+      .getState()
+      .tabs.filter((tab) => tab.workspaceSessionId === undefined),
+  ).toEqual([])
 })
 
 it("reuses the current root's subagent tab while keeping other roots separate", async () => {
@@ -22,14 +100,20 @@ it("reuses the current root's subagent tab while keeping other roots separate", 
     "../../src/gui/store/workspace-store.ts"
   )
   useWorkspaceStore.getState().openAgents("root-one", "child-one")
-  const first = useWorkspaceStore.getState().activeId
+  const first = selectWorkspacePresentation(
+    useWorkspaceStore.getState(),
+  ).activeId
   useWorkspaceStore.getState().openAgents("root-one", "child-two")
-  expect(useWorkspaceStore.getState().activeId).toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(first)
   expect(
     useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "agents"),
   ).toHaveLength(1)
   useWorkspaceStore.getState().openAgents("root-two", "child-three")
-  expect(useWorkspaceStore.getState().activeId).not.toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).not.toBe(first)
   useWorkspaceStore.getState().openAgents("root-one")
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
@@ -64,7 +148,9 @@ it("keeps file and browser tabs in their opening session and preserves an emptie
   ).toHaveLength(2)
 
   useWorkspaceStore.getState().setSession("session-one")
-  expect(useWorkspaceStore.getState().activeId).toBe(first.activeId)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(selectWorkspacePresentation(first).activeId)
   for (const tab of useWorkspaceStore
     .getState()
     .tabs.filter((entry) => entry.workspaceSessionId === "session-one")) {
@@ -72,7 +158,9 @@ it("keeps file and browser tabs in their opening session and preserves an emptie
   }
   useWorkspaceStore.getState().setSession("session-two")
   useWorkspaceStore.getState().setSession("session-one")
-  expect(useWorkspaceStore.getState().activeId).toBeUndefined()
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBeUndefined()
   expect(
     useWorkspaceStore
       .getState()
@@ -87,12 +175,18 @@ it("reuses the same skill preview per session and keeps another session separate
   const store = useWorkspaceStore.getState()
   store.setSession("first")
   store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
-  const first = useWorkspaceStore.getState().activeId
+  const first = selectWorkspacePresentation(
+    useWorkspaceStore.getState(),
+  ).activeId
   store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
-  expect(useWorkspaceStore.getState().activeId).toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(first)
   store.setSession("second")
   store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
-  expect(useWorkspaceStore.getState().activeId).not.toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).not.toBe(first)
   expect(
     useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "skill"),
   ).toHaveLength(2)
@@ -109,25 +203,33 @@ it("restores each session's pane and active tab after switching, including agent
   store.setSession("session-two")
   const secondTab = store.addTab("computer")
   store.openAgents("session-two")
-  expect(useWorkspaceStore.getState()).toMatchObject({
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
     open: true,
     expanded: false,
   })
   store.setOpen(false)
 
   store.setSession("session-one")
-  expect(useWorkspaceStore.getState()).toMatchObject({
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
     open: true,
     expanded: true,
     activeId: firstTab,
   })
   store.setSession("session-two")
-  expect(useWorkspaceStore.getState()).toMatchObject({
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({
     open: false,
     expanded: false,
   })
   store.activate(secondTab)
-  expect(useWorkspaceStore.getState().activeId).toBe(secondTab)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(secondTab)
   expect(localStorage.getItem("yakitori.workspaceTab")).toBeNull()
 })
 
@@ -147,7 +249,9 @@ it("removes a deleted session's workspace tabs and leaves other sessions intact"
       .getState()
       .tabs.some((tab) => tab.workspaceSessionId === "parent"),
   ).toBe(false)
-  expect(useWorkspaceStore.getState().activeId).toBe(otherTab)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(otherTab)
 
   store.removeSession("other")
   expect(useWorkspaceStore.getState().sessionId).toBeUndefined()
@@ -191,17 +295,19 @@ it("opens a fresh side chat when the previous one has expired", async () => {
     "parent",
   )
   const current = useWorkspaceStore.getState()
-  expect(current.activeId).not.toBe(previous)
+  expect(selectWorkspacePresentation(current).activeId).not.toBe(previous)
   expect(current.tabs.find((tab) => tab.id === previous)).toMatchObject({
     expiresAt: "2020-01-01T00:00:00.000Z",
   })
-  expect(current.tabs.find((tab) => tab.id === current.activeId)).toMatchObject(
-    {
-      kind: "chat",
-      workspaceSessionId: "parent",
-      excerpts: [{ id: "quote" }],
-    },
-  )
+  expect(
+    current.tabs.find(
+      (tab) => tab.id === selectWorkspacePresentation(current).activeId,
+    ),
+  ).toMatchObject({
+    kind: "chat",
+    workspaceSessionId: "parent",
+    excerpts: [{ id: "quote" }],
+  })
 })
 
 it("keeps selected context in its explicit side draft and advances focus only when adding", async () => {
@@ -223,7 +329,9 @@ it("keeps selected context in its explicit side draft and advances focus only wh
     },
   }
   store.addChatExcerpt(first, excerpt)
-  expect(useWorkspaceStore.getState().activeId).toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(first)
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
   ).toMatchObject({ excerpts: [excerpt], composerFocusRevision: 1 })
@@ -272,7 +380,9 @@ it.each([
   store.updateChatExcerpt(id, { ...excerpt, comment: "Late edit" })
   store.removeChatExcerpt(id, excerpt.id)
 
-  expect(useWorkspaceStore.getState().activeId).toBe(other)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(other)
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === id),
   ).toMatchObject({
@@ -287,7 +397,9 @@ it.each([
     expired: false,
   })
   store.addChatExcerpt(id, { ...excerpt, id: "renewed" })
-  expect(useWorkspaceStore.getState().activeId).toBe(id)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(id)
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === id),
   ).toMatchObject({
@@ -314,15 +426,21 @@ it("asks in a distinct side chat and does not choose between unrelated idle draf
     },
   }
   store.askInSideChat(excerpt, "main", first)
-  const second = useWorkspaceStore.getState().activeId
+  const second = selectWorkspacePresentation(
+    useWorkspaceStore.getState(),
+  ).activeId
   expect(second).not.toBe(first)
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
   ).toMatchObject({ excerpts: [] })
   store.addTab("browser")
   store.askInSideChat({ ...excerpt, id: "next" }, "main")
-  expect(useWorkspaceStore.getState().activeId).not.toBe(first)
-  expect(useWorkspaceStore.getState().activeId).not.toBe(second)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).not.toBe(first)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).not.toBe(second)
   expect(
     useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "chat"),
   ).toHaveLength(3)
@@ -339,9 +457,13 @@ it("repairs an inactive session's selection without changing the active session"
   store.setSession("second")
   const second = store.addTab("computer")
   store.closeTab(removed)
-  expect(useWorkspaceStore.getState().activeId).toBe(second)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(second)
   store.setSession("first")
-  expect(useWorkspaceStore.getState().activeId).toBe(fallback)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(fallback)
   expect(
     useWorkspaceStore.getState().tabs.some((tab) => tab.id === removed),
   ).toBe(false)
@@ -368,7 +490,9 @@ it("cannot activate or add excerpts to a tab owned by another session", async ()
       label: "Response",
     },
   })
-  expect(useWorkspaceStore.getState().activeId).toBe(second)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(second)
   expect(
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
   ).toMatchObject({ excerpts: [] })
@@ -388,13 +512,17 @@ it("replaces background chat status without retaining ended turns or old errors"
     expired: true,
   })
   store.setSession("second")
-  const second = useWorkspaceStore.getState().activeId
+  const second = selectWorkspacePresentation(
+    useWorkspaceStore.getState(),
+  ).activeId
   store.updateChatStatus(first, { hasMessages: true, expired: false })
   const tab = useWorkspaceStore.getState().tabs.find((tab) => tab.id === first)
   expect(tab).not.toHaveProperty("activeTurnId")
   expect(tab).not.toHaveProperty("error")
   expect(tab).toMatchObject({ hasMessages: true, expired: false })
-  expect(useWorkspaceStore.getState().activeId).toBe(second)
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+  ).toBe(second)
 })
 
 it("edits and removes an excerpt only in the named side draft", async () => {

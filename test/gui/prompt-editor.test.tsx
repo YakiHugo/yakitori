@@ -10,7 +10,10 @@ import {
 } from "../../src/gui/components/prompt-editor.tsx"
 import { inputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
 import { textInputDraft } from "../../src/gui/input-draft.ts"
-import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../../src/gui/store/workspace-store.ts"
 import type {
   ImageAttachment,
   PdfAttachment,
@@ -229,11 +232,17 @@ it("opens a skill chip in the workspace without changing the prompt", () => {
   const chip = screen.getByRole("button", { name: "review" })
   expect(chip.textContent).toBe("review")
   fireEvent.click(chip)
-  expect(useWorkspaceStore.getState()).toMatchObject({ open: true })
+  expect(
+    selectWorkspacePresentation(useWorkspaceStore.getState()),
+  ).toMatchObject({ open: true })
   expect(
     useWorkspaceStore
       .getState()
-      .tabs.find((tab) => tab.id === useWorkspaceStore.getState().activeId),
+      .tabs.find(
+        (tab) =>
+          tab.id ===
+          selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+      ),
   ).toMatchObject({
     kind: "skill",
     name: "review",

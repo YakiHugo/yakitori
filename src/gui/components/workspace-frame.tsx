@@ -25,6 +25,7 @@ import { useAppStore } from "../store/app-store.ts"
 import { useEngineStore } from "../store/engine-store.ts"
 import {
   isSideChatExpired,
+  selectWorkspacePresentation,
   useWorkspaceStore,
   type WorkspaceTab,
 } from "../store/workspace-store.ts"
@@ -41,8 +42,8 @@ import { DiscardFileDialog } from "./file-editor.tsx"
 import { SelectionActions } from "./selection-actions.tsx"
 import { SideChatPanel } from "./side-chat-panel.tsx"
 import { SidebarFrame } from "./sidebar-frame.tsx"
-import { WindowChrome } from "./window-chrome.tsx"
 import { SubagentsWorkspace } from "./subagents-workspace.tsx"
+import { WindowChrome } from "./window-chrome.tsx"
 import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
 
@@ -67,11 +68,11 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
   )
-  const open = useWorkspaceStore((state) => state.open)
+  const { open, expanded, activeId } = useWorkspaceStore(
+    selectWorkspacePresentation,
+  )
   const setOpen = useWorkspaceStore((state) => state.setOpen)
-  const expanded = useWorkspaceStore((state) => state.expanded)
   const tabs = useWorkspaceStore((state) => state.tabs)
-  const activeId = useWorkspaceStore((state) => state.activeId)
   const nativeSessionId = useAppStore((state) => state.selection.sessionId)
   const externalEngine = useEngineStore((state) => state.engineId)
   const externalSessionId = useEngineStore((state) => state.sessionId)
@@ -236,7 +237,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     return window.yakitoriDesktop?.browser?.onShortcut((action) => {
       if (useAppStore.getState().settingsSection !== undefined) return
       if (action === "toggle-workspace")
-        setOpen(!useWorkspaceStore.getState().open)
+        setOpen(!selectWorkspacePresentation(useWorkspaceStore.getState()).open)
       else if (!external || action !== "new-side-chat")
         addTab(
           action === "new-browser"
@@ -266,7 +267,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
         !document.querySelector("dialog[open]")
       ) {
         event.preventDefault()
-        setOpen(!useWorkspaceStore.getState().open)
+        setOpen(!selectWorkspacePresentation(useWorkspaceStore.getState()).open)
       }
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey) {
         const key = event.key.toLowerCase()
@@ -568,7 +569,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     }
                     onSelection={(selection) => {
                       if (external) return
-                      const workspace = useWorkspaceStore.getState()
+                      const workspace = selectWorkspacePresentation(
+                        useWorkspaceStore.getState(),
+                      )
                       if (
                         !workspace.open ||
                         workspace.activeId !== tab.id ||

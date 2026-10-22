@@ -12,13 +12,25 @@ import { MarkdownView } from "../../src/gui/components/markdown.tsx"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
 beforeEach(() => {
-  useWorkspaceStore.setState({ tabs: [], activeId: undefined })
+  useWorkspaceStore.setState({
+    tabs: [],
+    sessionId: undefined,
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: undefined },
+    },
+  })
 })
 
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
-  useWorkspaceStore.setState({ tabs: [], activeId: undefined })
+  useWorkspaceStore.setState({
+    tabs: [],
+    sessionId: undefined,
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: undefined },
+    },
+  })
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
     value: undefined,
@@ -170,9 +182,7 @@ describe("links", () => {
       />,
     )
     const link = screen.getByRole("link", { name: "the store" })
-    expect(link.querySelector("svg path")?.getAttribute("fill")).toBe(
-      "#3178C6",
-    )
+    expect(link.querySelector("svg path")?.getAttribute("fill")).toBe("#3178C6")
   })
 
   it("does not repeat the line when the link label already carries it", () => {

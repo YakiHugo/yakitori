@@ -862,9 +862,10 @@ describe("delete session", () => {
     const stream = fakeRef.current.streams[0]
     useWorkspaceStore.setState({
       tabs: [{ id: "changes", kind: "changes" }],
-      activeId: "changes",
       sessionId: undefined,
-      presentationBySession: {},
+      presentationBySession: {
+        "": { open: false, expanded: false, activeId: "changes" },
+      },
     })
     useWorkspaceStore.getState().setSession("session_1")
     useWorkspaceStore.getState().addTab("chat", "session_1")
@@ -905,9 +906,10 @@ describe("delete session", () => {
     }
     useWorkspaceStore.setState({
       tabs: [{ id: "changes", kind: "changes" }],
-      activeId: "changes",
       sessionId: undefined,
-      presentationBySession: {},
+      presentationBySession: {
+        "": { open: false, expanded: false, activeId: "changes" },
+      },
     })
     useWorkspaceStore.getState().setSession("session_1")
     const sideChatId = useWorkspaceStore.getState().addTab("chat", "session_1")

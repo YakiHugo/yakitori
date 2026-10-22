@@ -16,7 +16,10 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+import {
+  selectWorkspacePresentation,
+  useWorkspaceStore,
+} from "../../src/gui/store/workspace-store.ts"
 import type {
   SideChatSend,
   SideChatSnapshot,
@@ -142,14 +145,23 @@ beforeEach(() => {
         sourceSessionId: "main-session",
       },
     ],
-    activeId: "chat-tab",
+    sessionId: undefined,
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: "chat-tab" },
+    },
   })
 })
 
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
-  useWorkspaceStore.setState({ tabs: [], activeId: undefined })
+  useWorkspaceStore.setState({
+    tabs: [],
+    sessionId: undefined,
+    presentationBySession: {
+      "": { open: false, expanded: false, activeId: undefined },
+    },
+  })
   useAppStore.setState(createInitialAppState())
 })
 
@@ -226,7 +238,9 @@ describe("side chat panel", () => {
       sourceSessionId: "main-session",
       draft: inputParts(""),
     })
-    expect(useWorkspaceStore.getState().activeId).toBe(tabs[1]?.id)
+    expect(
+      selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+    ).toBe(tabs[1]?.id)
     expect(screen.getByText("An earlier answer")).toBeDefined()
   })
 
@@ -380,7 +394,9 @@ describe("side chat panel", () => {
         "main-session",
       )
     })
-    expect(useWorkspaceStore.getState().activeId).not.toBe("chat-tab")
+    expect(
+      selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+    ).not.toBe("chat-tab")
     expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({ excerpts: [] })
     expect(useWorkspaceStore.getState().tabs[1]).toMatchObject({
       kind: "chat",
@@ -428,7 +444,9 @@ describe("side chat panel", () => {
         "main-session",
       )
     })
-    expect(useWorkspaceStore.getState().activeId).toBe("chat-tab")
+    expect(
+      selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
+    ).toBe("chat-tab")
     expect(useWorkspaceStore.getState().tabs).toHaveLength(1)
     expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
       excerpts: [{ id: "renewed-question" }],

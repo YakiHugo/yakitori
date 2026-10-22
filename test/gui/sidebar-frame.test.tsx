@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { useState } from "react"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { SidebarFrame } from "../../src/gui/components/sidebar-frame.tsx"
 import {
   createInitialAppState,
@@ -43,7 +43,8 @@ beforeEach(() => {
     configurable: true,
     value: 1400,
   })
-  useWorkspaceStore.setState({ open: false, expanded: false })
+  useWorkspaceStore.getState().setOpen(false)
+  useWorkspaceStore.getState().setExpanded(false)
 })
 afterEach(() => {
   cleanup()
@@ -81,7 +82,7 @@ it("starts at 275 pixels with accessible 240–520 pixel resize bounds", () => {
 
 it("temporarily fits the viewport without replacing the preferred width and restores it when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   render(<Frame />)
   expectWidth(500, 520)
 
@@ -112,7 +113,7 @@ it("reserves room when the split workspace opens and restores the preferred widt
 
 it("uses split-pane bounds at 960 pixels and viewport bounds below that breakpoint", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(960)
   render(<Frame />)
   expectWidth(240, 240)
@@ -145,7 +146,7 @@ it("adjusts the divider with arrow keys, stops at the minimum, and resets to 275
 
 it("limits keyboard resizing to the space available beside the split workspace", () => {
   localStorage.setItem("yakitori.sidebarWidth", "320")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(1000)
   render(<Frame />)
   const divider = screen.getByRole("separator", { name: "Sidebar width" })
@@ -158,7 +159,7 @@ it("limits keyboard resizing to the space available beside the split workspace",
 
 it("resets the preferred width to 275 while constrained and reveals that default when space returns", () => {
   localStorage.setItem("yakitori.sidebarWidth", "500")
-  useWorkspaceStore.setState({ open: true })
+  useWorkspaceStore.getState().setOpen(true)
   resizeViewport(960)
   render(<Frame />)
   expectWidth(240, 240)
