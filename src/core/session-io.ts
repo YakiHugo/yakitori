@@ -59,13 +59,13 @@ export type TurnInputSubmission =
   | Readonly<{
       type: "started"
       turnId: string
-      inputItemId: string
+      inputItemId?: string
     }>
   | Readonly<{ type: "steered"; turnId: string }>
   | Readonly<{
       type: "replayed"
       turnId: string
-      inputItemId: string
+      inputItemId?: string
     }>
   | Readonly<{
       type: "not_submitted"
@@ -83,6 +83,13 @@ type TurnInputReply = Readonly<{
 }>
 
 export type SessionOp =
+  | Readonly<{
+      type: "resume_turn"
+      requestId: string
+      expectedTurnId: string
+      modelSelection?: TurnInput["modelSelection"]
+      reply: TurnInputReply
+    }>
   | Readonly<{
       type: "turn_input"
       input: TurnInput
@@ -349,7 +356,9 @@ export class BoundedQueue<T> {
 export function fingerprintTurnInput(input: TurnInput): string {
   const fingerprint = fingerprintInputAdmission({
     role:
-      input.goalId === undefined && input.provenance === undefined
+      input.goalId === undefined &&
+      input.provenance === undefined &&
+      input.purpose !== "continuation"
         ? InputRole.User
         : InputRole.Runtime,
     ...(input.provenance === undefined ? {} : { provenance: input.provenance }),

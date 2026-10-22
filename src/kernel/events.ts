@@ -326,7 +326,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
         return (
           onlyKeys(data, ["turnId", "inputId", "parentTurnId", "metadata"]) &&
           isString(data.turnId) &&
-          isString(data.inputId) &&
+          (data.inputId === undefined || isString(data.inputId)) &&
           (data.parentTurnId === undefined || isString(data.parentTurnId))
         )
       case EventType.TurnCompleted:

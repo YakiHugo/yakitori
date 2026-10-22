@@ -70,6 +70,24 @@ export class AgentThread {
     return this.#submitTurnInput(input, { type: "start_or_steer" })
   }
 
+  resumeTurn(
+    input: Readonly<{
+      requestId: string
+      expectedTurnId: string
+      modelSelection?: TurnInput["modelSelection"]
+    }>,
+  ): Promise<TurnInputSubmission> {
+    return new Promise((resolve, reject) => {
+      void this.#endpoints
+        .send({
+          type: "resume_turn",
+          ...structuredClone(input),
+          reply: { resolve, reject },
+        })
+        .catch(reject)
+    })
+  }
+
   compact(requestId: string): Promise<TurnInputSubmission> {
     return new Promise((resolve, reject) => {
       void this.#endpoints
@@ -154,6 +172,8 @@ export class AgentThread {
     mode: TurnInputMode,
   ): Promise<TurnInputSubmission> {
     input = structuredClone(input)
+    if (input.purpose === "continuation")
+      throw new TypeError("Continue a Turn through resumeTurn.")
     if (
       input.provenance !== undefined &&
       (!isThreadMessageProvenance(input.provenance) ||

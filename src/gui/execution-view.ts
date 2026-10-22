@@ -118,7 +118,7 @@ export type ActiveModelRetry = Readonly<{
   turnId: string
   kind: ModelFailureKind
   nextAttempt: number
-  maxAttempts: number
+  maxAttempts?: number
   delayMs: number
   message: string
 }>
@@ -531,9 +531,10 @@ function applyTransient(
       typeof nextAttempt !== "number" ||
       !Number.isSafeInteger(nextAttempt) ||
       nextAttempt < 2 ||
-      typeof maxAttempts !== "number" ||
-      !Number.isSafeInteger(maxAttempts) ||
-      maxAttempts < nextAttempt ||
+      (maxAttempts !== undefined &&
+        (typeof maxAttempts !== "number" ||
+          !Number.isSafeInteger(maxAttempts) ||
+          maxAttempts < nextAttempt)) ||
       typeof delayMs !== "number" ||
       !Number.isFinite(delayMs) ||
       delayMs < 0
@@ -546,7 +547,7 @@ function applyTransient(
         turnId: event.turnId,
         kind,
         nextAttempt,
-        maxAttempts,
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
         delayMs,
         message: event.message,
       },
@@ -753,7 +754,9 @@ function applyDurable(
         turnTimings: {
           ...next.turnTimings,
           [event.data.turnId]: {
-            inputId: event.data.inputId,
+            ...(event.data.inputId === undefined
+              ? {}
+              : { inputId: event.data.inputId }),
             startedAt: event.createdAt,
           },
         },

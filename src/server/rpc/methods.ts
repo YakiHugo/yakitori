@@ -62,6 +62,7 @@ import {
   type ApiCancelTurnResponse,
   type ApiClearGoalResponse,
   type ApiCompactSessionResponse,
+  type ApiResumeTurnResponse,
   type ApiCreateProjectResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
@@ -814,6 +815,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "session/compact",
     sessionScope,
     (handlers, params) => handlers.compactSession(params),
+  ),
+  handlerEntry<ApiResumeTurnResponse>(
+    "session/turn/resume",
+    sessionScope,
+    (handlers, params) => handlers.resumeTurn(params),
   ),
   handlerEntry<ApiAdmitInputResponse>(
     "session/input",

@@ -79,6 +79,11 @@ export function modelFailureFromUnknown(
   // Bound diagnostic text so a provider cannot inflate durable failure records.
   const providerMessage = input.providerMessage?.trim().slice(0, 2_000)
   const summary = stableFailureMessage(kind, input.fallbackMessage)
+  const serverShouldRetry =
+    input.providerCode === "insufficient_quota" ||
+    input.providerCode === "usage_limit_reached"
+      ? false
+      : input.serverShouldRetry
   const context = [
     ...(input.status === undefined ? [] : [`HTTP ${input.status}`]),
     ...(input.providerCode === undefined ? [] : [input.providerCode]),
@@ -105,9 +110,7 @@ export function modelFailureFromUnknown(
     ...(input.retryAfterMs === undefined
       ? {}
       : { retryAfterMs: input.retryAfterMs }),
-    ...(input.serverShouldRetry === undefined
-      ? {}
-      : { serverShouldRetry: input.serverShouldRetry }),
+    ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
     ...(causeCode === undefined && !providerMessage
       ? {}
       : {

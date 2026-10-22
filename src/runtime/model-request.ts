@@ -18,7 +18,6 @@ export type { ModelRequestPolicy } from "../kernel/index.ts"
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 const DEFAULT_MAX_ATTEMPTS = 8
-const DEFAULT_RATE_LIMIT_MAX_ATTEMPTS = 2
 // Iterator teardown can ignore cancellation indefinitely. This host safety
 // boundary reports unresolved ownership; it never treats expiry as release.
 const DEFAULT_STREAM_CLEANUP_TIMEOUT_MS = 1_000
@@ -54,7 +53,9 @@ export function createModelRequestStream(
     wireApi: options.wireApi,
     maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     rateLimitMaxAttempts:
-      options.rateLimitMaxAttempts ?? DEFAULT_RATE_LIMIT_MAX_ATTEMPTS,
+      options.rateLimitMaxAttempts ??
+      options.maxAttempts ??
+      DEFAULT_MAX_ATTEMPTS,
     baseDelayMs: options.baseDelayMs ?? 500,
     maxDelayMs: options.maxDelayMs ?? 8_000,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 300_000,
@@ -73,6 +74,8 @@ async function* runModelRequest(
   options: ResolvedModelRequestOptions,
 ): AsyncGenerator<ModelStreamEvent> {
   let previousFailure: ModelFailure | undefined
+  let budgetUsed = 0
+  let connectionRetries = 0
   for (let attempt = 1; ; attempt += 1) {
     let observedUsage: ModelUsage | undefined
     const usageFields = () =>
@@ -102,13 +105,16 @@ async function* runModelRequest(
       | undefined
     try {
       try {
-        const { rebuildMessagesAfterOutput: _rebuild, ...providerRequest } =
-          request
+        const {
+          rebuildMessagesAfterOutput: _rebuild,
+          waitForConnection: _wait,
+          ...providerRequest
+        } = request
         iterator = stream({
           ...providerRequest,
           attempt: {
             number: attempt,
-            maxAttempts: options.maxAttempts,
+            maxAttempts: attempt + options.maxAttempts - budgetUsed - 1,
             ...(previousFailure === undefined ? {} : { previousFailure }),
           },
           signal,
@@ -298,19 +304,35 @@ async function* runModelRequest(
     if (failureEvent === undefined) {
       throw new Error("Model attempt ended without an outcome.")
     }
+    const canRebuild =
+      !committedOutput || request.rebuildMessagesAfterOutput !== undefined
+    const waitingForConnection =
+      canRebuild &&
+      request.waitForConnection === true &&
+      request.compaction === undefined &&
+      failureEvent.failure.kind === "connection_failed" &&
+      failureEvent.failure.status === undefined &&
+      failureEvent.failure.serverShouldRetry !== false
+    if (!waitingForConnection) budgetUsed += 1
     const retry =
-      (!committedOutput || request.rebuildMessagesAfterOutput !== undefined) &&
-      (compactionTruncated
-        ? attempt < options.maxAttempts
-        : shouldRetry(failureEvent.failure, attempt, options))
-    const effectiveMaxAttempts =
+      waitingForConnection ||
+      (canRebuild &&
+        (compactionTruncated
+          ? budgetUsed < options.maxAttempts
+          : shouldRetry(failureEvent.failure, budgetUsed, options)))
+    const budget =
       failureEvent.failure.kind === "rate_limited"
         ? Math.min(options.maxAttempts, options.rateLimitMaxAttempts)
         : options.maxAttempts
+    const effectiveMaxAttempts = waitingForConnection
+      ? undefined
+      : attempt + Math.max(0, budget - budgetUsed)
     const failure = {
       ...failureEvent.failure,
       attempt,
-      maxAttempts: effectiveMaxAttempts,
+      ...(effectiveMaxAttempts === undefined
+        ? {}
+        : { maxAttempts: effectiveMaxAttempts }),
       outputObserved,
       retryDecision: retry ? "retry" : "fail",
     } as const
@@ -324,13 +346,28 @@ async function* runModelRequest(
         messages: await request.rebuildMessagesAfterOutput(),
       }
     }
-    const delayMs = retryDelay(failure, attempt, options)
+    // Connectivity waits leave the transient-error budget intact. The capped
+    // interval avoids hammering an offline host while remaining cancellable.
+    connectionRetries = waitingForConnection ? connectionRetries + 1 : 0
+    const retryAfterMs = failure.retryAfterMs
+    const delayMs = waitingForConnection
+      ? Math.max(
+          Math.min(60_000, 5_000 * 2 ** Math.min(connectionRetries - 1, 4)),
+          retryAfterMs !== undefined &&
+            Number.isFinite(retryAfterMs) &&
+            retryAfterMs >= 0
+            ? Math.min(retryAfterMs, MAX_TIMER_DELAY_MS)
+            : 0,
+        )
+      : retryDelay(failure, budgetUsed, options)
     yield {
       type: "retry",
       ...(committedOutput ? { committedOutput: true } : {}),
       attempt,
       nextAttempt: attempt + 1,
-      maxAttempts: effectiveMaxAttempts,
+      ...(effectiveMaxAttempts === undefined
+        ? {}
+        : { maxAttempts: effectiveMaxAttempts }),
       delayMs,
       failure,
       ...usageFields(),

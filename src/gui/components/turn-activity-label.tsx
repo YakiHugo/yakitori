@@ -47,7 +47,9 @@ export function TurnActivityLabel({
       role={active ? "status" : undefined}
     >
       {retry
-        ? `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
+        ? retry.maxAttempts === undefined
+          ? "Waiting for network"
+          : `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
         : active
           ? elapsed === undefined
             ? "Working"

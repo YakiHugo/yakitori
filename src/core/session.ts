@@ -1,4 +1,5 @@
 import { answerTextParts } from "../protocol/model-output.ts"
+import { canResumeTurn } from "../protocol/turn-recovery.ts"
 import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import {
   TaskCleanupError,
@@ -89,7 +90,7 @@ export type ExecutionRecord =
 type ActiveTurn = {
   messageAdmission?: Readonly<{ resolve(): void; reject(error: unknown): void }>
   readonly input: TurnInput
-  readonly inputItem: ResponseItemEnvelope
+  readonly inputItem: ResponseItemEnvelope | undefined
   inputRecorded: boolean
   // Compaction can replace model history before a continued answer finishes.
   assistantItems: ResponseItemEnvelope[]
@@ -142,7 +143,7 @@ type AcceptedThreadMessage = {
 type PendingTurnStart = {
   readonly input: TurnInput
   readonly context: TurnContextItem
-  readonly inputItem: ResponseItemEnvelope
+  readonly inputItem: ResponseItemEnvelope | undefined
   readonly items: readonly RolloutItem[]
   append?: RolloutAppend
 }
@@ -163,7 +164,7 @@ export class Session {
       fingerprint: string | undefined
       source: InputSource
       purpose: InputPurpose
-      inputItemId: string
+      inputItemId?: string
       turnId: string
       threadId: string
     }>
@@ -219,7 +220,9 @@ export class Session {
           fingerprint: record.item.requestFingerprint,
           source: record.item.source ?? "human",
           purpose: record.item.purpose ?? "message",
-          inputItemId: record.item.inputItemId,
+          ...(record.item.inputItemId === undefined
+            ? {}
+            : { inputItemId: record.item.inputItemId }),
           turnId: record.item.turnId,
         })
       }
@@ -391,6 +394,56 @@ export class Session {
   async #dispatch(
     operation: Exclude<SessionOp, Readonly<{ type: "shutdown" }>>,
   ): Promise<void> {
+    if (operation.type === "resume_turn") {
+      try {
+        const input: TurnInput = {
+          submissionId: operation.requestId,
+          source: "runtime",
+          purpose: "continuation",
+          content: createUserInput(""),
+          metadata: { resumeOfTurnId: operation.expectedTurnId },
+          ...(operation.modelSelection === undefined
+            ? {}
+            : { modelSelection: operation.modelSelection }),
+        }
+        if (!this.#submittedInputs.has(input.submissionId)) {
+          if (this.#activeTurn !== undefined) {
+            operation.reply.resolve(notSubmitted(Reason.NotIdle))
+            return
+          }
+          const stored = await this.#store.readThread(this.id)
+          const lastStart = stored?.rollout.findLast(
+            ({ item }) => item.type === "turn_started",
+          )?.item
+          const lastEnd = stored?.rollout.findLast(
+            ({ item }) => item.type === "turn_completed",
+          )?.item
+          if (
+            lastStart?.type !== "turn_started" ||
+            lastEnd?.type !== "turn_completed" ||
+            lastStart.turnId !== operation.expectedTurnId ||
+            lastEnd.turnId !== operation.expectedTurnId ||
+            !canResumeTurn(
+              lastEnd.outcome === "failed"
+                ? {
+                    status: "failed",
+                    error: lastEnd.error ?? { message: "Turn failed." },
+                  }
+                : { status: lastEnd.outcome },
+            )
+          ) {
+            operation.reply.resolve(notSubmitted(Reason.TurnMismatch))
+            return
+          }
+        }
+        operation.reply.resolve(
+          await this.#routeTurnInput(input, { type: "start_if_idle" }),
+        )
+      } catch (error) {
+        operation.reply.reject(error)
+      }
+      return
+    }
     if (operation.type === "compact") {
       try {
         operation.reply.resolve(
@@ -524,7 +577,9 @@ export class Session {
       return {
         type: "replayed",
         turnId: submitted.turnId,
-        inputItemId: submitted.inputItemId,
+        ...(submitted.inputItemId === undefined
+          ? {}
+          : { inputItemId: submitted.inputItemId }),
       }
     }
     const active = this.#activeTurn
@@ -614,10 +669,12 @@ export class Session {
       throw error
     }
     const inputItem =
-      input.provenance === undefined
-        ? buildInputItem(input)
-        : this.#acceptThreadMessage(input, input.submissionId, "started")
-            .envelope
+      input.purpose === "continuation"
+        ? undefined
+        : input.provenance === undefined
+          ? buildInputItem(input)
+          : this.#acceptThreadMessage(input, input.submissionId, "started")
+              .envelope
     this.#submittedInputs.set(input.submissionId, {
       threadId: this.id,
       fingerprint:
@@ -627,7 +684,7 @@ export class Session {
           : fingerprintTurnInput(input),
       source: inputSource(input),
       purpose: inputPurpose(input),
-      inputItemId: inputItem.id,
+      ...(inputItem === undefined ? {} : { inputItemId: inputItem.id }),
       turnId: input.submissionId,
     })
     const abort = new AbortController()
@@ -684,7 +741,7 @@ export class Session {
     return {
       type: "started",
       turnId: input.submissionId,
-      inputItemId: inputItem.id,
+      ...(inputItem === undefined ? {} : { inputItemId: inputItem.id }),
     }
   }
 
@@ -764,7 +821,9 @@ export class Session {
         {
           type: "turn_started",
           turnId: input.submissionId,
-          inputItemId: active.inputItem.id,
+          ...(active.inputItem === undefined
+            ? {}
+            : { inputItemId: active.inputItem.id }),
           source: inputSource(input),
           purpose: inputPurpose(input),
           ...(inputSource(input) === "human" &&
@@ -800,14 +859,14 @@ export class Session {
             entry.threadId === this.id &&
             entry.item.type === "turn_started" &&
             entry.item.turnId === input.submissionId &&
-            entry.item.inputItemId === pending.inputItem.id,
+            entry.item.inputItemId === pending.inputItem?.id,
         )
         if (start !== undefined) {
           const inputRecord = rollout.find(
             (entry) =>
               entry.threadId === this.id &&
               entry.item.type === "response_item" &&
-              entry.item.item.id === pending.inputItem.id,
+              entry.item.item.id === pending.inputItem?.id,
           )
           const contextRecord = rollout.find(
             (entry) =>
@@ -826,7 +885,7 @@ export class Session {
             (entry) =>
               entry.threadId === this.id &&
               entry.item.type === "response_item" &&
-              entry.item.item.id === pending.inputItem.id,
+              entry.item.item.id === pending.inputItem?.id,
           )
           const contextPresent = rollout.some(
             (entry) =>
@@ -882,7 +941,22 @@ export class Session {
     await this.#contextMutationTail
 
     if (outcome.type === "interrupted") {
+      const interruption: ResponseItemEnvelope = {
+        id: createInputId(),
+        turnId: active.input.submissionId,
+        createdAt: new Date().toISOString(),
+        item: {
+          role: "developer",
+          content: [
+            {
+              type: "text",
+              text: "The previous turn was interrupted. Tools or commands may have partially executed, and background processes may still be running. Check their current state before repeating actions.",
+            },
+          ],
+        },
+      }
       await this.#appendRollout([
+        { type: "response_item", item: interruption },
         {
           type: "turn_completed",
           turnId: active.input.submissionId,
@@ -891,6 +965,7 @@ export class Session {
           ...(active.metrics === undefined ? {} : { metrics: active.metrics }),
         },
       ])
+      this.#contextManager.record([interruption])
       await this.#flushRollout()
       this.#events.send({
         type: "turn.interrupted",
@@ -1074,6 +1149,11 @@ export class Session {
     const active = this.#requireExecution(execution)
 
     if (active.inputRecorded) return
+    if (active.inputItem === undefined) {
+      active.inputRecorded = true
+      return
+    }
+    const inputItem = active.inputItem
     if (active.input.provenance !== undefined) {
       await this.recordThreadMessageInput(execution, active.input)
       active.inputRecorded = true
@@ -1083,9 +1163,9 @@ export class Session {
       this.#requireExecution(execution)
       if (active.inputRecorded) return
       const items: readonly RolloutItem[] = [
-        { type: "response_item", item: active.inputItem },
+        { type: "response_item", item: inputItem },
       ]
-      this.#contextManager.record([active.inputItem])
+      this.#contextManager.record([inputItem])
       active.inputRecorded = true
       let append: RolloutAppend
       try {
@@ -1097,8 +1177,7 @@ export class Session {
           const stored = await this.#store.readThread(this.id)
           const existing = stored?.rollout.find(
             ({ item }) =>
-              item.type === "response_item" &&
-              item.item.id === active.inputItem.id,
+              item.type === "response_item" && item.item.id === inputItem.id,
           )
           append =
             existing === undefined

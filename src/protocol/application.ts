@@ -309,6 +309,18 @@ export type ApiCompactSessionResponse = {
   readonly turnId: string
 }
 
+export type ApiResumeTurnRequest = Readonly<{
+  sessionId: string
+  requestId: string
+  expectedTurnId: string
+  modelSelection?: ModelSelection
+}>
+
+export type ApiResumeTurnResponse = Readonly<{
+  requestId: string
+  turnId: string
+}>
+
 export type ApiCancelInputRequest = {
   readonly sessionId: string
   readonly inputId: string

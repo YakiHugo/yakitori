@@ -1100,6 +1100,7 @@ export async function createYakitoriApplication(
           resolveShellName: () => sessionShellEnv.shellName(),
           // Each Session owns both its external catalog and process manager.
           toolRegistry,
+          waitForConnection: !sideConversation && !isSubagentThread(stored),
           ...(hookRunner === undefined ? {} : { hookRunner }),
           ...(hookRunner === undefined ||
           stored.metadata.workingDirectory === undefined
