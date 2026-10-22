@@ -14,6 +14,49 @@
   align-items: center;
   gap: 4px;
   padding-inline: 58px 12px;
+  min-width: 0;
+}
+.window-navigation {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.window-heading {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  margin-left: 12px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.window-titlebar[data-sidebar-open="true"] .window-navigation {
+  width: calc(var(--sidebar-width, 275px) - 14px);
+}
+.window-session-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+.window-session-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.window-engine-label {
+  flex-shrink: 0;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted-foreground);
 }
 .window-titlebar button:disabled {
   opacity: 0.35;
@@ -70,4 +113,23 @@ html[data-desktop="macos"] .window-titlebar {
 }
 html[data-desktop="macos"] .window-titlebar button {
   -webkit-app-region: no-drag;
+}
+html[data-desktop="macos"]
+  .window-titlebar[data-sidebar-open="true"]
+  .window-navigation {
+  width: calc(var(--sidebar-width, 275px) - 46px);
+}
+@media (max-width: 699px) {
+  .window-titlebar[data-sidebar-open="true"] .window-navigation,
+  html[data-desktop="macos"]
+    .window-titlebar[data-sidebar-open="true"]
+    .window-navigation {
+    width: auto;
+  }
+  .window-heading {
+    margin-left: 6px;
+  }
+  .window-session-heading button[title="Open parent session"] {
+    max-width: 80px;
+  }
 }

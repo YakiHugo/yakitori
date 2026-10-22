@@ -30,6 +30,41 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
+  it("keeps the selected conversation title in the window toolbar", () => {
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail(),
+    })
+    render(<App />)
+    const toolbar = screen
+      .getByRole("navigation", { name: "History and sidebar" })
+      .closest("header")
+    if (!toolbar) throw new Error("Expected the window toolbar")
+    expect(
+      within(toolbar).getByRole("heading", { name: "Session" }),
+    ).toBeDefined()
+    expect(
+      within(screen.getByRole("main")).queryByRole("heading", {
+        name: "Session",
+      }),
+    ).toBeNull()
+    act(() =>
+      useAppStore.setState({
+        selectedSession: sessionDetail({ title: "Renamed task" }),
+      }),
+    )
+    expect(
+      within(toolbar).getByRole("heading", { name: "Renamed task" }),
+    ).toBeDefined()
+    act(() => useAppStore.getState().openSettings())
+    expect(
+      within(toolbar).queryByRole("heading", { name: "Renamed task" }),
+    ).toBeNull()
+    expect(
+      within(toolbar).queryByRole("button", { name: /workspace/ }),
+    ).toBeNull()
+  })
+
   it("routes a new-session project choice through the store intent", async () => {
     const user = userEvent.setup()
     const setNewSessionProject = vi.fn()

@@ -1,12 +1,28 @@
-import { ArrowLeft, ArrowRight, House, PanelLeft, Settings } from "lucide-react"
-import { useEffect } from "react"
+import {
+  ArrowLeft,
+  ArrowRight,
+  House,
+  PanelLeft,
+  PanelRight,
+  Settings,
+} from "lucide-react"
+import { type ReactNode, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
 import { useAppStore } from "../store/app-store.ts"
 
 export function WindowChrome({
   sidebarOpen,
   onToggleSidebar,
-}: Readonly<{ sidebarOpen: boolean; onToggleSidebar(): void }>) {
+  heading,
+  workspaceOpen,
+  onToggleWorkspace,
+}: Readonly<{
+  sidebarOpen: boolean
+  onToggleSidebar(): void
+  heading?: ReactNode
+  workspaceOpen: boolean
+  onToggleWorkspace(): void
+}>) {
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
   )
@@ -55,38 +71,53 @@ export function WindowChrome({
   }, [history, openSettings])
   return (
     <>
-      <header className="window-titlebar">
-        <button
-          type="button"
-          className="sidebar-icon"
-          aria-label="Go back"
-          title="Go back (⌘[)"
-          disabled={!history.canGoBack}
-          onClick={history.back}
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <button
-          type="button"
-          className="sidebar-icon"
-          aria-label="Go forward"
-          title="Go forward (⌘])"
-          disabled={!history.canGoForward}
-          onClick={history.forward}
-        >
-          <ArrowRight size={16} />
-        </button>
-        <button
-          type="button"
-          className="sidebar-icon"
-          aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-          title={`${sidebarOpen ? "Hide" : "Show"} sidebar (⌘B)`}
-          aria-expanded={sidebarOpen}
-          onClick={onToggleSidebar}
-          disabled={settingsOpen}
-        >
-          <PanelLeft size={16} />
-        </button>
+      <header className="window-titlebar" data-sidebar-open={sidebarOpen}>
+        <nav className="window-navigation" aria-label="History and sidebar">
+          <button
+            type="button"
+            className="sidebar-icon"
+            aria-label="Go back"
+            title="Go back (⌘[)"
+            disabled={!history.canGoBack}
+            onClick={history.back}
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <button
+            type="button"
+            className="sidebar-icon"
+            aria-label="Go forward"
+            title="Go forward (⌘])"
+            disabled={!history.canGoForward}
+            onClick={history.forward}
+          >
+            <ArrowRight size={16} />
+          </button>
+          <button
+            type="button"
+            className="sidebar-icon"
+            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            title={`${sidebarOpen ? "Hide" : "Show"} sidebar (⌘B)`}
+            aria-expanded={sidebarOpen}
+            onClick={onToggleSidebar}
+            disabled={settingsOpen}
+          >
+            <PanelLeft size={16} />
+          </button>
+        </nav>
+        <div className="window-heading">{heading}</div>
+        {!settingsOpen && (
+          <button
+            type="button"
+            className="sidebar-icon"
+            aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
+            aria-expanded={workspaceOpen}
+            title={`${workspaceOpen ? "Hide" : "Show"} workspace (⌘⇧B)`}
+            onClick={onToggleWorkspace}
+          >
+            <PanelRight size={16} />
+          </button>
+        )}
       </header>
       <nav className="window-rail" aria-label="App navigation">
         <button

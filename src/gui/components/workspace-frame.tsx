@@ -1,12 +1,12 @@
 import {
   Files,
+  FolderOpen,
   GitCompareArrows,
   Globe,
   Maximize2,
   MessageCirclePlus,
   Minimize2,
   Monitor,
-  PanelRight,
   Plus,
   Users,
   X,
@@ -64,7 +64,10 @@ function tabLabel(tab: WorkspaceTab): string {
   return views.find((view) => view.id === tab.kind)?.label ?? "Workspace"
 }
 
-export function WorkspaceFrame({ children }: { children: ReactNode }) {
+export function WorkspaceFrame({
+  children,
+  heading,
+}: Readonly<{ children: ReactNode; heading?: ReactNode }>) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
   )
@@ -81,7 +84,27 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       state.snapshot?.session.cwd ??
       state.sessions.find((session) => session.id === state.sessionId)?.cwd,
   )
+  const externalProjectId = useEngineStore(
+    (state) =>
+      state.snapshot?.session.projectId ??
+      state.sessions.find((session) => session.id === state.sessionId)
+        ?.projectId,
+  )
   const external = externalEngine !== undefined
+  const settingsOpen = useAppStore(
+    (state) => state.settingsSection !== undefined,
+  )
+  const projectName = useAppStore((state) => {
+    const projectId =
+      external && externalSessionId !== undefined
+        ? externalProjectId
+        : state.selection.sessionId === undefined
+          ? state.currentProject
+          : state.selectedSession?.id === state.selection.sessionId
+            ? state.selectedSession.projectId
+            : undefined
+    return state.projects.find((project) => project.id === projectId)?.name
+  })
   const sessionId = external
     ? (externalSessionId ?? `engine-draft:${externalEngine}`)
     : nativeSessionId
@@ -309,6 +332,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       <WindowChrome
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        heading={heading}
+        workspaceOpen={open}
+        onToggleWorkspace={() => setOpen(!open)}
       />
       <div
         ref={shell}
@@ -318,16 +344,35 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       >
         <SidebarFrame open={sidebarOpen} setOpen={setSidebarOpen} />
         {children}
-        {!open && (
-          <button
-            type="button"
-            aria-label="Show workspace"
-            title="Show workspace (⌘⇧B)"
-            className="sidebar-icon workspace-show"
-            onClick={() => setOpen(true)}
-          >
-            <PanelRight size={16} />
-          </button>
+        {!open && !settingsOpen && cwd && (
+          <aside className="workspace-overview" aria-label="Project overview">
+            <div className="workspace-project-card">
+              <div className="workspace-project-heading">
+                <span className="workspace-project-name" title={cwd}>
+                  {projectName ||
+                    cwd.split(/[\\/]/).filter(Boolean).at(-1) ||
+                    cwd}
+                </span>
+                <button
+                  type="button"
+                  className="sidebar-icon"
+                  aria-label="Open project files"
+                  title="Open project files"
+                  onClick={() => addTab("files", sessionId)}
+                >
+                  <FolderOpen size={16} />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="workspace-project-changes"
+                onClick={() => addTab("changes", sessionId)}
+              >
+                <GitCompareArrows size={18} />
+                <span>Changes</span>
+              </button>
+            </div>
+          </aside>
         )}
         <aside
           aria-label="Workspace"
@@ -508,15 +553,6 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               }}
             >
               {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-            </button>
-            <button
-              type="button"
-              className="sidebar-icon"
-              aria-label="Hide workspace"
-              title="Hide workspace (⌘⇧B)"
-              onClick={() => setOpen(false)}
-            >
-              <X size={15} />
             </button>
           </header>
           <div className="workspace-body">

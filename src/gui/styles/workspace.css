@@ -340,18 +340,55 @@
 .workspace-frame[data-resizing="true"] {
   user-select: none;
 }
-.workspace-show {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 10;
+.workspace-overview {
+  flex: 0 0 300px;
+  min-width: 0;
+  padding: 12px 16px 16px 0;
+}
+.workspace-project-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
   background: var(--background);
+  box-shadow: 0 2px 14px #00000008;
 }
-.workspace-shell[data-workspace-open="false"] .session-header {
-  padding-right: 52px;
+.workspace-project-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted-foreground);
+  font-size: 14px;
 }
-.workspace-shell[data-workspace-open="false"] .goal-editor-header {
-  padding-right: 52px;
+.workspace-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-project-changes {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  margin-left: -8px;
+  border-radius: 8px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+}
+.workspace-project-changes:hover {
+  background: var(--accent);
+}
+.workspace-project-card button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (max-width: 1179px) {
+  .workspace-overview {
+    display: none;
+  }
 }
 .workspace-frame button:focus-visible {
   outline: 2px solid var(--ring);

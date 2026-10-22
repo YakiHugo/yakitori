@@ -7,6 +7,19 @@
 .conversation-surface {
   min-width: 0;
 }
+.turn-activity-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding-bottom: 8px;
+  text-align: left;
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+.turn-activity-header[data-completed="true"] {
+  border-bottom: 1px solid var(--border);
+}
 .conversation-content,
 .conversation-composer {
   max-width: var(--conversation-width);

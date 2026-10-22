@@ -2,7 +2,10 @@ import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
-import { EngineConversation } from "./components/engine-session.tsx"
+import {
+  EngineConversation,
+  EngineSessionHeading,
+} from "./components/engine-session.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { GoalBar, GoalEditor } from "./components/session-goal.tsx"
@@ -52,7 +55,19 @@ export function App() {
   return (
     <TooltipProvider>
       <PreferencesEffects />
-      <WorkspaceFrame>
+      <WorkspaceFrame
+        heading={
+          settingsOpen ? (
+            <span>Settings</span>
+          ) : externalSession !== undefined ? (
+            <EngineSessionHeading />
+          ) : hasSession && !hydrating && !emptySession ? (
+            <SessionHeader />
+          ) : (
+            <span>{hydrating ? "Loading conversation…" : "New session"}</span>
+          )
+        }
+      >
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           {message !== undefined && message !== "" && (
             <div
@@ -69,9 +84,6 @@ export function App() {
           ) : (
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
-                {hasSession && !hydrating && !emptySession ? (
-                  <SessionHeader />
-                ) : null}
                 <Transcript
                   loading={hydrating}
                   emptyState={emptySession ? <EmptyState /> : undefined}
@@ -156,7 +168,7 @@ function SessionHeader() {
     .flatMap((list) => list.sessions)
     .find((candidate) => candidate.id === session.parentSessionId)
   return (
-    <header className="session-header flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
+    <div className="window-session-heading">
       <div className="flex min-w-0 items-center gap-2">
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
@@ -178,11 +190,11 @@ function SessionHeader() {
           </button>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="window-session-actions">
         <SessionRename />
         <SessionSummary />
       </div>
-    </header>
+    </div>
   )
 }
 
