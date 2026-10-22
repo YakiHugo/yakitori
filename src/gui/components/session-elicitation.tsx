@@ -12,6 +12,7 @@ import {
 } from "./elicitation-schema.ts"
 import { Button } from "./ui/button.tsx"
 import { Field, FieldGroup, FieldLabel, Input } from "./ui/field.tsx"
+import { Select } from "./ui/select.tsx"
 
 export function SessionElicitation() {
   const apiBase = useAppStore((state) => state.apiBase)
@@ -241,84 +242,100 @@ function ElicitationCard({
                   data-invalid={invalid}
                   data-disabled={busy}
                 >
-                  <FieldLabel htmlFor={fieldId}>
-                    {field.label}
-                    {field.required ? " (required)" : ""}
-                  </FieldLabel>
-                  {field.type === "boolean" || field.choices ? (
-                    <select
+                  {field.type === "array" && field.choices ? (
+                    <span
+                      id={`${fieldId}-label`}
+                      className="text-sm font-medium leading-5"
+                    >
+                      {field.label}
+                      {field.required ? " (required)" : ""}
+                    </span>
+                  ) : (
+                    <FieldLabel htmlFor={fieldId}>
+                      {field.label}
+                      {field.required ? " (required)" : ""}
+                    </FieldLabel>
+                  )}
+                  {field.type === "array" && field.choices ? (
+                    <fieldset
+                      aria-labelledby={`${fieldId}-label`}
+                      aria-invalid={invalid}
+                      aria-describedby={describedBy}
+                      className="flex flex-wrap gap-2"
+                    >
+                      {field.choices.map((choice) => (
+                        <label
+                          key={choice.value}
+                          className="flex cursor-pointer items-center gap-2 rounded-md border border-input px-3 py-2 text-sm has-checked:bg-accent has-disabled:opacity-50"
+                        >
+                          <input
+                            type="checkbox"
+                            className="accent-foreground"
+                            disabled={busy}
+                            checked={
+                              Array.isArray(value) &&
+                              value.includes(choice.value)
+                            }
+                            onChange={(event) => {
+                              const selected = Array.isArray(value) ? value : []
+                              update(
+                                field.name,
+                                field.choices
+                                  ?.filter((entry) =>
+                                    entry.value === choice.value
+                                      ? event.target.checked
+                                      : selected.includes(entry.value),
+                                  )
+                                  .map((entry) => entry.value) ?? [],
+                              )
+                            }}
+                          />
+                          {choice.label}
+                        </label>
+                      ))}
+                    </fieldset>
+                  ) : field.type === "boolean" || field.choices ? (
+                    <Select
                       id={fieldId}
-                      className="rounded-md border bg-background p-2 text-sm"
-                      multiple={field.type === "array"}
+                      className="w-full"
                       disabled={busy}
                       required={field.required}
                       aria-invalid={invalid}
                       aria-describedby={describedBy}
                       value={
-                        field.type === "boolean"
-                          ? value === undefined
-                            ? ""
-                            : String(value)
-                          : field.type === "array"
-                            ? Array.isArray(value)
-                              ? value
-                              : []
-                            : value === undefined
-                              ? ""
-                              : String(
-                                  field.choices?.findIndex(
-                                    (choice) => choice.value === value,
-                                  ),
-                                )
+                        value === undefined
+                          ? ""
+                          : field.type === "boolean"
+                            ? String(value)
+                            : String(
+                                field.choices?.findIndex(
+                                  (choice) => choice.value === value,
+                                ),
+                              )
                       }
-                      onChange={(event) => {
-                        if (field.type === "boolean")
-                          update(
-                            field.name,
-                            event.target.value === ""
-                              ? undefined
-                              : event.target.value === "true",
-                          )
-                        else if (field.type === "array")
-                          update(
-                            field.name,
-                            [...event.target.options]
-                              .filter((option) => option.selected)
-                              .map((option) => option.value),
-                          )
-                        else
-                          update(
-                            field.name,
-                            event.target.value === ""
-                              ? undefined
-                              : field.choices?.[Number(event.target.value)]
-                                  ?.value,
-                          )
-                      }}
-                    >
-                      {field.type === "array" ? null : (
-                        <option value="">Choose…</option>
-                      )}
-                      {field.type === "boolean" ? (
-                        <>
-                          <option value="true">Yes</option>
-                          <option value="false">No</option>
-                        </>
-                      ) : (
-                        field.choices?.map((choice, index) => (
-                          <option
-                            key={choice.value}
-                            value={
-                              field.type === "array"
-                                ? choice.value
-                                : String(index)
-                            }
-                          >
-                            {choice.label}
-                          </option>
-                        ))
-                      )}
-                    </select>
+                      onValueChange={(next) =>
+                        update(
+                          field.name,
+                          next === ""
+                            ? undefined
+                            : field.type === "boolean"
+                              ? next === "true"
+                              : field.choices?.[Number(next)]?.value,
+                        )
+                      }
+                      options={[
+                        { value: "", label: "Choose…" },
+                        ...(field.type === "boolean"
+                          ? [
+                              { value: "true", label: "Yes" },
+                              { value: "false", label: "No" },
+                            ]
+                          : (field.choices?.map((choice, index) => ({
+                              value: String(index),
+                              label: choice.label,
+                            })) ?? [])),
+                      ]}
+                    />
                   ) : (
                     <Input
                       id={fieldId}

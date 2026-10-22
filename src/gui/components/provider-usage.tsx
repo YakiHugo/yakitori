@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react"
 import type { ApiConfiguredProvider } from "../../protocol/providers.ts"
-import { estimateModelCost } from "../provider-usage-view.ts"
-import { useAppStore, type SubscriptionUsageState } from "../store/app-store.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
-import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
+import { estimateModelCost } from "../provider-usage-view.ts"
+import { type SubscriptionUsageState, useAppStore } from "../store/app-store.ts"
 import { totalTokens, type UsageRange, usageView } from "../usage-view.ts"
+import { ChatGPTUsageLink } from "./chatgpt-usage-link.tsx"
 import { ProviderLogo } from "./provider-logo.tsx"
 import { SubscriptionUsageCard } from "./subscription-panel.tsx"
+import { Select } from "./ui/select.tsx"
 
 const compact = new Intl.NumberFormat("en", {
   notation: "compact",
@@ -92,23 +93,15 @@ export function ProviderUsage({
     <section aria-label="Provider usage">
       <div className="provider-usage-toolbar">
         <h3>Usage</h3>
-        <select
+        <Select<UsageRange>
           aria-label="Usage period"
           value={range}
-          onChange={(event) =>
-            setRange(
-              event.target.value === "all"
-                ? "all"
-                : (Number(event.target.value) as UsageRange),
-            )
-          }
-        >
-          {([7, 30, 90, 366, "all"] as const).map((value) => (
-            <option value={value} key={value}>
-              {value === "all" ? "All time" : `Last ${value} days`}
-            </option>
-          ))}
-        </select>
+          onValueChange={setRange}
+          options={([7, 30, 90, 366, "all"] as const).map((value) => ({
+            value,
+            label: value === "all" ? "All time" : `Last ${value} days`,
+          }))}
+        />
       </div>
       <p className="provider-field-hint">
         Recorded in Yakitori ·{" "}

@@ -13,6 +13,7 @@ import { ProviderModels } from "./provider-models.tsx"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
 import { Field, FieldGroup, FieldLabel, Input } from "./ui/field.tsx"
+import { Select } from "./ui/select.tsx"
 
 export type ProviderDraft = {
   id: string
@@ -212,27 +213,25 @@ export function ProviderEditor({
               <FieldLabel htmlFor="provider-authentication">
                 Authentication
               </FieldLabel>
-              <select
+              <Select<NonNullable<ProviderConfiguration["authentication"]>>
                 id="provider-authentication"
                 value={draft.configuration.authentication ?? "stored"}
-                onChange={(event) =>
-                  update({
-                    authentication: event.target.value as NonNullable<
-                      ProviderConfiguration["authentication"]
-                    >,
-                  })
-                }
-              >
-                {draft.configuration.authentication === "codex_cli" ||
-                draft.configuration.authentication === "grok_cli" ? (
-                  <option value={draft.configuration.authentication}>
-                    External CLI account
-                  </option>
-                ) : null}
-                <option value="stored">Saved API key</option>
-                <option value="environment">Environment variable</option>
-                <option value="none">No authentication</option>
-              </select>
+                onValueChange={(authentication) => update({ authentication })}
+                options={[
+                  ...(draft.configuration.authentication === "codex_cli" ||
+                  draft.configuration.authentication === "grok_cli"
+                    ? [
+                        {
+                          value: draft.configuration.authentication,
+                          label: "External CLI account",
+                        },
+                      ]
+                    : []),
+                  { value: "stored", label: "Saved API key" },
+                  { value: "environment", label: "Environment variable" },
+                  { value: "none", label: "No authentication" },
+                ]}
+              />
             </Field>
             {custom || draft.configuration.authentication === "none" ? (
               <EndpointField
@@ -534,18 +533,20 @@ function ProtocolField({
   return (
     <Field>
       <FieldLabel htmlFor="provider-protocol">API protocol</FieldLabel>
-      <select
+      <Select<ProviderConfiguration["wireApi"]>
         id="provider-protocol"
         value={value}
-        onChange={(event) =>
-          onChange(event.target.value as ProviderConfiguration["wireApi"])
-        }
-      >
-        <option value="openai_chat_completions">OpenAI Chat Completions</option>
-        <option value="openai_responses">OpenAI Responses</option>
-        <option value="anthropic_messages">Anthropic Messages</option>
-        <option value="gemini_generate_content">Gemini GenerateContent</option>
-      </select>
+        onValueChange={onChange}
+        options={[
+          {
+            value: "openai_chat_completions",
+            label: "OpenAI Chat Completions",
+          },
+          { value: "openai_responses", label: "OpenAI Responses" },
+          { value: "anthropic_messages", label: "Anthropic Messages" },
+          { value: "gemini_generate_content", label: "Gemini GenerateContent" },
+        ]}
+      />
     </Field>
   )
 }

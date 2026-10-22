@@ -1,0 +1,111 @@
+.ui-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  min-height: 34px;
+  max-width: 100%;
+  flex-shrink: 0;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ui-select-trigger > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-select-trigger:hover:not(:disabled),
+.ui-select-trigger[data-state="open"] {
+  background: var(--accent);
+}
+
+.ui-select-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.ui-select-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ui-select-trigger[aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+
+.ui-select-chevron {
+  flex: none;
+  color: var(--muted-foreground);
+}
+
+.ui-select-content {
+  z-index: 100;
+  min-width: var(--radix-select-trigger-width);
+  max-width: calc(100vw - 16px);
+  max-height: min(320px, var(--radix-select-content-available-height));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 8px 28px #00000018,
+    0 2px 6px #00000008;
+}
+
+.ui-select-viewport {
+  padding: 4px;
+}
+
+.ui-select-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  border-radius: 6px;
+  padding: 6px 30px 6px 10px;
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  outline: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ui-select-item[data-highlighted] {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.ui-select-item[data-state="checked"] {
+  font-weight: 500;
+}
+
+.ui-select-item[data-disabled] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.ui-select-indicator {
+  position: absolute;
+  right: 9px;
+  display: flex;
+  align-items: center;
+}
+
+.ui-select-scroll {
+  display: flex;
+  justify-content: center;
+  padding: 4px;
+  color: var(--muted-foreground);
+}

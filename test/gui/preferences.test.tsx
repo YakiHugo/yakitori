@@ -185,19 +185,17 @@ describe("settings page", () => {
     useAppStore.setState({ settingsSection: "general" })
     render(<SettingsPage />)
 
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Appearance" }),
-      "system",
-    )
-    await user.selectOptions(
+    await user.click(screen.getByRole("combobox", { name: "Appearance" }))
+    await user.click(screen.getByRole("option", { name: "System" }))
+    await user.click(
       screen.getByRole("combobox", { name: "Send messages with" }),
-      "mod-enter",
     )
+    await user.click(screen.getByRole("option", { name: "⌘ / Ctrl + Enter" }))
     await user.click(screen.getByRole("button", { name: "Notifications" }))
-    await user.selectOptions(
+    await user.click(
       screen.getByRole("combobox", { name: "When work finishes" }),
-      "always",
     )
+    await user.click(screen.getByRole("option", { name: "Always" }))
     await user.click(screen.getByRole("switch", { name: "Notification sound" }))
 
     expect(readPreferences()).toEqual({
@@ -207,10 +205,10 @@ describe("settings page", () => {
       notificationSound: false,
     })
 
-    await user.selectOptions(
+    await user.click(
       screen.getByRole("combobox", { name: "When work finishes" }),
-      "off",
     )
+    await user.click(screen.getByRole("option", { name: "Never" }))
     expect(
       screen.getByRole("switch", { name: "Notification sound" }),
     ).toHaveProperty("disabled", true)
@@ -226,15 +224,17 @@ describe("settings page", () => {
     })
 
     const appearance = screen.getByRole("combobox", { name: "Appearance" })
-    await user.selectOptions(appearance, "dark")
+    await user.click(appearance)
+    await user.click(screen.getByRole("option", { name: "Dark" }))
     expect(screen.getByRole("alert").textContent).toContain(
       "could not be saved",
     )
-    expect(appearance).toHaveProperty("value", "light")
+    expect(appearance.textContent).toBe("Light")
 
-    await user.selectOptions(appearance, "dark")
+    await user.click(appearance)
+    await user.click(screen.getByRole("option", { name: "Dark" }))
     expect(screen.queryByRole("alert")).toBeNull()
-    expect(appearance).toHaveProperty("value", "dark")
+    expect(appearance.textContent).toBe("Dark")
     expect(readPreferences().appearance).toBe("dark")
   })
 })

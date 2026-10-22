@@ -95,10 +95,10 @@ describe("app shell", () => {
       setNewSessionProject,
     })
     render(<App />)
-    await user.selectOptions(
+    await user.click(
       screen.getByRole("combobox", { name: "New session project" }),
-      "project_b",
     )
+    await user.click(screen.getByRole("option", { name: "B" }))
     expect(setNewSessionProject).toHaveBeenCalledExactlyOnceWith("project_b")
   })
 

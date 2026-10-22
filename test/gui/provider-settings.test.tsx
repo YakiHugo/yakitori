@@ -17,8 +17,8 @@ import {
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import {
-  providerPresets,
   type ProviderPreset,
+  providerPresets,
 } from "../../src/runtime/provider-presets.ts"
 import type { ApiConfiguredProvider } from "../../src/server/provider-configuration.ts"
 import type { SubscriptionConnection } from "../../src/server/subscription-connections.ts"
@@ -460,9 +460,9 @@ it("preserves an existing Gemini compatibility connection when the native preset
   )
   await user.click(screen.getByRole("button", { name: "Edit connection" }))
   await user.click(screen.getByText("Advanced settings"))
-  expect(
-    (screen.getByLabelText("API protocol") as HTMLSelectElement).value,
-  ).toBe("openai_chat_completions")
+  expect(screen.getByLabelText("API protocol").textContent).toBe(
+    "OpenAI Chat Completions",
+  )
   expect(
     (screen.getByLabelText("API base URL") as HTMLInputElement).value,
   ).toBe("https://generativelanguage.googleapis.com/v1beta/openai/")
@@ -489,16 +489,18 @@ it("saves a new Gemini preset connection with the native protocol and endpoint",
   await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "Google Gemini" }))
   await user.click(screen.getByText("Advanced settings"))
-  expect(
-    (screen.getByLabelText("API protocol") as HTMLSelectElement).value,
-  ).toBe("gemini_generate_content")
-  await user.selectOptions(
-    screen.getByLabelText("API protocol"),
-    "openai_chat_completions",
+  expect(screen.getByLabelText("API protocol").textContent).toBe(
+    "Gemini GenerateContent",
   )
-  await user.selectOptions(
-    screen.getByLabelText("API protocol"),
-    "gemini_generate_content",
+  await user.click(screen.getByLabelText("API protocol"))
+  await user.click(
+    screen.getByRole("option", {
+      name: "OpenAI Chat Completions",
+    }),
+  )
+  await user.click(screen.getByLabelText("API protocol"))
+  await user.click(
+    screen.getByRole("option", { name: "Gemini GenerateContent" }),
   )
   await user.type(screen.getByLabelText("API key"), "native-test-key")
   await user.click(screen.getByRole("button", { name: "Add account" }))
@@ -1077,10 +1079,8 @@ it("drops an entered key when the account switches to environment authentication
   await openAccountSettings()
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "discarded-key")
-  await user.selectOptions(
-    screen.getByLabelText("Authentication"),
-    "environment",
-  )
+  await user.click(screen.getByLabelText("Authentication"))
+  await user.click(screen.getByRole("option", { name: "Environment variable" }))
   expect(screen.queryByLabelText("API key")).toBeNull()
   await user.click(screen.getByRole("button", { name: "Add account" }))
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())

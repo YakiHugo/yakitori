@@ -13,6 +13,7 @@ import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
 import { SidebarNameDialog } from "./components/sidebar-name-dialog.tsx"
 import { Transcript } from "./components/transcript.tsx"
+import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
@@ -240,24 +241,21 @@ function EmptyState() {
           : "What would you like to work on?"}
       </h2>
       <div className="mb-7 flex justify-center gap-3">
-        <select
+        <Select
           aria-label="New session project"
           disabled={hasSession}
           value={currentProject ?? ""}
-          className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
-          onChange={(event) =>
-            useAppStore
-              .getState()
-              .setNewSessionProject(event.target.value || undefined)
+          onValueChange={(projectId) =>
+            useAppStore.getState().setNewSessionProject(projectId || undefined)
           }
-        >
-          <option value="">No project</option>
-          {projects.map((entry) => (
-            <option key={entry.id} value={entry.id}>
-              {entry.name}
-            </option>
-          ))}
-        </select>
+          options={[
+            { value: "", label: "No project" },
+            ...projects.map((entry) => ({
+              value: entry.id,
+              label: entry.name,
+            })),
+          ]}
+        />
       </div>
     </div>
   )

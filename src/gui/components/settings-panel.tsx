@@ -9,6 +9,7 @@ import {
   type Preferences,
   usePreferencesStore,
 } from "../store/preferences-store.ts"
+import { Select } from "./ui/select.tsx"
 import "../styles/settings.css"
 
 export function GeneralSettingsSection() {
@@ -35,36 +36,30 @@ export function GeneralSettingsSection() {
           title="Appearance"
           description="Choose a theme, or follow your system."
         >
-          <select
+          <Select
             aria-label="Appearance"
             value={preferences.appearance}
-            onChange={(event) =>
-              update({
-                appearance: event.target.value as Preferences["appearance"],
-              })
-            }
-          >
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-            <option value="system">System</option>
-          </select>
+            onValueChange={(appearance) => update({ appearance })}
+            options={[
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" },
+              { value: "system", label: "System" },
+            ]}
+          />
         </SettingRow>
         <SettingRow
           title="Send messages with"
           description="Applies to conversations and side chats."
         >
-          <select
+          <Select
             aria-label="Send messages with"
             value={preferences.sendShortcut}
-            onChange={(event) =>
-              update({
-                sendShortcut: event.target.value as Preferences["sendShortcut"],
-              })
-            }
-          >
-            <option value="enter">Enter</option>
-            <option value="mod-enter">⌘ / Ctrl + Enter</option>
-          </select>
+            onValueChange={(sendShortcut) => update({ sendShortcut })}
+            options={[
+              { value: "enter", label: "Enter" },
+              { value: "mod-enter", label: "⌘ / Ctrl + Enter" },
+            ]}
+          />
         </SettingRow>
       </div>
       <div className="settings-hint">
@@ -111,20 +106,16 @@ export function NotificationSettingsSection() {
           title="When work finishes"
           description="Notify when a conversation finishes successfully."
         >
-          <select
+          <Select
             aria-label="When work finishes"
             value={preferences.notificationMode}
-            onChange={(event) =>
-              update({
-                notificationMode: event.target
-                  .value as Preferences["notificationMode"],
-              })
-            }
-          >
-            <option value="unfocused">When away</option>
-            <option value="always">Always</option>
-            <option value="off">Never</option>
-          </select>
+            onValueChange={(notificationMode) => update({ notificationMode })}
+            options={[
+              { value: "unfocused", label: "When away" },
+              { value: "always", label: "Always" },
+              { value: "off", label: "Never" },
+            ]}
+          />
         </SettingRow>
         <SettingRow
           title="Notification sound"

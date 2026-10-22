@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -12,35 +12,29 @@ import {
 } from "../store/engine-store.ts"
 import { ComposerSurface } from "./composer-surface.tsx"
 import { MarkdownView } from "./markdown.tsx"
+import { Select } from "./ui/select.tsx"
 
 export function EngineSelector() {
+  const id = useId()
   const engines = useEngineStore((state) => state.engines)
   const engineId = useEngineStore((state) => state.engineId)
   if (!engines.some((engine) => engine.kind === "acp")) return null
   return (
-    <label className="text-xs text-muted-foreground">
+    <label htmlFor={id} className="text-xs text-muted-foreground">
       Engine{" "}
-      <select
+      <Select
+        id={id}
         aria-label="New session engine"
-        className="rounded-md border bg-background px-3 py-1.5 text-foreground"
         value={engineId ?? "yakitori"}
-        onChange={(event) =>
-          chooseNewEngine(
-            event.target.value === "yakitori" ? "" : event.target.value,
-          )
+        onValueChange={(value) =>
+          chooseNewEngine(value === "yakitori" ? "" : value)
         }
-      >
-        {engines.map((engine) => (
-          <option
-            key={engine.id}
-            value={engine.id}
-            disabled={!engine.available}
-          >
-            {engine.label}
-            {!engine.available ? " (unavailable)" : ""}
-          </option>
-        ))}
-      </select>
+        options={engines.map((engine) => ({
+          value: engine.id,
+          label: `${engine.label}${engine.available ? "" : " (unavailable)"}`,
+          disabled: !engine.available,
+        }))}
+      />
     </label>
   )
 }
