@@ -1,4 +1,4 @@
-import { Bell, Keyboard, Monitor } from "lucide-react"
+import { Keyboard } from "lucide-react"
 import { type ReactNode, useEffect, useState } from "react"
 import {
   getNotificationPermission,
@@ -26,11 +26,6 @@ export function GeneralSettingsSection() {
   }
   return (
     <>
-      <div className="settings-section-heading">
-        <Monitor size={22} />
-        <h3>General</h3>
-        <p>A workspace that works your way.</p>
-      </div>
       <div className="settings-group">
         <SettingRow
           title="Appearance"
@@ -75,9 +70,6 @@ export function GeneralSettingsSection() {
           {error}
         </p>
       )}
-      <p className="settings-saved">
-        Changes are saved automatically on this device.
-      </p>
     </>
   )
 }
@@ -96,11 +88,6 @@ export function NotificationSettingsSection() {
   }
   return (
     <>
-      <div className="settings-section-heading">
-        <Bell size={22} />
-        <h3>Notifications</h3>
-        <p>Step away. Know when your work is ready.</p>
-      </div>
       <div className="settings-group">
         <SettingRow
           title="When work finishes"
@@ -145,9 +132,6 @@ export function NotificationSettingsSection() {
           {error}
         </p>
       )}
-      <p className="settings-saved">
-        Changes are saved automatically on this device.
-      </p>
     </>
   )
 }

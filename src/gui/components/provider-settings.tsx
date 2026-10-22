@@ -455,7 +455,6 @@ function ProviderConnections({ apiBase }: Readonly<{ apiBase: string }>) {
               <div className="provider-page-heading">
                 <div>
                   <h2>Accounts</h2>
-                  <p>Connected models are available in every conversation.</p>
                 </div>
                 <Button
                   type="button"

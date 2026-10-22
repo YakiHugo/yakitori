@@ -1,4 +1,3 @@
-import { Check, LoaderCircle, Unplug } from "lucide-react"
 import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
@@ -9,25 +8,23 @@ export function SubscriptionsSection() {
   const states = useAppStore((state) => state.subscriptionsByProvider)
   const error = useAppStore((state) => state.subscriptionsError)
   return (
-    <>
-      <div className="subscription-intro">
-        <p>Subscription access and current limits from connected providers.</p>
-        <span>Usage refreshes each time this section opens.</span>
-      </div>
-
-      <div className="subscription-list">
-        {error ? <p role="alert">{error}</p> : null}
-        {Object.keys(states).map((provider) => (
-          <ProviderUsageCard
-            key={provider}
-            provider={provider}
-            displayName={
-              states[provider]?.subscription?.displayName ?? "Account usage"
-            }
-          />
-        ))}
-      </div>
-    </>
+    <div className="subscription-list">
+      {error ? <p role="alert">{error}</p> : null}
+      {!error && Object.keys(states).length === 0 ? (
+        <p className="subscription-note">
+          Add an account in Providers to view its subscription limits.
+        </p>
+      ) : null}
+      {Object.keys(states).map((provider) => (
+        <ProviderUsageCard
+          key={provider}
+          provider={provider}
+          displayName={
+            states[provider]?.subscription?.displayName ?? "Account usage"
+          }
+        />
+      ))}
+    </div>
   )
 }
 
@@ -66,30 +63,12 @@ export function SubscriptionUsageCard({
       className="subscription-card"
       aria-labelledby={`${provider}-usage`}
       aria-busy={state.loading}
-      data-loading={state.loading}
     >
       <div className="subscription-card-header">
         <div>
           <h3 id={`${provider}-usage`}>{displayName}</h3>
-          <p>
-            {summary === undefined
-              ? "Subscription account"
-              : accountLabel(summary)}
-          </p>
+          {summary ? <p>{accountLabel(summary)}</p> : null}
         </div>
-        {state.loading ? (
-          <span className="subscription-status" data-loading="true">
-            <LoaderCircle className="subscription-spinner" size={12} />
-            {firstLoad ? "Checking" : "Updating"}
-          </span>
-        ) : summary === undefined ? (
-          <span className="subscription-status">
-            <Unplug size={12} />
-            Unavailable
-          </span>
-        ) : (
-          <ConnectionStatus provider={summary} />
-        )}
       </div>
 
       {firstLoad && state.loading ? (
@@ -117,22 +96,6 @@ export function SubscriptionUsageCard({
         </>
       )}
     </section>
-  )
-}
-
-function ConnectionStatus({
-  provider,
-}: Readonly<{ provider: ApiSubscriptionSummary }>) {
-  const connected = provider.availability === "available"
-  return (
-    <span className="subscription-status" data-connected={connected}>
-      {connected ? <Check size={12} /> : <Unplug size={12} />}
-      {connected
-        ? provider.credentialKind === "api_key"
-          ? "API key connected"
-          : "Connected"
-        : "Not connected"}
-    </span>
   )
 }
 

@@ -70,7 +70,6 @@ export function SettingsPage() {
           <span>Back to app</span>
         </button>
         <div className="settings-nav-group">
-          <p>Preferences</p>
           <nav aria-label="Settings sections" className="settings-nav">
             {sections.map(({ id, label, icon: Icon }) => (
               <button
@@ -102,14 +101,7 @@ export function SettingsPage() {
               ) : section === "notifications" ? (
                 <NotificationSettingsSection />
               ) : section === "subscriptions" ? (
-                <>
-                  <div className="settings-section-heading">
-                    <CircleUserRound size={22} />
-                    <h3>Subscriptions</h3>
-                    <p>Connected accounts and their current limits.</p>
-                  </div>
-                  <SubscriptionsSection />
-                </>
+                <SubscriptionsSection />
               ) : section === "mcp" ? (
                 <McpSettings />
               ) : (

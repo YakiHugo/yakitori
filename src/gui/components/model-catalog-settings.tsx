@@ -29,9 +29,7 @@ function AccountModels({
 }: Readonly<{ apiBase: string; provider: string }>) {
   const [catalog, setCatalog] = useState<ModelCatalogResponse>()
   const [settings, setSettings] = useState<ProviderModelSettings>({})
-  const [status, setStatus] = useState<
-    Readonly<{ pending: boolean; error?: string }>
-  >({ pending: false })
+  const [writeError, setWriteError] = useState<string>()
   const [error, setError] = useState<string>()
   const [revision, setRevision] = useState(0)
   const snapshot = useRef<ModelCatalogResponse | undefined>(undefined)
@@ -67,7 +65,7 @@ function AccountModels({
       },
       changed(next) {
         if (mounted.current) {
-          setStatus(next)
+          setWriteError(next.error)
           if (!next.pending && !next.error && readNeeded.current) {
             readNeeded.current = false
             setRevision((value) => value + 1)
@@ -141,11 +139,6 @@ function AccountModels({
     )
   return (
     <>
-      <p className="provider-field-hint">
-        {catalog.fetchedAt
-          ? `Last updated ${new Date(catalog.fetchedAt).toLocaleString()}`
-          : "Provider and app defaults"}
-      </p>
       {catalog.error ? <p role="alert">{catalog.error}</p> : null}
       <ProviderModels
         configuration={{
@@ -190,10 +183,9 @@ function AccountModels({
           }}
         />
       ) : null}
-      {status.pending ? <p role="status">Applying changes…</p> : null}
-      {status.error ? (
+      {writeError ? (
         <div className="provider-message">
-          <p role="alert">{status.error}</p>
+          <p role="alert">{writeError}</p>
           <Button
             type="button"
             variant="ghost"
@@ -209,13 +201,11 @@ function AccountModels({
                   },
                   (cause: unknown) => {
                     if (mounted.current)
-                      setStatus({
-                        pending: false,
-                        error:
-                          cause instanceof Error
-                            ? cause.message
-                            : "Could not load models.",
-                      })
+                      setWriteError(
+                        cause instanceof Error
+                          ? cause.message
+                          : "Could not load models.",
+                      )
                   },
                 )
             }}

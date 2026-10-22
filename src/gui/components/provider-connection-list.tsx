@@ -103,27 +103,16 @@ export function ProviderConnectionList({
                 </span>
               </span>
             </button>
-            <Badge
-              variant="secondary"
-              className="provider-credential"
-              data-missing={provider.credential === "missing" || !!error}
-              title={error ?? provider.connection?.message}
-            >
-              <span className="provider-status-dot" />
-              {error
-                ? "Needs attention"
-                : provider.connection?.state === "ready"
-                  ? "Connected"
-                  : provider.credential === "stored"
-                    ? "Key saved"
-                    : provider.credential === "environment"
-                      ? "Environment key"
-                      : provider.credential === "external"
-                        ? "External account"
-                        : provider.credential === "optional"
-                          ? "No key needed"
-                          : "Key required"}
-            </Badge>
+            {error || provider.credential === "missing" ? (
+              <Badge
+                variant="secondary"
+                className="provider-credential"
+                data-missing="true"
+                title={error}
+              >
+                {error ? "Needs attention" : "Key required"}
+              </Badge>
+            ) : null}
             <button
               type="button"
               role="switch"

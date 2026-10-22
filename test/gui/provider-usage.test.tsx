@@ -113,7 +113,9 @@ it("shows only the selected account's model usage and token totals", async () =>
     within(usage).getByRole("cell", { name: /Work shared-model/ }),
   ).toBeDefined()
   expect(within(usage).queryByText("other-model")).toBeNull()
-  await screen.findByText("Connected")
+  await screen.findByText(
+    "This provider does not currently expose subscription limits here.",
+  )
   expect(request).toHaveBeenCalledWith("subscription/read", {
     provider: "account-a",
   })
@@ -146,7 +148,9 @@ it("does not apply a previous account's late subscription response after navigat
       chatGPT={false}
     />,
   )
-  await screen.findByText("Connected")
+  await screen.findByText(
+    "This provider does not currently expose subscription limits here.",
+  )
   await act(async () =>
     finish?.({
       subscription: {

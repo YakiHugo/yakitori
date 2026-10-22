@@ -12,12 +12,6 @@
   line-height: 1.3;
   letter-spacing: -0.7px;
 }
-.provider-page-heading p {
-  margin: 8px 0 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.6;
-}
 .provider-loading {
   display: flex;
   align-items: center;
@@ -80,7 +74,6 @@
   overflow-wrap: anywhere;
 }
 .provider-connection-info > span,
-.provider-catalog-label p,
 .provider-custom-info > span,
 .provider-field-hint {
   color: var(--muted-foreground);
@@ -152,9 +145,6 @@
 .provider-catalog-label h3 {
   font-size: 15px;
   font-weight: 600;
-}
-.provider-catalog-label p {
-  font-size: 12px;
 }
 .provider-presets {
   display: grid;
@@ -745,10 +735,6 @@ button.provider-model-main {
   margin-top: 40px;
   padding-top: 28px;
   border-top: 1px solid var(--border);
-}
-.provider-account-detail .model-catalog-settings > h3 {
-  font-size: 20px;
-  font-weight: 600;
 }
 
 .provider-workspace:has(.model-configuration-panel) .provider-workspace-body {

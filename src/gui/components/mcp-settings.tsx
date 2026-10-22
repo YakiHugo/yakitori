@@ -1,4 +1,3 @@
-import { Plug } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
@@ -136,20 +135,11 @@ function McpServerList({
 
   return (
     <>
-      <div className="settings-section-heading">
-        <Plug size={22} />
-        <h3>MCP servers</h3>
-        <p>
-          {sessionId === undefined
-            ? "Tool connections from your global configuration."
-            : "Tool connections configured for the current conversation."}
-        </p>
-      </div>
-      <div className="mb-4">
-        <p className="text-xs text-muted-foreground">
-          Connection status refreshes while this page is open.
-        </p>
-      </div>
+      <p className="mb-4 text-xs text-muted-foreground">
+        {sessionId === undefined
+          ? "Tool connections from your global configuration."
+          : "Tool connections configured for the current conversation."}
+      </p>
       {statusError ? (
         <p role="alert" className="mb-3 text-sm text-destructive">
           {statusError}

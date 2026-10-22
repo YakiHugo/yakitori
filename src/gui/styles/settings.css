@@ -30,34 +30,11 @@
   background: color-mix(in oklab, var(--foreground) 7%, transparent);
 }
 
-.settings-nav-group > p {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  padding: 0 10px 9px;
-}
-
 .settings-content {
   width: 100%;
   min-width: 0;
 }
 
-.settings-section-heading {
-  padding: 8px 0 30px;
-}
-
-.settings-section-heading > svg {
-  display: none;
-}
-
-.settings-section-heading h3 {
-  font-size: 24px;
-  font-weight: 600;
-  letter-spacing: -0.6px;
-}
-
-.settings-section-heading p,
 .settings-row p {
   margin-top: 5px;
   color: var(--muted-foreground);
@@ -137,12 +114,6 @@
 
 .settings-hint svg {
   flex: none;
-}
-
-.settings-saved {
-  margin-top: 24px;
-  color: var(--muted-foreground);
-  font-size: 11px;
 }
 
 .settings-notification-check {
@@ -248,21 +219,20 @@
   margin-top: 14px;
 }
 
-.settings-usage-heading {
-  position: relative;
+.usage-retry {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 18px;
 }
 
-.settings-usage-heading > button {
-  position: absolute;
-  top: 14px;
-  right: 0;
+.usage-retry > button {
   border-radius: 7px;
   border: 1px solid var(--border);
   padding: 6px;
   color: var(--muted-foreground);
 }
 
-.settings-usage-heading > button:hover {
+.usage-retry > button:hover {
   background: var(--accent);
   color: var(--foreground);
 }
@@ -707,13 +677,6 @@
 .settings-page-body:has(.usage-dashboard) {
   padding-top: 32px;
   padding-bottom: 32px;
-}
-.usage-dashboard .settings-usage-heading {
-  padding: 0;
-  margin-bottom: 18px;
-}
-.usage-dashboard .settings-usage-heading > button {
-  top: 0;
 }
 .usage-model-comparison {
   list-style: none;

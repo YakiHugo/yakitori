@@ -36,10 +36,10 @@ export function ProviderCatalog({
   const match = (name: string) =>
     name.toLowerCase().includes(query.trim().toLowerCase())
   const groups = [
-    ["subscription", "Subscriptions", "Sign in or use a Coding Plan."],
-    ["vendor", "Vendors", "Connect directly with an API key."],
-    ["relay", "Relays", "Access multiple providers with one key."],
-    ["local", "On this machine", "Connect a local model server."],
+    ["subscription", "Subscriptions"],
+    ["vendor", "Vendors"],
+    ["relay", "Relays"],
+    ["local", "On this machine"],
   ] as const
   let count = 0
   return (
@@ -73,7 +73,7 @@ export function ProviderCatalog({
           </Button>
         ) : null}
       </div>
-      {groups.map(([kind, name, hint]) => {
+      {groups.map(([kind, name]) => {
         const entries = presets.filter(
           (preset) =>
             (preset.kind ?? "vendor") === kind &&
@@ -94,7 +94,6 @@ export function ProviderCatalog({
           >
             <div className="provider-catalog-label">
               <h3>{name}</h3>
-              <p>{hint}</p>
             </div>
             <div className="provider-presets">
               {showChatGPT ? (
