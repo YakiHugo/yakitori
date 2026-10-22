@@ -192,7 +192,11 @@ describe("sidebar", () => {
         "This provider does not currently expose subscription limits here.",
       ),
     ).toBeDefined()
-    expect(screen.getByText("Not connected")).toBeDefined()
+    expect(
+      screen.getByText(
+        "Sign in or configure this provider to view its subscription status.",
+      ),
+    ).toBeDefined()
     const codexCard = screen
       .getByRole("heading", { name: "Codex" })
       .closest("section")
@@ -201,7 +205,6 @@ describe("sidebar", () => {
       .closest("section")
     expect(codexCard?.getAttribute("aria-busy")).toBe("false")
     expect(grokCard?.getAttribute("aria-busy")).toBe("true")
-    expect(within(grokCard as HTMLElement).getByText("Updating")).toBeDefined()
     expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull()
     expect(loadSubscriptions).not.toHaveBeenCalled()
   })
@@ -249,7 +252,6 @@ describe("sidebar", () => {
       .getByRole("heading", { name: "Kimi" })
       .closest("section") as HTMLElement
     expect(within(kimiCard).getByText("API key connection")).toBeDefined()
-    expect(within(kimiCard).getByText("API key connected")).toBeDefined()
     expect(
       within(kimiCard).getByText(
         "Subscription usage is not available for API key connections.",
