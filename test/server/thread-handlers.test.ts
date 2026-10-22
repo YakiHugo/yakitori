@@ -4,7 +4,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
@@ -19,6 +18,7 @@ import { isKernelEvent } from "../../src/kernel/events.ts"
 import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createSkillsLoader } from "../../src/runtime/skills.ts"
 import { readPdf } from "../../src/runtime/tools/read-pdf.ts"
@@ -30,6 +30,7 @@ import { InputQueue } from "../../src/server/input-queue.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
 
@@ -51,6 +52,143 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it.each([
+    "allow",
+    "deny",
+  ] as const)("resolves %s permission only for the matching Session, Turn and request", async (behavior) => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+        }),
+    })
+    const gate = createPermissionGate()
+    const abort = new AbortController()
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      resolvePermission: gate.resolve,
+    })
+    cleanups.push(async () => {
+      abort.abort()
+      await manager.shutdown()
+      await handlers.close()
+    })
+    const created = await handlers.createSession()
+    const other = await handlers.createSession()
+    if (!created.ok || !other.ok) throw new Error("Missing test Session.")
+    const sessionId = created.value.session.id
+    const pending = gate.request({
+      sessionId,
+      turnId: "turn_permission",
+      toolCallId: "call_permission",
+      action: "command_execution",
+      signal: abort.signal,
+      timeoutMs: 10_000,
+    })
+    const request = gate.list(sessionId)[0]
+    if (request === undefined) throw new Error("Missing permission request.")
+    const answer = {
+      sessionId,
+      turnId: request.turnId,
+      permissionRequestId: request.permissionRequestId,
+      behavior,
+      reason: { kind: `user_${behavior}` },
+    }
+    expect(
+      await handlers.resolvePermission({ ...answer, behavior: "allow_always" }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_input" } })
+    for (const mismatch of [
+      { sessionId: other.value.session.id },
+      { turnId: "turn_wrong" },
+      { permissionRequestId: "permission_wrong" },
+    ]) {
+      expect(
+        await handlers.resolvePermission({ ...answer, ...mismatch }),
+      ).toMatchObject({ ok: false, error: { code: "not_found" } })
+    }
+    expect(gate.list(sessionId)).toHaveLength(1)
+    expect(await handlers.resolvePermission(answer)).toMatchObject({ ok: true })
+    await expect(pending).resolves.toEqual({
+      kind: behavior,
+      reason: answer.reason,
+    })
+    expect(await handlers.resolvePermission(answer)).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    })
+  })
+
+  it("acknowledges cancellation before the running Turn finishes cleanup", async () => {
+    const store = new MemoryThreadStore()
+    const sampling = deferred<void>()
+    const finish = deferred<void>()
+    const stream: StreamFn = async function* () {
+      sampling.resolve()
+      await finish.promise
+      yield { type: "cancelled" }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      finish.resolve()
+      await manager.shutdown()
+      await handlers.close()
+    })
+    const created = await handlers.createSession({
+      workingDirectory: testUserHome.path,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_cancel_cleanup",
+      content: createUserInput("start"),
+    })
+    if (!admitted.ok) throw new Error(admitted.error.message)
+    await sampling.promise
+    expect(
+      await handlers.cancelTurn({ sessionId, turnId: "turn_wrong" }),
+    ).toMatchObject({ ok: false, error: { code: "not_found" } })
+    expect(
+      await handlers.cancelTurn({
+        sessionId,
+        turnId: admitted.value.turnId,
+        reason: "user stop",
+      }),
+    ).toMatchObject({ ok: true })
+    expect(
+      (await store.readThread(sessionId))?.rollout.some(
+        ({ item }) => item.type === "turn_completed",
+      ),
+    ).toBe(false)
+    finish.resolve()
+    await expect
+      .poll(
+        async () =>
+          (await store.readThread(sessionId))?.rollout.find(
+            ({ item }) => item.type === "turn_completed",
+          )?.item,
+      )
+      .toMatchObject({
+        type: "turn_completed",
+        outcome: "interrupted",
+      })
+  })
+
   it("rejects legacy live shapes and applies a single UTF-8 byte budget for authored text", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({
@@ -1868,6 +2006,140 @@ describe("thread server handlers", () => {
         status: 503,
       },
     })
+  })
+
+  it("admits a promoted attachment once into the replacement actor after closing a materialized Session", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-promote-reopen-"))
+    const storageRoot = join(workspace, "store")
+    const store = new JsonlThreadStore({ root: storageRoot })
+    const promotionStarted = deferred<void>()
+    const releasePromotion = deferred<void>()
+    const rolloutAssets = createRolloutAssets(storageRoot, {
+      withMutationLease: (rolloutId, mutate) =>
+        store.withRolloutAssetMutation(rolloutId, mutate),
+    })
+    const promote = rolloutAssets.promoteAttachments.bind(rolloutAssets)
+    rolloutAssets.promoteAttachments = async (...args) => {
+      const promoted = await promote(...args)
+      promotionStarted.resolve()
+      await releasePromotion.promise
+      return promoted
+    }
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "materialized" }] },
+      { content: [{ type: "text", text: "image accepted" }] },
+    ])
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      rolloutAssets,
+      eventHub,
+    })
+    cleanups.push(async () => {
+      releasePromotion.resolve()
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
+    const published: { seq: number; type: string }[] = []
+    const subscription = eventHub.subscribe(sessionId, (delivery) => {
+      if (delivery.kind === "durable")
+        published.push(
+          ...delivery.events.map(({ seq, type }) => ({ seq, type })),
+        )
+    })
+    cleanups.push(async () => subscription.close())
+    const first = await handlers.admitInput({
+      sessionId,
+      requestId: "request_materialize",
+      content: createUserInput("materialize first"),
+    })
+    if (!first.ok) throw new Error(first.error.message)
+    await expect
+      .poll(async () =>
+        (await store.readThread(sessionId))?.rollout.some(
+          ({ item }) => item.type === "turn_completed",
+        ),
+      )
+      .toBe(true)
+    const original = manager.getThread(sessionId)
+    if (original === undefined) throw new Error("Missing original actor.")
+    const rolloutId = original.snapshot().metadata.rolloutId
+    const attachments = await rolloutAssets.importAttachmentBytes(
+      rolloutId,
+      "draft_reopen",
+      [{ name: "screen.png", data: pngBytes() }],
+    )
+    const admission = handlers.admitInput({
+      sessionId,
+      requestId: "request_reopen_image",
+      content: inputFixture([
+        { type: "text", text: "inspect" },
+        ...attachments.map((image) => ({ type: "image" as const, ...image })),
+      ]),
+    })
+    await promotionStarted.promise
+    expect(await handlers.closeSession({ sessionId })).toMatchObject({
+      ok: true,
+    })
+    expect(original.status).toBe("shutdown")
+    expect(manager.getThread(sessionId)).toBeUndefined()
+    releasePromotion.resolve()
+    const admitted = await admission
+    if (!admitted.ok) throw new Error(admitted.error.message)
+    expect(manager.getThread(sessionId)).toBeDefined()
+    expect(manager.getThread(sessionId)).not.toBe(original)
+    await expect
+      .poll(
+        () => published.filter(({ type }) => type === "turn.completed").length,
+      )
+      .toBe(2)
+    const stored = await store.readThread(sessionId)
+    expect(provider.callCount).toBe(2)
+    expect(new Set(published.map(({ seq }) => seq)).size).toBe(published.length)
+    expect(
+      stored?.rollout.filter(
+        ({ item }) =>
+          item.type === "turn_started" && item.turnId === admitted.value.turnId,
+      ),
+    ).toHaveLength(1)
+    const inputs = stored?.rollout.flatMap(({ item }) =>
+      item.type === "response_item" &&
+      item.item.turnId === admitted.value.turnId &&
+      item.item.item.role === "user"
+        ? [item.item]
+        : [],
+    )
+    expect(inputs).toHaveLength(1)
+    expect(inputs?.[0]?.id).toBe(admitted.value.inputId)
+    const image = inputs?.[0]?.item.content.find(
+      (block) => block.type === "image",
+    )
+    if (image?.type !== "image") throw new Error("Missing admitted image.")
+    expect(image.file).toMatchObject({
+      rolloutId,
+      path: "attachments/requests/request_reopen_image/1.png",
+    })
+    await expect(
+      rolloutAssets.read(requireStoredAssetSource(image.file)),
+    ).resolves.toEqual(pngBytes())
   })
 
   it("promotes attachments into the physical rollout asset namespace", async () => {
