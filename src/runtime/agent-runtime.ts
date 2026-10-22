@@ -1,5 +1,4 @@
 import type { AgentGraphStore } from "../core/agent-graph-store.ts"
-import { ThreadSpawnEdgeStatus } from "../core/agent-graph-store.ts"
 import type { AgentThread } from "../core/agent-thread.ts"
 import type { StoredThread, ThreadMetadata } from "../core/rollout.ts"
 import { agentStatusFromStoredThread } from "../core/session.ts"
@@ -12,6 +11,7 @@ import {
   type AgentControl,
   type AgentControlAdapter,
   type AgentRegistration,
+  agentRunOutcomeFromStatus,
   type AgentSummary,
   type AgentType,
   createAgentControl,
@@ -112,7 +112,6 @@ export function createAgentRuntime(input: {
         await input.graphStore.upsertThreadSpawnEdge({
           parentThreadId: request.parentSessionId,
           childThreadId: thread.id,
-          status: ThreadSpawnEdgeStatus.Open,
         })
         return thread.id
       } catch (error) {
@@ -150,7 +149,13 @@ export function createAgentRuntime(input: {
           `Agent ${request.sessionId} could not start its queued task: ${reason}.`,
         )
       }
-      return outcomeFromStatus(await waitForFinalStatus(thread))
+      const status = await waitForFinalStatus(thread)
+      return (
+        agentRunOutcomeFromStatus(status) ?? {
+          type: "errored",
+          error: `Agent entered terminal status ${status}.`,
+        }
+      )
     },
 
     async steerChild(request) {
@@ -250,10 +255,8 @@ export function createAgentRuntime(input: {
       restoreAgents: async () => {
         const manager = input.getThreadManager()
         await reconcileUnlinkedThreads(rootThreadId)
-        const descendantIds = await input.graphStore.listThreadSpawnDescendants(
-          rootThreadId,
-          ThreadSpawnEdgeStatus.Open,
-        )
+        const descendantIds =
+          await input.graphStore.listThreadSpawnDescendants(rootThreadId)
         const registrations: AgentRegistration[] = []
         const reconciled = new Set<string>()
         for (const threadId of descendantIds) {
@@ -317,10 +320,8 @@ export function createAgentRuntime(input: {
         stored.metadata.id
       // Listing must not restore actors, reconcile storage, or retry completion
       // delivery as the model-facing AgentControl.list operation does.
-      const descendants = await input.graphStore.listThreadSpawnDescendants(
-        rootThreadId,
-        ThreadSpawnEdgeStatus.Open,
-      )
+      const descendants =
+        await input.graphStore.listThreadSpawnDescendants(rootThreadId)
       const agents = await Promise.all(
         descendants.map(async (threadId): Promise<AgentSummary | undefined> => {
           const child = await manager.readStoredThread(threadId)
@@ -461,7 +462,6 @@ export function createAgentRuntime(input: {
       await input.graphStore.upsertThreadSpawnEdge({
         parentThreadId: candidate.parentSessionId,
         childThreadId: candidate.agentId,
-        status: ThreadSpawnEdgeStatus.Open,
       })
       known.add(candidate.agentId)
     }
@@ -533,7 +533,7 @@ function restoredCompletion(
   stored: StoredThread,
 ): AgentRegistration["pendingCompletion"] {
   const status = agentStatusFromStoredThread(stored)
-  const outcome = outcomeFromTerminalStatus(status)
+  const outcome = agentRunOutcomeFromStatus(status)
   if (outcome === undefined) return undefined
   const latestLifecycle = [...stored.rollout]
     .reverse()
@@ -572,21 +572,6 @@ function terminalDeliveryId(stored: StoredThread): string {
     throw new Error(`Agent Thread ${stored.metadata.id} has no terminal item.`)
   }
   return `agent_completion_${stored.metadata.id}_${terminal.rolloutId}_${String(terminal.seq)}`
-}
-
-function outcomeFromTerminalStatus(
-  status: AgentStatus,
-): import("./agent-control.ts").AgentRunOutcome | undefined {
-  if (typeof status === "object") {
-    return "completed" in status
-      ? {
-          type: "completed",
-          text: status.completed ?? "",
-          ...(status.reason === undefined ? {} : { reason: status.reason }),
-        }
-      : { type: "errored", error: status.errored }
-  }
-  return status === "interrupted" ? { type: "interrupted" } : undefined
 }
 
 function readAgentRegistration(
@@ -658,22 +643,4 @@ function waitForFinalStatus(thread: AgentThread): Promise<AgentStatus> {
 
 function isFinalStatus(status: AgentStatus): boolean {
   return status !== "pending_init" && status !== "running"
-}
-
-function outcomeFromStatus(status: AgentStatus) {
-  if (typeof status === "object") {
-    if ("completed" in status) {
-      return {
-        type: "completed" as const,
-        text: status.completed ?? "",
-        ...(status.reason === undefined ? {} : { reason: status.reason }),
-      }
-    }
-    return { type: "errored" as const, error: status.errored }
-  }
-  if (status === "interrupted") return { type: "interrupted" as const }
-  return {
-    type: "errored" as const,
-    error: `Agent entered terminal status ${status}.`,
-  }
 }
