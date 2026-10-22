@@ -30,10 +30,9 @@ export function UsageSection() {
   const period =
     selectedDate ?? (range === "all" ? "All time" : `Last ${range} days`)
   return (
-    <div className="usage-dashboard">
-      <div className="settings-section-heading settings-usage-heading">
-        <h3>Usage</h3>
-        {usage.error || (summary?.unavailableThreads ?? 0) > 0 ? (
+    <div className="usage-dashboard" aria-busy={usage.loading}>
+      {usage.error || (summary?.unavailableThreads ?? 0) > 0 ? (
+        <div className="usage-retry">
           <button
             type="button"
             aria-label="Retry usage"
@@ -46,14 +45,8 @@ export function UsageSection() {
               "Retry"
             )}
           </button>
-        ) : usage.loading ? (
-          <LoaderCircle
-            size={16}
-            className="animate-spin"
-            aria-label="Loading usage"
-          />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {usage.error && (
         <p role="alert">
           {usage.error}

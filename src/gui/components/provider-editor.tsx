@@ -59,15 +59,13 @@ export function ProviderEditor({
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [openError, setOpenError] = useState<string>()
   const [modelsOpen, setModelsOpen] = useState(false)
-  const [applyStatus, setApplyStatus] = useState<
-    Readonly<{ pending: boolean; error?: string }>
-  >({ pending: false })
+  const [applyError, setApplyError] = useState<string>()
   const mounted = useRef(true)
   const [writer] = useState(() =>
     createSettingsWriter<ProviderDraft>({
       write: onApply,
       changed(status) {
-        if (mounted.current) setApplyStatus(status)
+        if (mounted.current) setApplyError(status.error)
         else if (status.error) useAppStore.setState({ message: status.error })
       },
     }),
@@ -506,10 +504,9 @@ export function ProviderEditor({
           </div>
         )}
       </form>
-      {applyStatus.pending ? <p role="status">Applying changes…</p> : null}
-      {applyStatus.error ? (
+      {applyError ? (
         <div className="provider-message">
-          <p role="alert">{applyStatus.error}</p>
+          <p role="alert">{applyError}</p>
           <Button
             type="button"
             variant="ghost"

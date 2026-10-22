@@ -278,7 +278,6 @@ function ChildTrace({
           <ArrowLeft size={15} />
         </button>
         <div className="subagent-heading">
-          <span className="subagent-eyebrow">Subagent</span>
           <h2 title={session?.title ?? sessionId}>
             {session?.title ?? sessionId}
           </h2>

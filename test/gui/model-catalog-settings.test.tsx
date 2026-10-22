@@ -198,7 +198,11 @@ it("ignores a catalog read started before a committed local edit", async () => {
   })
   fireEvent.click(toggle)
   await waitFor(() =>
-    expect(screen.queryByText("Applying changes…")).toBeNull(),
+    expect(request).toHaveBeenCalledWith("provider/models/write", {
+      provider: "codex",
+      version: "first",
+      settings: { "future-coder": { visible: false } },
+    }),
   )
   expect(finishRead).toBeDefined()
   await act(async () => finishRead?.(source))

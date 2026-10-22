@@ -32,7 +32,6 @@
   flex: 1;
   min-width: 0;
 }
-.subagent-eyebrow,
 .subagent-task h3 {
   color: var(--muted-foreground);
   font-size: 11px;

@@ -40,7 +40,6 @@ export function ProviderAccountDetail({
         <div className="provider-account-actions">{actions}</div>
       </header>
       <section className="model-catalog-settings" aria-label="Account models">
-        <h3>Models</h3>
         {modelsAvailable ? (
           <ModelCatalogSettings apiBase={apiBase} provider={accountId} />
         ) : (

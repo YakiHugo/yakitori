@@ -277,7 +277,6 @@ function SummaryPopover({
               }}
             >
               <section className="session-summary-section">
-                <h3>Report</h3>
                 <TelemetryRail />
               </section>
               <section className="session-summary-section">

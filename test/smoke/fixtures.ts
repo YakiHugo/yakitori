@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import { expect, type Page, type TestInfo } from "@playwright/test"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import type { PdfAttachment } from "../../src/kernel/events.ts"
+import type { ProviderModelSettings } from "../../src/protocol/providers.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 
 export async function createSmokeEnvironment(): Promise<
@@ -591,6 +592,35 @@ export async function runProviderFlow(
     await expect(
       page.getByText("Applying changes…", { exact: true }),
     ).toHaveCount(0)
+    // Reload and selector checks need durable settings, not transient save feedback.
+    const waitForModelSettings = async (settings: ProviderModelSettings) => {
+      const settingsClient = createAppRpcClient({
+        apiBase: new URL(page.url()).origin,
+      })
+      try {
+        const directory = await settingsClient.request("provider/list", {})
+        const accountId = directory.accounts.find(
+          (account) => account.displayName === "Smoke API",
+        )?.name
+        if (!accountId) throw new Error("Missing smoke account")
+        await expect
+          .poll(async () => {
+            const catalog = await settingsClient.request(
+              "provider/models/read",
+              {
+                provider: accountId,
+              },
+            )
+            return catalog.settings
+          })
+          .toMatchObject(settings)
+      } finally {
+        settingsClient.close()
+      }
+    }
+    await waitForModelSettings({
+      "extra-coding": { contextWindowTokens: 64000 },
+    })
     await expect(page.getByRole("alert")).toHaveCount(0)
     await page.getByRole("button", { name: "Go back", exact: true }).click()
     await expect(
@@ -644,9 +674,13 @@ export async function runProviderFlow(
     await expect(
       page.getByText("Applying changes…", { exact: true }),
     ).toHaveCount(0)
+    await waitForModelSettings({
+      "extra-coding": { visible: false },
+      "future-coding": { visible: false },
+    })
     await expect(page.getByRole("alert")).toHaveCount(0)
     await page
-      .getByRole("heading", { name: "Models", exact: true })
+      .getByRole("region", { name: "Account models", exact: true })
       .scrollIntoViewIfNeeded()
     const modelsScreenshot = testInfo.outputPath("provider-model-settings.png")
     await page.screenshot({ path: modelsScreenshot, animations: "disabled" })

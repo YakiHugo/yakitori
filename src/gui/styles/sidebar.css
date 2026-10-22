@@ -242,19 +242,6 @@
   width: min(600px, calc(100vw - 32px));
   padding: 22px;
 }
-.subscription-intro {
-  margin: -8px 0 18px;
-}
-.subscription-intro p {
-  font-size: 14px;
-  color: var(--foreground);
-}
-.subscription-intro span {
-  display: block;
-  margin-top: 3px;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
 .subscription-list {
   display: flex;
   flex-direction: column;
@@ -287,28 +274,6 @@
   margin-top: 2px;
   color: var(--muted-foreground);
   font-size: 11px;
-}
-.subscription-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  padding: 3px 7px;
-  border-radius: 999px;
-  background: var(--muted);
-  color: var(--muted-foreground);
-  font-size: 10px;
-  font-weight: 500;
-}
-.subscription-status[data-connected="true"] {
-  background: color-mix(in oklab, #10b981 12%, var(--background));
-  color: color-mix(in oklab, #059669 82%, var(--foreground));
-}
-.subscription-status[data-loading="true"] {
-  color: var(--foreground);
-}
-.subscription-spinner {
-  animation: subscription-spin 800ms linear infinite;
 }
 .subscription-note {
   padding: 16px 0 3px;
@@ -472,11 +437,6 @@
     opacity: 1;
   }
 }
-@keyframes subscription-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 @keyframes subscription-shimmer {
   from {
     transform: translateX(-110%);
@@ -499,7 +459,6 @@
   .sidebar-dialog::backdrop {
     animation: none;
   }
-  .subscription-spinner,
   .subscription-skeleton-label::after,
   .subscription-skeleton-progress::after {
     animation: none;
