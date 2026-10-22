@@ -269,13 +269,8 @@
 .provider-editor-fields {
   min-width: 0;
 }
-.provider-editor select {
+.provider-editor .ui-select-trigger {
   width: 100%;
-  border: 1px solid var(--input);
-  border-radius: 6px;
-  padding: 8px 12px;
-  background: var(--background);
-  color: var(--foreground);
 }
 .provider-advanced {
   border-top: 1px solid var(--border);
@@ -349,7 +344,7 @@
   align-items: center;
   gap: 6px;
 }
-.provider-editor :is(input, select, button, summary, a):focus-visible {
+.provider-editor :is(input, button, summary, a):focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
@@ -630,12 +625,6 @@ button.provider-model-main {
   font-size: 22px;
   font-weight: 600;
 }
-.provider-usage-toolbar select {
-  font-size: 12px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
 .provider-usage-table {
   width: 100%;
   font-size: 12px;
@@ -719,14 +708,6 @@ button.provider-model-main {
 .model-catalog-settings .provider-model-list {
   max-height: none;
   overflow: visible;
-}
-.model-catalog-settings select {
-  width: 100%;
-  border: 1px solid var(--input);
-  border-radius: 6px;
-  padding: 8px 12px;
-  background: var(--background);
-  color: var(--foreground);
 }
 .model-catalog-settings .provider-editor-actions {
   border-top: 1px solid var(--border);

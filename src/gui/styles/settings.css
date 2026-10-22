@@ -79,14 +79,8 @@
   font-weight: 500;
 }
 
-.settings-row select {
+.settings-row .ui-select-trigger {
   max-width: 190px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 9px;
-  background: var(--background);
-  color: var(--foreground);
-  font-size: 12px;
 }
 
 .settings-switch {
@@ -123,7 +117,7 @@
   cursor: default;
 }
 
-.settings-content :is(select, button, input):focus-visible,
+.settings-content :is(button, input):focus-visible,
 .settings-nav button:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;

@@ -478,23 +478,28 @@ export async function runProviderFlow(
       exact: true,
     })
     await geminiEditor.getByText("Advanced settings", { exact: true }).click()
-    await expect(geminiEditor.getByLabel("API protocol")).toHaveValue(
-      "gemini_generate_content",
+    await expect(geminiEditor.getByLabel("API protocol")).toHaveText(
+      "Gemini GenerateContent",
     )
     await expect(geminiEditor.getByLabel("API base URL")).toHaveValue(
       "https://generativelanguage.googleapis.com/v1beta",
     )
-    await geminiEditor
-      .getByLabel("API protocol")
-      .selectOption("openai_chat_completions")
+    await geminiEditor.getByLabel("API protocol").click()
+    await page.keyboard.press("Escape")
+    await expect(geminiEditor).toBeVisible()
+    await expect(geminiEditor.getByLabel("API protocol")).toBeFocused()
+    await geminiEditor.getByLabel("API protocol").click()
+    await page
+      .getByRole("option", { name: "OpenAI Chat Completions", exact: true })
+      .click()
     await page.keyboard.press("Escape")
     await expect(geminiEditor).toHaveCount(0)
     await page
       .getByRole("button", { name: "Google Gemini", exact: true })
       .click()
     await geminiEditor.getByText("Advanced settings", { exact: true }).click()
-    await expect(geminiEditor.getByLabel("API protocol")).toHaveValue(
-      "gemini_generate_content",
+    await expect(geminiEditor.getByLabel("API protocol")).toHaveText(
+      "Gemini GenerateContent",
     )
     await page.keyboard.press("Escape")
     await expect(geminiEditor).toHaveCount(0)
@@ -1338,9 +1343,8 @@ async function runPdfInputFlow(
 // Configured executable -> production app RPC -> shared workspace, on both CI
 // platforms. No provider credentials or model service are used by this child.
 export async function runExternalEngineFlow(page: Page): Promise<void> {
-  await page
-    .getByRole("combobox", { name: "New session engine" })
-    .selectOption("smoke-acp")
+  await page.getByRole("combobox", { name: "New session engine" }).click()
+  await page.getByRole("option", { name: "Smoke ACP", exact: true }).click()
   const composer = page.getByRole("textbox", { name: "Message the Mate" })
   await composer.fill("permission")
   await page.getByRole("button", { name: "Send", exact: true }).click()

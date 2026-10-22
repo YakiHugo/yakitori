@@ -195,12 +195,11 @@ describe("external engine workspace", () => {
     const createNative = vi.fn()
     useAppStore.setState({ createSession: createNative })
     render(<EngineSelector />)
-    await userEvent
-      .setup()
-      .selectOptions(
-        screen.getByRole("combobox", { name: "New session engine" }),
-        "external",
-      )
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole("combobox", { name: "New session engine" }),
+    )
+    await user.click(screen.getByRole("option", { name: engine.label }))
     expect(createNative).not.toHaveBeenCalled()
     request.mockResolvedValue(snapshot())
     await selectEngineSession(snapshot().session)

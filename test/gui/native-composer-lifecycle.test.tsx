@@ -206,11 +206,8 @@ it("keeps the welcome layout through empty session creation and replay until inp
     screen.getByRole("combobox", { name: "New session project" }),
   ).toHaveProperty("disabled", true)
   expect(
-    screen.getByRole("combobox", { name: "New session project" }),
-  ).toHaveProperty("value", "")
-  expect(
-    screen.getByRole("option", { name: "No project", selected: true }),
-  ).toBeDefined()
+    screen.getByRole("combobox", { name: "New session project" }).textContent,
+  ).toBe("No project")
   const stream = fake.current.streams.at(-1)
   if (!stream) throw new Error("Session stream missing")
   act(() => stream.emitSnapshot({ session }))

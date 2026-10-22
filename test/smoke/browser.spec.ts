@@ -15,6 +15,74 @@ import {
   smokePdfBytes,
 } from "./fixtures.ts"
 
+test("shared selects keep preferences, keyboard focus and popup bounds", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    const appearance = page.getByRole("combobox", { name: "Appearance" })
+    await appearance.focus()
+    await page.keyboard.press("ArrowDown")
+    await expect(
+      page.getByRole("option", { name: "Light", exact: true }),
+    ).toBeFocused()
+    await page.keyboard.press("ArrowDown")
+    await expect(
+      page.getByRole("option", { name: "Dark", exact: true }),
+    ).toBeFocused()
+    await page.keyboard.press("Enter")
+    await expect(appearance).toHaveText("Dark")
+    await expect(appearance).toBeFocused()
+    await expect(page.locator("html")).toHaveClass(/dark/)
+
+    await page
+      .getByRole("button", { name: "Notifications", exact: true })
+      .click()
+    const notifications = page.getByRole("combobox", {
+      name: "When work finishes",
+    })
+    await notifications.click()
+    await page.keyboard.press("Escape")
+    await expect(notifications).toBeFocused()
+    await expect(
+      page.getByRole("region", { name: "Notification settings" }),
+    ).toBeVisible()
+    await notifications.click()
+    await page.getByRole("option", { name: "Never", exact: true }).click()
+    await expect(
+      page.getByRole("switch", { name: "Notification sound" }),
+    ).toBeDisabled()
+
+    await page.reload()
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await expect(appearance).toHaveText("Dark")
+    await page
+      .getByRole("button", { name: "Notifications", exact: true })
+      .click()
+    await expect(notifications).toHaveText("Never")
+    await page.setViewportSize({ width: 560, height: 720 })
+    await notifications.click()
+    const bounds = await page.getByRole("listbox").boundingBox()
+    if (!bounds) throw new Error("Select popup has no visible bounds")
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(560)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(720)
+    await page.keyboard.press("Escape")
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
 test("an unavailable saved model can be replaced and stays corrected after reload", async ({
   page,
 }, testInfo) => {
@@ -489,7 +557,7 @@ test("window history restores sessions and drafts without creating duplicate con
     })
     await page.goto(server.url)
     const project = page.getByRole("combobox", { name: "New session project" })
-    await expect(project).not.toHaveValue("")
+    await expect(project).not.toHaveText("No project")
     await runFauxTurn(page)
     const composer = page.getByRole("textbox", { name: "Message the Mate" })
     const reply = page.getByText("Hello from faux.", { exact: true })

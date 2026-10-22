@@ -125,18 +125,12 @@ it("submits typed fields, enum titles and defaults while omitting unanswered opt
     screen.getByRole("spinbutton", { name: "Count (required)" }),
     "3",
   )
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Plan" }),
-    "Paid",
-  )
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Color" }),
-    "blue",
-  )
-  await user.selectOptions(screen.getByRole("listbox", { name: "Topics" }), [
-    "API",
-    "SDK",
-  ])
+  await user.click(screen.getByRole("combobox", { name: "Plan" }))
+  await user.click(screen.getByRole("option", { name: "Paid" }))
+  await user.click(screen.getByRole("combobox", { name: "Color" }))
+  await user.click(screen.getByRole("option", { name: "blue" }))
+  await user.click(screen.getByRole("checkbox", { name: "SDK" }))
+  await user.click(screen.getByRole("checkbox", { name: "API" }))
   expect(answerCalls()).toHaveLength(0)
   await user.click(screen.getByRole("button", { name: "Submit" }))
   expect(answerCalls()).toEqual([
@@ -194,12 +188,10 @@ it("validates required fields, integer bounds and multiselect limits before answ
   )
   const count = screen.getByRole("spinbutton", { name: "Count (required)" })
   await user.type(count, "2.5")
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Choice (required)" }),
-    "No",
-  )
-  const tags = screen.getByRole("listbox", { name: "Tags" })
-  await user.selectOptions(tags, ["a", "b"])
+  await user.click(screen.getByRole("combobox", { name: "Choice (required)" }))
+  await user.click(screen.getByRole("option", { name: "No" }))
+  await user.click(screen.getByRole("checkbox", { name: "a" }))
+  await user.click(screen.getByRole("checkbox", { name: "b" }))
   await user.click(screen.getByRole("button", { name: "Submit" }))
   expect(screen.getByText("Enter at least 3 characters.")).toBeDefined()
   expect(screen.getByText("Enter a whole number.")).toBeDefined()
@@ -212,7 +204,7 @@ it("validates required fields, integer bounds and multiselect limits before answ
   await user.type(screen.getByRole("textbox", { name: "Name (required)" }), "i")
   await user.clear(count)
   await user.type(count, "3")
-  await user.deselectOptions(tags, "b")
+  await user.click(screen.getByRole("checkbox", { name: "b" }))
   await user.click(screen.getByRole("button", { name: "Submit" }))
   expect(answerCalls()[0]?.[1]).toMatchObject({
     result: {
@@ -439,7 +431,7 @@ it("accepts an explicit empty required multiselect when the schema has no minimu
     }),
   )
   render(<SessionElicitation />)
-  await screen.findByRole("listbox", { name: "features (required)" })
+  await screen.findByRole("group", { name: "features (required)" })
   await userEvent.setup().click(screen.getByRole("button", { name: "Submit" }))
   expect(answerCalls()).toEqual([
     [
