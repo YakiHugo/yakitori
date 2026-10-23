@@ -324,6 +324,63 @@ describe("application composition", () => {
     },
   )
 
+  it("uses the published model directory for independent task model choices", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const provider = createFauxProvider([
+        {
+          assertRequest(request) {
+            expect(
+              request.tools.find((tool) => tool.name === "create_thread")
+                ?.inputSchema.properties,
+            ).toMatchObject({
+              model: { enum: ["openai/gpt-6-sol"] },
+            })
+          },
+          content: [{ type: "text", text: "healthy model completed" }],
+        },
+      ])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        provider: "openai",
+        model: "gpt-6-sol",
+        stream: provider.stream,
+        modelDirectory: {
+          async listModels() {
+            return [
+              {
+                id: "gpt-6-sol",
+                displayName: "Selected model",
+                instructionProfileId: "default",
+              },
+            ]
+          },
+        },
+      })
+      try {
+        const created = await application.handlers.createSession({
+          title: "Published model choices",
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "published-directory",
+            content: inputFixture([{ type: "text", text: "work" }]),
+          }),
+        )
+        await waitForThreadIdle(application, sessionId)
+        expect(provider.callCount).toBe(1)
+        expect(
+          application.threadManager.getThread(sessionId)?.agentStatus,
+        ).toEqual({ completed: "healthy model completed" })
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it.each([
     {
       provider: "openai",
@@ -1415,6 +1472,338 @@ describe("application composition", () => {
           expect(sideRequest?.tools.map((tool) => tool.name)).not.toContain(
             name,
           )
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it.each([
+    "spawn_agent",
+    "create_thread",
+  ] as const)("%s routes the selected model and effort across providers", async (toolName) => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      // Independent tasks have their own override contract; only spawn is gated.
+      await writeFile(
+        configPath,
+        `${toolName === "create_thread" ? "model_context_window = 600000\nmodel_auto_compact_token_limit = 500000\n" : ""}[agents]\nexpose_model_overrides = ${toolName === "spawn_agent"}\n`,
+      )
+      const parent = createFauxProvider([
+        {
+          assertRequest(request) {
+            expect(
+              request.tools.find((tool) => tool.name === toolName)?.inputSchema
+                .properties,
+            ).toMatchObject({
+              model: { enum: ["alpha/shared", "beta/shared"] },
+              reasoning_effort: { enum: ["high", "low", "medium"] },
+            })
+          },
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "delegate",
+              name: toolName,
+              input: {
+                message: "independent work",
+                model: "beta/shared",
+                reasoning_effort: "medium",
+                ...(toolName === "spawn_agent"
+                  ? { task_name: "worker", fork_turns: "none" }
+                  : { title: "Independent task" }),
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "source finished" }] },
+      ])
+      const worker = createFauxProvider([
+        { content: [{ type: "text", text: "worker result" }] },
+      ])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        provider: "alpha",
+        model: "shared",
+        providerPlugins: [
+          {
+            id: "cross-provider",
+            createProviders: () =>
+              Object.fromEntries(
+                (
+                  [
+                    ["alpha", parent],
+                    ["beta", worker],
+                  ] as const
+                ).map(([id, faux]) => {
+                  return [
+                    id,
+                    createModelProvider({
+                      info: {
+                        id,
+                        wireApi: "openai_chat_completions",
+                        capabilities: { remoteCompaction: false },
+                      },
+                      models: createConfiguredModelsManager({
+                        provider: id,
+                        models: [
+                          {
+                            id: "shared",
+                            efforts:
+                              id === "alpha" ? ["high"] : ["low", "medium"],
+                            defaultEffort: id === "alpha" ? "high" : "low",
+                            contextWindowTokens:
+                              id === "alpha" ? 1_000_000 : 128_000,
+                            maxContextWindowTokens:
+                              id === "alpha" ? 1_000_000 : 128_000,
+                          },
+                        ],
+                      }),
+                      stream: faux.stream,
+                    }),
+                  ]
+                }),
+              ),
+          },
+        ],
+      })
+      try {
+        const created = await application.handlers.createSession({
+          title: "Source task",
+        })
+        expectOk(created)
+        const sourceId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: sourceId,
+            requestId: "start",
+            content: inputFixture([
+              { type: "text", text: "source-only history" },
+            ]),
+          }),
+        )
+        await waitForThreadIdle(application, sourceId)
+        const ids = await application.threadStore.listThreadIds()
+        const childId = ids.find((id) => id !== sourceId)
+        expect(childId).toBeDefined()
+        if (childId === undefined) throw new Error("Expected delegated session")
+        await waitForThreadIdle(application, childId)
+        expect(worker.requests).toHaveLength(1)
+        expect(worker.requests[0]?.target).toMatchObject({
+          provider: "beta",
+          model: "shared",
+          effort: "medium",
+        })
+        expect(JSON.stringify(worker.requests[0]?.messages)).not.toContain(
+          "source-only history",
+        )
+        const child = await application.threadStore.readThread(childId)
+        expect(child?.metadata).toMatchObject({
+          workingDirectory: await realpath(workspace),
+          ...(toolName === "spawn_agent" ? { parentThreadId: sourceId } : {}),
+        })
+        const sessions = await application.handlers.listSessions()
+        expectOk(sessions)
+        expect(sessions.value.sessions.map((session) => session.id)).toContain(
+          sourceId,
+        )
+        expect(
+          sessions.value.sessions.some((session) => session.id === childId),
+        ).toBe(toolName === "create_thread")
+        if (toolName === "create_thread") {
+          expect(
+            application.threadManager.getThread(sourceId)?.snapshot()
+              .configuration?.modelContextWindowTokens,
+          ).toBe(600_000)
+          expect(
+            application.threadManager.getThread(childId)?.snapshot()
+              .configuration,
+          ).not.toHaveProperty("modelContextWindowTokens")
+          expect(
+            application.threadManager.getThread(childId)?.snapshot()
+              .configuration,
+          ).not.toHaveProperty("modelAutoCompactTokenLimit")
+          expect(child?.metadata.conversationId).toBe(childId)
+          expect(child?.metadata).not.toHaveProperty("parentThreadId")
+          expect(child?.metadata.metadata).not.toHaveProperty("agent")
+          expect(
+            child?.rollout.find(({ item }) => item.type === "turn_context")
+              ?.item,
+          ).toMatchObject({
+            context: {
+              configuration: {
+                approvalPolicy: "always_approve",
+                modelChoice: {
+                  provider: "beta",
+                  model: "shared",
+                  effort: "medium",
+                },
+              },
+            },
+          })
+        }
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("refreshes spawn model exposure on the next sample and rejects a disabled in-flight override", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(join(workspace, "sample.txt"), "sample")
+      const sampledTools: ModelRequest["tools"][] = []
+      let calls = 0
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        provider: "custom",
+        model: "parent",
+        providerPlugins: [
+          {
+            id: "spawn-policy",
+            createProviders: () => ({
+              custom: createModelProvider({
+                info: {
+                  id: "custom",
+                  wireApi: "openai_chat_completions",
+                  capabilities: { remoteCompaction: false },
+                },
+                models: createConfiguredModelsManager({
+                  provider: "custom",
+                  models: [
+                    { id: "parent", efforts: ["high"], defaultEffort: "high" },
+                    {
+                      id: "worker",
+                      efforts: ["low", "medium"],
+                      defaultEffort: "low",
+                    },
+                    { id: "hidden", visible: false, efforts: ["high"] },
+                  ],
+                }),
+                stream: async function* (request) {
+                  calls++
+                  sampledTools.push(request.tools)
+                  if (calls === 1) {
+                    await writeFile(
+                      configPath,
+                      "[agents]\nexpose_model_overrides = true\n",
+                    )
+                    yield {
+                      type: "response",
+                      response: {
+                        stopReason: ModelStopReason.ToolUse,
+                        content: [
+                          {
+                            type: "tool_call",
+                            id: "refresh_exposure",
+                            name: "read_file",
+                            input: { path: "sample.txt" },
+                          },
+                        ],
+                      },
+                    }
+                    return
+                  }
+                  if (calls === 2) {
+                    // This request has already advertised overrides. A settings edit
+                    // before its tool executes must still enforce the current policy.
+                    await writeFile(
+                      configPath,
+                      "[agents]\nexpose_model_overrides = false\n",
+                    )
+                    yield {
+                      type: "response",
+                      response: {
+                        stopReason: ModelStopReason.ToolUse,
+                        content: [
+                          {
+                            type: "tool_call",
+                            id: "stale_override",
+                            name: "spawn_agent",
+                            input: {
+                              task_name: "worker",
+                              message: "work",
+                              model: "custom/worker",
+                              reasoning_effort: "low",
+                            },
+                          },
+                        ],
+                      },
+                    }
+                    return
+                  }
+                  yield {
+                    type: "response",
+                    response: {
+                      stopReason: ModelStopReason.EndTurn,
+                      content: [{ type: "text", text: "finished" }],
+                    },
+                  }
+                },
+              }),
+            }),
+          },
+        ],
+      })
+      try {
+        const created = await application.handlers.createSession({
+          title: "Spawn exposure",
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "spawn_exposure",
+            content: inputFixture([{ type: "text", text: "work" }]),
+          }),
+        )
+        await waitForThreadIdle(application, sessionId)
+        expect(calls).toBe(3)
+        const spawnDefinitions = sampledTools.map((tools) =>
+          tools.find((tool) => tool.name === "spawn_agent"),
+        )
+        expect(spawnDefinitions[0]?.inputSchema.properties).not.toHaveProperty(
+          "model",
+        )
+        expect(spawnDefinitions[1]?.inputSchema.properties).toMatchObject({
+          model: { enum: ["custom/parent", "custom/worker"] },
+          reasoning_effort: { enum: ["high", "low", "medium"] },
+        })
+        expect(spawnDefinitions[1]?.description).toContain(
+          "custom/worker (reasoning: low, medium; default: low)",
+        )
+        expect(spawnDefinitions[2]?.inputSchema.properties).not.toHaveProperty(
+          "model",
+        )
+        expect(spawnDefinitions[2]?.inputSchema.properties).not.toHaveProperty(
+          "reasoning_effort",
+        )
+        expect(await application.threadStore.listThreadIds()).toEqual([
+          sessionId,
+        ])
+        const stored = await application.threadStore.readThread(sessionId)
+        const failure = stored?.rollout.find(
+          ({ item }) =>
+            item.type === "item_completed" &&
+            "toolCallId" in item.item &&
+            item.item.toolCallId === "stale_override",
+        )
+        expect(failure?.item).toMatchObject({
+          type: "item_completed",
+          item: {
+            error: {
+              code: "invalid_tool_input",
+              message:
+                "Agent model overrides are disabled in runtime settings.",
+            },
+          },
+        })
       } finally {
         await application.close()
       }

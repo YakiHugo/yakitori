@@ -1,3 +1,4 @@
+import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
 import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
@@ -42,6 +43,8 @@ export type StepContext = Readonly<{
 
 export function captureStepContext(
   input: Readonly<{
+    threadModelOverrides?: AgentModelOverrides
+    agentModelOverrides?: AgentModelOverrides
     registry: ToolRegistry
     configuration: ResolvedStepConfiguration
     wireApi?: ModelWireApi
@@ -173,6 +176,12 @@ export function captureStepContext(
     executionPolicy: stepExecutionLimits(input.configuration),
     toolRouter: input.registry.finalize({
       enabledTrustedTools,
+      ...(input.threadModelOverrides === undefined
+        ? {}
+        : { threadModelOverrides: input.threadModelOverrides }),
+      ...(input.agentModelOverrides === undefined
+        ? {}
+        : { agentModelOverrides: input.agentModelOverrides }),
       customToolMode:
         model.supportsCustomTools && provider.supportsCustomTools
           ? "native"

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util"
 import type { JsonValue, ToolExecutionDescriptor } from "../../kernel/index.ts"
+import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelToolDefinition, ToolWireProtocol } from "../model.ts"
 import type { UserShellEnv } from "../user-shell-env.ts"
 import { createApplyPatchTool } from "./apply-patch.ts"
@@ -8,10 +9,13 @@ import { dynamicToolExecution } from "./execution-descriptors.ts"
 import { createGlobTool } from "./glob.ts"
 import { createGoalTools, type GoalToolService } from "./goal.ts"
 import { createGrepTool } from "./grep.ts"
-import { createMultiAgentTools } from "./multi-agent.ts"
+import { createMultiAgentTools, createSpawnAgentTool } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
-import { createThreadCollaborationTools } from "./thread-collaboration.ts"
+import {
+  createThreadCollaborationTools,
+  createThreadTool,
+} from "./thread-collaboration.ts"
 import { canonicalToolName, plainToolName, type ToolName } from "./tool-name.ts"
 import {
   createToolSearchIndex,
@@ -60,6 +64,8 @@ const RESERVED_EXTERNAL_DEFAULT_NAMES = new Set([
 ])
 
 export type ToolFinalizeOptions = Readonly<{
+  threadModelOverrides?: AgentModelOverrides
+  agentModelOverrides?: AgentModelOverrides
   enabledTrustedTools: ReadonlySet<string>
   customToolMode: "function" | "native"
   wireProtocol: ToolWireProtocol
@@ -226,6 +232,18 @@ export function createToolRegistry(
           entry.source.kind === "external" ||
           options.enabledTrustedTools.has(name),
       )
+      for (let index = 0; index < eligible.length; index++) {
+        const entry = eligible[index]
+        if (entry === undefined || entry[1].source.kind !== "trusted") continue
+        const runtime =
+          entry[0] === "spawn_agent"
+            ? createSpawnAgentTool(options.agentModelOverrides)
+            : entry[0] === "create_thread"
+              ? createThreadTool(options.threadModelOverrides)
+              : undefined
+        if (runtime !== undefined)
+          eligible[index] = [entry[0], { ...entry[1], runtime }]
+      }
       const selected = new Map([
         ...eligible.filter(([, entry]) => entry.source.kind === "trusted"),
         ...eligible

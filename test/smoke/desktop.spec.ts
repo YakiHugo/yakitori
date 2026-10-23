@@ -5,6 +5,7 @@ import { createServer } from "node:http"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
+import { parse } from "smol-toml"
 import {
   test as base,
   type ElectronApplication,
@@ -17,6 +18,7 @@ import {
   runBudgetedGoal,
   runExternalEngineFlow,
   runFauxTurn,
+  runIndependentSessionFlow,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
@@ -268,6 +270,44 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     },
   })
   await runExternalEngineFlow(page)
+  expect(rendererErrors).toEqual([])
+})
+
+test("desktop independent sessions route cross-provider models and appear in the sidebar", async ({
+  desktop,
+}, testInfo) => {
+  await runIndependentSessionFlow(desktop.page, testInfo)
+  expect(desktop.rendererErrors).toEqual([])
+})
+
+test("desktop runtime settings persist subagent model selection to disk", async ({
+  desktop,
+}, testInfo) => {
+  const { page, sidecarUrl, rendererErrors } = desktop
+  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await page.getByRole("button", { name: "Runtime", exact: true }).click()
+  const control = page.getByRole("switch", { name: "Subagent model selection" })
+  await expect(control).not.toBeChecked()
+  await control.click()
+  await expect
+    .poll(
+      async () =>
+        (await client.request("config/read", {})).configuration.agents
+          ?.exposeModelOverrides,
+    )
+    .toBe(true)
+  const snapshot = await client.request("config/read", {})
+  const user = snapshot.layers.find((layer) => layer.source === "user")
+  if (user === undefined) throw new Error("User configuration is missing.")
+  expect(parse(await readFile(user.path, "utf8")).agents).toEqual({
+    expose_model_overrides: true,
+  })
+  await page.reload()
+  await page.getByRole("button", { name: "Settings", exact: true }).click()
+  await page.getByRole("button", { name: "Runtime", exact: true }).click()
+  await expect(control).toBeChecked()
+  await page.screenshot({ path: testInfo.outputPath("runtime-settings.png") })
   expect(rendererErrors).toEqual([])
 })
 

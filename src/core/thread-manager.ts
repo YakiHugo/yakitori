@@ -2,6 +2,7 @@ import type {
   EventMetadata,
   JsonObject,
   ModelMessage,
+  SessionConfigurationSnapshot,
 } from "../kernel/events.ts"
 import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
@@ -9,32 +10,34 @@ import type { GitInfo, ModelContextSettings, StoredThread } from "./rollout.ts"
 import { Session } from "./session.ts"
 import type { SessionTaskRunner } from "./session-task.ts"
 import { SessionStatus } from "./session-io.ts"
-import type {
-  CreateThreadMetadata,
-  ThreadStore,
-  ThreadStoreForkResult,
-  ThreadStoreListInput,
+import {
+  PersistContext,
+  type CreateThreadMetadata,
+  type ThreadStore,
+  type ThreadStoreForkResult,
+  type ThreadStoreListInput,
 } from "./thread-store.ts"
 
-export type CreateThreadInput = {
-  readonly threadId?: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly gitInfo?: GitInfo
-  readonly projectId?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly parentThreadId?: string
-  readonly conversationId?: string
-  readonly metadata?: EventMetadata
-  readonly initialContext?: Readonly<{
+export type CreateThreadInput = Readonly<{
+  threadId?: string
+  title?: string
+  workingDirectory?: string
+  gitInfo?: GitInfo
+  projectId?: string
+  mateId?: string
+  mateRevisionId?: string
+  parentThreadId?: string
+  conversationId?: string
+  metadata?: EventMetadata
+  initialConfiguration?: SessionConfigurationSnapshot
+  initialContext?: Readonly<{
     sourceThreadId: string
     messages: readonly ModelMessage[]
     worldStateBaseline?: JsonObject
     previousModel?: ModelContextSettings
     activeContextTokens?: number
   }>
-}
+}>
 
 export type ForkThreadInput = {
   readonly sourceThreadId: string
@@ -171,6 +174,25 @@ export class ThreadManager {
       }
       let stored = await this.#store.createThread(metadata)
       try {
+        if (input.initialConfiguration !== undefined) {
+          await this.#store.appendItems(threadId, [
+            {
+              type: "turn_context",
+              context: {
+                turnId: createTurnId(),
+                configuration: input.initialConfiguration,
+                selection: input.initialConfiguration.defaultTarget,
+              },
+            },
+          ])
+          await this.#store.persistThread(threadId, PersistContext.TurnStart)
+          await this.#store.flushThread(threadId)
+          stored =
+            (await this.#store.readThread(threadId)) ??
+            (() => {
+              throw new Error("Thread disappeared while configuring.")
+            })()
+        }
         if (input.initialContext !== undefined) {
           const initialContext = input.initialContext
           const seedTurnId = createTurnId()

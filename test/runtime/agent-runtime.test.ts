@@ -178,13 +178,17 @@ describe("agent runtime", () => {
       })
       const control = controls.get(root.id)
       if (control === undefined) throw new Error("missing root control")
-      const parent = control.bind(root.id, TARGET)
+      const parent = control.bind(root.id, TARGET, async () => ({
+        current: TARGET,
+        resolve: (selection) => selection,
+        models: [{ provider: "faux", model: "recipient_model" }],
+      }))
       const child = await parent.spawn({
         taskName: "worker",
         message: "first",
         agentType: "general",
         forkTurns: "none",
-        model: "recipient_model",
+        model: "faux/recipient_model",
       })
       await expect.poll(() => provider.callCount).toBe(1)
       await toolEntered.promise

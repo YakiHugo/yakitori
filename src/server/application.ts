@@ -71,6 +71,10 @@ import {
   createLocalSkillsSource,
   type SkillsSource,
 } from "../runtime/skills.ts"
+import {
+  AgentModelSelectionError,
+  type AgentModelOverrides,
+} from "../runtime/agent-model-selection.ts"
 import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
 import { createAccountRuntime } from "./account-runtime.ts"
@@ -100,7 +104,11 @@ import {
 import { createYakitoriHttpServer } from "./http.ts"
 import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
-import { type AccountModelSource, createModelRouter } from "./model-router.ts"
+import {
+  type AccountModelSource,
+  ModelRouteError,
+  createModelRouter,
+} from "./model-router.ts"
 import { createModelSourceTool } from "./model-source-tools.ts"
 import {
   consoleOperationalFailureReporter,
@@ -868,9 +876,47 @@ export async function createYakitoriApplication(
     })
     goals = goalRuntime
     let threadManager: ThreadManager
+    // Sampling consumes the published directory. Catalog owners refresh it;
+    // an unrelated provider must not add discovery work to another Turn.
+    const readAgentModels = async (
+      target: import("../kernel/events.ts").ModelSelection,
+    ): Promise<AgentModelOverrides> => ({
+      current:
+        modelRouter.selectionFor(target.provider, target.model) ?? target,
+      models: modelRouter
+        .list()
+        .filter((provider) => provider.availability === "available")
+        .flatMap((provider) =>
+          provider.models
+            .filter((model) => model.visible !== false)
+            .map((model) => ({
+              provider: provider.name,
+              model: model.id,
+              ...(model.efforts === undefined
+                ? {}
+                : { efforts: model.efforts }),
+              ...(model.defaultEffort === undefined
+                ? {}
+                : { defaultEffort: model.defaultEffort }),
+            })),
+        ),
+      resolve(selection) {
+        if (injectedProviderNames.has(selection.provider)) {
+          providerRegistry.models(selection.provider).validate(selection)
+          return selection
+        }
+        try {
+          return modelRouter.route(selection)
+        } catch (error) {
+          if (!(error instanceof ModelRouteError)) throw error
+          throw new AgentModelSelectionError(error.message)
+        }
+      },
+    })
     const threadCollaboration = createThreadCollaboration({
       getThreadManager: () => threadManager,
       store: threadStore,
+      onCreated: () => broadcastNotification?.(sidebarChangedMethod, {}),
     })
     const agentRuntime = createAgentRuntime({
       graphStore: agentGraphStore,
@@ -1048,6 +1094,13 @@ export async function createYakitoriApplication(
                 (await mcpExtension?.prepare(servers, signal)) ?? [],
             }
           },
+          readAgentModels,
+          readAgentConfiguration: async () =>
+            (
+              await sessionUserConfig.readConfiguration({
+                cwd: workingDirectory,
+              })
+            ).agents,
           readModelTransport: () => publishedConfiguration.modelTransport,
           loadSessionGoal: async () =>
             sideConversation ? undefined : goalRuntime.get(stored.metadata.id),
@@ -1119,9 +1172,7 @@ export async function createYakitoriApplication(
                   stored,
                   sessionConfiguration.rolloutBudget,
                 ),
-                threadCollaboration: threadCollaboration.bind(
-                  stored.metadata.id,
-                ),
+                threadCollaboration,
               }),
           rolloutAssets,
           ...(assetBaseUrl === undefined

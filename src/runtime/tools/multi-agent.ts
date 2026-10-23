@@ -5,6 +5,11 @@ import {
   type BoundAgentControl,
   type ForkTurns,
 } from "../agent-control.ts"
+import {
+  agentModelOptions,
+  AgentModelSelectionError,
+  type AgentModelOverrides,
+} from "../agent-model-selection.ts"
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
 import {
   collaborationExecution,
@@ -30,11 +35,15 @@ export function createMultiAgentTools(): readonly RuntimeTool[] {
   ]
 }
 
-function createSpawnAgentTool(): RuntimeTool {
+export function createSpawnAgentTool(
+  modelOverrides?: AgentModelOverrides,
+): RuntimeTool {
+  const options = agentModelOptions(modelOverrides)
   return {
     toolName: plainToolName("spawn_agent"),
     description:
-      "Spawn an agent for a concrete, bounded subtask that can run independently alongside useful local work. The child inherits the current model and tools, can spawn descendants within the configured depth limit, and returns immediately with an agent id and canonical task path. It starts with a fresh conversation context by default and receives message as its assigned task. Set fork_turns to all or a positive integer string only when the child genuinely needs parent history.",
+      "Spawn an agent for a concrete, bounded subtask that can run independently alongside useful local work. The child inherits the current model and tools, can spawn descendants within the configured depth limit, and returns immediately with an agent id and canonical task path. It starts with a fresh conversation context by default and receives message as its assigned task. Set fork_turns to all or a positive integer string only when the child genuinely needs parent history." +
+      ` ${options.description}`,
     approvalRequirement: noToolApprovalRequired,
     // Multiple spawn calls in one model response are intentionally safe to
     // execute together; they do not mutate the workspace themselves.
@@ -66,23 +75,24 @@ function createSpawnAgentTool(): RuntimeTool {
           description:
             'Optional parent history to inherit: "none" (default), "all", or a positive integer string such as "3".',
         },
-        model: {
-          type: "string",
-          minLength: 1,
-          description:
-            "Optional model override within the current provider. Omit unless explicitly needed.",
-        },
-        reasoning_effort: {
-          type: "string",
-          minLength: 1,
-          description: "Optional reasoning effort override for the child.",
-        },
+        ...options.properties,
       },
       required: ["task_name", "message"],
     },
     async execute(input, context) {
       const control = requireControl(context.agentControl)
       if (!control.ok) return control.error
+      const record = recordInput(input)
+      if (
+        record !== undefined &&
+        ["model", "reasoning_effort"].some(
+          (key) => Object.hasOwn(record, key) && !(key in options.properties),
+        )
+      )
+        return failure(
+          "invalid_tool_input",
+          "Model or reasoning overrides are not exposed in this session.",
+        )
       const parsed = parseSpawnInput(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
@@ -474,7 +484,10 @@ async function runControl(
   try {
     return await run()
   } catch (error) {
-    if (error instanceof AgentControlError) {
+    if (
+      error instanceof AgentControlError ||
+      error instanceof AgentModelSelectionError
+    ) {
       return failure(error.code, error.message)
     }
     throw error

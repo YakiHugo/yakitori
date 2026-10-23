@@ -6,6 +6,10 @@ import type { AgentStatus } from "../core/session-io.ts"
 import type { TurnCompletion } from "../kernel/events.ts"
 import type { ForkedModelContext } from "./model-context.ts"
 import { RolloutBudget, type RolloutBudgetConfig } from "./rollout-budget.ts"
+import {
+  type AgentModelOverrides,
+  resolveAgentModelTarget,
+} from "./agent-model-selection.ts"
 
 export type AgentType = "general" | "explore"
 export type ForkTurns = "none" | "all" | number
@@ -132,7 +136,11 @@ type WaitWakeReason = AgentWaitResult["reason"] | "aborted"
 
 export type AgentControl = Readonly<{
   rolloutBudget: RolloutBudget
-  bind(sessionId: string, target: AgentModelTarget): BoundAgentControl
+  bind(
+    sessionId: string,
+    target: AgentModelTarget,
+    modelOverrides?: () => Promise<AgentModelOverrides | undefined>,
+  ): BoundAgentControl
   registerAgent(input: AgentRegistration): void
   unregisterAgent(agentId: string): void
   runtimeContext(sessionId: string): AgentRuntimeContext
@@ -363,6 +371,7 @@ export function createAgentControl(input: {
   function bind(
     sessionId: string,
     target: AgentModelTarget,
+    modelOverrides?: () => Promise<AgentModelOverrides | undefined>,
   ): BoundAgentControl {
     const actor = requireAgent(sessionId)
     return {
@@ -375,6 +384,11 @@ export function createAgentControl(input: {
             `Agent ${actor.path} is at the maximum delegation depth of ${String(maxDepth)}. Complete the task without spawning another agent.`,
           )
         }
+        const hasOverrides =
+          request.model !== undefined || request.reasoningEffort !== undefined
+        const available = hasOverrides ? await modelOverrides?.() : undefined
+        requireLiveActor(actor)
+        const childTarget = resolveAgentModelTarget(target, request, available)
         const taskName = requireTaskName(request.taskName)
         const path = `${actor.path}/${taskName}`
         requireOpenPath(path)
@@ -392,13 +406,6 @@ export function createAgentControl(input: {
             parentSessionId: sessionId,
             forkTurns: request.forkTurns,
           })
-          const childTarget: AgentModelTarget = {
-            ...target,
-            ...(request.model === undefined ? {} : { model: request.model }),
-            ...(request.reasoningEffort === undefined
-              ? {}
-              : { effort: request.reasoningEffort }),
-          }
           const childId = await input.adapter.createChild({
             parentSessionId: sessionId,
             rootSessionId: actor.rootSessionId,

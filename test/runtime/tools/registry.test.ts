@@ -750,6 +750,7 @@ describe("finalized tool router", () => {
       wait_agent: "none",
       interrupt_agent: "none",
       list_agents: "none",
+      create_thread: "none",
       list_threads: "none",
       read_thread: "none",
       send_message_to_thread: "none",

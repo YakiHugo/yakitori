@@ -3,6 +3,7 @@ import {
   Bell,
   ChartColumn,
   CircleUserRound,
+  Cpu,
   Monitor,
   Plug,
   Server,
@@ -17,9 +18,11 @@ import {
 import { UsageSection } from "./usage-section.tsx"
 import { SubscriptionsSection } from "./subscription-panel.tsx"
 import { ProviderSettings } from "./provider-settings.tsx"
+import { RuntimeSettings } from "./runtime-settings.tsx"
 
 const sections = [
   { id: "general", label: "General", icon: Monitor },
+  { id: "runtime", label: "Runtime", icon: Cpu },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "providers", label: "Providers", icon: Server },
   { id: "subscriptions", label: "Subscriptions", icon: CircleUserRound },
@@ -33,6 +36,7 @@ const sections = [
 
 const sectionAria: Record<SettingsSection, string> = {
   general: "General settings",
+  runtime: "Runtime settings",
   notifications: "Notification settings",
   providers: "Provider settings",
   subscriptions: "Subscription settings",
@@ -98,6 +102,8 @@ export function SettingsPage() {
             <div className="settings-content-inner">
               {section === "general" ? (
                 <GeneralSettingsSection />
+              ) : section === "runtime" ? (
+                <RuntimeSettings />
               ) : section === "notifications" ? (
                 <NotificationSettingsSection />
               ) : section === "subscriptions" ? (

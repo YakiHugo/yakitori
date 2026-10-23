@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util"
+import type { AgentConfiguration } from "../protocol/configuration.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type { Session, TurnCompletion } from "../core/session.ts"
 import type { TurnInput } from "../core/session-io.ts"
@@ -35,6 +36,7 @@ import {
 } from "../kernel/index.ts"
 import { answerTextParts, modelOutputItemId } from "../protocol/model-output.ts"
 import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
+import type { AgentModelOverrides } from "./agent-model-selection.ts"
 import { readAssetSource } from "./asset-media.ts"
 import {
   type BackgroundCompaction,
@@ -95,7 +97,10 @@ import {
   SessionConfiguration,
   toolHistoryOutputBudget,
 } from "./session-configuration.ts"
-import type { BoundThreadCollaboration } from "./thread-collaboration.ts"
+import type {
+  BoundThreadCollaboration,
+  ThreadCollaboration,
+} from "./thread-collaboration.ts"
 import {
   createToolExecutionGate,
   type ToolExecutionGate,
@@ -143,6 +148,7 @@ type WithoutExecution<T> = T extends (
   : never
 
 export type PreparedStepContext = Readonly<{
+  agents?: AgentConfiguration
   sections?: readonly import("./world-state.ts").WorldStateSection[]
   // Only context that affects a prepared compaction belongs in this key.
   compactionKey?: import("../kernel/index.ts").JsonValue
@@ -177,6 +183,10 @@ export type TurnLoopOptions = Readonly<{
   modelContextWindowTokens?: number
   modelAutoCompactTokenLimit?: number
   modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
+  readAgentModels?: (
+    target: import("../kernel/events.ts").ModelSelection,
+  ) => Promise<AgentModelOverrides>
+  readAgentConfiguration?: () => Promise<AgentConfiguration | undefined>
   readModelTransport?: () => ModelTransportPolicy | undefined
   prepareStepContext?: (
     input: Readonly<{ workingDirectory: string; signal: AbortSignal }>,
@@ -189,7 +199,7 @@ export type TurnLoopOptions = Readonly<{
   rolloutAssets?: RolloutAssets
   onOperationalFailure?: TurnLoopOperationalFailureReporter
   agentControl?: AgentControl
-  threadCollaboration?: BoundThreadCollaboration
+  threadCollaboration?: ThreadCollaboration
   hookRunner?: HookRunner
   sessionHookContext?: Readonly<{
     sessionId: string
@@ -794,7 +804,54 @@ async function executeTurnModelLoop(
           workingDirectory: turn.requestSettings.workspaceRoot,
           signal: input.signal,
         })) ?? {}
+      const readModelCatalog = async (
+        target: import("../kernel/events.ts").ModelSelection,
+      ): Promise<AgentModelOverrides> => {
+        if (input.options.readAgentModels !== undefined)
+          return waitForToolReadiness(
+            input.options.readAgentModels(target),
+            input.signal,
+          )
+        const models =
+          input.options.modelClient?.models(target.provider) ??
+          modelSession?.models
+        return {
+          current: target,
+          models:
+            models === undefined
+              ? []
+              : (
+                  await waitForToolReadiness(models.listModels(), input.signal)
+                ).map((model) => ({ ...model, provider: target.provider })),
+          resolve(selection) {
+            models?.validate(selection)
+            return selection
+          },
+        }
+      }
+      const enabledTools = new Set(
+        input.toolRegistry
+          .trustedToolNames()
+          .filter((name) => turn.requestSettings.enabledTools.includes(name)),
+      )
+      const needsThreadModels =
+        input.options.threadCollaboration !== undefined &&
+        enabledTools.has("create_thread")
+      const needsAgentModels =
+        input.options.agentControl !== undefined &&
+        enabledTools.has("spawn_agent") &&
+        preparedContext.agents?.exposeModelOverrides === true
+      const modelCatalog =
+        needsThreadModels || needsAgentModels
+          ? await readModelCatalog(turn.requestSettings.target)
+          : undefined
       step = captureStepContext({
+        ...(!needsThreadModels || modelCatalog === undefined
+          ? {}
+          : { threadModelOverrides: modelCatalog }),
+        ...(!needsAgentModels || modelCatalog === undefined
+          ? {}
+          : { agentModelOverrides: modelCatalog }),
         registry: input.toolRegistry,
         configuration: turn.requestSettings,
         ...(wireApi === undefined ? {} : { wireApi }),
@@ -1451,11 +1508,37 @@ async function executeTurnModelLoop(
                     agentControl: input.options.agentControl.bind(
                       metadata.id,
                       executionStep.target,
+                      async () => {
+                        const agents =
+                          input.options.readAgentConfiguration === undefined
+                            ? preparedContext.agents
+                            : await input.options.readAgentConfiguration()
+                        return agents?.exposeModelOverrides === true
+                          ? readModelCatalog(executionStep.target)
+                          : undefined
+                      },
                     ),
                   }),
               ...(input.options.threadCollaboration === undefined
                 ? {}
-                : { threadCollaboration: input.options.threadCollaboration }),
+                : {
+                    threadCollaboration: input.options.threadCollaboration.bind(
+                      metadata.id,
+                      {
+                        target: executionStep.target,
+                        signal: input.signal,
+                        readModels: () =>
+                          readModelCatalog(executionStep.target),
+                        ...(input.options.modelClient === undefined
+                          ? {}
+                          : {
+                              models: input.options.modelClient.models.bind(
+                                input.options.modelClient,
+                              ),
+                            }),
+                      },
+                    ),
+                  }),
             })
             toolCalls += calls.length
             for await (const { call, item, result } of results) {
@@ -3317,10 +3400,10 @@ async function executePreparedTool(
   }
 }
 
-async function waitForToolReadiness(
-  readiness: Promise<void>,
+async function waitForToolReadiness<T>(
+  readiness: Promise<T>,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<T> {
   if (signal.aborted) throw abortError()
   let rejectAborted: (() => void) | undefined
   const aborted = new Promise<never>((_, reject) => {
@@ -3330,7 +3413,7 @@ async function waitForToolReadiness(
   signal.addEventListener("abort", onAbort, { once: true })
   if (signal.aborted) onAbort()
   try {
-    await Promise.race([readiness, aborted])
+    return await Promise.race([readiness, aborted])
   } finally {
     signal.removeEventListener("abort", onAbort)
   }

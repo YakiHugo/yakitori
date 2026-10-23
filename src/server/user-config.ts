@@ -4,6 +4,7 @@ import type { ConfigurationSnapshot as WireConfigurationSnapshot } from "../prot
 export type ConfigurationSnapshot = WireConfigurationSnapshot<UserConfiguration>
 
 import type {
+  AgentConfiguration,
   ConfigLayerSource,
   ConfigOrigin,
 } from "../protocol/configuration.ts"
@@ -86,6 +87,7 @@ export class ConfigVersionConflictError extends Error {
 }
 
 export type UserConfiguration = Readonly<{
+  agents?: AgentConfiguration
   models?: ModelSettingsConfiguration
   modelProviders?: Readonly<Record<string, StoredProviderConfiguration>>
   rolloutBudget?: RolloutBudgetConfig
@@ -615,6 +617,7 @@ async function configurationFromConfig(
   baseDirectory: string,
   skillDirectories = { paths: baseDirectory, config: baseDirectory },
 ): Promise<UserConfiguration> {
+  const agents = agentsFromConfig(value.agents)
   const preference = preferenceFromConfig(value)
   const baseInstructions = await baseInstructionsFromConfig(
     value,
@@ -665,6 +668,7 @@ async function configurationFromConfig(
   }
   return {
     ...instructionConfiguration,
+    ...(agents === undefined ? {} : { agents }),
     ...(value.models === undefined
       ? {}
       : { models: modelSettingsFromConfig(value.models) }),
@@ -686,6 +690,38 @@ async function configurationFromConfig(
     ...(mcpServers === undefined ? {} : { mcpServers }),
     ...(hooks === undefined ? {} : { hooks }),
   }
+}
+
+function agentsFromConfig(
+  value: TomlValue | undefined,
+): AgentConfiguration | undefined {
+  if (value === undefined) return undefined
+  if (!isTomlTable(value)) {
+    throw new ConfigurationError("agents must be a table.", {
+      keyPath: "agents",
+    })
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "expose_model_overrides") {
+      throw new ConfigurationError(`Unknown agents field: ${key}.`, {
+        code: "unknown_field",
+        keyPath: `agents.${key}`,
+      })
+    }
+  }
+  const exposeModelOverrides = value.expose_model_overrides
+  if (
+    exposeModelOverrides !== undefined &&
+    typeof exposeModelOverrides !== "boolean"
+  ) {
+    throw new ConfigurationError(
+      "agents.expose_model_overrides must be a boolean.",
+      {
+        keyPath: "agents.expose_model_overrides",
+      },
+    )
+  }
+  return exposeModelOverrides === undefined ? {} : { exposeModelOverrides }
 }
 
 function modelTransportFromConfig(

@@ -9,7 +9,10 @@ import type {
   ToolExecutionDescriptor,
 } from "../../../src/kernel/index.ts"
 import { createToolExecutionGate } from "../../../src/runtime/tool-execution-gate.ts"
-import { createMultiAgentTools } from "../../../src/runtime/tools/multi-agent.ts"
+import {
+  createMultiAgentTools,
+  createSpawnAgentTool,
+} from "../../../src/runtime/tools/multi-agent.ts"
 import { canonicalToolName } from "../../../src/runtime/tools/tool-name.ts"
 import type {
   RuntimeTool,
@@ -18,6 +21,72 @@ import type {
 } from "../../../src/runtime/tools/types.ts"
 
 describe("multi-agent tools", () => {
+  it("hides override fields by default and rejects supplied hidden fields", async () => {
+    const tool = requireTool("spawn_agent")
+    expect(tool.inputSchema.properties).not.toHaveProperty("model")
+    expect(tool.inputSchema.properties).not.toHaveProperty("reasoning_effort")
+    const spawn = vi.fn(control().spawn)
+    for (const overrides of [
+      { model: "worker" },
+      { reasoning_effort: "high" },
+    ]) {
+      await expect(
+        tool.execute(
+          { task_name: "worker", message: "work", ...overrides },
+          context(control({ spawn })),
+        ),
+      ).resolves.toMatchObject({ ok: false, code: "invalid_tool_input" })
+    }
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it("advertises exact model IDs and per-model reasoning options from the supplied catalog", () => {
+    const tool = createSpawnAgentTool({
+      current: { provider: "faux", model: "worker" },
+      resolve: (selection) => selection,
+      models: [
+        {
+          provider: "faux",
+          model: "worker",
+          efforts: ["low", "medium"],
+          defaultEffort: "low",
+        },
+        {
+          provider: "other",
+          model: "reviewer",
+          efforts: ["high"],
+          defaultEffort: "high",
+        },
+        { provider: "faux", model: "plain", efforts: [] },
+      ],
+    })
+    expect(tool.inputSchema.properties).toMatchObject({
+      model: { enum: ["faux/worker", "other/reviewer", "faux/plain"] },
+      reasoning_effort: { enum: ["low", "medium", "high"] },
+    })
+    expect(tool.description).toContain(
+      "faux/worker (reasoning: low, medium; default: low)",
+    )
+    expect(tool.description).toContain("faux/plain (reasoning: not listed)")
+    expect(
+      createSpawnAgentTool({
+        current: { provider: "faux", model: "worker" },
+        resolve: (selection) => selection,
+        models: [{ provider: "faux", model: "plain", efforts: [] }],
+      }).inputSchema.properties,
+    ).not.toHaveProperty("reasoning_effort")
+    const unavailable = createSpawnAgentTool({
+      current: { provider: "faux", model: "worker" },
+      resolve: (selection) => selection,
+      models: [],
+    })
+    expect(unavailable.inputSchema.properties).not.toHaveProperty("model")
+    expect(unavailable.inputSchema.properties).not.toHaveProperty(
+      "reasoning_effort",
+    )
+    expect(unavailable.description).toContain("Model overrides are unavailable")
+  })
+
   it("cancels mailbox waits and releases tool admission for the next turn", async () => {
     vi.useFakeTimers()
     const agentControl = createAgentControl({

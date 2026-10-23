@@ -1,7 +1,13 @@
+import {
+  createThreadCreator,
+  type ThreadCreationContext,
+  type ThreadCreateRequest,
+} from "./thread-creation.ts"
 import type { StoredThread } from "../core/rollout.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
 import type { ThreadStore } from "../core/thread-store.ts"
 import { createUserInput } from "../core/user-input.ts"
+import { threadMessageSubmissionId } from "./thread-message-identity.ts"
 import {
   createThreadReader,
   ThreadCollaborationError,
@@ -40,11 +46,15 @@ export type BoundThreadCollaboration = ReturnType<ThreadCollaboration["bind"]>
 export function createThreadCollaboration(input: {
   store: ThreadStore
   getThreadManager: () => ThreadManager
+  onCreated?: (threadId: string) => void
 }) {
   const reader = createThreadReader(input)
+  const create = createThreadCreator(input)
   return {
-    bind(sourceThreadId: string) {
+    bind(sourceThreadId: string, creation?: ThreadCreationContext) {
       return {
+        create: (request: ThreadCreateRequest) =>
+          create(sourceThreadId, request, creation),
         list: reader.list,
         read: reader.read,
         async send(request: {
@@ -92,7 +102,7 @@ export function createThreadCollaboration(input: {
               `Thread ${request.threadId} was not found in this service's store.`,
             )
           const admitted = await target.startOrSteer({
-            submissionId: submissionId(
+            submissionId: threadMessageSubmissionId(
               sourceThreadId,
               request.threadId,
               request.requestId,
@@ -208,13 +218,6 @@ export function createThreadCollaboration(input: {
     },
   }
 }
-function submissionId(
-  sourceThreadId: string,
-  targetThreadId: string,
-  requestId: string,
-) {
-  return `thread-message:${JSON.stringify([sourceThreadId, targetThreadId, requestId])}`
-}
 function requestResult(
   stored: StoredThread | undefined,
   request: ThreadRequest,
@@ -223,7 +226,11 @@ function requestResult(
 ): ThreadRequestResult {
   if (stored === undefined)
     return { ...request, status: "not_found", consumed: false }
-  const id = submissionId(sourceThreadId, request.threadId, request.requestId)
+  const id = threadMessageSubmissionId(
+    sourceThreadId,
+    request.threadId,
+    request.requestId,
+  )
   const admission = stored.rollout.find(
     ({ item, threadId }) =>
       threadId === request.threadId &&

@@ -74,7 +74,8 @@ composed once with the service's `ThreadManager` and `ThreadStore`. It does not
 use the subagent registry or depend on a GUI connection. This keeps a future
 ACP transport at the service boundary rather than in renderer lifecycle code.
 Its tool vocabulary follows Codex's
-[dynamic thread tools](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/tui/src/dynamic_tools.rs).
+[dynamic thread tools](https://github.com/openai/codex/blob/9a8a85bc539325f2819dd0717f88b6ba6286495e/codex-rs/tui/src/dynamic_tools.rs)
+(local reference dated 2026-10-22).
 Yakitori's multi-provider messages cannot carry an unpaired provider-specific
 tool output, so the recipient receives a fixed developer trust wrapper around
 a JSON payload with source provenance. Only the wrapper is instruction-bearing;
@@ -87,6 +88,27 @@ guarantee of exactly-once model execution or external effects. Result tracking
 is request/Turn-specific and never automatically starts a callback Turn in the
 source. A caller that wants further work decides explicitly after reading the
 result.
+
+Independent creation uses a new conversation and the source's workspace,
+project and explicit execution policy. Model defaults are rebuilt through the
+target's ModelsManager before any creation is persisted. Source context-window,
+compaction and transport overrides are not copied. Custom base instructions
+remain session policy; model-derived base instructions follow the target.
+This follows Codex's selective thread/start overrides and fresh configuration
+assembly, rather than restoring another thread's runtime configuration.
+It is a visible user task rather than a member of the creator's bounded
+subagent tree; subagents cannot use it to
+escape their controller. The source/request identity owns a durable creation
+receipt so retries cannot create multiple roots or silently change models.
+The initial configuration is committed with the new root's rollout. A retry
+after that commit but before task admission reuses this saved configuration.
+
+Delegated model references use the public `provider/model` directory. The host
+validates the selected model and effort and owns account routing; credentials
+and concrete account IDs are not model-selection arguments. A changed provider
+or model uses its own effort default and drops the parent's speed setting.
+The runtime subagent override switch controls spawn exposure and is rechecked
+before creation; independent task creation has its own model/effort arguments.
 
 There is no second V1/V2 engine or rollout migration. New configurations enable
 the current tools by default. The optional collaboration configuration marker
