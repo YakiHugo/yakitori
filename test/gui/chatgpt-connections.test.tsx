@@ -447,7 +447,11 @@ it("disambiguates matching model labels by service and returns the logical selec
   await user.click(
     screen.getByRole("button", { name: "Select model and effort" }),
   )
-  await user.click(screen.getByRole("button", { name: "Test model Other" }))
+  await user.click(
+    within(screen.getByRole("group", { name: "Other" })).getByRole("button", {
+      name: "Test model",
+    }),
+  )
   expect(change).toHaveBeenCalledWith({
     provider: "other",
     model: "test-model",
