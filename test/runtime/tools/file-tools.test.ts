@@ -908,6 +908,7 @@ describe("bounded file tools", () => {
       "wait_agent",
       "interrupt_agent",
       "list_agents",
+      "create_thread",
       "list_threads",
       "read_thread",
       "send_message_to_thread",
