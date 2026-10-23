@@ -50,10 +50,12 @@ import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
+type OpenAIResponseProfile = "openai" | "grok" | "kimi"
+
 export type OpenAIProviderOptions = Readonly<{
   warmup?: boolean
   requestProfile?: "chatgpt-plan" | "codex"
-  responseProfile?: "openai" | "grok"
+  responseProfile?: OpenAIResponseProfile
   apiKey: string
   model: string
   client?: OpenAI
@@ -181,7 +183,7 @@ async function* streamOpenAI(
   warmup = false,
   requestProfile?: "chatgpt-plan" | "codex",
   upload?: ReturnType<typeof createFileUploadCache>,
-  responseProfile: "openai" | "grok" = "openai",
+  responseProfile: OpenAIResponseProfile = "openai",
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -195,11 +197,35 @@ async function* streamOpenAI(
     | Extract<ModelStreamEvent, { type: "response" | "failure" }>
     | undefined
   try {
+    if (responseProfile === "kimi") {
+      if ((request.target.model || defaultModel) !== "kimi-k3")
+        throw new ModelRequestControlsError(
+          "The Kimi Responses profile currently supports kimi-k3 only.",
+        )
+      if (
+        request.compaction === "responses_compact" ||
+        request.compaction === "codex_remote"
+      )
+        throw new ModelRequestControlsError(
+          "Kimi Responses does not support remote compaction.",
+        )
+      if (
+        request.messages.some(
+          (message) =>
+            (message.role === "user" || message.role === "tool") &&
+            message.content.some((block) => block.type === "document"),
+        )
+      )
+        throw new ModelRequestControlsError(
+          "Kimi Responses supports text and image inputs, not PDF inputs.",
+        )
+    }
     const reasoningSummary =
-      requestProfile === "codex" ||
-      (requestProfile === undefined &&
-        URL.parse(client.baseURL ?? "https://api.openai.com")?.origin ===
-          "https://api.openai.com")
+      responseProfile !== "kimi" &&
+      (requestProfile === "codex" ||
+        (requestProfile === undefined &&
+          URL.parse(client.baseURL ?? "https://api.openai.com")?.origin ===
+            "https://api.openai.com"))
     const nativeDeferredLoading =
       requestProfile !== "chatgpt-plan" &&
       nativeDeferredToolProtocol(request) === "openai"
@@ -207,15 +233,16 @@ async function* streamOpenAI(
       request,
       nativeDeferredLoading,
     )
-    const media = await prepareProviderMedia(
-      request,
-      upload === undefined
+    const media = await prepareProviderMedia(request, {
+      // Kimi accepts data URLs for both user and tool images, not HTTP URLs.
+      ...(responseProfile === "kimi" ? { inlineImageUrls: true } : {}),
+      ...(upload === undefined
         ? {}
         : {
             uploadDocument: (document, bytes) =>
               upload(document, bytes, request.signal),
-          },
-    )
+          }),
+    })
     if (request.compaction === "responses_compact") {
       if (requestProfile !== undefined)
         throw new ModelRequestControlsError(
@@ -313,7 +340,9 @@ async function* streamOpenAI(
           : []),
       ],
       tools: toOpenAITools(request.tools, nativeDeferredLoading),
-      parallel_tool_calls: request.parallelToolCalls ?? true,
+      ...(responseProfile === "kimi"
+        ? {}
+        : { parallel_tool_calls: request.parallelToolCalls ?? true }),
       ...(request.toolChoice === undefined
         ? {}
         : {
@@ -338,7 +367,7 @@ async function* streamOpenAI(
       ...(requestProfile === "codex" || request.maxOutputTokens === undefined
         ? {}
         : { max_output_tokens: request.maxOutputTokens }),
-      store: false,
+      ...(responseProfile === "kimi" ? {} : { store: false }),
       stream: true,
       ...(reasoningSummary
         ? { include: ["reasoning.encrypted_content" as const] }
@@ -363,6 +392,18 @@ async function* streamOpenAI(
         : {}),
     }
     body = applyModelRequestControls(request, "openai_responses", body)
+    if (responseProfile === "kimi") {
+      validateKimiResponsesRequest(request, body)
+      // The Kimi output schema includes a null placeholder absent from its
+      // reasoning input schema. Preserve it in native history, not on replay.
+      if (Array.isArray(body.input))
+        body.input = body.input.map((item) => {
+          if (item.type !== "reasoning" || item.encrypted_content !== null)
+            return item
+          const { encrypted_content: _encrypted, ...reasoning } = item
+          return reasoning
+        })
+    }
     if (requestProfile === "chatgpt-plan") {
       const allowed = new Set([
         "reasoning",
@@ -839,6 +880,67 @@ async function* streamOpenAI(
   }
 }
 
+function validateKimiResponsesRequest(
+  request: ModelRequest,
+  body: ResponseCreateParamsStreaming,
+): void {
+  // The documented Kimi contract is narrower than the Responses wire shape.
+  // Reject unsupported constraints rather than letting a server ignore them.
+  if (body.tool_choice !== undefined && body.tool_choice !== "auto")
+    throw new ModelRequestControlsError(
+      "Kimi Responses supports tool_choice auto only.",
+    )
+  if (
+    request.parallelToolCalls === false ||
+    body.parallel_tool_calls !== undefined
+  )
+    throw new ModelRequestControlsError(
+      "Kimi Responses does not support parallel_tool_calls controls.",
+    )
+  if (body.service_tier !== undefined)
+    throw new ModelRequestControlsError(
+      "Kimi Responses does not support service_tier controls.",
+    )
+  if (
+    body.reasoning?.effort != null &&
+    !["low", "high", "max"].includes(body.reasoning.effort)
+  )
+    throw new ModelRequestControlsError(
+      "Kimi Responses reasoning effort must be low, high or max.",
+    )
+  if (body.reasoning?.summary != null)
+    throw new ModelRequestControlsError(
+      "Kimi Responses does not support reasoning summary controls.",
+    )
+  if (
+    body.include?.some(
+      (field) =>
+        field !== "web_search_call.results" &&
+        field !== "web_search_call.action.sources",
+    )
+  )
+    throw new ModelRequestControlsError(
+      "Kimi Responses include supports web search results and sources only.",
+    )
+  for (const definition of body.tools ?? []) {
+    const tools =
+      definition.type === "namespace" ? definition.tools : [definition]
+    for (const tool of tools) {
+      if (tool.type === "function" || tool.type === "web_search") continue
+      if (
+        tool.type === "custom" &&
+        tool.name === "apply_patch" &&
+        tool.format?.type === "grammar" &&
+        tool.format.syntax === "lark"
+      )
+        continue
+      throw new ModelRequestControlsError(
+        "Kimi Responses supports function, web_search and custom apply_patch tools with a Lark grammar only.",
+      )
+    }
+  }
+}
+
 function customFallbackKeysForRequest(
   request: ModelRequest,
   nativeDeferredLoading: boolean,
@@ -1189,7 +1291,7 @@ export function fromOpenAIResponse(
   continuationScope?: string,
   model = response.model,
   completedItemIds: ReadonlySet<string> = new Set(),
-  responseProfile: "openai" | "grok" = "openai",
+  responseProfile: OpenAIResponseProfile = "openai",
 ): ModelResponse {
   if (response.status === "cancelled") {
     throw new OpenAIProtocolError(
@@ -1209,9 +1311,9 @@ export function fromOpenAIResponse(
   if (response.status === "incomplete") {
     if (rawStopReason === "max_output_tokens") {
       stopReason = ModelStopReason.Length
-      // OpenAI uses this reason for both output and context exhaustion. Only
-      // xAI distinguishes max_prompt_tokens, so do not infer OpenAI's cause.
-      lengthReason = responseProfile === "grok" ? "output" : "unknown"
+      // Kimi documents this as returned-token exhaustion; xAI distinguishes
+      // max_prompt_tokens. OpenAI also uses it for context exhaustion.
+      lengthReason = responseProfile === "openai" ? "unknown" : "output"
     } else if (
       responseProfile === "grok" &&
       rawStopReason === "max_prompt_tokens"
@@ -1585,7 +1687,7 @@ function responseResult(
   response: Response,
   stopReason: ModelResponse["stopReason"],
   content: readonly ModelContentBlock[],
-  responseProfile: "openai" | "grok" = "openai",
+  responseProfile: OpenAIResponseProfile = "openai",
 ): ModelResponse {
   return {
     stopReason,
@@ -1630,7 +1732,7 @@ function responseResult(
 function responseFailure(
   response: Response,
   provider: string,
-  responseProfile: "openai" | "grok",
+  responseProfile: OpenAIResponseProfile,
 ): ModelStreamFailureEvent | undefined {
   if (
     response.status !== "cancelled" &&
@@ -1671,7 +1773,7 @@ function responseFailure(
 
 function activeContextTokens(
   usage: NonNullable<Response["usage"]>,
-  responseProfile: "openai" | "grok",
+  responseProfile: OpenAIResponseProfile,
 ): number {
   if (responseProfile === "grok") {
     const contextDetails = (usage as unknown as Record<string, unknown>)
@@ -1695,7 +1797,7 @@ function terminalFailure(
   stage: "connect" | "response_body",
   requestId?: string,
   responseId?: string,
-  responseProfile: "openai" | "grok" = "openai",
+  responseProfile: OpenAIResponseProfile = "openai",
 ): ModelStreamFailureEvent {
   const status =
     error instanceof OpenAI.APIError && typeof error.status === "number"

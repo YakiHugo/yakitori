@@ -1,5 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises"
 import { once } from "node:events"
+import { readFile, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { join, resolve } from "node:path"
 import { expect, test, type WebSocketRoute } from "@playwright/test"
@@ -17,6 +17,94 @@ import {
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+test("new Kimi, OpenAI and xAI accounts default to Responses and persist Kimi K3", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  const endpoint = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ data: [{ id: "kimi-k3" }] }))
+  })
+  endpoint.listen(0, "127.0.0.1")
+  await once(endpoint, "listening")
+  const address = endpoint.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing catalog endpoint")
+  const baseURL = `http://127.0.0.1:${address.port}/v1`
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: {
+        ...environment.env,
+        MOONSHOT_API_KEY: "",
+        YAKITORI_GUI_DIR: resolve("dist/gui"),
+      },
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("button", { name: "Providers", exact: true }).click()
+    await page.getByRole("button", { name: "Add account", exact: true }).click()
+    for (const [name, defaultBaseURL] of [
+      ["OpenAI", "https://api.openai.com/v1"],
+      ["xAI", "https://api.x.ai/v1"],
+      ["Kimi API", "https://api.moonshot.ai/v1"],
+    ] as const) {
+      await page.getByRole("button", { name, exact: true }).click()
+      const editor = page.getByRole("dialog", { name, exact: true })
+      await editor.getByText("Advanced settings", { exact: true }).click()
+      await expect(editor.getByLabel("API protocol")).toHaveText(
+        "OpenAI Responses",
+      )
+      await expect(editor.getByLabel("API base URL")).toHaveValue(
+        defaultBaseURL,
+      )
+      if (name !== "Kimi API") {
+        await editor
+          .getByRole("button", { name: "Cancel", exact: true })
+          .click()
+        continue
+      }
+      await editor
+        .getByText("Model defaults (optional)", { exact: true })
+        .click()
+      await expect(editor.getByText("kimi-k3", { exact: true })).toBeVisible()
+      await editor.getByLabel("Account name").fill("Smoke Kimi")
+      // Catalog discovery stays on the owned endpoint before credentials are
+      // entered; this smoke never sends a key or model request to Kimi.
+      await editor.getByLabel("API base URL").fill(baseURL)
+      await editor.getByLabel("API key", { exact: true }).fill("smoke-key")
+      await editor
+        .getByRole("button", { name: "Add account", exact: true })
+        .click()
+      await expect(editor).toHaveCount(0)
+    }
+    await page.reload()
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("button", { name: "Providers", exact: true }).click()
+    await page.getByRole("button", { name: /^Smoke Kimi/ }).click()
+    await expect(page.getByText("kimi-k3", { exact: true })).toBeVisible()
+    await page
+      .getByRole("button", { name: "Edit connection", exact: true })
+      .click()
+    const saved = page.getByRole("dialog", { name: "Smoke Kimi", exact: true })
+    await saved.getByText("Advanced settings", { exact: true }).click()
+    await expect(saved.getByLabel("API protocol")).toHaveText(
+      "OpenAI Responses",
+    )
+    await expect(saved.getByLabel("API base URL")).toHaveValue(baseURL)
+  } finally {
+    await server?.stop()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve, reject) =>
+      endpoint.close((error) => (error ? reject(error) : resolve())),
+    )
+    await environment.cleanup()
+  }
+})
 
 test("independent sessions route cross-provider models and appear in the sidebar", async ({
   page,

@@ -1,4 +1,7 @@
-import type { ProviderPreset } from "../protocol/providers.ts"
+import type {
+  ProviderConfiguration,
+  ProviderPreset,
+} from "../protocol/providers.ts"
 
 export type { ConfiguredModel, ProviderPreset } from "../protocol/providers.ts"
 
@@ -97,20 +100,20 @@ export const providerServices: readonly ProviderPreset[] = [
     id: "moonshot",
     name: "Kimi API",
     baseURL: "https://api.moonshot.ai/v1",
-    wireApi: "openai_chat_completions",
+    wireApi: "openai_responses",
     envKey: "MOONSHOT_API_KEY",
     models: [
       {
         id: "kimi-k3",
         contextWindowTokens: 1_048_576,
-        // The Chat Completions adapter currently sends still images only.
+        // The Responses adapter currently sends still images only.
         inputModalities: ["text", "image"],
         efforts: ["low", "high", "max"],
         defaultEffort: "max",
       },
     ],
     // Kimi API credentials/models are separate from the Kimi Code subscription.
-    documentationURL: "https://platform.kimi.ai/docs/overview",
+    documentationURL: "https://platform.kimi.ai/docs/api/responses",
   },
   {
     id: "glm",
@@ -193,3 +196,18 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://www.kimi.com/code/docs/en/",
   },
 ]
+
+// Native capabilities belong to an explicit service at its documented endpoint,
+// not to an editable account name or a template label on a relay.
+export function providerServiceForEndpoint(
+  configuration: Pick<ProviderConfiguration, "service" | "baseURL">,
+): ProviderPreset | undefined {
+  const service = providerServices.find(
+    (entry) => entry.id === configuration.service,
+  )
+  if (service === undefined) return undefined
+  return new URL(configuration.baseURL).href.replace(/\/$/, "") ===
+    new URL(service.baseURL).href.replace(/\/$/, "")
+    ? service
+    : undefined
+}
