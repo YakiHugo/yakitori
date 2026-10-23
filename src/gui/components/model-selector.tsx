@@ -6,10 +6,7 @@ import {
   useRef,
   useState,
 } from "react"
-import type {
-  ApiProviderModel,
-  ApiProviderSummary,
-} from "../../protocol/application.ts"
+import type { ApiProviderModel } from "../../protocol/application.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
 import { cn } from "../lib/utils.ts"
 import {
@@ -17,16 +14,7 @@ import {
   resolveEffectiveModel,
   useAppStore,
 } from "../store/app-store.ts"
-
-function displayName(
-  providers: readonly ApiProviderSummary[],
-  selection: ModelSelection,
-): string {
-  const entry = providers
-    .find((provider) => provider.name === selection.provider)
-    ?.models.find((model) => model.id === selection.model)
-  return entry?.displayName ?? `${selection.provider}/${selection.model}`
-}
+import { ProviderLogo } from "./provider-logo.tsx"
 
 function displayEffort(effort: string): string {
   return effort
@@ -144,8 +132,6 @@ export function ModelSelector({
     return () => window.removeEventListener("keydown", closeOnEscape)
   }, [menu])
 
-  if (providers.length === 0) return null
-
   const availableProviders = providers
     .filter((provider) => provider.availability !== "requires_login")
     .map((provider) => ({
@@ -165,40 +151,32 @@ export function ModelSelector({
     effective === undefined
       ? undefined
       : providers
-          .find((provider) => provider.name === effective.provider)
+          .find(
+            (provider) =>
+              provider.name === effective.provider &&
+              provider.availability !== "requires_login",
+          )
           ?.models.find((model) => model.id === effective.model)
+  const modelLabel =
+    effectiveEntry?.displayName ?? effectiveEntry?.id ?? "Select model"
   const hasAvailableModels = availableProviders.some(
     (provider) => provider.models.length > 0,
   )
-  const defaultSelection = normalizeModelSelection(
-    resolveEffectiveModel({
-      sessionCurrent: undefined,
-      userPreference,
-      defaultProvider,
-      defaultModel,
-    }),
-    providers,
-  )
-  const defaultEntry = providers
-    .find(
-      (provider) =>
-        provider.name === defaultSelection?.provider &&
-        provider.availability !== "requires_login",
-    )
-    ?.models.find((model) => model.id === defaultSelection?.model)
   const efforts =
     effectiveEntry?.effortStyle === "none" ? undefined : effectiveEntry?.efforts
   const speeds = effectiveEntry?.speeds
-  const fast = effective?.speed === "fast"
+  const fast = effectiveEntry !== undefined && effective?.speed === "fast"
   const effortMenuAvailable = hasEffortControls(effectiveEntry)
   // An unpinned effort runs at the model's catalog default; show that stop
   // instead of an empty slider.
   const currentEffort =
-    effective?.effort ??
-    (effectiveEntry?.defaultEffort !== undefined &&
-    efforts?.includes(effectiveEntry.defaultEffort)
-      ? effectiveEntry.defaultEffort
-      : undefined)
+    effectiveEntry === undefined
+      ? undefined
+      : (effective?.effort ??
+        (effectiveEntry.defaultEffort !== undefined &&
+        efforts?.includes(effectiveEntry.defaultEffort)
+          ? effectiveEntry.defaultEffort
+          : undefined))
   const peak =
     currentEffort !== undefined &&
     efforts !== undefined &&
@@ -307,11 +285,7 @@ export function ModelSelector({
               {fast ? (
                 <Zap className="size-3.5 shrink-0 fill-blue-500 text-blue-500" />
               ) : null}
-              <span className="min-w-0 truncate">
-                {effective === undefined
-                  ? "Select model"
-                  : displayName(providers, effective)}
-              </span>
+              <span className="min-w-0 truncate">{modelLabel}</span>
               {currentEffort === undefined ? null : (
                 <span className="shrink-0 text-muted-foreground">
                   {displayEffort(currentEffort)}
@@ -375,7 +349,7 @@ export function ModelSelector({
                         : displayEffort(currentEffort)}
                     </span>
                     <span className="mt-0.5 block max-w-full truncate text-center text-[13px] font-normal text-muted-foreground">
-                      {displayName(providers, effective)}
+                      {modelLabel}
                     </span>
                   </button>
                   <span />
@@ -411,67 +385,60 @@ export function ModelSelector({
                     Select model
                   </span>
                 </div>
-                <button
-                  type="button"
-                  aria-pressed={current === undefined}
-                  disabled={defaultEntry === undefined}
-                  onClick={() => {
-                    changeSelection(undefined)
-                    setMenu(
-                      hasEffortControls(defaultEntry) ? "effort" : undefined,
-                    )
-                  }}
-                  className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">Default</span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {defaultEntry === undefined
-                        ? "Default model is unavailable"
-                        : "Recommended set of models"}
-                    </span>
-                  </span>
-                </button>
-                {availableProviders.flatMap((provider) =>
-                  provider.models.map((model) => {
-                    const selected =
-                      effective?.provider === provider.name &&
-                      effective.model === model.id
-                    const duplicateLabel = availableProviders.some(
-                      (other) =>
-                        other.name !== provider.name &&
-                        other.models.some(
-                          (entry) =>
-                            (entry.displayName ?? entry.id) ===
-                            (model.displayName ?? model.id),
-                        ),
-                    )
-                    return (
-                      <button
-                        key={JSON.stringify([provider.name, model.id])}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() => selectModel(provider.name, model.id)}
-                        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <span className="min-w-0 flex-1 truncate">
-                          {model.displayName ?? model.id}
-                          {duplicateLabel ? (
-                            <span className="ml-2 text-xs text-muted-foreground">
-                              {provider.displayName ?? provider.name}
+                <div className="space-y-2">
+                  {availableProviders
+                    .filter((provider) => provider.models.length > 0)
+                    .map((provider) => (
+                      <fieldset key={provider.name} className="min-w-0">
+                        <legend className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-muted-foreground">
+                          <ProviderLogo preset={provider.name} size={14} />
+                          <span className="truncate">
+                            {provider.displayName ?? provider.name}
+                          </span>
+                        </legend>
+                        {provider.models.map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            aria-pressed={
+                              effective?.provider === provider.name &&
+                              effective.model === model.id
+                            }
+                            onClick={() => selectModel(provider.name, model.id)}
+                            className="flex w-full items-center gap-2 rounded-xl py-1.5 pr-2.5 pl-8 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <span className="min-w-0 flex-1 truncate">
+                              {model.displayName ?? model.id}
                             </span>
-                          ) : null}
-                        </span>
-                        {selected ? (
-                          <Check
-                            aria-hidden="true"
-                            className="size-4 shrink-0"
-                          />
-                        ) : null}
-                      </button>
-                    )
-                  }),
-                )}
+                            {effective?.provider === provider.name &&
+                            effective.model === model.id ? (
+                              <Check
+                                aria-hidden="true"
+                                className="size-4 shrink-0"
+                              />
+                            ) : null}
+                          </button>
+                        ))}
+                      </fieldset>
+                    ))}
+                </div>
+                {!hasAvailableModels ? (
+                  <div className="px-2.5 py-2">
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      No models available to choose.
+                    </p>
+                    <button
+                      type="button"
+                      className="text-xs underline"
+                      onClick={() => {
+                        setMenu(undefined)
+                        useAppStore.getState().openSettings("providers")
+                      }}
+                    >
+                      Manage accounts
+                    </button>
+                  </div>
+                ) : null}
                 {availableProviders.some(
                   (provider) => provider.catalogError,
                 ) ? (
@@ -491,21 +458,6 @@ export function ModelSelector({
           </div>
         ) : null}
       </div>
-      {effective && !effectiveEntry ? (
-        <span className="text-xs text-muted-foreground">
-          Selected model is no longer available.{" "}
-          <button
-            type="button"
-            className="underline"
-            onClick={() => {
-              if (hasAvailableModels) setMenu("model")
-              else useAppStore.getState().openSettings("providers")
-            }}
-          >
-            {hasAvailableModels ? "Choose another model" : "Manage accounts"}
-          </button>
-        </span>
-      ) : null}
     </div>
   )
 }

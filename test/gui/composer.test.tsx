@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -2059,6 +2060,7 @@ describe("model selector", () => {
       providers: [
         {
           name: "openai",
+          displayName: "OpenAI",
           defaultModel: "gpt-5.1-codex",
           models: [
             {
@@ -2079,6 +2081,7 @@ describe("model selector", () => {
         },
         {
           name: "codex",
+          displayName: "Codex",
           models: [
             {
               id: "gpt-5.6-sol",
@@ -2092,6 +2095,7 @@ describe("model selector", () => {
         },
         {
           name: "kimi-code",
+          displayName: "Kimi Code",
           models: [
             {
               id: "kimi-for-coding",
@@ -2109,6 +2113,7 @@ describe("model selector", () => {
         },
         {
           name: "anthropic",
+          displayName: "Anthropic",
           models: [
             {
               id: "claude-sonnet-4-6",
@@ -2120,6 +2125,7 @@ describe("model selector", () => {
         },
         {
           name: "grok",
+          displayName: "xAI",
           models: [
             {
               id: "grok-4.20-non-reasoning",
@@ -2183,7 +2189,7 @@ describe("model selector", () => {
     expect(combinedSelector().textContent).toContain("Low")
   })
 
-  it("shows a unified model list under a Select model header", async () => {
+  it("groups model choices under vendor names without a Default action", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -2194,16 +2200,43 @@ describe("model selector", () => {
     expect(
       container.querySelector("[data-model-picker]")?.textContent,
     ).toContain("Select model")
-    expect(screen.getByText("Recommended set of models")).toBeDefined()
-    expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
+    expect(screen.queryByRole("button", { name: /^Default/ })).toBeNull()
+    expect(screen.getAllByRole("group")).toHaveLength(5)
+    expect(
+      within(screen.getByRole("group", { name: "Kimi Code" })).getByRole(
+        "button",
+        { name: "K3" },
+      ),
+    ).toBeDefined()
+    expect(
+      within(screen.getByRole("group", { name: "OpenAI" })).getByRole(
+        "button",
+        { name: "GPT 5.1 Codex" },
+      ),
+    ).toBeDefined()
     expect(screen.queryByText("anthropic")).toBeNull()
-    expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
     expect(
       screen.getByRole("button", { name: "Claude Sonnet 4.6" }),
     ).toBeDefined()
     expect(
       screen.getByRole("button", { name: "Grok 4.20 Non-Reasoning" }),
     ).toBeDefined()
+  })
+
+  it("guides an empty model picker to account settings", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...selectModelState(),
+      providers: [],
+      modelSelections: {},
+    })
+    render(<Composer />)
+
+    expect(combinedSelector().textContent).toBe("Select model")
+    await user.click(combinedSelector())
+    expect(screen.queryByRole("group")).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Manage accounts" }))
+    expect(useAppStore.getState().settingsSection).toBe("providers")
   })
 
   it("offers effort stops and a speed toggle for reasoning models", async () => {
@@ -2224,35 +2257,34 @@ describe("model selector", () => {
     expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
   })
 
-  it("recovers an unavailable choice through the model picker without changing it implicitly", async () => {
+  it.each([
+    "preference",
+    "session",
+  ])("recovers an unavailable %s choice only after an explicit model selection", async (source) => {
     const user = userEvent.setup()
+    const unavailable = {
+      provider: "removed-account",
+      model: "old-model",
+      effort: "max",
+    }
     useAppStore.setState({
       ...selectModelState(),
-      modelSelections: {},
-      userPreference: { provider: "removed-account", model: "old-model" },
+      modelSelections: source === "session" ? { session_1: unavailable } : {},
+      userPreference: source === "preference" ? unavailable : undefined,
     })
     render(<Composer />)
 
-    expect(combinedSelector().textContent).toContain(
-      "removed-account/old-model",
-    )
-    expect(useAppStore.getState().userPreference).toEqual({
-      provider: "removed-account",
-      model: "old-model",
-    })
-    await user.click(
-      screen.getByRole("button", { name: "Choose another model" }),
-    )
+    expect(combinedSelector().textContent).toBe("Select model")
+    expect(combinedSelector().textContent).not.toContain("removed-account")
     expect(
-      screen
-        .getByRole("button", { name: /Default.*Default model is unavailable/ })
-        .hasAttribute("disabled"),
-    ).toBe(true)
+      source === "session"
+        ? useAppStore.getState().modelSelections.session_1
+        : useAppStore.getState().userPreference,
+    ).toEqual(unavailable)
+    await user.click(combinedSelector())
+    expect(screen.queryByRole("button", { name: /^Default/ })).toBeNull()
     expect(useAppStore.getState().settingsSection).toBeUndefined()
     await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
-    expect(
-      screen.queryByText(/Selected model is no longer available/),
-    ).toBeNull()
     expect(useAppStore.getState().modelSelections.session_1).toEqual({
       provider: "openai",
       model: "gpt-5.1-codex",
@@ -2283,9 +2315,6 @@ describe("model selector", () => {
     render(<Composer />)
 
     expect(combinedSelector().textContent).toContain("GPT 5.1 Codex")
-    expect(
-      screen.queryByText(/Selected model is no longer available/),
-    ).toBeNull()
     await openModelMenu(user)
     expect(screen.queryByRole("button", { name: "GPT 5.1 Codex" })).toBeNull()
     expect(
@@ -2413,33 +2442,6 @@ describe("model selector", () => {
       provider: "kimi-code",
       model: "k3",
     })
-  })
-
-  it("returns to the default model's effort controls when choosing Default", async () => {
-    const user = userEvent.setup()
-    window.localStorage.clear()
-    useAppStore.setState({
-      ...selectModelState(),
-      modelSelections: {
-        session_1: { provider: "grok", model: "grok-4.20-non-reasoning" },
-      },
-    })
-    render(<Composer />)
-
-    await user.click(combinedSelector())
-    await user.click(
-      screen.getByRole("button", {
-        name: /Default.*Recommended set of models/,
-      }),
-    )
-
-    expect(combinedSelector().getAttribute("aria-expanded")).toBe("true")
-    expect(
-      screen.getByRole("slider", { name: "Reasoning effort" }),
-    ).toBeDefined()
-    expect(combinedSelector().textContent).toBe("Select effort")
-    await user.click(combinedSelector())
-    expect(combinedSelector().textContent).toContain("GPT 5.1 Codex")
   })
 
   it("pins an effort for the effective model without a reset action", async () => {
@@ -2667,7 +2669,7 @@ describe("model selector", () => {
     expect(screen.queryByRole("button", { name: /speed/ })).toBeNull()
   })
 
-  it("checks the effective model row and clears the session override via the Default row", async () => {
+  it("checks the effective model and records each explicit choice without a Default action", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -2675,10 +2677,10 @@ describe("model selector", () => {
 
     await openModelMenu(user)
 
-    // With no session override, Default is the pressed row.
+    expect(screen.queryByRole("button", { name: /^Default/ })).toBeNull()
     expect(
       screen
-        .getByRole("button", { name: "Default Recommended set of models" })
+        .getByRole("button", { name: "GPT 5.1 Codex" })
         .getAttribute("aria-pressed"),
     ).toBe("true")
 
@@ -2691,24 +2693,17 @@ describe("model selector", () => {
     await user.click(combinedSelector())
     expect(combinedSelector().textContent).toContain("GPT-5")
 
-    // The picked model row is now pressed; Default is not.
     await openModelMenu(user)
     expect(
       screen
         .getByRole("button", { name: "GPT-5" })
         .getAttribute("aria-pressed"),
     ).toBe("true")
-    expect(
-      screen
-        .getByRole("button", { name: "Default Recommended set of models" })
-        .getAttribute("aria-pressed"),
-    ).toBe("false")
-
-    // Clicking Default clears the session override.
-    await user.click(
-      screen.getByRole("button", { name: "Default Recommended set of models" }),
-    )
-    expect(useAppStore.getState().modelSelections).toEqual({})
+    await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "openai",
+      model: "gpt-5.1-codex",
+    })
   })
 })
 
