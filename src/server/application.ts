@@ -678,26 +678,21 @@ export async function createYakitoriApplication(
             const preset = providerServices.find(
               (entry) => entry.id === config?.service,
             )
-            const official =
-              preset &&
-              config &&
-              preset.baseURL.replace(/\/+$/, "") ===
-                config.baseURL.replace(/\/+$/, "") &&
-              preset.wireApi === config.wireApi
+            // A declared vendor service owns model identity independently of
+            // endpoint, protocol and account labels. Relays and local servers
+            // keep account-local identities unless a model explicitly maps one.
+            const modelService =
+              preset?.kind === "relay" || preset?.kind === "local"
+                ? undefined
+                : preset
             const namespace =
               chatGPTAccount || config?.authentication === "codex_cli"
                 ? "openai"
-                : official
-                  ? preset.id === "xai"
-                    ? "xai"
-                    : preset.id
-                  : name
+                : (modelService?.id ?? name)
             const serviceName =
               chatGPTAccount || config?.authentication === "codex_cli"
                 ? "OpenAI"
-                : official
-                  ? preset.name
-                  : (config?.name ?? name)
+                : (modelService?.name ?? config?.name ?? name)
             const available = providerRegistry.providers.includes(name)
             let summary: ApiProviderSummary
             try {

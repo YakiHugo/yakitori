@@ -6,7 +6,8 @@ export type ProviderConfiguration = Readonly<{
     | "anthropic_messages"
     | "gemini_generate_content"
   baseURL: string
-  // Runtime service binding. `preset` below records only the creation template.
+  // Stable service identity; vendor models share this namespace across accounts.
+  // `preset` below records only the creation template.
   service?: string
   // Selects exactly one credential source. Keys never fall back to another source.
   authentication?: "stored" | "environment" | "none" | "codex_cli" | "grok_cli"

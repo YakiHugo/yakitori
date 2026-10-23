@@ -672,17 +672,13 @@ describe("side chat panel", () => {
     await user.click(
       screen.getByRole("button", { name: "Select model and effort" }),
     )
-    await user.click(
-      screen.getByRole("button", {
-        name: /Default.*Recommended set of models/,
-      }),
-    )
+    await user.click(screen.getByRole("button", { name: "Model A" }))
     await user.click(
       screen.getByRole("button", { name: "Send side chat message" }),
     )
-    const defaultAttempt = requests("sideChat/send")[3]
-    expect(defaultAttempt?.requestId).not.toBe(changed?.requestId)
-    expect(defaultAttempt?.modelSelection).toEqual(modelA)
+    const reselected = requests("sideChat/send")[3]
+    expect(reselected?.requestId).not.toBe(changed?.requestId)
+    expect(reselected?.modelSelection).toEqual(modelA)
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("Main conversation draft"),
     )

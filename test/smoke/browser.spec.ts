@@ -1,4 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises"
+import { once } from "node:events"
+import { createServer } from "node:http"
 import { join, resolve } from "node:path"
 import { expect, test, type WebSocketRoute } from "@playwright/test"
 import { parse, stringify } from "smol-toml"
@@ -93,7 +95,7 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
   try {
     await writeFile(
       configPath,
-      stringify({ provider: "removed-account", model: "scripted" }),
+      stringify({ provider: "removed-account", model: "retired-model" }),
     )
     server = await spawnServerProcess({
       command: process.execPath,
@@ -104,17 +106,23 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
       onStderr: (line) => logs.push(line),
     })
     await page.goto(server.url)
+    const selector = page.getByRole("button", {
+      name: "Select model and effort",
+    })
+    await expect(selector).toHaveText("Select model")
+    await page.reload()
+    await expect(selector).toHaveText("Select model")
+    expect(parse(await readFile(configPath, "utf8"))).toMatchObject({
+      provider: "removed-account",
+      model: "retired-model",
+    })
+    await page.screenshot({
+      path: testInfo.outputPath("model-unavailable.png"),
+    })
     await page.getByRole("button", { name: "New session", exact: true }).click()
-    await page.getByRole("button", { name: "Choose another model" }).click()
-    await expect(
-      page.getByRole("button", {
-        name: /Default.*Default model is unavailable/,
-      }),
-    ).toBeDisabled()
+    await selector.click()
+    await expect(page.getByRole("button", { name: /^Default/ })).toHaveCount(0)
     await page.getByRole("button", { name: "scripted", exact: true }).click()
-    await expect(
-      page.getByText(/Selected model is no longer available/),
-    ).toHaveCount(0)
     await page
       .getByRole("textbox", { name: "Message the Mate" })
       .fill("Test model selection recovery.")
@@ -129,9 +137,6 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
     await expect(
       page.getByRole("button", { name: "Select model and effort" }),
     ).toContainText("scripted")
-    await expect(
-      page.getByText(/Selected model is no longer available/),
-    ).toHaveCount(0)
     await page.screenshot({ path: testInfo.outputPath("model-recovered.png") })
   } finally {
     await testInfo.attach("server.log", {
@@ -145,6 +150,131 @@ test("an unavailable saved model can be replaced and stays corrected after reloa
       clearTimeout(timer)
       await environment.cleanup()
     }
+  }
+})
+
+test("model picker groups choices by vendor and keeps the selected model explicit", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const endpoint = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    const ids = request.url?.startsWith("/kimi/")
+      ? ["k3", "k3-256k"]
+      : ["gpt-6-sol", "gpt-6-luna"]
+    response.end(JSON.stringify({ data: ids.map((id) => ({ id })) }))
+  })
+  endpoint.listen(0, "127.0.0.1")
+  await once(endpoint, "listening")
+  const address = endpoint.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing catalog endpoint")
+  let server: ServerProcess | undefined
+  try {
+    await writeFile(
+      join(environment.root, "home", "config.toml"),
+      stringify({
+        provider: "kimi-code",
+        model: "k3",
+        model_providers: {
+          "kimi-account": {
+            name: "Kimi account",
+            service: "kimi-code",
+            authentication: "none",
+            base_url: `http://127.0.0.1:${address.port}/kimi`,
+            api_backend: "messages",
+            models: [
+              {
+                id: "k3",
+                displayName: "K3",
+                efforts: ["low", "max"],
+                defaultEffort: "max",
+              },
+              { id: "k3-256k", displayName: "K3-256k" },
+            ],
+          },
+          "openai-account": {
+            name: "OpenAI account",
+            service: "openai",
+            authentication: "none",
+            base_url: `http://127.0.0.1:${address.port}/openai/v1`,
+            api_backend: "chat_completions",
+            models: [
+              { id: "gpt-6-sol", displayName: "GPT-6 Sol" },
+              { id: "gpt-6-luna", displayName: "GPT-6 Luna" },
+            ],
+          },
+        },
+      }),
+    )
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: {
+        ...environment.env,
+        YAKITORI_PROVIDER: "kimi-account",
+        YAKITORI_MODEL: "k3",
+        YAKITORI_GUI_DIR: resolve("dist/gui"),
+      },
+    })
+    await page.goto(server.url)
+    const selector = page.getByRole("button", {
+      name: "Select model and effort",
+    })
+    await expect(selector).toContainText("K3")
+    await selector.click()
+    await page
+      .getByRole("button", { name: "Select model", exact: true })
+      .click()
+    const kimi = page.getByRole("group", { name: "Kimi Code", exact: true })
+    const openai = page.getByRole("group", { name: "OpenAI", exact: true })
+    await expect(
+      kimi.getByRole("button", { name: "K3", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true")
+    await expect(
+      kimi.getByRole("button", { name: "K3-256k", exact: true }),
+    ).toBeVisible()
+    await expect(
+      openai.getByRole("button", { name: "GPT-6 Sol", exact: true }),
+    ).toBeVisible()
+    await expect(page.getByRole("button", { name: /^Default/ })).toHaveCount(0)
+    for (const group of [kimi, openai]) {
+      await expect(group.locator(".provider-logo")).toBeVisible()
+      await expect(group.locator(".provider-logo > span")).not.toHaveCSS(
+        "mask-image",
+        "none",
+      )
+    }
+    await page.screenshot({
+      path: testInfo.outputPath("model-groups.png"),
+      animations: "disabled",
+    })
+    await page.setViewportSize({ width: 560, height: 720 })
+    const bounds = await page.locator("[data-model-picker]").boundingBox()
+    if (!bounds) throw new Error("Missing model picker")
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(560)
+    await openai
+      .getByRole("button", { name: "GPT-6 Luna", exact: true })
+      .click()
+    await expect(selector).toHaveText("GPT-6 Luna")
+    await selector.click()
+    await expect(
+      openai.getByRole("button", { name: "GPT-6 Luna", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true")
+    await expect(
+      kimi.getByRole("button", { name: "K3", exact: true }),
+    ).toHaveAttribute("aria-pressed", "false")
+    await page.screenshot({
+      path: testInfo.outputPath("model-groups-narrow.png"),
+      animations: "disabled",
+    })
+  } finally {
+    await server?.stop()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+    await environment.cleanup()
   }
 })
 

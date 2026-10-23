@@ -13,6 +13,7 @@ import moonshot from "../assets/provider-icons/moonshot.svg"
 import openai from "../assets/provider-icons/openai.svg"
 import qwen from "../assets/provider-icons/qwen.svg"
 import xai from "../assets/provider-icons/xai.svg"
+import "./provider-logo.css"
 
 // Brand assets are from lobehub/lobe-icons (MIT); the license ships beside them.
 const logos: Record<string, { url: string; monochrome?: boolean }> = {
@@ -35,12 +36,17 @@ const logos: Record<string, { url: string; monochrome?: boolean }> = {
 
 export function ProviderLogo({
   preset,
-}: Readonly<{ preset: string | undefined }>) {
+  size,
+}: Readonly<{ preset: string | undefined; size?: number }>) {
   const logo = preset === undefined ? undefined : logos[preset]
   return (
-    <span className="provider-logo" aria-hidden="true">
+    <span
+      className="provider-logo"
+      aria-hidden="true"
+      style={size === undefined ? undefined : { width: size, height: size }}
+    >
       {logo === undefined ? (
-        <Server size={23} />
+        <Server size={size ?? 23} />
       ) : logo.monochrome ? (
         <span style={{ maskImage: `url("${logo.url}")` }} />
       ) : (

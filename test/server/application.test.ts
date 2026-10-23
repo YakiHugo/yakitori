@@ -3421,6 +3421,150 @@ describe("application composition", () => {
     })
   })
 
+  it("preserves vendor model choices across connection edits and restart while isolating relay and local accounts", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const requests: string[] = []
+      const endpoint = createServer(async (request, response) => {
+        if (request.url?.endsWith("/models")) {
+          response.writeHead(200, { "content-type": "application/json" })
+          response.end(JSON.stringify({ data: [{ id: "coder" }] }))
+          return
+        }
+        let body = ""
+        for await (const chunk of request) body += chunk
+        if (!body.includes("Generate a concise"))
+          requests.push(request.url ?? "")
+        response.writeHead(200, { "content-type": "text/event-stream" })
+        response.end(
+          `data: ${JSON.stringify({ id: "reply", choices: [{ index: 0, delta: { content: "Stable model reply" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        )
+      })
+      const endpointUrl = await listen(endpoint)
+      const choice = { provider: "deepseek", model: "coder" }
+      let sessionId: string | undefined
+      try {
+        for (const restarted of [false, true]) {
+          const application = await createYakitoriApplication({
+            rootDir,
+            workspace,
+            userConfigPath: join(rootDir, "config.toml"),
+            provider: "faux",
+          })
+          const server = application.createHttpServer()
+          try {
+            const baseUrl = await listen(server)
+            if (!restarted) {
+              for (const service of ["deepseek", "openrouter", "ollama"]) {
+                await rpcRequest(baseUrl, "provider/configuration/write", {
+                  id: `${service}-account`,
+                  configuration: {
+                    name: "Original account",
+                    service,
+                    authentication: "none",
+                    baseURL: `${endpointUrl}/original/v1`,
+                    wireApi: "openai_chat_completions",
+                    models: [{ id: "coder", displayName: "Original name" }],
+                  },
+                })
+              }
+              await rpcRequest(baseUrl, "userPreference/write", choice)
+              const created = await application.handlers.createSession()
+              expectOk(created)
+              sessionId = created.value.session.id
+            }
+            if (!sessionId) throw new Error("Missing session")
+            const listed = await rpcRequest<ApiListProvidersResponse>(
+              baseUrl,
+              "provider/list",
+              {},
+            )
+            expect(listed.userPreference).toEqual(choice)
+            expect(listed.providers.map((provider) => provider.name)).toEqual([
+              "faux",
+              "deepseek",
+              "openrouter-account",
+              "ollama-account",
+            ])
+            expect(
+              listed.providers.find((provider) => provider.name === "deepseek")
+                ?.models,
+            ).toEqual([
+              expect.objectContaining({
+                id: "coder",
+                displayName: restarted ? "Renamed model" : "Original name",
+              }),
+            ])
+            if (restarted) {
+              const restored = await application.handlers.readSession({
+                sessionId,
+              })
+              expectOk(restored)
+              expect(restored.value.session.currentModel).toEqual(choice)
+            }
+            expectOk(
+              await application.handlers.admitInput({
+                sessionId,
+                requestId: `stable-identity-${restarted}`,
+                content: inputFixture([
+                  { type: "text", text: "Use the saved model" },
+                ]),
+                modelSelection: choice,
+              }),
+            )
+            await waitForThreadIdle(application, sessionId)
+            const detail = await application.handlers.readSession({ sessionId })
+            expectOk(detail)
+            expect(detail.value.session.currentModel).toEqual(choice)
+            if (!restarted) {
+              // Protocol and endpoint select the transport, never the identity.
+              for (const wireApi of [
+                "openai_responses",
+                "openai_chat_completions",
+              ]) {
+                await rpcRequest(baseUrl, "provider/configuration/write", {
+                  id: "deepseek-account",
+                  configuration: {
+                    name: "Renamed account",
+                    service: "deepseek",
+                    authentication: "none",
+                    baseURL: `${endpointUrl}/edited/v1`,
+                    wireApi,
+                    models: [{ id: "coder", displayName: "Renamed model" }],
+                  },
+                })
+                const edited = await rpcRequest<ApiListProvidersResponse>(
+                  baseUrl,
+                  "provider/list",
+                  {},
+                )
+                expect(
+                  edited.providers.find(
+                    (provider) => provider.name === "deepseek",
+                  )?.models,
+                ).toEqual([
+                  expect.objectContaining({
+                    id: "coder",
+                    displayName: "Renamed model",
+                  }),
+                ])
+                expect(edited.userPreference).toEqual(choice)
+              }
+            }
+          } finally {
+            await closeServer(server)
+            await application.close()
+          }
+        }
+        expect(requests).toEqual([
+          "/original/v1/chat/completions",
+          "/edited/v1/chat/completions",
+        ])
+      } finally {
+        await closeServer(endpoint)
+      }
+    })
+  })
+
   it("routes an admitted next-Turn selection through another registered provider", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const primary = createFauxProvider([

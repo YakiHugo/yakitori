@@ -11,6 +11,7 @@ import {
   expect,
   type Page,
 } from "@playwright/test"
+import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
@@ -268,6 +269,62 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   })
   await runExternalEngineFlow(page)
   expect(rendererErrors).toEqual([])
+})
+
+test("desktop keeps model identity across account edits and preserves an unavailable choice", async ({
+  desktop,
+}, testInfo) => {
+  const { page, sidecarUrl, rendererErrors } = desktop
+  const endpoint = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" })
+    response.end(JSON.stringify({ data: [{ id: "coder" }] }))
+  })
+  endpoint.listen(0, "127.0.0.1")
+  await once(endpoint, "listening")
+  const address = endpoint.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing model catalog server")
+  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  const choice = { provider: "deepseek", model: "coder" }
+  const selector = page.getByRole("button", { name: "Select model and effort" })
+  try {
+    for (const edited of [false, true]) {
+      const displayName = edited ? "Renamed model" : "Friendly model"
+      await client.request("provider/configuration/write", {
+        id: "vendor-account",
+        configuration: {
+          name: edited ? "Renamed account" : "Original account",
+          service: "deepseek",
+          authentication: "none",
+          baseURL: `http://127.0.0.1:${address.port}/${edited ? "edited" : "original"}/v1`,
+          wireApi: edited ? "openai_responses" : "openai_chat_completions",
+          models: [{ id: "coder", displayName }],
+        },
+      })
+      if (!edited) await client.request("userPreference/write", choice)
+      await page.reload()
+      await expect(selector).toHaveText(displayName)
+      expect(
+        (await client.request("provider/list", {})).userPreference,
+      ).toEqual(choice)
+    }
+    await client.request("provider/configuration/delete", {
+      id: "vendor-account",
+    })
+    await page.reload()
+    await expect(selector).toHaveText("Select model")
+    expect((await client.request("provider/list", {})).userPreference).toEqual(
+      choice,
+    )
+    await page.screenshot({
+      path: testInfo.outputPath("model-unavailable.png"),
+    })
+    expect(rendererErrors).toEqual([])
+  } finally {
+    client.close()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+  }
 })
 
 async function closeApplication(
