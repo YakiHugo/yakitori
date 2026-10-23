@@ -3,7 +3,10 @@ import type { ProviderConfiguration } from "./providers.ts"
 
 // Native engine settings remain opaque to clients; application settings have
 // their shared wire types without exposing native services or validators.
+export type AgentConfiguration = Readonly<{ exposeModelOverrides?: boolean }>
+
 export type ApplicationConfiguration = Readonly<{
+  agents?: AgentConfiguration
   modelProviders?: Readonly<
     Record<string, ProviderConfiguration & { credentialRef?: string }>
   >

@@ -108,6 +108,7 @@ export type SubscriptionUsageState = Readonly<{
 
 export type SettingsSection =
   | "general"
+  | "runtime"
   | "notifications"
   | "providers"
   | "subscriptions"

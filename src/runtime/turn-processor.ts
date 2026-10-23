@@ -1,3 +1,4 @@
+import type { AgentConfiguration } from "../protocol/configuration.ts"
 import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { JsonValue } from "../kernel/index.ts"
 import {
@@ -39,6 +40,7 @@ export type TurnProcessorOptions = Omit<
     loadProjectInstructions?: typeof loadProjectInstructions
     prepareStepExtensions?: (signal: AbortSignal) => Promise<
       Readonly<{
+        agents?: AgentConfiguration
         skills?: SkillConfiguration
         skillMcpServers?: readonly SkillMcpServer[]
         projectRootMarkers?: readonly string[]
@@ -102,6 +104,9 @@ export function createTurnProcessor(
       })
       const goal = await loadSessionGoal?.()
       return {
+        ...(configuration.agents === undefined
+          ? {}
+          : { agents: configuration.agents }),
         sections: [
           createProjectInstructionsSection(instructions),
           ...(preparedSkills.sections ?? []),

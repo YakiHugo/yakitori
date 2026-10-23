@@ -35,6 +35,8 @@ import {
   type ModelsManager,
 } from "../../src/runtime/models-manager.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createThreadCollaboration } from "../../src/runtime/thread-collaboration.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
 import { mcpResult } from "../../src/runtime/tools/mcp-result.ts"
@@ -75,6 +77,80 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it.each([
+    {
+      label: "an empty tool allowlist",
+      enabledTools: [],
+      exposeModelOverrides: true,
+    },
+    {
+      label: "thread messaging without creation",
+      enabledTools: [
+        "list_threads",
+        "read_thread",
+        "send_message_to_thread",
+        "wait_threads",
+      ],
+      exposeModelOverrides: true,
+    },
+    {
+      label: "spawn with inherited model settings",
+      enabledTools: ["spawn_agent"],
+      exposeModelOverrides: false,
+    },
+  ])("completes normal sampling without a delegation catalog for $label", async ({
+    enabledTools,
+    exposeModelOverrides,
+  }) => {
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "normal work completed" }] },
+    ])
+    const store = new MemoryThreadStore()
+    const manager: ThreadManager = new ThreadManager({
+      store,
+      createTurnProcessor: (stored) =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: createToolRegistry(),
+          loadProjectInstructions: async () => undefined,
+          prepareStepExtensions: async () => ({
+            agents: { exposeModelOverrides },
+          }),
+          readAgentModels: async () => {
+            throw new Error("unused model directory is unavailable")
+          },
+          agentControl: rootOnlyAgentControl(stored.metadata.id),
+          threadCollaboration: createThreadCollaboration({
+            store,
+            getThreadManager: () => manager,
+          }),
+        }),
+    })
+    cleanups.push(() => manager.shutdown())
+    const thread = await manager.createThread({
+      workingDirectory: testUserHome.path,
+      mateId: "mate_live",
+      mateRevisionId: "mate_revision_live",
+      initialConfiguration: SessionConfiguration.create({
+        selection: { provider: "faux", model: "scripted" },
+        workspaceRoot: testUserHome.path,
+        enabledTools,
+        approvalPolicy: "always_approve",
+        promptCacheKey: "catalog-independent",
+      }).snapshot,
+    })
+    await thread.startIfIdle({ content: createUserInput("normal work") })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "normal work completed" })
+    expect(provider.callCount).toBe(1)
+    const stored = await store.readThread(thread.id)
+    expect(
+      stored?.rollout.findLast(({ item }) => item.type === "turn_completed")
+        ?.item,
+    ).toMatchObject({ type: "turn_completed", outcome: "completed" })
+  })
+
   it("retains completed request usage after process exit during the next request", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-usage-checkpoint-"))
     try {

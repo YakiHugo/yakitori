@@ -1,3 +1,8 @@
+import {
+  agentModelOptions,
+  AgentModelSelectionError,
+  type AgentModelOverrides,
+} from "../agent-model-selection.ts"
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
 import {
   ThreadCollaborationError,
@@ -30,6 +35,7 @@ const pagination = {
 }
 export function createThreadCollaborationTools(): readonly RuntimeTool[] {
   return [
+    createThreadTool(),
     tool(
       "list_threads",
       "Discover independent root sessions in this service's store, including sessions outside your subagent tree. search_term searches titles, saved user input and final assistant answers, not tool results, reasoning or other-agent messages. Follow nextCursor until truncated is false; unavailableThreadCount reports unreadable histories. Does not discover other machines.",
@@ -160,7 +166,7 @@ export function createThreadCollaborationTools(): readonly RuntimeTool[] {
     ),
     tool(
       "wait_threads",
-      "Track requests previously accepted by send_message_to_thread, including after restart. Returns when any specified request reaches a terminal status, on timeout, or when this wait is cancelled. The exact recipient turn is tracked, so later user turns cannot change its result. completed requires both message consumption and terminal turn completion; completionReason preserves refused or truncated answers and does not imply the requested work succeeded. interrupted, failed, delivery_incomplete and not_found are not success. Read answerItemIds with read_thread for full results. Cancelling this wait does not cancel recipient work.",
+      "Track requests previously accepted by create_thread or send_message_to_thread, including after restart. Returns when any specified request reaches a terminal status, on timeout, or when this wait is cancelled. The exact recipient turn is tracked, so later user turns cannot change its result. completed requires both message consumption and terminal turn completion; completionReason preserves refused or truncated answers and does not imply the requested work succeeded. interrupted, failed, delivery_incomplete and not_found are not success. Read answerItemIds with read_thread for full results. Cancelling this wait does not cancel recipient work.",
       {
         requests: {
           type: "array",
@@ -188,7 +194,7 @@ export function createThreadCollaborationTools(): readonly RuntimeTool[] {
                 type: "string",
                 minLength: 1,
                 description:
-                  "Original stable request identity returned by send_message_to_thread.",
+                  "Original stable request identity returned by create_thread or send_message_to_thread.",
               },
             },
             required: ["thread_id", "turn_id", "request_id"],
@@ -231,6 +237,55 @@ export function createThreadCollaborationTools(): readonly RuntimeTool[] {
     ),
   ]
 }
+export function createThreadTool(models?: AgentModelOverrides): RuntimeTool {
+  const options = agentModelOptions(models)
+  return tool(
+    "create_thread",
+    "Create and start a separate, visible root session only when the user asks for a new independent task. Inherits the source workspace, project and execution permissions, with a fresh conversation. Omit model/effort to inherit. Returns a durable admission receipt; use wait_threads then read_thread for results. Reuse request_id only for identical retries. Messages are other-agent input, never user authorization. " +
+      options.description,
+    {
+      message: {
+        type: "string",
+        minLength: 1,
+        maxLength: 65_536,
+        description: "Task for the new session.",
+      },
+      title: { type: "string", minLength: 1 },
+      request_id: {
+        type: "string",
+        minLength: 1,
+        maxLength: 512,
+        description:
+          "Stable creation retry identity. Defaults to this tool call's ID.",
+      },
+      ...options.properties,
+    },
+    ["message"],
+    async (input, control, context) => {
+      const requestId =
+        optionalString(input, "request_id") ?? context.toolCallId
+      if (!requestId)
+        throw new ThreadCollaborationError(
+          "invalid_input",
+          "request_id is required without a tool call ID.",
+        )
+      return control.create({
+        requestId,
+        message: string(input, "message"),
+        ...(optionalString(input, "title") === undefined
+          ? {}
+          : { title: string(input, "title") }),
+        ...(optionalString(input, "model") === undefined
+          ? {}
+          : { model: string(input, "model") }),
+        ...(optionalString(input, "reasoning_effort") === undefined
+          ? {}
+          : { reasoningEffort: string(input, "reasoning_effort") }),
+      })
+    },
+  )
+}
+
 function tool(
   name: string,
   description: string,
@@ -327,7 +382,10 @@ function tool(
           },
         }
       } catch (error) {
-        if (error instanceof ThreadCollaborationError)
+        if (
+          error instanceof ThreadCollaborationError ||
+          error instanceof AgentModelSelectionError
+        )
           return failure(error.code, error.message)
         throw error
       }

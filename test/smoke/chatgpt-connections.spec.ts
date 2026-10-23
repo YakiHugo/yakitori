@@ -19,6 +19,66 @@ test.afterAll(async () => {
   await server?.close()
 })
 
+test("runtime settings persist subagent model selection and restore effective state", async ({
+  page,
+}, testInfo) => {
+  let enabled = false
+  let version = "first"
+  const writes: Record<string, unknown>[] = []
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  await page.routeWebSocket("**/rpc", (route) => {
+    route.onMessage((message) => {
+      const input = JSON.parse(String(message)) as {
+        id: number
+        method: string
+        params: Record<string, unknown>
+      }
+      let result: unknown = {}
+      if (input.method === "provider/configuration/read")
+        result = { providers: [], presets: [], subscriptions: [] }
+      if (input.method === "chatgpt/read")
+        result = { accounts: [], welcomeRequired: false }
+      if (input.method === "config/write") {
+        writes.push(input.params)
+        enabled = input.params.value === true
+        version = "second"
+      }
+      if (input.method === "config/read" || input.method === "config/write")
+        result = {
+          configuration: { agents: { exposeModelOverrides: enabled } },
+          effective: { agents: { expose_model_overrides: enabled } },
+          origins: {},
+          layers: [{ source: "user", path: "/home/config.toml", version }],
+        }
+      route.send(JSON.stringify({ id: input.id, result }))
+    })
+  })
+  await page.goto(url)
+  await page.getByRole("button", { name: "Runtime", exact: true }).click()
+  const control = page.getByRole("switch", { name: "Subagent model selection" })
+  await expect(control).toHaveAttribute("aria-checked", "false")
+  await control.click()
+  await expect
+    .poll(() => writes)
+    .toEqual([
+      {
+        keyPath: ["agents", "expose_model_overrides"],
+        value: true,
+        expectedVersion: "first",
+      },
+    ])
+  await expect(page.getByText("Applying changes…")).toHaveCount(0)
+  await page.getByRole("button", { name: "General", exact: true }).click()
+  await page.getByRole("button", { name: "Runtime", exact: true }).click()
+  await expect(control).toHaveAttribute("aria-checked", "true")
+  await page.screenshot({
+    path: testInfo.outputPath("runtime-settings.png"),
+    fullPage: true,
+  })
+  expect(errors).toEqual([])
+})
+
 test("account setup shows reference models and retries authenticated discovery", async ({
   page,
 }, testInfo) => {

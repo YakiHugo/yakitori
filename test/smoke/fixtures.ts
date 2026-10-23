@@ -100,6 +100,203 @@ export async function runFauxTurn(page: Page): Promise<void> {
   ).toHaveCount(0)
 }
 
+export async function runIndependentSessionFlow(
+  page: Page,
+  testInfo: TestInfo,
+): Promise<void> {
+  const requests: {
+    path: string | undefined
+    body: Record<string, unknown>
+  }[] = []
+  let creationRequested = false
+  const endpoint = createServer((request, response) => {
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({ data: [{ id: "shared" }] }))
+      return
+    }
+    let body = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      body += chunk
+    })
+    request.on("end", () => {
+      const sent = JSON.parse(body) as Record<string, unknown>
+      requests.push({ path: request.url, body: sent })
+      const worker = request.url?.startsWith("/worker/") === true
+      const first =
+        !worker &&
+        !creationRequested &&
+        Array.isArray(sent.tools) &&
+        sent.tools.length > 0 &&
+        JSON.stringify(sent.messages).includes(
+          "Create a separate independent task",
+        )
+      if (first) creationRequested = true
+      response.writeHead(200, { "content-type": "text/event-stream" })
+      response.end(
+        `data: ${JSON.stringify({
+          id: `chatcmpl_${requests.length}`,
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "shared",
+          choices: [
+            {
+              index: 0,
+              delta: first
+                ? {
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "new_independent_task",
+                        type: "function",
+                        function: {
+                          name: "create_thread",
+                          arguments: JSON.stringify({
+                            title: "Independent worker",
+                            message: "Work in a fresh session",
+                            model: "worker-vendor/coder",
+                            reasoning_effort: "medium",
+                          }),
+                        },
+                      },
+                    ],
+                  }
+                : {
+                    role: "assistant",
+                    content: !Array.isArray(sent.tools)
+                      ? JSON.stringify({ title: "Source task" })
+                      : worker
+                        ? "Independent worker result"
+                        : "Created independent task",
+                  },
+              finish_reason: first ? "tool_calls" : "stop",
+            },
+          ],
+        })}\n\ndata: [DONE]\n\n`,
+      )
+    })
+  })
+  endpoint.listen(0, "127.0.0.1")
+  await once(endpoint, "listening")
+  const address = endpoint.address()
+  if (address === null || typeof address === "string")
+    throw new Error("Missing model endpoint")
+  const client = createAppRpcClient({ apiBase: new URL(page.url()).origin })
+  try {
+    for (const name of ["source", "worker"] as const) {
+      await client.request("provider/configuration/write", {
+        id: `${name}-account`,
+        configuration: {
+          name: `${name} account`,
+          authentication: "none",
+          wireApi: "openai_chat_completions",
+          baseURL: `http://127.0.0.1:${address.port}/${name}/v1`,
+          models: [
+            {
+              id: "shared",
+              identity: { namespace: `${name}-vendor`, model: "coder" },
+              contextWindowTokens: name === "source" ? 1_000_000 : 128_000,
+              maxContextWindowTokens: name === "source" ? 1_000_000 : 128_000,
+              efforts: name === "source" ? ["high"] : ["low", "medium"],
+              defaultEffort: name === "source" ? "high" : "low",
+            },
+          ],
+        },
+      })
+    }
+    const snapshot = await client.request("config/read", {})
+    const user = snapshot.layers.find((layer) => layer.source === "user")
+    if (user === undefined) throw new Error("User configuration is missing")
+    await client.request("config/write", {
+      keyPath: ["model_context_window"],
+      value: 600_000,
+      expectedVersion: user.version,
+    })
+    await client.request("userPreference/write", {
+      provider: "source-vendor",
+      model: "coder",
+      effort: "high",
+    })
+    await page.reload()
+    await page
+      .getByRole("button", { name: "New session in workspace", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Create a separate independent task")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Created independent task", { exact: true }),
+    ).toBeVisible()
+    // Sidebar notification must reveal the new root without reloading the app.
+    await expect
+      .poll(async () =>
+        (await client.request("session/list", {})).sessions.some(
+          (session) => session.title === "Independent worker",
+        ),
+      )
+      .toBe(true)
+    await page
+      .getByRole("button", { name: "Independent worker", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Independent worker result", { exact: true }),
+    ).toBeVisible()
+    const selector = page.getByRole("button", {
+      name: "Select model and effort",
+    })
+    await expect(selector).toContainText("shared")
+    const sessions = (await client.request("session/list", {})).sessions
+    const child = sessions.find(
+      (session) => session.title === "Independent worker",
+    )
+    if (child === undefined) throw new Error("Independent session is missing")
+    expect(child.conversationId).toBe(child.id)
+    expect(
+      (await client.request("session/read", { sessionId: child.id })).session
+        .currentModel,
+    ).toEqual({ provider: "worker-vendor", model: "coder", effort: "medium" })
+    const workerRequests = requests.filter(
+      (entry) =>
+        entry.path?.startsWith("/worker/") &&
+        JSON.stringify(entry.body.messages).includes("Work in a fresh session"),
+    )
+    expect(workerRequests).toHaveLength(1)
+    expect(workerRequests[0]?.body).toMatchObject({
+      model: "shared",
+      reasoning_effort: "medium",
+    })
+    expect(JSON.stringify(workerRequests[0]?.body.messages)).not.toContain(
+      "Create a separate independent task",
+    )
+    await page.reload()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Independent worker result", { exact: true }),
+    ).toBeVisible()
+    await page.screenshot({
+      path: testInfo.outputPath("independent-session.png"),
+    })
+  } finally {
+    const requestsPath = testInfo.outputPath("independent-model-requests.json")
+    await writeFile(requestsPath, JSON.stringify(requests, null, 2))
+    await testInfo.attach("independent-session-model-requests", {
+      path: requestsPath,
+      contentType: "application/json",
+    })
+    client.close()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+  }
+}
+
 // A small explicit budget makes the real faux-provider loop stop deterministically.
 // This traverses GUI -> RPC -> Session -> SQLite -> goal/changed notifications.
 export async function runBudgetedGoal(page: Page): Promise<void> {

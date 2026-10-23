@@ -24,6 +24,49 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 })
 
 describe("user config", () => {
+  it("round-trips subagent model exposure and rejects invalid settings before writing", async () => {
+    await withConfigPath(async (configPath) => {
+      const store = createUserConfigStore({ configPath })
+      expect(
+        (await store.readConfiguration()).agents?.exposeModelOverrides ?? false,
+      ).toBe(false)
+      const enabled = await store.writeValue({
+        keyPath: ["agents", "expose_model_overrides"],
+        value: true,
+      })
+      expect(enabled.configuration.agents).toEqual({
+        exposeModelOverrides: true,
+      })
+      expect((await store.readConfiguration()).agents).toEqual({
+        exposeModelOverrides: true,
+      })
+      const content = await readFile(configPath, "utf8")
+      for (const value of [
+        "true",
+        1,
+        { expose_model_overrides: true, model: "unknown" },
+      ]) {
+        await expect(
+          store.writeValue({ keyPath: ["agents"], value }),
+        ).rejects.toBeInstanceOf(ConfigurationError)
+        expect(await readFile(configPath, "utf8")).toBe(content)
+      }
+      await expect(
+        store.writeValue({
+          keyPath: ["agents", "expose_model_overrides"],
+          value: "true",
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError)
+      const disabled = await store.writeValue({
+        keyPath: ["agents", "expose_model_overrides"],
+        value: false,
+      })
+      expect(disabled.configuration.agents).toEqual({
+        exposeModelOverrides: false,
+      })
+    })
+  })
+
   it("validates HTTP MCP configuration before committing it", async () => {
     await withConfigPath(async (configPath) => {
       const store = createUserConfigStore({ configPath })

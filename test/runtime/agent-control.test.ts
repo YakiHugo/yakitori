@@ -14,6 +14,121 @@ import {
 const TARGET = { provider: "faux", model: "scripted" }
 
 describe("agent control", () => {
+  it("validates current model overrides before creating a child and resets changed-model defaults", async () => {
+    const harness = createHarness({ maxConcurrentAgents: 5 })
+    let enabled = true
+    const root = harness.control.bind(
+      "root_session",
+      { ...TARGET, effort: "high", speed: "fast" },
+      async () =>
+        enabled
+          ? {
+              current: TARGET,
+              resolve: (selection) => selection,
+              models: [
+                {
+                  provider: "faux",
+                  model: "scripted",
+                  efforts: ["high"],
+                  defaultEffort: "high",
+                },
+                {
+                  provider: "faux",
+                  model: "worker",
+                  efforts: ["low", "medium"],
+                  defaultEffort: "low",
+                },
+                { provider: "faux", model: "plain", efforts: [] },
+              ],
+            }
+          : undefined,
+    )
+    const request = {
+      taskName: "worker",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    } as const
+    await expect(
+      root.spawn({ ...request, model: "unknown" }),
+    ).rejects.toMatchObject({ code: "invalid_tool_input" })
+    await expect(
+      root.spawn({ ...request, model: "faux/worker", reasoningEffort: "high" }),
+    ).rejects.toMatchObject({ code: "invalid_tool_input" })
+    await expect(
+      root.spawn({ ...request, model: "faux/plain", reasoningEffort: "low" }),
+    ).rejects.toMatchObject({ code: "invalid_tool_input" })
+    enabled = false
+    await expect(
+      root.spawn({ ...request, model: "faux/worker" }),
+    ).rejects.toMatchObject({ code: "invalid_tool_input" })
+    expect(harness.children).toHaveLength(0)
+    enabled = true
+    await root.spawn({ ...request, model: "faux/worker" })
+    await root.spawn({
+      ...request,
+      taskName: "explicit",
+      model: "faux/worker",
+      reasoningEffort: "medium",
+      forkTurns: "all",
+    })
+    await root.spawn({ ...request, taskName: "plain", model: "faux/plain" })
+    await root.spawn({ ...request, taskName: "inherited" })
+    expect(harness.children.map((child) => child.target)).toEqual([
+      { provider: "faux", model: "worker", effort: "low" },
+      { provider: "faux", model: "worker", effort: "medium" },
+      { provider: "faux", model: "plain" },
+      { provider: "faux", model: "scripted", effort: "high", speed: "fast" },
+    ])
+    expect(harness.children[1]?.forkedContext?.messages[0]).toMatchObject({
+      role: "user",
+    })
+  })
+
+  it("does not create a child after its parent closes during model discovery", async () => {
+    const harness = createHarness()
+    const started = deferred<void>()
+    const release = deferred<void>()
+    const root = harness.control.bind("root_session", TARGET, async () => {
+      started.resolve()
+      await release.promise
+      return {
+        current: TARGET,
+        resolve: (selection) => selection,
+        models: [{ provider: "faux", model: "scripted" }],
+      }
+    })
+    const spawning = root.spawn({
+      taskName: "worker",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+      model: "faux/scripted",
+    })
+    const rejected = expect(spawning).rejects.toMatchObject({
+      code: "agent_closed",
+    })
+    await started.promise
+    await harness.control.close()
+    release.resolve()
+    await rejected
+    expect(harness.children).toHaveLength(0)
+  })
+
+  it("rejects model overrides without an exposure policy", async () => {
+    const harness = createHarness()
+    await expect(
+      harness.control.bind("root_session", TARGET).spawn({
+        taskName: "worker",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+        model: "scripted",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_tool_input" })
+    expect(harness.children).toHaveLength(0)
+  })
+
   it("distinguishes an expired deadline from a status arriving after it", async () => {
     vi.useFakeTimers()
     const harness = createHarness()

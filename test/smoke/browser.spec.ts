@@ -13,9 +13,30 @@ import {
   runBudgetedGoal,
   runExternalEngineFlow,
   runFauxTurn,
+  runIndependentSessionFlow,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+test("independent sessions route cross-provider models and appear in the sidebar", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runIndependentSessionFlow(page, testInfo)
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
 
 test("shared selects keep preferences, keyboard focus and popup bounds", async ({
   page,
