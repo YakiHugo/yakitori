@@ -211,13 +211,6 @@ describe("model catalog context windows", () => {
         usedFallbackModelMetadata: true,
       },
     )
-    expect(resolveModel({ provider: "kimi-code", model: "k30" })).toMatchObject(
-      {
-        instructionProfileId: "default",
-        fileEditingToolType: "edit_write",
-        usedFallbackModelMetadata: true,
-      },
-    )
     expect(
       resolveModel({ provider: "codex", model: "gpt-future" }),
     ).toMatchObject({
@@ -225,6 +218,36 @@ describe("model catalog context windows", () => {
       model: "gpt-future",
       instructionProfileId: "default",
       supportsNativeToolSearch: false,
+      usedFallbackModelMetadata: true,
+    })
+  })
+
+  it("uses Kimi Code's shared agent profile without borrowing another model's capabilities", () => {
+    for (const model of [
+      "k3.1-pro",
+      "k3.1-pro-highspeed",
+      "future-code-model",
+    ]) {
+      const selection = { provider: "kimi-code", model }
+      const resolved = resolveModel(selection)
+      expect(resolved).toMatchObject({
+        instructionProfileId: "kimi-code",
+        shellToolType: "unified_exec",
+        fileEditingToolType: "edit_write",
+        supportsNativeToolSearch: false,
+        supportsCustomTools: false,
+        inputModalities: ["text"],
+        usedFallbackModelMetadata: false,
+      })
+      expect(resolved.efforts).toBeUndefined()
+      expect(resolved.defaultEffort).toBeUndefined()
+      expect(resolved.maxOutputTokens).toBeUndefined()
+      expect(catalogModelCapacity(selection)).toBeUndefined()
+    }
+    expect(
+      resolveModel({ provider: "custom", model: "k3.1-pro" }),
+    ).toMatchObject({
+      instructionProfileId: "default",
       usedFallbackModelMetadata: true,
     })
   })

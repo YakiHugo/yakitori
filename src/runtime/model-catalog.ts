@@ -237,11 +237,28 @@ export function resolveModel(input: {
       usedFallbackModelMetadata: false,
     }
   }
+  // Kimi Code binds one shared agent profile independently of its model alias.
+  // New aliases inherit that profile, never another SKU's limits or efforts.
+  const fallback = resolveFallbackModel(input)
+  return input.provider.toLowerCase() === "kimi-code"
+    ? {
+        ...fallback,
+        instructionProfileId: "kimi-code",
+        usedFallbackModelMetadata: false,
+      }
+    : fallback
+}
+
+export function resolveFallbackModel(
+  input: Pick<ResolvedModel, "provider" | "model">,
+): ResolvedModel {
   return {
-    ...input,
+    provider: input.provider,
+    model: input.model,
     instructionProfileId: "default",
     inputModalities: ["text"],
     imageDetailModes: [],
+    // These are Yakitori's tools, not a claim about vendor capabilities.
     shellToolType: "unified_exec",
     fileEditingToolType: "edit_write",
     supportsNativeToolSearch: false,

@@ -4,7 +4,7 @@ import {
   type CatalogModel,
   type ResolvedModel,
   requireInstructionProfileId,
-  resolveModel,
+  resolveFallbackModel,
 } from "./model-catalog.ts"
 import { mergeModelEfforts } from "./model-effort.ts"
 import { NonChatModelError } from "./model-kind.ts"
@@ -30,7 +30,7 @@ export function createModelSettingsManager(
         configuration(selection.model) === undefined
       )
         throw error
-      base = resolveModel(selection)
+      base = resolveFallbackModel(selection)
     }
     const configured = configuration(selection.model)
     if (!configured) return base
