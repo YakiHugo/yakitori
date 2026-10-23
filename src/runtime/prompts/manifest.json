@@ -112,6 +112,17 @@
     "adaptation": "yakitori-host-compatibility-v1",
     "adaptationNotes": "Only the one-wait restriction is adapted: Yakitori has no automatic command-completion reminders, so further bounded write_stdin waits remain necessary. Independent background work and all other guidance are retained."
   },
+  "kimi-code": {
+    "file": "kimi-code.md",
+    "agent": "kimi-code",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/523d35b54b25a0b4589388a2b6c8c4261f1ef7db/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+    "version": "523d35b54b25a0b4589388a2b6c8c4261f1ef7db",
+    "selection": "Official shared default profile, independent of model alias. Stable prefix before Environment; live environment, project instructions, and skills remain harness-owned world-state messages.",
+    "sha256": "057415d55b6e19618640d9514017abd41d5254043119b8eded07921cf060809e",
+    "upstreamSha256": "baf8f8174e398d8cac5821daa5aec7c91ac19fd9532b406ca196d44d77cfcb9a",
+    "adaptation": "yakitori-host-compatibility-v1",
+    "adaptationNotes": "Only tag-based instruction authority is adapted to Yakitori message roles and sources. The original tool-use, permission, coding, and context-management guidance is retained."
+  },
   "kimi-for-coding": {
     "file": "kimi-code.md",
     "agent": "kimi-code",

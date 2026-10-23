@@ -6,6 +6,7 @@ import {
   type ModelCapacity,
   type ResolvedModel,
   requireInstructionProfileId,
+  resolveFallbackModel,
   resolveModel,
 } from "./model-catalog.ts"
 import { mergeModelEfforts } from "./model-effort.ts"
@@ -52,18 +53,11 @@ export function createConfiguredModelsManager(input: {
     }
     const known = catalog.get(configured.id)
     let resolved: ResolvedModel = {
-      ...(known === undefined || input.catalogProvider === undefined
-        ? {
-            instructionProfileId: "default",
-            inputModalities: ["text"],
-            imageDetailModes: [],
-            // These are Yakitori's tools, not a claim about vendor capabilities.
-            shellToolType: "unified_exec",
-            fileEditingToolType: "edit_write",
-            supportsNativeToolSearch: false,
-            supportsCustomTools: false,
-            usedFallbackModelMetadata: true,
-          }
+      ...(input.catalogProvider === undefined
+        ? resolveFallbackModel({
+            provider: input.provider,
+            model: configured.id,
+          })
         : resolveModel({
             provider: input.catalogProvider,
             model: configured.id,

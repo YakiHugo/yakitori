@@ -1,7 +1,10 @@
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import { providerServices } from "../runtime/provider-services.ts"
+import {
+  providerServiceForEndpoint,
+  providerServices,
+} from "../runtime/provider-services.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
@@ -13,14 +16,7 @@ export async function discoverProviderModels(
 ): Promise<readonly ConfiguredModel[]> {
   const messages = configuration.wireApi === "anthropic_messages"
   const gemini = configuration.wireApi === "gemini_generate_content"
-  const preset = providerServices.find(
-    (entry) => entry.id === configuration.service,
-  )
-  const officialPreset =
-    preset?.baseURL.replace(/\/+$/, "") ===
-    configuration.baseURL.replace(/\/+$/, "")
-      ? preset
-      : undefined
+  const officialPreset = providerServiceForEndpoint(configuration)
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)
@@ -62,6 +58,7 @@ export async function discoverProviderModels(
         pages.size === 1 &&
         !gemini &&
         [404, 405].includes(response.status) &&
+        configuration.wireApi === officialPreset?.wireApi &&
         officialPreset?.models.length
       )
         return officialPreset.models
@@ -135,6 +132,14 @@ export async function discoverProviderModels(
       }
       if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim())
         throw new ConfigurationError("A model catalog entry has no model ID.")
+      // Kimi's shared catalog also lists models outside this adapted protocol.
+      // Keep unsupported models out of the selectable directory, not just hidden.
+      if (
+        officialPreset?.id === "moonshot" &&
+        configuration.wireApi === "openai_responses" &&
+        entry.id !== "kimi-k3"
+      )
+        continue
       const capabilities = isRecord(entry.capabilities)
         ? entry.capabilities
         : undefined

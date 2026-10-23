@@ -12,7 +12,10 @@ import {
 import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import { providerServices } from "../runtime/provider-services.ts"
+import {
+  providerServiceForEndpoint,
+  providerServices,
+} from "../runtime/provider-services.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
 export function createConfiguredProvider(
@@ -28,23 +31,15 @@ export function createConfiguredProvider(
   const preset = providerServices.find(
     (entry) => entry.id === configuration.service,
   )
-  // Presets are editable. Native PDF support requires the documented endpoint;
-  // URL syntax normalization and one trailing slash do not change that endpoint.
-  const knownPresetEndpoint =
-    preset !== undefined &&
-    new URL(configuration.baseURL).href.replace(/\/$/, "") ===
-      new URL(preset.baseURL).href.replace(/\/$/, "")
-  const catalogProvider = knownPresetEndpoint
-    ? preset.catalogProvider
-    : undefined
+  const service = providerServiceForEndpoint(configuration)
+  const knownPresetEndpoint = service !== undefined
+  const catalogProvider = service?.catalogProvider
   const buildModels = (configured: readonly ConfiguredModel[]) =>
     createConfiguredModelsManager({
       provider: id,
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
       models: configured.map((model) => ({
-        ...(knownPresetEndpoint
-          ? preset.models.find((known) => known.id === model.id)
-          : undefined),
+        ...service?.models.find((known) => known.id === model.id),
         ...model,
       })),
       wireApi: configuration.wireApi,
@@ -76,7 +71,7 @@ export function createConfiguredProvider(
   return createModelProvider({
     info: {
       id,
-      ...(knownPresetEndpoint ? { serviceId: preset.id } : {}),
+      ...(service === undefined ? {} : { serviceId: service.id }),
       wireApi: configuration.wireApi,
       capabilities: {
         remoteCompaction:
@@ -92,7 +87,7 @@ export function createConfiguredProvider(
               configuration.wireApi === "openai_chat_completions")) ||
             (catalogProvider === "anthropic" &&
               configuration.wireApi === "anthropic_messages") ||
-            (preset.id === "gemini" &&
+            (service.id === "gemini" &&
               configuration.wireApi === "gemini_generate_content")),
       },
     },
@@ -128,7 +123,11 @@ export function createConfiguredProvider(
               ...options,
               warmup: configuration.requestWarmup === true,
               responseProfile:
-                knownPresetEndpoint && preset.id === "xai" ? "grok" : "openai",
+                service?.id === "xai"
+                  ? "grok"
+                  : service?.id === "moonshot"
+                    ? "kimi"
+                    : "openai",
             })
           : configuration.wireApi === "anthropic_messages"
             ? createAnthropicTurnTransport({
