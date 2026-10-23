@@ -250,7 +250,11 @@ export function createThreadTool(models?: AgentModelOverrides): RuntimeTool {
         maxLength: 65_536,
         description: "Task for the new session.",
       },
-      title: { type: "string", minLength: 1 },
+      title: {
+        type: "string",
+        minLength: 1,
+        description: "Optional title for the new session in the sidebar.",
+      },
       request_id: {
         type: "string",
         minLength: 1,
