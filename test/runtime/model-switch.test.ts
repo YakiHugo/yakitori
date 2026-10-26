@@ -10,6 +10,7 @@ import {
   ModelStopReason,
   type StreamFn,
 } from "../../src/runtime/model.ts"
+import { validateModelHistoryScope } from "../../src/runtime/model-native.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
@@ -168,6 +169,112 @@ describe("pre-sampling model switches", () => {
     expect(JSON.stringify(thread.snapshot().context.history)).toContain(
       "opaque checkpoint",
     )
+  })
+
+  it.each([
+    100_000, 200_000,
+  ])("converts an opaque checkpoint through its owner before switching models within the same account to a %i-token window", async (window) => {
+    const requests: ModelRequest[] = []
+    let samples = 0
+    const stream: StreamFn = async function* (request) {
+      validateModelHistoryScope(request, "openai_responses")
+      requests.push(request)
+      if (request.compaction === "codex_remote") {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            providerResponseId: "native_response",
+            content: [
+              {
+                type: "compaction",
+                provider: "work",
+                model: "model-a",
+                scope: "work:account",
+                encryptedContent: "opaque checkpoint",
+              },
+            ],
+          },
+        }
+        return
+      }
+      if (request.compaction === "local") {
+        expect(request.target).toMatchObject({
+          provider: "work",
+          model: "model-a",
+        })
+        expect(JSON.stringify(request.messages)).toContain("opaque checkpoint")
+        expect(JSON.stringify(request.messages)).not.toContain(
+          "Fresh correction",
+        )
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "Portable retained progress" }],
+          },
+        }
+        return
+      }
+      samples += 1
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: `done ${request.target.model}` }],
+          usage: { activeContextTokens: samples === 1 ? 100_000 : 100 },
+        },
+      }
+    }
+    const harness = await setupConfigured(stream, true)
+    const thread = await harness.manager.createThread({
+      workingDirectory: harness.root,
+      mateId: "mate",
+      mateRevisionId: "revision",
+    })
+    for (const text of ["Original task", "Create checkpoint"]) {
+      await thread.startIfIdle({
+        content: inputFixture([{ type: "text", text }]),
+      })
+      await expect
+        .poll(() => thread.agentStatus)
+        .toEqual({ completed: "done model-a" })
+    }
+    expect(
+      requests.filter((request) => request.compaction === "codex_remote"),
+    ).toHaveLength(1)
+    await harness.registration.replace({
+      work: harness.provider("work", [
+        { id: "model-a", contextWindowTokens: 100_000 },
+        { id: "model-b", contextWindowTokens: window },
+      ]),
+    })
+    await thread.startIfIdle({
+      modelSelection: { provider: "work", model: "model-b" },
+      content: inputFixture([
+        { type: "text", text: "Fresh correction: continue with model B" },
+      ]),
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done model-b" })
+    expect(
+      requests
+        .filter((request) => request.compaction !== undefined)
+        .map((request) => [request.target.model, request.compaction]),
+    ).toEqual([
+      ["model-a", "codex_remote"],
+      ["model-a", "local"],
+    ])
+    const final = requests.at(-1)
+    expect(final?.target.model).toBe("model-b")
+    expect(JSON.stringify(final?.messages)).toContain(
+      "Portable retained progress",
+    )
+    expect(JSON.stringify(final?.messages)).toContain(
+      "Fresh correction: continue with model B",
+    )
+    expect(JSON.stringify(final?.messages)).not.toContain("opaque checkpoint")
   })
 
   it("uses the previous provider for a portable checkpoint when switching to a smaller foreign model", async () => {

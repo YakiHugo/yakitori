@@ -24,6 +24,28 @@ afterEach(async () => {
 })
 
 it.each([
+  ["https://generativelanguage.googleapis.com/v1beta", true],
+  ["https://GENERATIVELANGUAGE.GOOGLEAPIS.COM:443/v1/", true],
+  ["https://relay.example/v1beta", false],
+  ["https://generativelanguage.googleapis.com/proxy/v1beta", false],
+  ["https://generativelanguage.googleapis.com/v1beta/openai", false],
+] as const)("enables Interactions PDF input only at its documented endpoint %s", async (baseURL, nativePdf) => {
+  const provider = createConfiguredProvider(
+    "custom-account",
+    {
+      name: "Gemini account",
+      service: "gemini",
+      wireApi: "gemini_interactions",
+      baseURL,
+      models: [{ id: "gemini-3.8-flash", inputModalities: ["text", "image"] }],
+    },
+    "test-key",
+  )
+  expect(provider.info.capabilities.nativePdf).toBe(nativePdf)
+  await provider.close?.()
+})
+
+it.each([
   {
     preset: "openai",
     wireApi: "openai_responses",
@@ -643,12 +665,14 @@ it.each([
   "openai_responses",
   "anthropic_messages",
   "gemini_generate_content",
+  "gemini_interactions",
 ] as const)("sends no credential header for an unauthenticated %s account", async (wireApi) => {
   const headers: {
     authorization: string | undefined
     apiKey: string | undefined
     googleKey: string | undefined
   }[] = []
+  const paths: (string | undefined)[] = []
   const endpoint = createServer(async (request, response) => {
     for await (const _chunk of request) {
       /* Drain the request before completing its response. */
@@ -658,6 +682,7 @@ it.each([
       apiKey: request.headers["x-api-key"] as string | undefined,
       googleKey: request.headers["x-goog-api-key"] as string | undefined,
     })
+    paths.push(request.url)
     response.writeHead(200, { "content-type": "text/event-stream" })
     if (wireApi === "openai_responses")
       response.end(
@@ -666,6 +691,10 @@ it.each([
     else if (wireApi === "anthropic_messages")
       response.end(
         'event: message_start\ndata: {"type":"message_start","message":{"id":"reply","type":"message","role":"assistant","model":"local","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+      )
+    else if (wireApi === "gemini_interactions")
+      response.end(
+        'data: {"event_type":"interaction.created","interaction":{"id":"reply","model":"local","status":"in_progress"}}\n\ndata: {"event_type":"interaction.completed","interaction":{"id":"reply","model":"local","status":"completed"}}\n\n',
       )
     else
       response.end(
@@ -706,6 +735,8 @@ it.each([
     expect(headers).toEqual([
       { authorization: undefined, apiKey: undefined, googleKey: undefined },
     ])
+    if (wireApi === "gemini_interactions")
+      expect(paths).toEqual(["/interactions"])
   } finally {
     await turn.close()
     await provider.close?.()

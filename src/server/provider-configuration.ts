@@ -60,10 +60,11 @@ export function requireProviderConfiguration(
     wireApi !== "openai_responses" &&
     wireApi !== "openai_chat_completions" &&
     wireApi !== "anthropic_messages" &&
-    wireApi !== "gemini_generate_content"
+    wireApi !== "gemini_generate_content" &&
+    wireApi !== "gemini_interactions"
   ) {
     throw new ConfigurationError(
-      "wireApi must be openai_responses, openai_chat_completions, anthropic_messages or gemini_generate_content.",
+      "wireApi must be openai_responses, openai_chat_completions, anthropic_messages, gemini_generate_content or gemini_interactions.",
     )
   }
   const envKey =
@@ -379,7 +380,9 @@ export function providersFromConfig(
                 ? "openai_chat_completions"
                 : backend === "generate_content"
                   ? "gemini_generate_content"
-                  : backend,
+                  : backend === "interactions"
+                    ? "gemini_interactions"
+                    : backend,
         envKey: record.env_key,
         authentication: record.authentication,
         credentialPath: record.credential_path,
@@ -442,7 +445,9 @@ export function providerConfigValue(
           ? "messages"
           : configuration.wireApi === "gemini_generate_content"
             ? "generate_content"
-            : "chat_completions",
+            : configuration.wireApi === "gemini_interactions"
+              ? "interactions"
+              : "chat_completions",
     models: configuration.models,
     ...(configuration.enabled === undefined
       ? {}

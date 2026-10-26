@@ -123,6 +123,7 @@ export type ModelNativeItem = Readonly<{
     | "openai_chat_completions"
     | "anthropic_messages"
     | "gemini_generate_content"
+    | "gemini_interactions"
   value: JsonObject
 }>
 export type FileObservation = Readonly<{

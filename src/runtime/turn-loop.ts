@@ -1045,7 +1045,9 @@ async function executeTurnModelLoop(
         .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
         .filter((block) => block.type === "compaction")
       const foreignCheckpoint = nativeCheckpoints.find(
-        (block) => block.provider !== step?.target.provider,
+        (block) =>
+          block.provider !== step?.target.provider ||
+          block.model !== step.target.model,
       )
       const previousModel = beforeStep.context.previousModel
       const sourceSelection =
@@ -1069,9 +1071,14 @@ async function executeTurnModelLoop(
           foreignCheckpoint !== undefined &&
           !client?.hasProvider(sourceSelection.provider)
         ) {
-          throw new Error(
-            `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
-          )
+          throw new ModelFailureError({
+            kind: "invalid_request",
+            stage: "request_build",
+            provider: step.target.provider,
+            wireApi: wireApi ?? "unknown",
+            providerCode: "history_incompatible",
+            message: `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
+          })
         }
         const sourceSession =
           sourceSelection.provider === step.target.provider
@@ -1113,8 +1120,15 @@ async function executeTurnModelLoop(
                   block.model === sourceSelection.model,
               )
             ) {
-              throw new Error(
-                `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
+              throw new ModelFailureError(
+                {
+                  kind: "invalid_request",
+                  stage: "request_build",
+                  provider: step.target.provider,
+                  wireApi: wireApi ?? "unknown",
+                  providerCode: "history_incompatible",
+                  message: `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
+                },
                 { cause: error },
               )
             }
@@ -1162,13 +1176,16 @@ async function executeTurnModelLoop(
                   injectWorldState: modelCalls !== 0,
                   stream: sourceSession?.stream ?? stream,
                   wireApi: sourceSession?.wireApi ?? wireApi,
+                  // A different model/account needs a portable text summary,
+                  // rather than another checkpoint encrypted for its owner.
                   remoteCompaction:
                     sourceSelection.provider === step.target.provider &&
+                    sourceSelection.model === step.target.model &&
                     (sourceSession?.remoteCompaction ?? false),
                   ...(sourceSelection.provider === step.target.provider &&
                   remoteCompaction === "codex_remote" &&
                   sourceSelection.model !== step.target.model &&
-                  remoteCompaction
+                  nativeCheckpoints.length === 0
                     ? { fallback: { step, stream } }
                     : {}),
                   signal: input.signal,
@@ -2772,7 +2789,6 @@ async function compactLiveHistory(
       } catch (error) {
         if (input.signal.aborted || isAbortError(error)) throw error
         if (
-          input.remoteCompaction &&
           !usedFallback &&
           input.fallback !== undefined &&
           canRetryCompactionWithCurrentModel(error)
@@ -2781,12 +2797,14 @@ async function compactLiveHistory(
           fallbackSourceError = error
           compactionStep = input.fallback.step
           compactionStream = input.fallback.stream
-          source = trimRemoteCompactionToolTail(
-            input.history.map(({ item }) => item),
-            compactionStep.configuration.baseInstructions.text,
-            compactionStep.configuration.modelCapacity
-              ?.effectiveContextWindowTokens,
-          )
+          source = input.remoteCompaction
+            ? trimRemoteCompactionToolTail(
+                input.history.map(({ item }) => item),
+                compactionStep.configuration.baseInstructions.text,
+                compactionStep.configuration.modelCapacity
+                  ?.effectiveContextWindowTokens,
+              )
+            : input.history.map(({ item }) => item)
           continue
         }
         if (usedFallback && fallbackSourceError !== undefined) {

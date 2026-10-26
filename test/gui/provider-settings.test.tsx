@@ -483,7 +483,10 @@ it("preserves an existing Gemini compatibility connection when the native preset
   })
 })
 
-it("saves a new Gemini preset connection with the native protocol and endpoint", async () => {
+it.each([
+  ["gemini_generate_content", "Gemini GenerateContent"],
+  ["gemini_interactions", "Gemini Interactions"],
+] as const)("saves a new Gemini preset connection with the selected %s protocol and endpoint", async (wireApi, protocolLabel) => {
   const user = userEvent.setup()
   request.mockResolvedValue({ providers: [], presets: providerPresets })
   await openAccountSettings()
@@ -499,9 +502,7 @@ it("saves a new Gemini preset connection with the native protocol and endpoint",
     }),
   )
   await user.click(screen.getByLabelText("API protocol"))
-  await user.click(
-    screen.getByRole("option", { name: "Gemini GenerateContent" }),
-  )
+  await user.click(screen.getByRole("option", { name: protocolLabel }))
   await user.type(screen.getByLabelText("API key"), "native-test-key")
   await user.click(screen.getByRole("button", { name: "Add account" }))
   await waitFor(() => expect(loadProviders).toHaveBeenCalledOnce())
@@ -511,7 +512,7 @@ it("saves a new Gemini preset connection with the native protocol and endpoint",
       preset: "gemini",
       service: "gemini",
       authentication: "stored",
-      wireApi: "gemini_generate_content",
+      wireApi,
       baseURL: "https://generativelanguage.googleapis.com/v1beta",
       envKey: "GEMINI_API_KEY",
       models: [],

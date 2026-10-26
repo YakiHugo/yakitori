@@ -71,6 +71,7 @@ export type ModelWireApi =
   | "anthropic_messages"
   | "faux"
   | "gemini_generate_content"
+  | "gemini_interactions"
   | "openai_chat_completions"
   | "openai_responses"
   | "unknown"

@@ -1,11 +1,16 @@
 import { createServer } from "node:http"
+import Anthropic from "@anthropic-ai/sdk"
 import { expect, it } from "vitest"
 import { isJsonObject, type JsonObject } from "../../src/kernel/index.ts"
-import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
-import type { ModelNativeItem, ModelRequest } from "../../src/runtime/model.ts"
+import type {
+  ModelNativeItem,
+  ModelRequest,
+  StreamFn,
+} from "../../src/runtime/model.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 
 const apis: ModelNativeItem["wireApi"][] = [
   "openai_responses",
@@ -239,3 +244,136 @@ it.each([
     },
   ])
 })
+
+it.each([
+  {
+    api: "anthropic_messages" as const,
+    native: { thinking: { display: "omitted" } },
+    expected: {
+      thinking: { type: "adaptive", display: "omitted" },
+      output_config: { effort: "high" },
+    },
+  },
+  {
+    api: "gemini_generate_content" as const,
+    native: { generationConfig: { thinkingConfig: { includeThoughts: true } } },
+    expected: {
+      generationConfig: {
+        candidateCount: 1,
+        thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
+      },
+    },
+  },
+])("serializes $api thinking display controls without losing captured effort", async ({
+  api,
+  native,
+  expected,
+}) => {
+  let body: unknown
+  const fetchFn: typeof fetch = async (_url, init) => {
+    body = JSON.parse(String(init?.body))
+    return new Response(
+      JSON.stringify({ error: { message: "Captured request" } }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    )
+  }
+  const { stream, request } = thinkingControlsRequest(api, native, fetchFn)
+  for await (const _event of stream(request)) {
+  }
+  expect(body).toMatchObject(expected)
+})
+
+it("replaces the automatic thinking configuration when an uncaptured mode is explicit", async () => {
+  let body: JsonObject | undefined
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const parsed: unknown = JSON.parse(String(init?.body))
+    if (!isJsonObject(parsed)) throw new Error("Invalid request")
+    body = parsed
+    return new Response(
+      JSON.stringify({ error: { message: "Captured request" } }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    )
+  }
+  const { stream, request } = thinkingControlsRequest(
+    "anthropic_messages",
+    { thinking: { type: "disabled" } },
+    fetchFn,
+  )
+  const { effort: _effort, ...target } = request.target
+  for await (const _event of stream({ ...request, target })) {
+  }
+  expect(body?.thinking).toEqual({ type: "disabled" })
+})
+
+it.each([
+  ["anthropic_messages", { thinking: { type: "disabled" } }],
+  ["anthropic_messages", { thinking: { budget_tokens: 2048 } }],
+  [
+    "gemini_generate_content",
+    { generationConfig: { thinkingConfig: { thinkingLevel: "low" } } },
+  ],
+  [
+    "gemini_generate_content",
+    { generationConfig: { thinkingConfig: { thinkingBudget: 2048 } } },
+  ],
+  ["gemini_generate_content", { generationConfig: { thinkingConfig: null } }],
+  ["gemini_generate_content", { generationConfig: { thinkingConfig: [] } }],
+] as const)("rejects %s controls that replace captured thinking strength or its object before sending", async (api, native) => {
+  let sent = false
+  const fetchFn: typeof fetch = async () => {
+    sent = true
+    throw new Error("Unexpected network request")
+  }
+  const { stream, request } = thinkingControlsRequest(api, native, fetchFn)
+  const events = []
+  for await (const event of stream(request)) events.push(event)
+  expect(events).toMatchObject([
+    {
+      type: "failure",
+      failure: { stage: "request_build", kind: "invalid_request" },
+    },
+  ])
+  expect(sent).toBe(false)
+})
+
+function thinkingControlsRequest(
+  api: "anthropic_messages" | "gemini_generate_content",
+  native: JsonObject,
+  fetchFn: typeof fetch,
+): { stream: StreamFn; request: ModelRequest } {
+  const model =
+    api === "anthropic_messages"
+      ? "claude-sonnet-4-6"
+      : "gemini-3-flash-preview"
+  const options = { apiKey: "test", model }
+  return {
+    stream:
+      api === "anthropic_messages"
+        ? createAnthropicTestStream({
+            ...options,
+            client: new Anthropic({
+              apiKey: "test",
+              fetch: fetchFn,
+              maxRetries: 0,
+            }),
+          })
+        : createGeminiProvider({
+            ...options,
+            baseURL: "https://example.test",
+            fetchFn,
+          }),
+    request: {
+      target: {
+        provider: "test",
+        model,
+        instructionProfileId: "test",
+        effort: "high",
+      },
+      messages: [{ role: "user", content: [{ type: "text", text: "Go" }] }],
+      tools: [],
+      system: [],
+      toolWireProtocol: "eager",
+      providerOptions: { provider: "test", wireApi: api, body: native },
+    },
+  }
+}

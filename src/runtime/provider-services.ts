@@ -200,14 +200,24 @@ export const providerServices: readonly ProviderPreset[] = [
 // Native capabilities belong to an explicit service at its documented endpoint,
 // not to an editable account name or a template label on a relay.
 export function providerServiceForEndpoint(
-  configuration: Pick<ProviderConfiguration, "service" | "baseURL">,
+  configuration: Pick<ProviderConfiguration, "service" | "baseURL" | "wireApi">,
 ): ProviderPreset | undefined {
   const service = providerServices.find(
     (entry) => entry.id === configuration.service,
   )
   if (service === undefined) return undefined
-  return new URL(configuration.baseURL).href.replace(/\/$/, "") ===
-    new URL(service.baseURL).href.replace(/\/$/, "")
+  const url = new URL(configuration.baseURL).href.replace(/\/$/, "")
+  if (
+    service.id === "gemini" &&
+    configuration.wireApi === "gemini_interactions"
+  )
+    return [
+      "https://generativelanguage.googleapis.com/v1beta",
+      "https://generativelanguage.googleapis.com/v1",
+    ].includes(url)
+      ? service
+      : undefined
+  return url === new URL(service.baseURL).href.replace(/\/$/, "")
     ? service
     : undefined
 }

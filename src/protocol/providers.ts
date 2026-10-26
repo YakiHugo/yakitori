@@ -5,6 +5,7 @@ export type ProviderConfiguration = Readonly<{
     | "openai_chat_completions"
     | "anthropic_messages"
     | "gemini_generate_content"
+    | "gemini_interactions"
   baseURL: string
   // Stable service identity; vendor models share this namespace across accounts.
   // `preset` below records only the creation template.
@@ -97,6 +98,7 @@ export type ProviderPreset = Readonly<{
     | "openai_chat_completions"
     | "anthropic_messages"
     | "gemini_generate_content"
+    | "gemini_interactions"
   envKey?: string
   kind?: "vendor" | "relay" | "local" | "subscription"
   noKey?: boolean

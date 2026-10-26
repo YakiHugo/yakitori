@@ -39,8 +39,9 @@ export function supportsOpenAIChatUserPdf(model: string): boolean {
   ].includes(model)
 }
 
-// Overall inline payload, distinct from the 50 MB per-PDF processing limit.
-// https://ai.google.dev/gemini-api/docs/generate-content/file-input-methods
+// GenerateContent and Interactions share this overall inline payload limit,
+// distinct from the 50 MB per-PDF processing limit.
+// https://ai.google.dev/gemini-api/docs/file-input-methods#input-method-comparison
 export const GEMINI_INLINE_REQUEST_MAX_BYTES = 100_000_000
 
 // Messages limits the whole JSON request, not raw bytes per PDF. Decimal MB is
