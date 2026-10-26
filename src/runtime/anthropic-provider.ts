@@ -38,14 +38,17 @@ import {
 } from "./model-failure.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
+  ModelHistoryScopeError,
   modelNativeItems,
   modelNativeResponseMetadata,
   portableModelContent,
   replayModelNativeItems,
+  validateModelHistoryScope,
 } from "./model-native.ts"
 import {
   applyModelRequestControls,
   ModelRequestControlsError,
+  validateModelRequestControls,
 } from "./model-request-controls.ts"
 import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
@@ -144,6 +147,8 @@ async function* streamAnthropic(
     ),
   )
   try {
+    validateModelHistoryScope(request, "anthropic_messages")
+    validateModelRequestControls(request, "anthropic_messages")
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "anthropic"
     const explicitPromptCaching = profile !== "generic"
@@ -319,7 +324,8 @@ async function* streamAnthropic(
     }
     if (
       error instanceof AssetMediaError ||
-      error instanceof ModelRequestControlsError
+      error instanceof ModelRequestControlsError ||
+      error instanceof ModelHistoryScopeError
     ) {
       yield {
         type: "failure",
@@ -329,6 +335,9 @@ async function* streamAnthropic(
           provider: request.target.provider,
           wireApi: "anthropic_messages",
           message: error.message,
+          ...(error instanceof ModelHistoryScopeError
+            ? { providerCode: error.code }
+            : {}),
         },
       }
     } else yield terminalFailure(error, request.target.provider, "connect")

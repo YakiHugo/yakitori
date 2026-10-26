@@ -1,7 +1,6 @@
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
-import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   ANTHROPIC_REQUEST_MAX_BYTES,
   GEMINI_INLINE_REQUEST_MAX_BYTES,
@@ -10,6 +9,7 @@ import {
   supportsOpenAIChatToolPdf,
   supportsOpenAIChatUserPdf,
 } from "../native-pdf-capabilities.ts"
+import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   type ResolvedStepConfiguration,
   stepExecutionLimits,
@@ -84,9 +84,11 @@ export function captureStepContext(
     input.wireApi === "openai_chat_completions"
       ? !model.usedFallbackModelMetadata &&
         supportsOpenAIChatToolPdf(model.model, target.effort)
-      : input.wireApi === "gemini_generate_content"
-        ? supportsGeminiToolPdf(model.model)
-        : true
+      : input.wireApi === "gemini_interactions"
+        ? false
+        : input.wireApi === "gemini_generate_content"
+          ? supportsGeminiToolPdf(model.model)
+          : true
   const nativePdf =
     input.nativePdf === true &&
     nativePdfModel &&
@@ -114,6 +116,7 @@ export function captureStepContext(
     // interpretation of the published unit, not a model context estimate.
     // https://developers.openai.com/api/docs/guides/file-inputs
     // https://ai.google.dev/gemini-api/docs/generate-content/document-processing
+    // https://ai.google.dev/gemini-api/docs/document-processing#passing-multiple-pdfs
     ...((nativePdf || nativeUserPdf) &&
     (input.wireApi === "openai_chat_completions" ||
       input.wireApi === "openai_responses")
@@ -125,7 +128,8 @@ export function captureStepContext(
           },
         }
       : (nativePdf || nativeUserPdf) &&
-          input.wireApi === "gemini_generate_content"
+          (input.wireApi === "gemini_generate_content" ||
+            input.wireApi === "gemini_interactions")
         ? {
             nativePdfLimits: {
               maxFileBytes: 50_000_000,
@@ -216,7 +220,8 @@ function providerToolCapabilities(
     }
   if (
     wireApi === "openai_chat_completions" ||
-    wireApi === "gemini_generate_content"
+    wireApi === "gemini_generate_content" ||
+    wireApi === "gemini_interactions"
   )
     return { supportsCustomTools: false }
   const normalized = provider.toLowerCase()

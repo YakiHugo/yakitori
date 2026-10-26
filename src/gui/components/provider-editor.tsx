@@ -542,6 +542,7 @@ function ProtocolField({
           { value: "openai_responses", label: "OpenAI Responses" },
           { value: "anthropic_messages", label: "Anthropic Messages" },
           { value: "gemini_generate_content", label: "Gemini GenerateContent" },
+          { value: "gemini_interactions", label: "Gemini Interactions" },
         ]}
       />
     </Field>

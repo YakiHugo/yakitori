@@ -15,7 +15,9 @@ export async function discoverProviderModels(
   apiKey: string | undefined,
 ): Promise<readonly ConfiguredModel[]> {
   const messages = configuration.wireApi === "anthropic_messages"
-  const gemini = configuration.wireApi === "gemini_generate_content"
+  const gemini =
+    configuration.wireApi === "gemini_generate_content" ||
+    configuration.wireApi === "gemini_interactions"
   const officialPreset = providerServiceForEndpoint(configuration)
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`

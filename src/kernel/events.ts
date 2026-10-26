@@ -858,6 +858,7 @@ function isModelNativeItem(value: unknown): boolean {
       "openai_chat_completions",
       "anthropic_messages",
       "gemini_generate_content",
+      "gemini_interactions",
     ].includes(String(value.wireApi)) &&
     isJsonObject(value.value)
   )

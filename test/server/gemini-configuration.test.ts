@@ -26,9 +26,13 @@ const configuration = {
   models: [],
 } as const
 
-it("round-trips native Gemini settings without changing explicit compatibility connections", () => {
+it.each([
+  ["gemini_generate_content", "generate_content"],
+  ["gemini_interactions", "interactions"],
+] as const)("round-trips %s settings without changing explicit compatibility connections", (wireApi, backend) => {
   const native = requireProviderConfiguration({
     ...configuration,
+    wireApi,
     models: [
       {
         id: "gemini-model",
@@ -43,7 +47,7 @@ it("round-trips native Gemini settings without changing explicit compatibility c
     wireApi: "openai_chat_completions",
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
   })
-  expect(providerConfigValue(native).api_backend).toBe("generate_content")
+  expect(providerConfigValue(native).api_backend).toBe(backend)
   expect(providerConfigValue(compatibility).api_backend).toBe(
     "chat_completions",
   )
@@ -69,7 +73,10 @@ it("round-trips native Gemini settings without changing explicit compatibility c
   }
 })
 
-it("discovers native pages using header authentication and persists input-only limits across restart", async () => {
+it.each([
+  ["gemini_generate_content", "generate_content"],
+  ["gemini_interactions", "interactions"],
+] as const)("discovers %s pages using header authentication and persists the protocol and input-only limits across restart", async (wireApi, backend) => {
   const directory = await mkdtemp(join(tmpdir(), "yakitori-gemini-catalog-"))
   const requests: {
     path: string | undefined
@@ -144,7 +151,7 @@ it("discovers native pages using header authentication and persists input-only l
       {
         action: "save",
         name: "Native Gemini",
-        api_backend: "generate_content",
+        api_backend: backend,
         base_url: `http://127.0.0.1:${address.port}/v1beta`,
         api_key: "catalog-secret",
       },
@@ -165,10 +172,13 @@ it("discovers native pages using header authentication and persists input-only l
     ])
     expect(JSON.stringify(result)).not.toContain("catalog-secret")
     const persisted = await readFile(join(directory, "config.toml"), "utf8")
-    expect(persisted).toContain('api_backend = "generate_content"')
+    expect(persisted).toContain(`api_backend = "${backend}"`)
     expect(persisted).not.toContain("catalog-secret")
     const restarted = create()
     await restarted.service.reload()
+    expect(
+      (await restarted.service.read()).providers[0]?.configuration.wireApi,
+    ).toBe(wireApi)
     const accountId = restarted.registry.providers[0]
     if (!accountId) throw new Error("Missing account")
     const manager = restarted.registry.models(accountId)

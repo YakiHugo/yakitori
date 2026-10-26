@@ -2,6 +2,7 @@ import {
   createAnthropicTurnTransport,
   createChatCompletionsProvider,
   createConfiguredModelsManager,
+  createGeminiInteractionsProvider,
   createGeminiProvider,
   createModelProvider,
   createOpenAITurnTransport,
@@ -88,7 +89,8 @@ export function createConfiguredProvider(
             (catalogProvider === "anthropic" &&
               configuration.wireApi === "anthropic_messages") ||
             (service.id === "gemini" &&
-              configuration.wireApi === "gemini_generate_content")),
+              (configuration.wireApi === "gemini_generate_content" ||
+                configuration.wireApi === "gemini_interactions"))),
       },
     },
     models,
@@ -101,7 +103,8 @@ export function createConfiguredProvider(
       const options = {
         apiKey:
           configuration.authentication === "none" &&
-          configuration.wireApi === "gemini_generate_content"
+          (configuration.wireApi === "gemini_generate_content" ||
+            configuration.wireApi === "gemini_interactions")
             ? ""
             : apiKey,
         ...(configuration.authentication === "none"
@@ -144,12 +147,14 @@ export function createConfiguredProvider(
         transport?.stream ??
         (configuration.wireApi === "gemini_generate_content"
           ? createGeminiProvider(options)
-          : createChatCompletionsProvider({
-              ...options,
-              ...(preset?.flavor === undefined
-                ? {}
-                : { flavor: preset.flavor }),
-            }))
+          : configuration.wireApi === "gemini_interactions"
+            ? createGeminiInteractionsProvider(options)
+            : createChatCompletionsProvider({
+                ...options,
+                ...(preset?.flavor === undefined
+                  ? {}
+                  : { flavor: preset.flavor }),
+              }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
           if (

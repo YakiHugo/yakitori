@@ -81,6 +81,12 @@ describe("Step tool planning", () => {
       tool: false,
     },
     {
+      wireApi: "gemini_interactions",
+      model: "gemini-3.8-flash",
+      user: true,
+      tool: false,
+    },
+    {
       wireApi: "openai_responses",
       model: "gpt-6-astra",
       user: true,
@@ -135,7 +141,8 @@ describe("Step tool planning", () => {
       if (
         nativePdf &&
         entry.user &&
-        entry.wireApi === "gemini_generate_content"
+        (entry.wireApi === "gemini_generate_content" ||
+          entry.wireApi === "gemini_interactions")
       ) {
         expect(step.userDocumentReading.nativePdfLimits).toEqual({
           maxFileBytes: 50_000_000,

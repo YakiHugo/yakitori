@@ -36,15 +36,18 @@ import {
   providerErrorMessage,
 } from "./model-failure.ts"
 import {
+  ModelHistoryScopeError,
   modelNativeItems,
   modelNativeResponseMetadata,
   portableModelContent,
   replayModelNativeItems,
+  validateModelHistoryScope,
 } from "./model-native.ts"
 import {
   applyModelRequestControls,
   ModelRequestControlsError,
   openAIToolChoice,
+  validateModelRequestControls,
 } from "./model-request-controls.ts"
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
@@ -197,6 +200,8 @@ async function* streamOpenAI(
     | Extract<ModelStreamEvent, { type: "response" | "failure" }>
     | undefined
   try {
+    validateModelHistoryScope(request, "openai_responses")
+    validateModelRequestControls(request, "openai_responses")
     if (responseProfile === "kimi") {
       if ((request.target.model || defaultModel) !== "kimi-k3")
         throw new ModelRequestControlsError(
@@ -845,7 +850,8 @@ async function* streamOpenAI(
     }
     if (
       error instanceof AssetMediaError ||
-      error instanceof ModelRequestControlsError
+      error instanceof ModelRequestControlsError ||
+      error instanceof ModelHistoryScopeError
     ) {
       yield {
         type: "failure",
@@ -855,6 +861,9 @@ async function* streamOpenAI(
           provider: request.target.provider,
           wireApi: "openai_responses",
           message: error.message,
+          ...(error instanceof ModelHistoryScopeError
+            ? { providerCode: error.code }
+            : {}),
         },
       }
       return

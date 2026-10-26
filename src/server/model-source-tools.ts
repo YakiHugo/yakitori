@@ -50,6 +50,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
             "chat_completions",
             "messages",
             "generate_content",
+            "interactions",
           ],
         },
         api_key: {
@@ -172,6 +173,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
               "messages",
               "chat_completions",
               "generate_content",
+              "interactions",
             ].includes(String(backend))
           )
             throw new ConfigurationError("Unknown API backend.")
@@ -188,9 +190,11 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
                     ? "openai_chat_completions"
                     : backend === "generate_content"
                       ? "gemini_generate_content"
-                      : (previous?.wireApi ??
-                        preset?.wireApi ??
-                        "openai_chat_completions"),
+                      : backend === "interactions"
+                        ? "gemini_interactions"
+                        : (previous?.wireApi ??
+                          preset?.wireApi ??
+                          "openai_chat_completions"),
             preset: preset?.id ?? previous?.preset,
             service: preset?.id ?? previous?.service ?? "generic",
             authentication:

@@ -30,14 +30,17 @@ import {
 } from "./model-failure.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
+  ModelHistoryScopeError,
   modelNativeItems,
   modelNativeResponseMetadata,
   portableModelContent,
   replayModelNativeItems,
+  validateModelHistoryScope,
 } from "./model-native.ts"
 import {
   applyModelRequestControls,
   ModelRequestControlsError,
+  validateModelRequestControls,
 } from "./model-request-controls.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
@@ -105,6 +108,8 @@ async function* streamChatCompletions(
   const usageFields = () => (usage === undefined ? {} : { usage })
   let providerRequestId: string | undefined
   try {
+    validateModelHistoryScope(request, "openai_chat_completions")
+    validateModelRequestControls(request, "openai_chat_completions")
     if (request.compaction !== undefined && request.compaction !== "local")
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
@@ -229,6 +234,7 @@ async function* streamChatCompletions(
     let reasoning = ""
     let refusal = ""
     let nativeText = ""
+    let nativeContentParts: JsonObject[] | undefined
     const nativeReasoning: Record<
       string,
       import("../kernel/index.ts").JsonValue
@@ -336,6 +342,70 @@ async function* streamChatCompletions(
             reasoningDetails[index] = previous
           }
         }
+        // Mistral switches from thinking/text parts to plain strings within a
+        // single stream. Keep its structured continuation separate from the
+        // text/reasoning projection consumed by the harness.
+        if (Array.isArray(delta.content)) {
+          nativeContentParts ??=
+            nativeText.length === 0 ? [] : [{ type: "text", text: nativeText }]
+          for (const part of delta.content) {
+            if (!isJsonObject(part))
+              throw new ChatCompletionsProtocolError(
+                "Invalid completion content part.",
+              )
+            let fragment: string
+            let type: "delta" | "reasoning_delta"
+            if (part.type === "text" && typeof part.text === "string") {
+              fragment = part.text
+              type = "delta"
+              text += fragment
+            } else if (part.type === "thinking") {
+              if (
+                !Array.isArray(part.thinking) ||
+                !part.thinking.every(isJsonObject) ||
+                (part.signature != null &&
+                  typeof part.signature !== "string") ||
+                (part.closed !== undefined && typeof part.closed !== "boolean")
+              )
+                throw new ChatCompletionsProtocolError(
+                  "Invalid completion thinking part.",
+                )
+              fragment = part.thinking
+                .map((unit) => {
+                  if (
+                    unit.type === "reference" ||
+                    unit.type === "tool_reference"
+                  )
+                    return ""
+                  if (unit.type !== "text")
+                    throw new ChatCompletionsProtocolError(
+                      "Unsupported completion thinking content.",
+                    )
+                  if (typeof unit.text !== "string")
+                    throw new ChatCompletionsProtocolError(
+                      "Invalid completion thinking text.",
+                    )
+                  return unit.text
+                })
+                .join("")
+              type = "reasoning_delta"
+              reasoning += fragment
+            } else {
+              throw new ChatCompletionsProtocolError(
+                "Unsupported completion content part.",
+              )
+            }
+            appendChatContentPart(nativeContentParts, part)
+            if (fragment.length > 0)
+              yield {
+                type,
+                text: fragment,
+                ...(request.streamOutputItems && completionId !== undefined
+                  ? { itemId: `${completionId}_0` }
+                  : {}),
+              }
+          }
+        }
         for (const [field, type] of [
           ["content", "delta"],
           ["reasoning_content", "reasoning_delta"],
@@ -344,6 +414,7 @@ async function* streamChatCompletions(
         ] as const) {
           const fragment = delta[field]
           if (fragment === undefined || fragment === null) continue
+          if (field === "content" && Array.isArray(fragment)) continue
           if (typeof fragment !== "string")
             throw new ChatCompletionsProtocolError(`Invalid ${field} delta.`)
           if (type === "reasoning_delta") {
@@ -353,7 +424,14 @@ async function* streamChatCompletions(
           } else {
             text += fragment
             if (field === "refusal") refusal += fragment
-            else nativeText += fragment
+            else {
+              nativeText += fragment
+              if (nativeContentParts !== undefined && fragment.length > 0)
+                appendChatContentPart(nativeContentParts, {
+                  type: "text",
+                  text: fragment,
+                })
+            }
           }
           if (fragment.length > 0)
             yield {
@@ -565,7 +643,8 @@ async function* streamChatCompletions(
     const native = modelNativeItems(request, "openai_chat_completions", [
       {
         role: "assistant",
-        content: nativeText.length === 0 ? null : nativeText,
+        content:
+          nativeContentParts ?? (nativeText.length === 0 ? null : nativeText),
         ...(refusal.length === 0 ? {} : { refusal }),
         ...nativeReasoning,
         ...(reasoningDetails.length === 0
@@ -653,7 +732,8 @@ async function* streamChatCompletions(
     }
     if (
       error instanceof AssetMediaError ||
-      error instanceof ModelRequestControlsError
+      error instanceof ModelRequestControlsError ||
+      error instanceof ModelHistoryScopeError
     ) {
       yield {
         type: "failure",
@@ -663,6 +743,9 @@ async function* streamChatCompletions(
           provider: request.target.provider,
           wireApi: "openai_chat_completions",
           message: error.message,
+          ...(error instanceof ModelHistoryScopeError
+            ? { providerCode: error.code }
+            : {}),
         },
       }
       return
@@ -699,7 +782,7 @@ async function* streamChatCompletions(
         ...(typeof apiError?.code === "string"
           ? { providerCode: apiError.code }
           : {}),
-        providerMessage: providerErrorMessage(apiError?.error),
+        providerMessage: providerErrorMessage({ error: apiError?.error }),
         ...(requestId === undefined ? {} : { providerRequestId: requestId }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
@@ -893,6 +976,41 @@ export function toChatCompletionsMessages(
   }
   if (toolMedia.length > 0) result.push({ role: "user", content: toolMedia })
   return result
+}
+
+function appendChatContentPart(parts: JsonObject[], part: JsonObject): void {
+  const previous = parts.at(-1)
+  if (
+    part.type === "text" &&
+    previous?.type === "text" &&
+    typeof previous.text === "string" &&
+    typeof part.text === "string"
+  ) {
+    parts[parts.length - 1] = {
+      ...previous,
+      ...part,
+      text: previous.text + part.text,
+    }
+  } else if (
+    part.type === "thinking" &&
+    previous?.type === "thinking" &&
+    Array.isArray(previous.thinking) &&
+    Array.isArray(part.thinking) &&
+    typeof previous.signature !== "string"
+  ) {
+    // Thinking text and its final signature can arrive in separate deltas.
+    // A signed block is complete; do not attach a later block to its signature.
+    // `closed` controls Mistral prefixing, not SSE fragment boundaries.
+    const thinking = previous.thinking
+    thinking.push(...part.thinking)
+    parts[parts.length - 1] = {
+      ...previous,
+      ...part,
+      thinking,
+    }
+  } else {
+    parts.push(part)
+  }
 }
 
 function chatToolInput(block: ModelToolCallBlock): unknown {

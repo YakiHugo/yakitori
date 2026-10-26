@@ -4,9 +4,52 @@ import type {
   ModelContentBlock,
   ModelNativeItem,
   ModelRequest,
+  ModelWireApi,
 } from "./model.ts"
 
 type NativeWireApi = ModelNativeItem["wireApi"]
+
+export class ModelHistoryScopeError extends Error {
+  readonly code = "history_incompatible"
+}
+
+// A text/tool projection can travel to another model. An encrypted checkpoint
+// has no portable equivalent: losing it would discard the summarized history.
+export function validateModelHistoryScope(
+  request: Pick<ModelRequest, "target" | "messages" | "continuationScope">,
+  wireApi: ModelWireApi,
+): void {
+  for (const message of request.messages) {
+    if (message.role !== "assistant") continue
+    for (const block of message.content) {
+      if (block.type !== "compaction") continue
+      if (
+        wireApi !== "openai_responses" ||
+        block.provider !== request.target.provider ||
+        block.model !== request.target.model ||
+        request.continuationScope === undefined ||
+        block.scope !== request.continuationScope
+      )
+        throw new ModelHistoryScopeError(
+          "Opaque compaction belongs to another provider, model, API or account; convert it through its owner before continuing.",
+        )
+    }
+    for (const native of message.native ?? []) {
+      if (native.value.type !== "compaction") continue
+      if (
+        wireApi !== "openai_responses" ||
+        native.wireApi !== wireApi ||
+        native.provider !== request.target.provider ||
+        native.model !== request.target.model ||
+        request.continuationScope === undefined ||
+        native.scope !== request.continuationScope
+      )
+        throw new ModelHistoryScopeError(
+          "Native compaction cannot be projected into portable history for another provider, model, API or account.",
+        )
+    }
+  }
+}
 
 // Unlike Codex's single Responses protocol, Yakitori must fence opaque replay
 // by API, credentials and model. Native values are data, never proof that the
