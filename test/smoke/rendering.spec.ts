@@ -319,7 +319,10 @@ test("Escape dismisses the model menu before interrupting the focused conversati
   const prompt = "Keep this response streaming until interrupted."
   await renderingApp.send(prompt)
   await renderingApp.append(prompt, "Output before interruption.")
-  const response = page.getByRole("region", { name: "Response", exact: true })
+  const response = page.getByRole("region", {
+    name: "Current response",
+    exact: true,
+  })
   await expect(response).toContainText("Output before interruption.")
   const composer = page.getByRole("textbox", { name: "Message the Mate" })
   await composer.fill("Keep this unsent draft.")
@@ -354,7 +357,9 @@ test("Escape dismisses the model menu before interrupting the focused conversati
     page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
   ).toHaveCount(0)
   await expect(composer).toHaveText("Keep this unsent draft.")
-  await expect(response).toContainText("Output before interruption.")
+  await expect(
+    page.getByRole("region", { name: "Response", exact: true }),
+  ).toContainText("Output before interruption.")
   await composer.fill("")
   await expect(
     page.getByRole("button", { name: "Resume", exact: true }),
