@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { ChatGPTPlanAccess } from "../../src/runtime/chatgpt-plan-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { captureModelsManager } from "../../src/runtime/models-manager.ts"
 import { createChatGPTModelConnections } from "../../src/server/chatgpt-model-connections.ts"
 import { createModelDirectory } from "../../src/server/model-directory.ts"
 
@@ -135,11 +136,14 @@ describe("ChatGPT model connections", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     failed = true
     await expect(provider.models.refresh({ force: true })).rejects.toThrow(
-      "ChatGPT model catalog failed",
+      "ChatGPT models are unavailable",
     )
     await expect(provider.models.listModels()).rejects.toThrow(
       "ChatGPT models are unavailable",
     )
+    await expect(
+      captureModelsManager(provider.models).listModels(),
+    ).rejects.toThrow("ChatGPT models are unavailable")
     failed = false
     await expect(provider.models.listModels()).resolves.toHaveLength(1)
   })
