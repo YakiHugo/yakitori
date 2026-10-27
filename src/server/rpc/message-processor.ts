@@ -1,3 +1,4 @@
+import type { ModelRoutePreviewer } from "../../protocol/model-routing.ts"
 import type { EngineRegistry } from "../engine-registry.ts"
 import type { ChatGPTConnections } from "../chatgpt-connections.ts"
 import { ConfigurationError } from "../config-errors.ts"
@@ -74,6 +75,7 @@ export type MessageProcessorOptions = Readonly<{
   eventHub?: SessionEventHub
   projectStore?: ProjectStore
   providers?: () => Promise<ApiListProvidersResponse>
+  previewModel?: ModelRoutePreviewer
   subscriptionUsage?: (
     provider: ApiSubscriptionProvider,
   ) => Promise<ApiReadSubscriptionResponse>
@@ -120,6 +122,7 @@ export class MessageProcessor {
   private readonly providerConfiguration: ProviderService | undefined
   private readonly mcp: McpService | undefined
   private readonly projectStore: ProjectStore | undefined
+  private readonly previewModel: ModelRoutePreviewer | undefined
   private readonly providers:
     | (() => Promise<ApiListProvidersResponse>)
     | undefined
@@ -151,6 +154,7 @@ export class MessageProcessor {
     this.chatgpt = options.chatgpt
     this.mcp = options.mcp
     this.projectStore = options.projectStore
+    this.previewModel = options.previewModel
     this.providers = options.providers
     this.subscriptionUsage = options.subscriptionUsage
     this.userConfig = options.userConfig
@@ -329,6 +333,7 @@ export class MessageProcessor {
       subscriptions: this.subscriptions,
       projectStore: this.projectStore,
       providers: this.providers,
+      previewModel: this.previewModel,
       subscriptionUsage: this.subscriptionUsage,
       userConfig: this.userConfig,
       availableProviders: this.availableProviders,

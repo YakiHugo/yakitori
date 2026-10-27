@@ -1,4 +1,8 @@
 import type {
+  ModelRoutePreviewRequest,
+  ModelRoutePreview,
+} from "./model-routing.ts"
+import type {
   ApiAdmitInputRequest,
   ApiAdmitInputResponse,
   ApiCancelInputRequest,
@@ -247,6 +251,7 @@ export type RpcMethodParams = Readonly<
       "project/move": ProjectMoveParams
       "project/delete": ProjectDeleteParams
       "provider/list": Readonly<Record<string, never>>
+      "model/preview": ModelRoutePreviewRequest
       "subscription/read": ApiReadSubscriptionRequest
       "config/read": ConfigReadParams
       "config/write": ConfigWriteParams
@@ -306,6 +311,7 @@ export type RpcMethodResponses = Readonly<
       "project/move": Readonly<Record<string, never>>
       "project/delete": Readonly<Record<string, never>>
       "provider/list": ApiListProvidersResponse
+      "model/preview": ModelRoutePreview
       "subscription/read": ApiReadSubscriptionResponse
       "config/read": ConfigurationSnapshot
       "config/write": ConfigurationSnapshot

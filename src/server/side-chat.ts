@@ -21,7 +21,7 @@ import type {
   AttachmentBytesInput,
   RolloutAssets,
 } from "../core/rollout-assets.ts"
-import { Session } from "../core/session.ts"
+import { Session, type SessionSnapshot } from "../core/session.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
@@ -48,6 +48,9 @@ export const sideChatInstructions =
 export type SideChatService = {
   create(input: SideChatCreate): Promise<SideChatSnapshot>
   read(sideChatId: string): SideChatSnapshot
+  routingContext(
+    sideChatId: string,
+  ): Pick<SessionSnapshot, "context" | "configuration"> | undefined
   send(input: SideChatSend): Promise<SideChatSnapshot>
   cancel(sideChatId: string, turnId: string): Promise<SideChatSnapshot>
   remove(sideChatId: string): Promise<void>
@@ -499,6 +502,15 @@ export function createSideChatService(options: {
     },
     read(id) {
       return snapshot(requireChat(id))
+    },
+    routingContext(id) {
+      const chat = chats.get(id)
+      if (chat === undefined || chat.closing) return undefined
+      const { context, configuration } = chat.thread.snapshot()
+      return {
+        context,
+        ...(configuration === undefined ? {} : { configuration }),
+      }
     },
     async send(input) {
       const chat = requireChat(input.sideChatId)

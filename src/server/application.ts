@@ -1,3 +1,5 @@
+import { ContextManager } from "../core/context-manager.ts"
+import { modelRoutingRequirements } from "../runtime/model-routing-requirements.ts"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -1119,7 +1121,15 @@ export async function createYakitoriApplication(
             return modelRouter.route(
               { ...selection, ...choice },
               {
-                image: context.requiresImages,
+                ...(context.requiresImages
+                  ? { inputModalities: ["image"] }
+                  : {}),
+                ...(context.imageDetail === undefined
+                  ? {}
+                  : { imageDetail: context.imageDetail }),
+                ...(context.contextWindowTokens === undefined
+                  ? {}
+                  : { contextWindowTokens: context.contextWindowTokens }),
                 ...(context.preferredAccount === undefined
                   ? {}
                   : { preferredAccount: context.preferredAccount }),
@@ -1476,6 +1486,61 @@ export async function createYakitoriApplication(
           handlers,
           projectStore: ownedProjectStore,
           providers,
+          previewModel: async ({ selection, requirements, sessionId }) => {
+            const live =
+              sessionId === undefined
+                ? undefined
+                : threadManager.getThread(sessionId)?.snapshot()
+            const side =
+              sessionId === undefined || live
+                ? undefined
+                : sideChats.routingContext(sessionId)
+            const stored =
+              sessionId === undefined || live || side
+                ? undefined
+                : await threadStore.readThread(sessionId)
+            const context =
+              live?.context ??
+              side?.context ??
+              (stored
+                ? ContextManager.fromStoredThread(stored).snapshot()
+                : undefined)
+            const configuration =
+              live?.configuration ??
+              side?.configuration ??
+              stored?.rollout
+                .flatMap(({ item }) =>
+                  item.type === "turn_context"
+                    ? [item.context.configuration]
+                    : [],
+                )
+                .at(-1)
+            const active = modelRoutingRequirements({
+              history: context?.history.map(({ item }) => item) ?? [],
+              ...(configuration === undefined ? {} : { configuration }),
+            })
+            return modelRouter.preview(selection, {
+              ...active,
+              ...requirements,
+              inputModalities: [
+                ...new Set([
+                  ...(active.inputModalities ?? []),
+                  ...(requirements?.inputModalities ?? []),
+                ]),
+              ],
+              ...(active.imageDetail === "original"
+                ? { imageDetail: "original" }
+                : {}),
+              ...(active.contextWindowTokens === undefined
+                ? {}
+                : {
+                    contextWindowTokens: Math.max(
+                      active.contextWindowTokens,
+                      requirements?.contextWindowTokens ?? 0,
+                    ),
+                  }),
+            })
+          },
           providerConfiguration,
           chatgpt: chatGPTConnections,
           subscriptionUsage,
@@ -1768,7 +1833,11 @@ function configureProviders(
       info: {
         id: "faux",
         wireApi: "faux",
-        capabilities: { remoteCompaction: false, nativePdf: false },
+        capabilities: {
+          remoteCompaction: false,
+          nativePdf: false,
+          tools: { supportsCustomTools: true, eagerTools: true },
+        },
       },
       stream: createFauxScenarioStream(input.fauxScenario ?? "text"),
     })

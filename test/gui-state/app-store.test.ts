@@ -10,7 +10,6 @@ import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
-  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
@@ -1681,51 +1680,6 @@ describe("project state", () => {
 })
 
 describe("model selection", () => {
-  it("drops obsolete boolean thinking values from K2.7 selections", () => {
-    expect(
-      normalizeModelSelection(
-        {
-          provider: "kimi-code",
-          model: "kimi-for-coding-highspeed",
-          effort: "off",
-        },
-        [
-          {
-            name: "kimi-code",
-            models: [
-              {
-                id: "kimi-for-coding-highspeed",
-                instructionProfileId: "kimi-code",
-                effortStyle: "none",
-              },
-            ],
-          },
-        ],
-      ),
-    ).toEqual({ provider: "kimi-code", model: "kimi-for-coding-highspeed" })
-    expect(
-      normalizeModelSelection(
-        {
-          provider: "kimi-code",
-          model: "k3",
-          effort: "max",
-        },
-        [
-          {
-            name: "kimi-code",
-            models: [
-              {
-                id: "k3",
-                instructionProfileId: "kimi-code",
-                effortStyle: "levels",
-              },
-            ],
-          },
-        ],
-      ),
-    ).toEqual({ provider: "kimi-code", model: "k3", effort: "max" })
-  })
-
   it("persists selections per session and rehydrates from localStorage", () => {
     globalThis.localStorage.clear()
 

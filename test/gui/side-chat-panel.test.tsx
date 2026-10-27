@@ -166,6 +166,109 @@ afterEach(() => {
 })
 
 describe("side chat panel", () => {
+  it("previews its own attachment requirements and blocks an unavailable effort combination", async () => {
+    useAppStore.setState({
+      modelSelections: { "main-session": { ...modelA, effort: "low" } },
+      providers: [
+        {
+          name: "test",
+          models: [
+            {
+              id: "a",
+              displayName: "Model A",
+              instructionProfileId: "default",
+              effortStyle: "levels",
+              efforts: ["low", "high"],
+              inputModalities: ["text", "image"],
+              imageDetailModes: ["high", "original"],
+            },
+          ],
+        },
+      ],
+    })
+    useWorkspaceStore.getState().updateChatDraft(
+      "chat-tab",
+      inputParts("Review", [
+        {
+          name: "diagram.png",
+          mediaType: "image/png",
+          sizeBytes: 20,
+          detail: "original",
+          file: {
+            rolloutId: "side-chat",
+            path: "attachments/staging/images/diagram.png",
+          },
+        },
+      ]),
+      [],
+    )
+    client.request.mockImplementation(async (method, params) => {
+      if (method === "sideChat/create") return snapshot()
+      if (method === "sideChat/send") return acceptedSnapshot(1)
+      if (method === "model/preview") {
+        const selection = params.selection as { effort?: string }
+        const available = selection.effort === "high"
+        return {
+          available,
+          efforts: ["high"],
+          speeds: [],
+          inputModalities: available ? ["text", "image"] : [],
+          imageDetailModes: available ? ["high", "original"] : [],
+          rejections: available
+            ? []
+            : [
+                {
+                  accountId: "vision",
+                  model: "a",
+                  code: "unsupported_effort",
+                  message: "The image connection requires high effort.",
+                },
+              ],
+        }
+      }
+      return {}
+    })
+    const user = userEvent.setup()
+    render(<Panel />)
+    await screen.findByText("The image connection requires high effort.")
+    const send = screen.getByRole("button", {
+      name: "Send side chat message",
+    }) as HTMLButtonElement
+    expect(send.disabled).toBe(true)
+    expect(requests("sideChat/send")).toEqual([])
+    await waitFor(() =>
+      expect(requests("model/preview")).toContainEqual({
+        selection: { ...modelA, effort: "low" },
+        requirements: {
+          inputModalities: ["image"],
+          imageDetail: "original",
+        },
+        sessionId: "side-chat",
+      }),
+    )
+    expect(
+      requests("model/preview").some(
+        (request) => request.sessionId === "main-session",
+      ),
+    ).toBe(false)
+    await user.click(
+      screen.getByRole("button", { name: "Select model and effort" }),
+    )
+    await user.click(screen.getByRole("button", { name: "high" }))
+    await waitFor(() => expect(send.disabled).toBe(false))
+    await user.click(send)
+    await waitFor(() =>
+      expect(requests("sideChat/send")[0]).toMatchObject({
+        sideChatId: "side-chat",
+        modelSelection: { ...modelA, effort: "high" },
+      }),
+    )
+    expect(useAppStore.getState().modelSelections["main-session"]).toEqual({
+      ...modelA,
+      effort: "low",
+    })
+  })
+
   it("keeps a streaming Mermaid response readable without attempting a diagram", async () => {
     client.request.mockImplementation(async (method) =>
       method === "sideChat/create"

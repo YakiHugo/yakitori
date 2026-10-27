@@ -2,6 +2,10 @@ import { expect, test, type WebSocketRoute } from "@playwright/test"
 import { createServer, type ViteDevServer } from "vite"
 import type { ChatGPTConnectionState } from "../../src/server/chatgpt-connections.ts"
 import { providerPresets } from "../../src/runtime/provider-presets.ts"
+import type {
+  ModelRoutePreview,
+  ModelRoutePreviewRequest,
+} from "../../src/protocol/model-routing.ts"
 
 let server: ViteDevServer
 let url: string
@@ -283,6 +287,36 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
             defaultModel: "qa-model",
           }
           break
+        case "model/preview": {
+          const selection = input.params
+            .selection as ModelRoutePreviewRequest["selection"]
+          const available =
+            selection.model === "qa-model" &&
+            state.accounts.some(
+              (account) =>
+                account.providerId === selection.provider &&
+                account.state === "connected",
+            )
+          result = {
+            available,
+            ...(available ? { target: selection } : {}),
+            efforts: [],
+            speeds: [],
+            inputModalities: ["text"],
+            imageDetailModes: [],
+            rejections: available
+              ? []
+              : [
+                  {
+                    accountId: selection.provider,
+                    model: selection.model,
+                    code: "model_unavailable",
+                    message: "This fixture account is not connected.",
+                  },
+                ],
+          } satisfies ModelRoutePreview
+          break
+        }
         case "provider/models/read":
           result = {
             provider: input.params.provider,
