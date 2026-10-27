@@ -10,6 +10,7 @@ export type ResolvedModel = Readonly<{
   compactionHash?: string
   defaultEffort?: string
   efforts?: readonly string[]
+  speeds?: readonly string[]
   multiAgentReasoningEffort?: string
   // Requested budget and API capability are distinct. The curated Claude
   // request default is Yakitori policy, not an Anthropic API default.
@@ -195,6 +196,7 @@ export function resolveModel(input: {
     return {
       ...input,
       ...("efforts" in entry ? { efforts: entry.efforts } : {}),
+      ...("speeds" in entry ? { speeds: entry.speeds } : {}),
       ...("defaultEffort" in entry
         ? { defaultEffort: entry.defaultEffort }
         : {}),

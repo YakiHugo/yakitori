@@ -1,15 +1,18 @@
+import {
+  type EffectiveModel,
+  effectiveModelCapacity,
+  effectiveModelDirectory,
+  mergeEffectiveModel,
+  validateEffectiveModel,
+} from "./effective-model.ts"
 import { DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS } from "./model.ts"
 import {
-  type CatalogModel,
   catalogModelCapacity,
   listCatalogModels,
-  type ModelCapacity,
   type ResolvedModel,
-  requireInstructionProfileId,
   resolveFallbackModel,
   resolveModel,
 } from "./model-catalog.ts"
-import { mergeModelEfforts } from "./model-effort.ts"
 import { isChatModel, NonChatModelError } from "./model-kind.ts"
 import { modelVisibleByDefault } from "./model-policy.ts"
 import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
@@ -30,21 +33,15 @@ export function createConfiguredModelsManager(input: {
   wireApi?: ProviderPreset["wireApi"]
   models: readonly ConfiguredModel[]
 }): ModelsManager {
+  const configuredModels = structuredClone(input.models)
   const catalog = new Map(
     (input.catalogProvider === undefined
       ? []
       : listCatalogModels(input.catalogProvider)
     ).map((model) => [model.model, model]),
   )
-  const models = new Map<
-    string,
-    {
-      resolved: ResolvedModel
-      listed: CatalogModel
-      capacity: ModelCapacity | undefined
-    }
-  >()
-  for (const configured of input.models) {
+  const models = new Map<string, EffectiveModel>()
+  for (const configured of configuredModels) {
     if (!isChatModel(configured)) continue
     if (configured.id.trim() === "" || models.has(configured.id)) {
       throw new Error(
@@ -64,23 +61,8 @@ export function createConfiguredModelsManager(input: {
           })),
       provider: input.provider,
       model: configured.id,
-      ...(configured.instructionProfileId === undefined
-        ? {}
-        : {
-            instructionProfileId: requireInstructionProfileId(
-              configured.instructionProfileId,
-            ),
-          }),
-      ...(configured.inputModalities === undefined
-        ? {}
-        : { inputModalities: [...configured.inputModalities] }),
-      ...(configured.imageDetailModes === undefined
-        ? {}
-        : { imageDetailModes: configured.imageDetailModes }),
-      ...(configured.maxOutputTokens === undefined
-        ? {}
-        : { maxOutputTokens: configured.maxOutputTokens }),
     }
+    resolved = mergeEffectiveModel(resolved, configured)
     if (input.wireApi !== undefined) {
       // Native schemas need both the wire protocol and the vendor's confirmed
       // implementation. grok-build Responses currently uses FunctionTool only.
@@ -120,64 +102,44 @@ export function createConfiguredModelsManager(input: {
         ),
       }
     }
-    resolved = mergeModelEfforts(resolved, configured, input.provider)
-    const { efforts } = resolved
-    const { provider: _, usedFallbackModelMetadata: __, ...metadata } = resolved
-    const listed: CatalogModel = {
-      ...metadata,
-      visible:
-        configured.visible ??
-        modelVisibleByDefault(
-          input.catalogProvider ?? input.provider,
-          configured.id,
-          configured.defaultVisible,
-        ),
-      ...(configured.displayName === undefined
-        ? known?.displayName === undefined
-          ? {}
-          : { displayName: known.displayName }
-        : { displayName: configured.displayName }),
-      ...(efforts === undefined
-        ? {}
-        : {
-            efforts: [...efforts],
-            effortStyle:
-              efforts.length === 0 ? ("none" as const) : ("levels" as const),
-          }),
-      ...(configured.contextWindowTokens === undefined
-        ? {}
-        : { contextWindowTokens: configured.contextWindowTokens }),
-      ...(configured.contextWindowScope === undefined
-        ? {}
-        : { contextWindowScope: configured.contextWindowScope }),
-      ...(configured.pricing === undefined
-        ? {}
-        : { pricing: configured.pricing }),
-      ...(configured.speeds !== undefined
-        ? { speeds: configured.speeds }
-        : known?.speeds === undefined ||
-            (input.wireApi !== undefined &&
-              input.wireApi !== "openai_responses")
-          ? {}
-          : { speeds: [...known.speeds] }),
+    if (
+      configured.speeds === undefined &&
+      input.wireApi !== undefined &&
+      input.wireApi !== "openai_responses"
+    ) {
+      const { speeds: _, ...withoutInheritedSpeeds } = resolved
+      resolved = withoutInheritedSpeeds
     }
-    const capacity =
-      configured.contextWindowTokens === undefined
-        ? known === undefined || input.catalogProvider === undefined
-          ? undefined
+    const {
+      applyPatchToolType: _,
+      speeds: knownSpeeds,
+      ...knownMetadata
+    } = known ?? {}
+    const effective = mergeEffectiveModel(
+      {
+        ...knownMetadata,
+        ...(knownSpeeds === undefined ||
+        (input.wireApi !== undefined && input.wireApi !== "openai_responses")
+          ? {}
+          : { speeds: knownSpeeds }),
+        ...resolved,
+        ...(known === undefined || input.catalogProvider === undefined
+          ? {}
           : catalogModelCapacity({
               provider: input.catalogProvider,
               model: configured.id,
-            })
-        : {
-            contextWindowTokens: configured.contextWindowTokens,
-            maxContextWindowTokens:
-              configured.maxContextWindowTokens ??
-              configured.contextWindowTokens,
-            effectiveContextWindowPercent: 100,
-            contextWindowScope: configured.contextWindowScope ?? "total",
-          }
-    models.set(configured.id, { resolved, listed, capacity })
+            })),
+        visible:
+          configured.visible ??
+          modelVisibleByDefault(
+            input.catalogProvider ?? input.provider,
+            configured.id,
+            configured.defaultVisible,
+          ),
+      },
+      configured,
+    )
+    models.set(configured.id, effective)
   }
 
   const requireModel = (selection: ModelSelectionInput) => {
@@ -186,7 +148,7 @@ export function createConfiguredModelsManager(input: {
         `Models manager for ${input.provider} cannot resolve provider ${selection.provider}.`,
       )
     }
-    const configured = input.models.find(
+    const configured = configuredModels.find(
       (model) => model.id.toLowerCase() === selection.model.toLowerCase(),
     )
     if (configured && !isChatModel(configured))
@@ -198,39 +160,24 @@ export function createConfiguredModelsManager(input: {
     return model
   }
 
-  return {
+  const manager: ModelsManager = {
     provider: input.provider,
+    capture: () => manager,
     async refresh() {},
     async listModels(options) {
       return [...models.values()]
-        .map((model) => model.listed)
+        .map(effectiveModelDirectory)
         .filter((model) => options?.includeHidden || model.visible !== false)
     },
     resolve(selection) {
-      return requireModel(selection).resolved
+      return requireModel(selection)
     },
     validate(selection) {
-      const model = requireModel(selection).listed
-      if (
-        selection.effort !== undefined &&
-        model.efforts !== undefined &&
-        !model.efforts.includes(selection.effort)
-      ) {
-        throw new Error(
-          `Reasoning effort ${selection.effort} is not supported by ${input.provider}/${selection.model}.`,
-        )
-      }
-      if (
-        selection.speed !== undefined &&
-        !model.speeds?.includes(selection.speed)
-      ) {
-        throw new Error(
-          `Speed ${selection.speed} is not supported by ${input.provider}/${selection.model}.`,
-        )
-      }
+      validateEffectiveModel(requireModel(selection), selection)
     },
     capacity(selection) {
-      return requireModel(selection).capacity
+      return effectiveModelCapacity(requireModel(selection))
     },
   }
+  return manager
 }

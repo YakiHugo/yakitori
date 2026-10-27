@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFileModelsCacheStore } from "../../src/runtime/models-cache-store.ts"
 import {
+  captureModelsManager,
   createDiscoveringModelsManager,
   type DiscoveredModel,
   type PersistedModelsCache,
@@ -31,6 +32,114 @@ describe("discovering models manager", () => {
     expect(listed?.defaultEffort).toBe(expectedDefault)
     expect(resolved.efforts).toEqual(efforts)
     expect(resolved.defaultEffort).toBe(expectedDefault)
+  })
+
+  it("publishes discovered image details, speeds and capacities consistently", async () => {
+    const manager = createDiscoveringModelsManager({
+      provider: "work",
+      catalogProvider: "openai",
+      identity: async () => "account",
+      discover: async () => [
+        {
+          id: "gpt-6-sol",
+          imageDetailModes: ["high"],
+          speeds: ["standard"],
+          contextWindowTokens: 64_000,
+          contextWindowScope: "input",
+          maxOutputTokens: 4_000,
+        },
+      ],
+    })
+    const [listed] = await manager.listModels()
+    const selection = { provider: "work", model: "gpt-6-sol" }
+    expect(listed).toMatchObject({
+      imageDetailModes: ["high"],
+      speeds: ["standard"],
+      contextWindowTokens: 64_000,
+      maxOutputTokens: 4_000,
+    })
+    expect(manager.resolve(selection).imageDetailModes).toEqual(["high"])
+    expect(manager.capacity(selection)).toEqual({
+      contextWindowTokens: 64_000,
+      maxContextWindowTokens: 64_000,
+      effectiveContextWindowPercent: 100,
+      contextWindowScope: "input",
+    })
+    expect(() => manager.validate({ ...selection, speed: "fast" })).toThrow(
+      "not supported",
+    )
+  })
+
+  it("captures the first refreshed catalog and preserves it while later refreshes publish", async () => {
+    let upstream: readonly DiscoveredModel[] = [
+      {
+        id: "coder",
+        contextWindowTokens: 64_000,
+        imageDetailModes: ["high"],
+        efforts: ["low"],
+        defaultEffort: "low",
+      },
+    ]
+    const manager = createDiscoveringModelsManager({
+      provider: "work",
+      identity: async () => "account",
+      discover: async () => upstream,
+    })
+    const active = captureModelsManager(manager)
+    await active.refresh()
+    upstream = [
+      {
+        id: "coder",
+        contextWindowTokens: 128_000,
+        imageDetailModes: ["original"],
+        efforts: ["high"],
+        defaultEffort: "high",
+      },
+    ]
+    await manager.refresh({ force: true })
+    await active.refresh({ force: true })
+    const selection = { provider: "work", model: "coder" }
+    expect(active.capacity(selection)?.contextWindowTokens).toBe(64_000)
+    expect(active.resolve(selection)).toMatchObject({
+      imageDetailModes: ["high"],
+      defaultEffort: "low",
+    })
+    expect((await active.listModels())[0]).toMatchObject({
+      contextWindowTokens: 64_000,
+      imageDetailModes: ["high"],
+      defaultEffort: "low",
+    })
+    expect(() => active.validate({ ...selection, effort: "high" })).toThrow(
+      "not supported",
+    )
+    expect(manager.capacity(selection)?.contextWindowTokens).toBe(128_000)
+    expect(manager.resolve(selection)).toMatchObject({
+      imageDetailModes: ["original"],
+      defaultEffort: "high",
+    })
+  })
+
+  it("does not reuse or publish account catalogs when credential identity is unknown", async () => {
+    const save = vi.fn()
+    const manager = createDiscoveringModelsManager({
+      provider: "work",
+      identity: async () => undefined,
+      discover: async () => [{ id: "unowned" }],
+      cacheStore: {
+        load: async () => ({
+          identity: undefined,
+          fetchedAt: Date.now(),
+          models: [{ id: "persisted-unowned" }],
+        }),
+        save,
+      },
+    })
+    expect(await manager.listModels()).toEqual([])
+    expect(save).not.toHaveBeenCalled()
+    expect(
+      manager.resolve({ provider: "work", model: "unowned" })
+        .usedFallbackModelMetadata,
+    ).toBe(true)
   })
 
   it("blocks only a cold cache on the first fetch", async () => {
