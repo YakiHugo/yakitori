@@ -4,6 +4,7 @@ import type {
   ModelTarget,
   ModelWireApi,
   StreamFn,
+  ToolWireProtocol,
 } from "./model.ts"
 import {
   createModelRequestStream,
@@ -13,10 +14,21 @@ import {
 import type { ModelsManager } from "./models-manager.ts"
 import { createStaticModelsManager } from "./models-manager.ts"
 
+export type ProviderToolCapabilities = Readonly<{
+  supportsCustomTools: boolean
+  nativeDeferredProtocol?: Extract<
+    ToolWireProtocol,
+    "anthropic_deferred" | "openai_deferred"
+  >
+  eagerTools?: boolean
+}>
+
 export type ModelProviderCapabilities = Readonly<{
   remoteCompaction: false | "codex_remote" | "responses_compact"
   // Opt in only for an endpoint whose native PDF support is known.
   nativePdf?: boolean
+  // Endpoint upper bound; model capabilities may only narrow it.
+  tools?: ProviderToolCapabilities
 }>
 
 export type ModelProviderInfo = Readonly<{
@@ -35,6 +47,7 @@ export type ModelClientSession = {
   readonly wireApi?: ModelWireApi
   readonly remoteCompaction?: ModelProviderCapabilities["remoteCompaction"]
   readonly nativePdf?: boolean
+  readonly toolCapabilities?: ProviderToolCapabilities
   readonly stream: StreamFn
   // Optional, non-generating request preparation. Caller accounts its usage.
   readonly warmup?: StreamFn
@@ -183,6 +196,9 @@ export function createModelProvider(
         wireApi: input.info.wireApi,
         remoteCompaction: input.info.capabilities.remoteCompaction,
         nativePdf: input.info.capabilities.nativePdf === true,
+        ...(input.info.capabilities.tools === undefined
+          ? {}
+          : { toolCapabilities: input.info.capabilities.tools }),
         stream(request) {
           requireTargetProvider(input.info.id, request.target)
           if (

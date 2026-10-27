@@ -1,17 +1,22 @@
 import type { ProviderModelSettings } from "../protocol/providers.ts"
 import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import {
-  type CatalogModel,
-  type ResolvedModel,
-  requireInstructionProfileId,
-  resolveFallbackModel,
-} from "./model-catalog.ts"
-import { mergeModelEfforts } from "./model-effort.ts"
+  type EffectiveModel,
+  effectiveModelCapacity,
+  effectiveModelDirectory,
+  mergeEffectiveModel,
+  validateEffectiveModel,
+} from "./effective-model.ts"
+import { type CatalogModel, resolveFallbackModel } from "./model-catalog.ts"
 import { NonChatModelError } from "./model-kind.ts"
-import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
+import {
+  captureModelsManager,
+  type ModelSelectionInput,
+  type ModelsManager,
+} from "./models-manager.ts"
 
-// Provider managers apply Yakitori's execution defaults. This final projection
-// applies user choices without changing the provider's catalog or its cache.
+// Settings project the same effective record for listing and execution. They
+// never mutate provider discovery data or the provider's persisted catalog.
 export function createModelSettingsManager(
   source: ModelsManager,
   settings: () => ProviderModelSettings,
@@ -20,163 +25,137 @@ export function createModelSettingsManager(
     Object.entries(settings()).find(
       ([key]) => key.toLowerCase() === id.toLowerCase(),
     )?.[1]
-  const resolve = (selection: ModelSelectionInput): ResolvedModel => {
-    let base: ResolvedModel
+  const effective = (
+    selection: ModelSelectionInput,
+    listed?: CatalogModel,
+    models = source,
+  ): EffectiveModel => {
+    const configured = configuration(selection.model)
+    let base: EffectiveModel
     try {
-      base = source.resolve(selection)
+      base = {
+        ...(listed === undefined
+          ? models.resolve(selection)
+          : { ...resolveFallbackModel(selection), ...listed }),
+        ...models.capacity(selection),
+      }
     } catch (error) {
-      if (
-        !(error instanceof ModelNotConfiguredError) ||
-        configuration(selection.model) === undefined
-      )
+      if (!(error instanceof ModelNotConfiguredError) || !configured)
         throw error
       base = resolveFallbackModel(selection)
     }
-    const configured = configuration(selection.model)
-    if (!configured) return base
-    const result: ResolvedModel = {
-      ...base,
-      ...(configured.instructionProfileId === undefined
+    return applySettings(base, configured)
+  }
+  const applySettings = (
+    base: EffectiveModel,
+    configured: ProviderModelSettings[string] | undefined,
+  ): EffectiveModel => {
+    // User request budgets may narrow an authoritative model limit; editing
+    // settings cannot grant a larger window or output limit to that backend.
+    const output = configured?.maxOutputTokens
+    const window = configured?.contextWindowTokens
+    const maximum = configured?.maxContextWindowTokens ?? window
+    const maxContextWindowTokens =
+      maximum === undefined
+        ? base.maxContextWindowTokens
+        : Math.min(
+            maximum,
+            base.maxContextWindowTokens ?? Number.POSITIVE_INFINITY,
+          )
+    const contextWindowTokens =
+      window === undefined && configured?.maxContextWindowTokens === undefined
+        ? undefined
+        : Math.min(
+            window ?? base.contextWindowTokens ?? Number.POSITIVE_INFINITY,
+            maxContextWindowTokens ?? Number.POSITIVE_INFINITY,
+          )
+    return mergeEffectiveModel(base, {
+      ...configured,
+      ...(output === undefined
         ? {}
         : {
-            instructionProfileId: requireInstructionProfileId(
-              configured.instructionProfileId,
+            maxOutputTokens: Math.min(
+              output,
+              base.maxOutputTokens ?? Number.POSITIVE_INFINITY,
             ),
           }),
-      ...(configured.inputModalities === undefined
+      ...(contextWindowTokens === undefined ||
+      !Number.isFinite(contextWindowTokens)
         ? {}
-        : { inputModalities: configured.inputModalities }),
-      ...(configured.imageDetailModes === undefined
+        : { contextWindowTokens, effectiveContextWindowPercent: 100 }),
+      ...(maxContextWindowTokens === undefined
         ? {}
-        : { imageDetailModes: configured.imageDetailModes }),
-      ...(configured.maxOutputTokens === undefined
-        ? {}
-        : { maxOutputTokens: configured.maxOutputTokens }),
-    }
-    return mergeModelEfforts(result, configured, selection.provider)
+        : { maxContextWindowTokens }),
+    })
   }
+
   return {
     provider: source.provider,
     refresh: (options) => source.refresh(options),
+    capture: () => {
+      const captured = structuredClone(settings())
+      return createModelSettingsManager(
+        captureModelsManager(source),
+        () => captured,
+      )
+    },
     ...(source.subscribe ? { subscribe: source.subscribe.bind(source) } : {}),
     ...(source.status ? { status: source.status.bind(source) } : {}),
     async listModels(options) {
-      const listed = await source.listModels({ includeHidden: true })
+      const snapshot = captureModelsManager(source)
+      const listed = await snapshot.listModels({ includeHidden: true })
       const byId = new Map(
         listed.map((model) => [model.model.toLowerCase(), model]),
       )
       for (const id of Object.keys(settings())) {
-        if (!byId.has(id.toLowerCase())) {
-          let resolved: ResolvedModel
-          try {
-            resolved = resolve({ provider: source.provider, model: id })
-          } catch (error) {
-            if (error instanceof NonChatModelError) continue
-            throw error
-          }
-          const {
-            provider: _,
-            usedFallbackModelMetadata: __,
-            ...metadata
-          } = resolved
-          byId.set(id.toLowerCase(), metadata)
+        if (byId.has(id.toLowerCase())) continue
+        try {
+          byId.set(
+            id.toLowerCase(),
+            effectiveModelDirectory(
+              effective(
+                { provider: source.provider, model: id },
+                undefined,
+                snapshot,
+              ),
+            ),
+          )
+        } catch (error) {
+          if (error instanceof NonChatModelError) continue
+          throw error
         }
       }
       return [...byId.values()]
-        .map((model): CatalogModel => {
-          const configured = configuration(model.model)
-          const {
-            instructionProfileId: _,
-            efforts: __,
-            defaultEffort: ___,
-            ...override
-          } = configured ?? {}
-          const result = {
-            ...mergeModelEfforts(model, configured ?? {}, source.provider),
-            ...override,
-            visible: configured?.visible ?? model.visible ?? true,
-          }
-          if (result.efforts !== undefined) {
-            result.effortStyle = result.efforts.length ? "levels" : "none"
-          }
-          return result
-        })
+        .map((model) => ({
+          ...effectiveModelDirectory(
+            effective(
+              { provider: source.provider, model: model.model },
+              model,
+              snapshot,
+            ),
+          ),
+          visible: configuration(model.model)?.visible ?? model.visible ?? true,
+        }))
         .filter((model) => options?.includeHidden || model.visible)
     },
-    resolve,
-    validate(selection) {
-      const configured = configuration(selection.model)
-      if (!configured) return source.validate(selection)
-      const { effort, speed, ...identity } = selection
-      try {
-        source.validate(identity)
-      } catch (error) {
-        if (!(error instanceof ModelNotConfiguredError)) throw error
-      }
-      const model = resolve(selection)
-      if (
-        effort !== undefined &&
-        model.efforts !== undefined &&
-        !model.efforts.includes(effort)
-      )
-        throw new Error(
-          `Reasoning effort ${effort} is not supported by ${selection.provider}/${selection.model}.`,
-        )
-      if (
-        speed !== undefined &&
-        configured.speeds !== undefined &&
-        !configured.speeds.includes(speed)
-      )
-        throw new Error(
-          `Speed ${speed} is not supported by ${selection.provider}/${selection.model}.`,
-        )
-      // Only overridden fields bypass the source's validation.
-      const inherited = {
-        ...identity,
-        ...(configured.efforts === undefined && effort !== undefined
-          ? { effort }
-          : {}),
-        ...(configured.speeds === undefined && speed !== undefined
-          ? { speed }
-          : {}),
-      }
-      try {
-        source.validate(inherited)
-      } catch (error) {
-        if (!(error instanceof ModelNotConfiguredError)) throw error
-      }
-    },
+    resolve: effective,
+    validate: (selection) =>
+      validateEffectiveModel(effective(selection), selection),
     capacity(selection) {
       const configured = configuration(selection.model)
-      let base: ReturnType<ModelsManager["capacity"]>
+      let capacity: ReturnType<ModelsManager["capacity"]>
       try {
-        base = source.capacity(selection)
+        capacity = source.capacity(selection)
       } catch (error) {
         if (!(error instanceof ModelNotConfiguredError) || !configured)
           throw error
       }
-      if (configured?.contextWindowTokens === undefined)
-        return base === undefined
-          ? undefined
-          : {
-              ...base,
-              ...(configured?.maxContextWindowTokens === undefined
-                ? {}
-                : {
-                    maxContextWindowTokens: configured.maxContextWindowTokens,
-                  }),
-              ...(configured?.contextWindowScope === undefined
-                ? {}
-                : { contextWindowScope: configured.contextWindowScope }),
-            }
-      return {
-        contextWindowTokens: configured.contextWindowTokens,
-        maxContextWindowTokens:
-          configured.maxContextWindowTokens ?? configured.contextWindowTokens,
-        effectiveContextWindowPercent: 100,
-        contextWindowScope:
-          configured.contextWindowScope ?? base?.contextWindowScope ?? "total",
-      }
+      return effectiveModelCapacity(
+        applySettings(
+          { ...resolveFallbackModel(selection), ...capacity },
+          configured,
+        ),
+      )
     },
   }
 }

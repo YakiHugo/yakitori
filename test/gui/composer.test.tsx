@@ -84,6 +84,133 @@ afterEach(() => {
 })
 
 describe("composer", () => {
+  it("keeps an explicit effort and blocks the unavailable image combination before admission", async () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      modelSelections: {
+        session_1: { provider: "vendor", model: "shared", effort: "low" },
+      },
+      providers: [
+        {
+          name: "vendor",
+          models: [
+            {
+              id: "shared",
+              instructionProfileId: "default",
+              efforts: ["low", "high"],
+              inputModalities: ["text", "image"],
+            },
+          ],
+        },
+      ],
+      promptDraft: inputParts("Review this", [draftImage("high")]),
+    })
+    fakeRef.current.respond = (method) => {
+      if (method === "model/preview")
+        return {
+          available: false,
+          efforts: ["high"],
+          speeds: [],
+          inputModalities: [],
+          imageDetailModes: [],
+          rejections: [
+            {
+              accountId: "vision",
+              model: "shared",
+              code: "unsupported_effort",
+              message: "This account does not support effort low.",
+            },
+          ],
+        }
+      throw new Error(`Unexpected RPC: ${method}`)
+    }
+    render(<Composer />)
+    await screen.findByText("This account does not support effort low.")
+    expect(
+      (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+    expect(useAppStore.getState().modelSelections.session_1?.effort).toBe("low")
+    expect(fakeRef.current.requestsFor("session/input/admit")).toEqual([])
+    expect(
+      fakeRef.current.requestsFor("model/preview")[0]?.params,
+    ).toMatchObject({
+      selection: { effort: "low" },
+      requirements: { inputModalities: ["image"] },
+    })
+  })
+
+  it("lets an unsupported original-detail draft switch to High before admission", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      modelSelections: {
+        session_1: { provider: "vendor", model: "shared" },
+      },
+      providers: [
+        {
+          name: "vendor",
+          models: [
+            {
+              id: "shared",
+              instructionProfileId: "default",
+              inputModalities: ["text", "image"],
+              imageDetailModes: ["high"],
+            },
+          ],
+        },
+      ],
+      promptDraft: inputParts("Review this", [draftImage("original")]),
+    })
+    fakeRef.current.respond = (method, params) => {
+      if (method === "model/preview") {
+        const { requirements } = params as {
+          requirements: { imageDetail?: string }
+        }
+        const available = requirements.imageDetail !== "original"
+        return {
+          available,
+          efforts: [],
+          speeds: [],
+          inputModalities: available ? ["text", "image"] : [],
+          imageDetailModes: available ? ["high"] : [],
+          rejections: available
+            ? []
+            : [
+                {
+                  message:
+                    "This account does not support original image detail.",
+                },
+              ],
+        }
+      }
+      throw new Error(`Unexpected RPC: ${method}`)
+    }
+    render(<Composer />)
+    await screen.findByText(
+      "This account does not support original image detail.",
+    )
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    const detail = screen.getByRole("button", {
+      name: "Use high detail for screenshot.png",
+    })
+    expect(detail).toHaveProperty("disabled", false)
+    await user.click(detail)
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
+    )
+    expect(useAppStore.getState().promptDraft?.attachments[0]).toMatchObject({
+      detail: "high",
+    })
+    expect(fakeRef.current.requestsFor("session/input/admit")).toEqual([])
+  })
+
   it("resumes an interrupted turn without submitting or clearing a user message", async () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
@@ -867,9 +994,9 @@ describe("composer", () => {
     expect(screen.getByText(/Original detail is unavailable/)).toBeDefined()
     expect(
       screen.getByRole("button", {
-        name: "Original detail unavailable for screenshot.png",
+        name: "Use high detail for screenshot.png",
       }),
-    ).toHaveProperty("disabled", true)
+    ).toHaveProperty("disabled", false)
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(

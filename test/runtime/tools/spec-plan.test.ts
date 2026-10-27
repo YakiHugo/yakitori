@@ -333,6 +333,30 @@ describe("Step tool planning", () => {
     await client.close()
   })
 
+  it("lets Turn capabilities restrict the Responses tool defaults", async () => {
+    const registry = createToolRegistry()
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
+    const step = captureStepContext({
+      registry,
+      configuration: configuration(
+        target("openai", "gpt-5", "codex"),
+        registry.trustedToolNames(),
+      ),
+      wireApi: "openai_responses",
+      toolCapabilities: { supportsCustomTools: false },
+    })
+
+    expect(step.toolWireProtocol).toBe("meta_dispatch")
+    expect(step.toolRouter.modelDefinitions.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(["tool_search", "use_tool"]),
+    )
+    expect(
+      step.toolRouter.modelDefinitions.every((tool) => tool.kind !== "custom"),
+    ).toBe(true)
+    await step.toolRouter.release()
+    await registry.dispose()
+  })
+
   it("keeps image tools disabled for text-only Chat models", async () => {
     const models = createConfiguredModelsManager({
       provider: "text-only",

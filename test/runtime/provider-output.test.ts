@@ -1,4 +1,5 @@
 import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
+import { persistModelMessages } from "../support/persist-model-messages.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 import { describe, expect, it } from "vitest"
@@ -10,7 +11,10 @@ import {
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
-import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
+import {
+  createOpenAIProvider,
+  toOpenAIInput,
+} from "../../src/runtime/openai-provider.ts"
 
 describe("provider output completeness", () => {
   it("keeps reasoning summary parts distinct through streaming and completion", async () => {
@@ -326,13 +330,35 @@ describe("provider output completeness", () => {
     )
     const terminal = events.at(-1)
     if (terminal?.type !== "response") throw new Error("Missing response")
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
+    expect(history[0]).toMatchObject({
+      native: [
+        {
+          value: {
+            type: "thinking",
+            thinking: "Inspect files",
+            signature: "complete_signature",
+          },
+        },
+      ],
+    })
     expect(
       toAnthropicMessages(
-        [{ role: "assistant", content: terminal.response.content }],
+        history,
         true,
         undefined,
         "anthropic",
         "backend_1",
+        new Map(),
+        "test-model",
       ),
     ).toEqual([
       {
@@ -376,18 +402,76 @@ describe("provider output completeness", () => {
             ]),
         ...anthropicFinish("max_tokens"),
       ]),
-      request("anthropic"),
+      { ...request("anthropic"), continuationScope: "backend_1" },
     )
     const terminal = events.at(-1)
     if (terminal?.type !== "response") throw new Error("Missing response")
     expect(terminal.response.content).toEqual([
       { type: "reasoning", text: "Partial reasoning" },
     ])
+    expect(terminal.response.native).toEqual([])
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
     expect(
-      toAnthropicMessages([
-        { role: "assistant", content: terminal.response.content },
-      ]),
+      toAnthropicMessages(
+        history,
+        true,
+        undefined,
+        "anthropic",
+        "backend_1",
+        new Map(),
+        "test-model",
+      ),
     ).toEqual([])
+  })
+
+  it("drops unsigned native thinking while retaining valid native text during replay", async () => {
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Visible" },
+          { type: "reasoning", text: "Partial reasoning" },
+        ],
+        native: [
+          {
+            provider: "anthropic",
+            model: "test-model",
+            wireApi: "anthropic_messages",
+            scope: "backend_1",
+            value: { type: "text", text: "Visible" },
+          },
+          {
+            provider: "anthropic",
+            model: "test-model",
+            wireApi: "anthropic_messages",
+            scope: "backend_1",
+            value: { type: "thinking", thinking: "Partial reasoning" },
+          },
+        ],
+      },
+    ])
+
+    expect(
+      toAnthropicMessages(
+        history,
+        true,
+        undefined,
+        "anthropic",
+        "backend_1",
+        new Map(),
+        "test-model",
+      ),
+    ).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Visible" }] },
+    ])
   })
 
   it("rejects an Anthropic signature delta for a non-thinking block", async () => {
@@ -652,7 +736,8 @@ describe("provider output completeness", () => {
   it.each([
     { status: "incomplete", arguments: '{"path":"b.txt"}' },
     { status: "completed", arguments: '{"path":"b.txt"' },
-  ])("does not commit OpenAI calls without complete items and complete JSON (%j)", async (tail) => {
+    { status: "completed", arguments: "1e400" },
+  ])("does not commit OpenAI calls without complete items and complete JSON values (%j)", async (tail) => {
     const item = {
       type: "function_call",
       id: "item_tail",
@@ -665,10 +750,11 @@ describe("provider output completeness", () => {
         { type: "response.output_item.done", output_index: 0, item },
         openaiFinish("max_output_tokens", [item]),
       ]),
-      request("openai"),
+      { ...request("openai"), continuationScope: "account" },
     )
     expect(events.filter((event) => event.type === "output_item")).toEqual([])
-    expect(events.at(-1)).toMatchObject({
+    const terminal = events.at(-1)
+    expect(terminal).toMatchObject({
       type: "response",
       response: {
         stopReason: ModelStopReason.Length,
@@ -676,6 +762,27 @@ describe("provider output completeness", () => {
         content: [],
       },
     })
+    if (terminal?.type !== "response") throw new Error("Missing response")
+    expect(terminal.response.native).toEqual([])
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
+    expect(
+      toOpenAIInput(
+        history,
+        true,
+        "openai",
+        "account",
+        new Map(),
+        "test-model",
+      ),
+    ).toEqual([])
   })
 
   it("keeps custom OpenAI calls pending until an output item completion", async () => {
@@ -694,13 +801,130 @@ describe("provider output completeness", () => {
         },
         openaiFinish("max_output_tokens"),
       ]),
-      request("openai"),
+      { ...request("openai"), continuationScope: "account" },
     )
     expect(events.filter((event) => event.type === "output_item")).toEqual([])
-    expect(events.at(-1)).toMatchObject({
+    const terminal = events.at(-1)
+    expect(terminal).toMatchObject({
       type: "response",
       response: { incompleteToolCalls: true, content: [] },
     })
+    if (terminal?.type !== "response") throw new Error("Missing response")
+    expect(terminal.response.native).toEqual([])
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
+    expect(
+      toOpenAIInput(
+        history,
+        true,
+        "openai",
+        "account",
+        new Map(),
+        "test-model",
+      ),
+    ).toEqual([])
+  })
+
+  it("does not replay an OpenAI custom call with non-string input", async () => {
+    const item = {
+      type: "custom_tool_call",
+      id: "item_tail",
+      call_id: "call_tail",
+      name: "apply_patch",
+      input: { patch: "*** Begin Patch" },
+      status: "completed",
+    }
+    const events = await collect(
+      openaiStream([
+        { type: "response.output_item.done", output_index: 0, item },
+        openaiFinish("max_output_tokens", [item]),
+      ]),
+      { ...request("openai"), continuationScope: "account" },
+    )
+    expect(events.filter((event) => event.type === "output_item")).toEqual([])
+    const terminal = events.at(-1)
+    expect(terminal).toMatchObject({
+      type: "response",
+      response: { incompleteToolCalls: true, content: [] },
+    })
+    if (terminal?.type !== "response") throw new Error("Missing response")
+    expect(terminal.response.native).toEqual([])
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
+    expect(
+      toOpenAIInput(
+        history,
+        true,
+        "openai",
+        "account",
+        new Map(),
+        "test-model",
+      ),
+    ).toEqual([])
+  })
+
+  it("replays a custom OpenAI call completed by its output item without a status", async () => {
+    const item = {
+      type: "custom_tool_call",
+      id: "item_done",
+      call_id: "call_done",
+      name: "apply_patch",
+      input: "*** Begin Patch",
+    }
+    const events = await collect(
+      openaiStream([
+        { type: "response.output_item.done", output_index: 0, item },
+        openaiFinish("max_output_tokens"),
+      ]),
+      { ...request("openai"), continuationScope: "account" },
+    )
+    expect(events.find((event) => event.type === "output_item")).toMatchObject({
+      content: [
+        {
+          type: "tool_call",
+          id: "call_done",
+          name: "apply_patch",
+          input: "*** Begin Patch",
+          toolKind: "custom",
+        },
+      ],
+      native: [{ value: item }],
+    })
+    const terminal = events.at(-1)
+    if (terminal?.type !== "response") throw new Error("Missing response")
+    const history = await persistModelMessages([
+      {
+        role: "assistant",
+        content: terminal.response.content,
+        ...(terminal.response.native === undefined
+          ? {}
+          : { native: terminal.response.native }),
+      },
+    ])
+    expect(
+      toOpenAIInput(
+        history,
+        true,
+        "openai",
+        "account",
+        new Map(),
+        "test-model",
+      ),
+    ).toEqual([item])
   })
 
   it("merges OpenAI deltas and authoritative terminal text once", async () => {

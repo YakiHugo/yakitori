@@ -184,6 +184,9 @@ describe("session configuration", () => {
     const base = createStaticModelsManager("faux")
     const models = {
       ...base,
+      capture() {
+        return this
+      },
       resolve(selection: Parameters<typeof base.resolve>[0]) {
         return {
           ...base.resolve(selection),

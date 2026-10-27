@@ -10,6 +10,7 @@ import {
   discardDraftAttachments,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
+import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import {
   attachmentInputDraft,
@@ -19,7 +20,6 @@ import {
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
-  normalizeModelSelection,
   resolveEffectiveModel,
   useAppStore,
   useExecutionView,
@@ -138,26 +138,47 @@ export function Composer() {
     },
     [getFileIndex],
   )
-  const effectiveModel = normalizeModelSelection(
-    resolveEffectiveModel({
-      sessionCurrent,
-      userPreference,
-      defaultProvider,
-      defaultModel,
-    }),
-    providers,
+  const effectiveModel = resolveEffectiveModel({
+    sessionCurrent,
+    userPreference,
+    defaultProvider,
+    defaultModel,
+  })
+  const draftAttachments = inputContentAttachments(inputContent(draft))
+  const requiresImages = draftAttachments.some((attachment) =>
+    attachment.mediaType.startsWith("image/"),
   )
+  const requiresOriginal = draftAttachments.some(
+    (attachment) => "detail" in attachment && attachment.detail === "original",
+  )
+  const route = useModelRoutePreview(
+    effectiveModel,
+    {
+      ...(requiresImages ? { inputModalities: ["image"] } : {}),
+      ...(requiresOriginal ? { imageDetail: "original" } : {}),
+    },
+    sessionId,
+  )
+  const routeError =
+    route?.preview?.available === false
+      ? (route.preview.rejections[0]?.message ??
+        "No connected account can run this model selection.")
+      : undefined
   const modelEntry = providers
     .find((provider) => provider.name === effectiveModel?.provider)
     ?.models.find((model) => model.id === effectiveModel?.model)
   const supportsImages =
     modelEntry === undefined
       ? true
-      : (modelEntry.inputModalities?.includes("image") ?? false)
+      : ((
+          route?.preview?.inputModalities ?? modelEntry.inputModalities
+        )?.includes("image") ?? false)
   const supportsOriginal =
     modelEntry === undefined
       ? true
-      : (modelEntry.imageDetailModes?.includes("original") ?? false)
+      : ((
+          route?.preview?.imageDetailModes ?? modelEntry.imageDetailModes
+        )?.includes("original") ?? false)
   const contextTokens = view.contextTokens
   // The snapshot pairs tokens with the window of the model that produced
   // them. Records written before capacity was persisted fall back to the
@@ -432,12 +453,13 @@ export function Composer() {
             usedTokens={contextTokens?.activeContextTokens}
             capacity={contextCapacity}
           />
-          <ModelSelector />
+          <ModelSelector routePreview={{ value: route?.preview }} />
         </>
       }
       importAttachments={importAttachments}
       readingAttachments={readingAttachments}
-      attachmentError={attachmentError}
+      submissionBlocked={routeError !== undefined}
+      attachmentError={attachmentError ?? routeError}
       onAttachmentError={setAttachmentError}
       searchFiles={fileSearchCwd ? searchFiles : undefined}
       fileSearchRoot={fileSearchCwd}

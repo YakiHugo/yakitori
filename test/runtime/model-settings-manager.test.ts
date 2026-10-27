@@ -71,6 +71,83 @@ it("keeps provider data, app visibility, and user overrides independent through 
   expect(writes.flat().some((model) => model.id === "manual-coder")).toBe(false)
 })
 
+it("uses the same overridden profile and image details in listing and execution", async () => {
+  const manager = createModelSettingsManager(
+    createConfiguredModelsManager({
+      provider: "work",
+      catalogProvider: "openai",
+      models: [{ id: "gpt-6-sol" }],
+    }),
+    () => ({
+      "gpt-6-sol": {
+        instructionProfileId: "kimi-code",
+        imageDetailModes: ["high"],
+        maxOutputTokens: 1024,
+      },
+    }),
+  )
+  const selection = { provider: "work", model: "gpt-6-sol" }
+  expect(manager.resolve(selection)).toMatchObject({
+    instructionProfileId: "kimi-code",
+    imageDetailModes: ["high"],
+    maxOutputTokens: 1024,
+  })
+  expect((await manager.listModels())[0]).toMatchObject({
+    instructionProfileId: "kimi-code",
+    imageDetailModes: ["high"],
+    maxOutputTokens: 1024,
+  })
+})
+
+it("copies settings when capturing a Turn even when callers mutate the same object", async () => {
+  const settings = {
+    coder: { efforts: ["low"], defaultEffort: "low" },
+  }
+  const manager = createModelSettingsManager(
+    createConfiguredModelsManager({
+      provider: "work",
+      models: [{ id: "coder" }],
+    }),
+    () => settings,
+  )
+  const active = manager.capture?.()
+  settings.coder = { efforts: ["high"], defaultEffort: "high" }
+  expect(
+    active?.resolve({ provider: "work", model: "coder" }).defaultEffort,
+  ).toBe("low")
+  expect((await active?.listModels())?.[0]?.defaultEffort).toBe("low")
+  expect(
+    manager.resolve({ provider: "work", model: "coder" }).defaultEffort,
+  ).toBe("high")
+})
+
+it("keeps listed capabilities and capacity in one catalog publication during refresh", async () => {
+  let upstream: readonly DiscoveredModel[] = [
+    { id: "coder", efforts: ["low"], contextWindowTokens: 64_000 },
+  ]
+  const source = createDiscoveringModelsManager({
+    provider: "work",
+    identity: async () => "account",
+    discover: async () => upstream,
+  })
+  const manager = createModelSettingsManager(source, () => ({}))
+  await source.refresh()
+  const listing = manager.listModels()
+  upstream = [{ id: "coder", efforts: ["high"], contextWindowTokens: 128_000 }]
+  await source.refresh({ force: true })
+
+  expect((await listing)[0]).toMatchObject({
+    efforts: ["low"],
+    contextWindowTokens: 64_000,
+    maxContextWindowTokens: 64_000,
+  })
+  expect((await manager.listModels())[0]).toMatchObject({
+    efforts: ["high"],
+    contextWindowTokens: 128_000,
+    maxContextWindowTokens: 128_000,
+  })
+})
+
 it.each([
   { efforts: [] },
   { efforts: ["low"] },
@@ -139,6 +216,61 @@ it("keeps an explicit default when the source has no known effort list", async (
     manager.resolve({ provider: "work", model: "coder" }).defaultEffort,
   ).toBe("custom")
   expect((await manager.listModels())[0]?.defaultEffort).toBe("custom")
+})
+
+it("limits user budgets to the source model's known hard limits", async () => {
+  const source = createConfiguredModelsManager({
+    provider: "work",
+    models: [
+      {
+        id: "coder",
+        contextWindowTokens: 64_000,
+        maxContextWindowTokens: 128_000,
+        maxOutputTokens: 8_000,
+      },
+    ],
+  })
+  const manager = createModelSettingsManager(source, () => ({
+    coder: {
+      contextWindowTokens: 256_000,
+      maxContextWindowTokens: 512_000,
+      maxOutputTokens: 16_000,
+    },
+  }))
+  const selection = { provider: "work", model: "coder" }
+  expect(manager.resolve(selection).maxOutputTokens).toBe(8_000)
+  expect(manager.capacity(selection)).toMatchObject({
+    contextWindowTokens: 128_000,
+    maxContextWindowTokens: 128_000,
+  })
+  expect((await manager.listModels())[0]).toMatchObject({
+    contextWindowTokens: 128_000,
+    maxContextWindowTokens: 128_000,
+    maxOutputTokens: 8_000,
+  })
+  expect(source.capacity(selection)).toMatchObject({
+    contextWindowTokens: 64_000,
+    maxContextWindowTokens: 128_000,
+  })
+})
+
+it("narrows the current window when a user maximum is below the source default", async () => {
+  const manager = createModelSettingsManager(
+    createConfiguredModelsManager({
+      provider: "work",
+      models: [{ id: "coder", contextWindowTokens: 64_000 }],
+    }),
+    () => ({ coder: { maxContextWindowTokens: 32_000 } }),
+  )
+  const selection = { provider: "work", model: "coder" }
+  expect(manager.capacity(selection)).toMatchObject({
+    contextWindowTokens: 32_000,
+    maxContextWindowTokens: 32_000,
+  })
+  expect((await manager.listModels())[0]).toMatchObject({
+    contextWindowTokens: 32_000,
+    maxContextWindowTokens: 32_000,
+  })
 })
 
 it("captures user model settings for active Turns while applying new settings to later Turns", async () => {

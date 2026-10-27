@@ -1,3 +1,4 @@
+import type { ModelRoutePreviewer } from "../protocol/model-routing.ts"
 import type { EngineRegistry } from "./engine-registry.ts"
 import { readFile, realpath } from "node:fs/promises"
 import {
@@ -47,6 +48,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectStore?: ProjectStore
   readonly providers?: () => Promise<ApiListProvidersResponse>
+  readonly previewModel?: ModelRoutePreviewer
   readonly subscriptionUsage?: (
     provider: ApiSubscriptionProvider,
   ) => Promise<ApiReadSubscriptionResponse>
@@ -145,6 +147,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       reportOperationalFailure: reporter,
       ...(projectStore === undefined ? {} : { projectStore }),
       ...(providers === undefined ? {} : { providers }),
+      ...(options.previewModel === undefined
+        ? {}
+        : { previewModel: options.previewModel }),
       ...(subscriptionUsage === undefined ? {} : { subscriptionUsage }),
       ...(userConfig === undefined ? {} : { userConfig }),
       ...(availableProviders === undefined ? {} : { availableProviders }),

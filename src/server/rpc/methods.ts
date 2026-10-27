@@ -1,3 +1,4 @@
+import type { ModelRoutePreviewer } from "../../protocol/model-routing.ts"
 import type {
   InitializeParams,
   ProjectChangedNotification,
@@ -145,6 +146,7 @@ export type RpcMethodContext = Readonly<{
   subscriptions: SessionSubscriptions
   projectStore: ProjectStore | undefined
   providers: (() => Promise<ApiListProvidersResponse>) | undefined
+  previewModel?: ModelRoutePreviewer | undefined
   subscriptionUsage:
     | ((
         provider: ApiSubscriptionProvider,
@@ -1136,6 +1138,95 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     async invoke(_params, context) {
       if (context.providers === undefined) throw unavailable("provider/list")
       return { result: await context.providers() }
+    },
+  },
+  {
+    method: "model/preview",
+    scope: () => ({ kind: "globalSharedRead", name: "config" }),
+    async invoke(params, context) {
+      if (context.previewModel === undefined) throw unavailable("model/preview")
+      const record = requireParamsRecord(params, "model/preview")
+      if (
+        record.sessionId !== undefined &&
+        (typeof record.sessionId !== "string" || !record.sessionId.trim())
+      )
+        throw invalidParams("sessionId must be a non-empty string.")
+      const selection = requireParamsRecord(record.selection, "selection")
+      if (
+        typeof selection.provider !== "string" ||
+        !selection.provider.trim() ||
+        typeof selection.model !== "string" ||
+        !selection.model.trim()
+      )
+        throw invalidParams("selection must name a provider and model.")
+      for (const field of ["effort", "speed"] as const)
+        if (
+          selection[field] !== undefined &&
+          (typeof selection[field] !== "string" || !selection[field].trim())
+        )
+          throw invalidParams(`${field} must be a non-empty string.`)
+      const requirements =
+        record.requirements === undefined
+          ? {}
+          : requireParamsRecord(record.requirements, "requirements")
+      if (
+        requirements.inputModalities !== undefined &&
+        (!Array.isArray(requirements.inputModalities) ||
+          requirements.inputModalities.some(
+            (value) => !["text", "image", "video"].includes(value),
+          ))
+      )
+        throw invalidParams(
+          "inputModalities must contain text, image or video.",
+        )
+      if (
+        requirements.imageDetail !== undefined &&
+        requirements.imageDetail !== "high" &&
+        requirements.imageDetail !== "original"
+      )
+        throw invalidParams("imageDetail must be high or original.")
+      if (
+        requirements.contextWindowTokens !== undefined &&
+        (typeof requirements.contextWindowTokens !== "number" ||
+          !Number.isSafeInteger(requirements.contextWindowTokens) ||
+          requirements.contextWindowTokens <= 0)
+      )
+        throw invalidParams("contextWindowTokens must be a positive integer.")
+      return {
+        result: await context.previewModel({
+          ...(typeof record.sessionId === "string"
+            ? { sessionId: record.sessionId }
+            : {}),
+          selection: {
+            provider: selection.provider,
+            model: selection.model,
+            ...(typeof selection.effort === "string"
+              ? { effort: selection.effort }
+              : {}),
+            ...(typeof selection.speed === "string"
+              ? { speed: selection.speed }
+              : {}),
+          },
+          requirements: {
+            ...(Array.isArray(requirements.inputModalities)
+              ? {
+                  inputModalities: requirements.inputModalities as (
+                    | "text"
+                    | "image"
+                    | "video"
+                  )[],
+                }
+              : {}),
+            ...(requirements.imageDetail === "high" ||
+            requirements.imageDetail === "original"
+              ? { imageDetail: requirements.imageDetail }
+              : {}),
+            ...(typeof requirements.contextWindowTokens === "number"
+              ? { contextWindowTokens: requirements.contextWindowTokens }
+              : {}),
+          },
+        }),
+      }
     },
   },
   {

@@ -510,7 +510,7 @@ describe("Kimi Responses profile", () => {
           body: { tool_choice: "required" },
         },
       },
-      message: "tool_choice auto only",
+      message: "harness-owned tool_choice",
     },
     {
       name: "sequential tool constraint",

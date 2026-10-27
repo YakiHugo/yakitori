@@ -1,6 +1,7 @@
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
+import type { ProviderToolCapabilities } from "../model-provider.ts"
 import {
   ANTHROPIC_REQUEST_MAX_BYTES,
   GEMINI_INLINE_REQUEST_MAX_BYTES,
@@ -21,15 +22,6 @@ const FILE_EDITING_TOOLS = new Set(["apply_patch", "edit_file", "write_file"])
 // allowance as a local safety policy rather than assume access to the 1M tier.
 const UNVERIFIED_ANTHROPIC_MEDIA_SAFETY_UNITS = 100
 
-type ProviderToolCapabilities = Readonly<{
-  supportsCustomTools: boolean
-  nativeDeferredProtocol?: Extract<
-    ToolWireProtocol,
-    "anthropic_deferred" | "openai_deferred"
-  >
-  eagerTools?: boolean
-}>
-
 export type StepContext = Readonly<{
   configuration: ResolvedStepConfiguration
   target: ModelTarget
@@ -49,6 +41,7 @@ export function captureStepContext(
     configuration: ResolvedStepConfiguration
     wireApi?: ModelWireApi
     nativePdf?: boolean
+    toolCapabilities?: ProviderToolCapabilities
   }>,
 ): StepContext {
   const target = Object.freeze({ ...input.configuration.target })
@@ -64,7 +57,9 @@ export function captureStepContext(
   if (model.provider !== target.provider || model.model !== target.model) {
     throw new Error("Step model metadata does not match its concrete target.")
   }
-  const provider = providerToolCapabilities(target.provider, input.wireApi)
+  const provider =
+    input.toolCapabilities ??
+    providerToolCapabilities(target.provider, input.wireApi)
   const toolWireProtocol =
     model.supportsNativeToolSearch &&
     provider.nativeDeferredProtocol !== undefined
@@ -206,8 +201,8 @@ function providerToolCapabilities(
   wireApi?: ModelWireApi,
 ): ProviderToolCapabilities {
   // A connection's editable ID carries no protocol meaning. Production Turns
-  // supply the protocol captured by their transport owner; direct stream
-  // callers retain the existing built-in provider defaults.
+  // supply captured transport capabilities; direct stream callers retain the
+  // existing built-in provider defaults.
   if (wireApi === "openai_responses")
     return {
       supportsCustomTools: true,

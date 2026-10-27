@@ -330,7 +330,7 @@ it("does not carry a connection's successful status to a changed endpoint from t
   expect((await f.service.read()).providers[0]?.connection).toBeUndefined()
 })
 
-it("refreshes with current discovery semantics after a service binding change", async () => {
+it("keeps custom endpoint discovery generic after a service binding change", async () => {
   const f = await fixture()
   await f.service.write({
     id: "personal",
@@ -349,7 +349,7 @@ it("refreshes with current discovery semantics after a service binding change", 
   await f.service.refreshModels("personal")
   expect(f.requests.at(-1)).toEqual({
     key: "Bearer same-key",
-    path: "/v1/models?sub_type=chat",
+    path: "/v1/models",
   })
   const restarted = f.create()
   await restarted.service.reload()

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  createConfiguredModelsManager,
   createModelProvider,
   createProviderContinuationScope,
   createProviderRegistry,
@@ -7,6 +8,10 @@ import {
   type ModelRequest,
   type ModelStreamEvent,
 } from "../../src/runtime/index.ts"
+import {
+  createDiscoveringModelsManager,
+  type DiscoveredModel,
+} from "../../src/runtime/models-manager.ts"
 
 describe("provider registry", () => {
   it("applies provider replacements to future Turns while retaining active transports", async () => {
@@ -55,6 +60,156 @@ describe("provider registry", () => {
     await replacing
     await withdrawing
     await registry.close()
+  })
+
+  it("keeps active Turn facts and request defaults while discovery updates later Turns", async () => {
+    let upstream: readonly DiscoveredModel[] = [
+      {
+        id: "claude-sonnet-4-6",
+        contextWindowTokens: 64_000,
+        maxOutputTokens: 4_000,
+        efforts: ["low"],
+        defaultEffort: "low",
+        imageDetailModes: ["high"],
+      },
+    ]
+    const models = createDiscoveringModelsManager({
+      provider: "work",
+      catalogProvider: "anthropic",
+      identity: async () => "account",
+      discover: async () => upstream,
+    })
+    const seen: {
+      effort: string | undefined
+      defaultEffort: string | undefined
+      output: number | undefined
+    }[] = []
+    const registry = createProviderRegistry({
+      work: createModelProvider({
+        info: {
+          id: "work",
+          wireApi: "anthropic_messages",
+          capabilities: { remoteCompaction: false },
+        },
+        models,
+        stream: async function* (input) {
+          seen.push({
+            effort: input.target.effort,
+            defaultEffort: input.reasoning?.defaultEffort,
+            output: input.maxOutputTokens,
+          })
+          yield {
+            type: "response",
+            response: { stopReason: "end_turn", content: [] },
+          }
+        },
+      }),
+    })
+    const client = registry.createClient()
+    try {
+      const active = client.startTurn("work")
+      await active.models.refresh()
+      for await (const event of active.stream(
+        request("work", "claude-sonnet-4-6"),
+      ))
+        void event
+      upstream = [
+        {
+          id: "claude-sonnet-4-6",
+          contextWindowTokens: 128_000,
+          maxOutputTokens: 8_000,
+          efforts: ["high"],
+          defaultEffort: "high",
+          imageDetailModes: ["original"],
+        },
+      ]
+      await models.refresh({ force: true })
+      const next = client.startTurn("work")
+      await next.models.refresh()
+      const selection = { provider: "work", model: "claude-sonnet-4-6" }
+      expect(active.models.capacity(selection)?.contextWindowTokens).toBe(
+        64_000,
+      )
+      expect(next.models.capacity(selection)?.contextWindowTokens).toBe(128_000)
+      expect(active.models.resolve(selection).imageDetailModes).toEqual([
+        "high",
+      ])
+      expect(next.models.resolve(selection).imageDetailModes).toEqual([
+        "original",
+      ])
+      for (const turn of [active, next])
+        for await (const event of turn.stream(
+          request("work", "claude-sonnet-4-6"),
+        ))
+          void event
+      expect(seen).toEqual([
+        { effort: "low", defaultEffort: "low", output: 4_000 },
+        { effort: "low", defaultEffort: "low", output: 4_000 },
+        { effort: "high", defaultEffort: "high", output: 8_000 },
+      ])
+    } finally {
+      await client.close()
+      await registry.close()
+    }
+  })
+
+  it("preserves custom Turn models and capabilities through the registry", async () => {
+    const providerModels = createConfiguredModelsManager({
+      provider: "openai",
+      models: [{ id: "provider-model" }],
+    })
+    const turnModels = createConfiguredModelsManager({
+      provider: "openai",
+      models: [{ id: "turn-model" }],
+    })
+    const registry = createProviderRegistry({
+      openai: {
+        info: {
+          id: "openai",
+          wireApi: "openai_responses",
+          capabilities: {
+            remoteCompaction: "responses_compact",
+            nativePdf: true,
+            tools: {
+              supportsCustomTools: true,
+              nativeDeferredProtocol: "openai_deferred",
+            },
+          },
+        },
+        models: providerModels,
+        startTurn() {
+          return {
+            models: turnModels,
+            wireApi: "openai_chat_completions",
+            remoteCompaction: false,
+            nativePdf: false,
+            toolCapabilities: { supportsCustomTools: false },
+            stream: () => responseStream([], "unused"),
+            close() {},
+          }
+        },
+      },
+    })
+    const session = registry.createClient().startTurn("openai")
+    try {
+      expect(session.wireApi).toBe("openai_chat_completions")
+      expect(session.remoteCompaction).toBe(false)
+      expect(session.nativePdf).toBe(false)
+      expect(session.toolCapabilities).toEqual({ supportsCustomTools: false })
+      expect(
+        session.models.resolve({ provider: "openai", model: "turn-model" })
+          .model,
+      ).toBe("turn-model")
+      expect(() =>
+        session.models.validate({
+          provider: "openai",
+          model: "provider-model",
+        }),
+      ).toThrow("not configured")
+    } finally {
+      await session.close()
+      await registry.close()
+    }
   })
 
   it("derives stable continuation scopes from provider configuration", () => {
@@ -264,6 +419,56 @@ describe("provider registry", () => {
 
     expect(closed).toEqual([1, 2])
     expect(() => client.startTurn("openai")).toThrow("Model client is closed")
+  })
+
+  it("does not send a request when its Turn closes during catalog preparation", async () => {
+    let beginRefresh = () => {}
+    let finishRefresh = () => {}
+    const started = new Promise<void>((resolve) => {
+      beginRefresh = resolve
+    })
+    const refreshing = new Promise<void>((resolve) => {
+      finishRefresh = resolve
+    })
+    const seen: string[] = []
+    const models = createDiscoveringModelsManager({
+      provider: "grok",
+      catalogProvider: "grok",
+      identity: async () => "bound-account",
+      async discover() {
+        beginRefresh()
+        await refreshing
+        return [{ id: "grok-4.7" }]
+      },
+    })
+    const registry = createProviderRegistry({
+      grok: createModelProvider({
+        info: {
+          id: "grok",
+          wireApi: "openai_responses",
+          capabilities: { remoteCompaction: false },
+        },
+        models,
+        stream: () => responseStream(seen, "inference"),
+      }),
+    })
+    const client = registry.createClient()
+    const turn = client.startTurn("grok")
+    const pending = (async () => {
+      for await (const event of turn.stream(request("grok", "grok-4.7")))
+        void event
+    })()
+    try {
+      await started
+      await turn.close()
+      finishRefresh()
+      await expect(pending).rejects.toThrow("Model Turn is closed")
+      expect(seen).toEqual([])
+    } finally {
+      finishRefresh()
+      await client.close()
+      await registry.close()
+    }
   })
 
   it("finishes every outstanding Turn cleanup before reporting Session cleanup failure", async () => {

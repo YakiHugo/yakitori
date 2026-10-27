@@ -112,7 +112,59 @@ it("keeps old models available on an explicitly configured Chat connection", asy
     },
     "test-key",
   )
-  expect(models.map((model) => model.id)).toEqual(["kimi-k3", "kimi-k2.6"])
+  expect(models.map((model) => model.id)).toEqual(["kimi-k2.6", "kimi-k3"])
+})
+
+it.each([
+  {
+    baseURL: "https://api.siliconflow.cn/v1",
+    path: "/v1/models?sub_type=chat",
+  },
+  { baseURL: "https://relay.example/v1", path: "/v1/models" },
+])("uses SiliconFlow query parameters only on its confirmed endpoint $baseURL", async ({
+  baseURL,
+  path,
+}) => {
+  const requests = await catalogEndpoint({ data: [{ id: "coder" }] })
+  await discoverProviderModels(
+    {
+      name: "Personal",
+      service: "siliconflow",
+      wireApi: "openai_chat_completions",
+      baseURL,
+      models: [],
+    },
+    "test-key",
+  )
+  expect(requests[0]?.path).toBe(path)
+})
+
+it.each([
+  {
+    baseURL: "https://openrouter.ai/api/v1",
+    price: { inputPerMillion: 2, outputPerMillion: 8 },
+  },
+  { baseURL: "https://relay.example/v1", price: undefined },
+])("interprets OpenRouter prices only on its confirmed endpoint $baseURL", async ({
+  baseURL,
+  price,
+}) => {
+  await catalogEndpoint({
+    data: [
+      { id: "coder", pricing: { prompt: "0.000002", completion: "0.000008" } },
+    ],
+  })
+  const models = await discoverProviderModels(
+    {
+      name: "Personal",
+      service: "openrouter",
+      wireApi: "openai_chat_completions",
+      baseURL,
+      models: [],
+    },
+    "test-key",
+  )
+  expect(models[0]?.pricing).toEqual(price)
 })
 
 async function catalogEndpoint(body: object, status = 200) {

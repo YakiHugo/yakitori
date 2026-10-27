@@ -8,6 +8,7 @@ import {
   type ServerProcess,
   spawnServerProcess,
 } from "../../src/desktop/server-process.ts"
+import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
@@ -380,6 +381,243 @@ test("model picker groups choices by vendor and keeps the selected model explici
       animations: "disabled",
     })
   } finally {
+    await server?.stop()
+    endpoint.closeAllConnections()
+    await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+    await environment.cleanup()
+  }
+})
+
+test("model preview prevents mixed-provider effort and image combinations before routing the turn", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const requests: {
+    path: string | undefined
+    body: Record<string, unknown>
+  }[] = []
+  const endpoint = createServer((request, response) => {
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(
+        JSON.stringify({
+          data: [
+            {
+              id: request.url?.startsWith("/vision/")
+                ? "vision-upstream"
+                : "text-upstream",
+            },
+          ],
+        }),
+      )
+      return
+    }
+    let body = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      body += chunk
+    })
+    request.on("end", () => {
+      requests.push({
+        path: request.url,
+        body: JSON.parse(body) as Record<string, unknown>,
+      })
+      response.writeHead(200, { "content-type": "text/event-stream" })
+      response.end(
+        `data: ${JSON.stringify({
+          id: "preview-response",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "vision-upstream",
+          choices: [
+            {
+              index: 0,
+              delta: { content: "Routed through vision." },
+              finish_reason: null,
+            },
+          ],
+        })}\n\ndata: ${JSON.stringify({
+          id: "preview-response",
+          object: "chat.completion.chunk",
+          created: 1,
+          model: "vision-upstream",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        })}\n\ndata: [DONE]\n\n`,
+      )
+    })
+  })
+  endpoint.listen(0, "127.0.0.1")
+  await once(endpoint, "listening")
+  const address = endpoint.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing preview endpoint")
+  let server: ServerProcess | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    client = createAppRpcClient({ apiBase: server.url })
+    for (const kind of ["text", "vision"] as const) {
+      await client.request("provider/configuration/write", {
+        id: `${kind}-account`,
+        configuration: {
+          name: `${kind} account`,
+          authentication: "none",
+          wireApi: "openai_chat_completions",
+          baseURL: `http://127.0.0.1:${address.port}/${kind}/v1`,
+          models: [
+            {
+              id: `${kind}-upstream`,
+              displayName: "Shared Coder",
+              identity: { namespace: "shared-vendor", model: "shared-coder" },
+              inputModalities: kind === "text" ? ["text"] : ["text", "image"],
+              imageDetailModes: kind === "text" ? [] : ["high"],
+              efforts: kind === "text" ? ["low"] : ["high"],
+              defaultEffort: kind === "text" ? "low" : "high",
+              contextWindowTokens: kind === "text" ? 64_000 : 128_000,
+            },
+          ],
+        },
+      })
+    }
+    const selection = {
+      provider: "shared-vendor",
+      model: "shared-coder",
+      effort: "high",
+    }
+    const rejected = await client.request("model/preview", {
+      selection: { ...selection, effort: "low" },
+      requirements: { inputModalities: ["image"] },
+    })
+    expect(rejected.available).toBe(false)
+    expect(rejected.rejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: "text-account",
+          code: "unsupported_modality",
+        }),
+        expect.objectContaining({
+          accountId: "vision-account",
+          code: "unsupported_effort",
+        }),
+      ]),
+    )
+    const preview = await client.request("model/preview", {
+      selection,
+      requirements: { inputModalities: ["image"] },
+    })
+    expect(preview).toMatchObject({
+      available: true,
+      target: {
+        provider: "vision-account",
+        model: "vision-upstream",
+        effort: "high",
+      },
+      efforts: ["high"],
+      inputModalities: ["text", "image"],
+    })
+    await client.request("userPreference/write", selection)
+    await page.goto(server.url)
+    const selector = page.getByRole("button", {
+      name: "Select model and effort",
+    })
+    await expect(selector).toHaveText("Shared CoderHigh")
+    await selector.click()
+    await expect(
+      page.getByRole("button", { name: "low", exact: true }),
+    ).toBeVisible()
+    await page.keyboard.press("Escape")
+    const imageBytes = await readFile(
+      join(environment.root, "workspace", "smoke.png"),
+    )
+    const imported = await server.request({
+      type: "import_attachment_bytes",
+      rolloutId: "draft_preview_smoke",
+      ownerId: "preview_smoke",
+      items: [{ name: "preview.png", data: imageBytes }],
+    })
+    const image = imported.ok ? imported.attachments?.[0] : undefined
+    if (image?.mediaType !== "image/png")
+      throw new Error("Preview image import failed")
+    // The browser exercises the actual composer and owned attachment assets;
+    // only the Electron preload import response is supplied by this fixture.
+    await page.evaluate(
+      (image) => {
+        Object.defineProperty(window, "yakitoriDesktop", {
+          configurable: true,
+          value: {
+            importAttachmentFiles: async () => [image],
+            discardDraftAttachments: async () => {},
+          },
+        })
+      },
+      { ...image, detail: "original" },
+    )
+    const editor = page.getByRole("textbox", { name: "Message the Mate" })
+    await editor.fill("Inspect the attached preview image.")
+    await editor.evaluate((node, base64) => {
+      const bytes = Uint8Array.from(atob(base64), (character) =>
+        character.charCodeAt(0),
+      )
+      const clipboardData = new DataTransfer()
+      clipboardData.items.add(
+        new File([bytes], "preview.png", { type: "image/png" }),
+      )
+      node.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      )
+    }, imageBytes.toString("base64"))
+    await expect(
+      page.getByRole("button", { name: "Preview preview.png", exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("button", { name: "Send", exact: true }),
+    ).toBeDisabled()
+    await page
+      .getByRole("button", {
+        name: "Use high detail for preview.png",
+        exact: true,
+      })
+      .click()
+    await expect(
+      page.getByRole("button", { name: "Send", exact: true }),
+    ).toBeEnabled()
+    await selector.click()
+    await expect(
+      page.getByRole("button", { name: "high", exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("button", { name: "low", exact: true }),
+    ).toHaveCount(0)
+    await page.screenshot({
+      path: testInfo.outputPath("model-preview-image-effort.png"),
+      animations: "disabled",
+    })
+    await page.keyboard.press("Escape")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Routed through vision.", { exact: true }),
+    ).toBeVisible()
+    const sent = requests.find(({ body }) =>
+      JSON.stringify(body.messages).includes("data:image/png"),
+    )
+    expect(sent).toMatchObject({
+      path: "/vision/v1/chat/completions",
+      body: { model: "vision-upstream", reasoning_effort: "high" },
+    })
+    expect(requests.some(({ path }) => path?.startsWith("/text/"))).toBe(false)
+  } finally {
+    client?.close()
     await server?.stop()
     endpoint.closeAllConnections()
     await new Promise<void>((resolve) => endpoint.close(() => resolve()))

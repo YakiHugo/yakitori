@@ -1,4 +1,3 @@
-import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import type { ProviderModelSettings } from "../protocol/providers.ts"
 import { createModelSettingsManager } from "./model-settings-manager.ts"
 import type { ModelRequest, StreamFn } from "./model.ts"
@@ -12,7 +11,12 @@ import {
   ModelStreamCleanupError,
   type ModelRequestPolicy,
 } from "./model-request.ts"
-import type { ModelsManager } from "./models-manager.ts"
+import { captureModelsManager, type ModelsManager } from "./models-manager.ts"
+import {
+  ModelRequestPlanError,
+  prepareModelRequestPlan,
+} from "./model-request-plan.ts"
+import { ModelRequestControlsError } from "./model-request-controls.ts"
 
 type ProviderDefinitions = Readonly<Record<string, ModelProvider | StreamFn>>
 
@@ -107,11 +111,15 @@ export function createProviderRegistry(
     if (errors.length > 0)
       throw new AggregateError(errors, "Failed to retire model providers.")
   }
-  const configuredModels = (entry: ProviderEntry, capture = false) => {
+  const configuredModels = (
+    entry: ProviderEntry,
+    capture = false,
+    base: ModelsManager = entry.provider.models,
+  ) => {
     const provider = entry.provider.info.id
     const captured = capture ? (options.settings?.(provider) ?? {}) : undefined
     return createModelSettingsManager(
-      entry.provider.models,
+      base,
       () => captured ?? options.settings?.(provider) ?? {},
     )
   }
@@ -168,6 +176,16 @@ export function createProviderRegistry(
           throw new Error(
             `Turn transport for ${entry.provider.info.id} cannot stream target ${request.target.provider}/${request.target.model}.`,
           )
+        if (
+          (request.compaction === "codex_remote" ||
+            request.compaction === "responses_compact") &&
+          request.compaction !==
+            (session.remoteCompaction ??
+              entry.provider.info.capabilities.remoteCompaction)
+        )
+          throw new Error(
+            `Provider ${entry.provider.info.id} does not support remote compaction.`,
+          )
         const events = stream(request)
         return (async function* () {
           requireActive()
@@ -183,40 +201,71 @@ export function createProviderRegistry(
         })()
       }
     const warmup = session.warmup
-    const turnModels = configuredModels(entry, true)
-    const requestWithPolicy = (request: ModelRequest): ModelRequest => {
-      let model: ReturnType<ModelsManager["resolve"]>
-      try {
-        model = turnModels.resolve(request.target)
-      } catch (error) {
-        if (!(error instanceof ModelNotConfiguredError)) throw error
-        return { ...request, reasoning: {} }
+    const turnModels = captureModelsManager(
+      configuredModels(entry, true, session.models),
+    )
+    const toolCapabilities =
+      session.toolCapabilities ?? entry.provider.info.capabilities.tools
+    const requestWithPolicy = (request: ModelRequest): ModelRequest =>
+      prepareModelRequestPlan(request, {
+        model: turnModels.resolve(request.target),
+        wireApi: session.wireApi ?? entry.provider.info.wireApi,
+        ...(toolCapabilities === undefined ? {} : { toolCapabilities }),
+      }).request
+    const prepareStream = (stream: StreamFn): StreamFn =>
+      async function* (request) {
+        await turnModels.refresh()
+        requireActive()
+        if (request.signal?.aborted) {
+          yield { type: "cancelled" }
+          return
+        }
+        let prepared: ModelRequest
+        try {
+          prepared = requestWithPolicy(request)
+        } catch (error) {
+          if (
+            !(
+              error instanceof ModelRequestPlanError ||
+              error instanceof ModelRequestControlsError
+            )
+          )
+            throw error
+          yield {
+            type: "failure",
+            failure: {
+              kind: "invalid_request",
+              stage: "request_build",
+              provider: request.target.provider,
+              wireApi: session.wireApi ?? entry.provider.info.wireApi,
+              message: error.message,
+              ...(error instanceof ModelRequestPlanError
+                ? { providerCode: error.code }
+                : {}),
+            },
+          }
+          return
+        }
+        yield* stream(prepared)
       }
-      return {
-        ...request,
-        reasoning: {
-          ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
-          ...(model.defaultEffort === undefined
-            ? {}
-            : { defaultEffort: model.defaultEffort }),
-          ...(model.multiAgentReasoningEffort === undefined
-            ? {}
-            : { multiAgentReasoningEffort: model.multiAgentReasoningEffort }),
-        },
-      }
-    }
+
     return {
       models: turnModels,
       ...(session.serviceId === undefined
         ? {}
         : { serviceId: session.serviceId }),
-      wireApi: entry.provider.info.wireApi,
-      remoteCompaction: session.remoteCompaction ?? false,
-      nativePdf: entry.provider.info.capabilities.nativePdf === true,
-      stream: guarded((request) => session.stream(requestWithPolicy(request))),
+      wireApi: session.wireApi ?? entry.provider.info.wireApi,
+      remoteCompaction:
+        session.remoteCompaction ??
+        entry.provider.info.capabilities.remoteCompaction,
+      nativePdf:
+        session.nativePdf ??
+        entry.provider.info.capabilities.nativePdf === true,
+      ...(toolCapabilities === undefined ? {} : { toolCapabilities }),
+      stream: guarded(prepareStream(session.stream)),
       ...(warmup === undefined
         ? {}
-        : { warmup: guarded((request) => warmup(requestWithPolicy(request))) }),
+        : { warmup: guarded(prepareStream(warmup)) }),
       close() {
         closing ??= Promise.resolve()
           .then(() => session.close())

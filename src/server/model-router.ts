@@ -1,8 +1,14 @@
+import type { ResolvedModel } from "../runtime/model-catalog.ts"
 import type {
   ApiProviderModel,
   ApiProviderSummary,
 } from "../protocol/application.ts"
 import type { ModelSelection } from "../protocol/events.ts"
+import type {
+  ModelRoutePreview,
+  ModelRouteRejection,
+  ModelRouteRequirements,
+} from "../protocol/model-routing.ts"
 import type { ConfiguredModel } from "../protocol/providers.ts"
 import { ModelNotConfiguredError } from "../runtime/configured-models-manager.ts"
 import { NonChatModelError } from "../runtime/model-kind.ts"
@@ -21,10 +27,18 @@ export type AccountModelSource = Readonly<{
 type Binding = Readonly<{
   accountId: string
   model: string
-  speeds?: readonly string[]
 }>
 
-export class ModelRouteError extends Error {}
+export class ModelRouteError extends Error {
+  readonly rejections: readonly ModelRouteRejection[]
+  constructor(
+    message: string,
+    rejections: readonly ModelRouteRejection[] = [],
+  ) {
+    super(message)
+    this.rejections = rejections
+  }
+}
 
 // The directory groups only explicit model identities. Account-local model IDs
 // stay on the binding; neither display names nor credential values are identities.
@@ -102,7 +116,6 @@ export function createModelRouter(input: {
         candidates.push({
           accountId: account.accountId,
           model: model.id,
-          ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
         })
         nextBindings.set(identityKey, candidates)
       }
@@ -130,7 +143,11 @@ export function createModelRouter(input: {
           ...(first.displayName === undefined
             ? {}
             : { displayName: first.displayName }),
-          instructionProfileId: first.instructionProfileId,
+          instructionProfileId: rows.every(
+            (row) => row.instructionProfileId === first.instructionProfileId,
+          )
+            ? first.instructionProfileId
+            : "default",
           inputModalities: [
             ...new Set(
               rows.flatMap((row) => row.inputModalities ?? ["text" as const]),
@@ -141,7 +158,9 @@ export function createModelRouter(input: {
           ],
           effortStyle: efforts.length ? "levels" : "none",
           ...(efforts.length ? { efforts } : {}),
-          ...(first.defaultEffort && efforts.includes(first.defaultEffort)
+          ...(first.defaultEffort &&
+          rows.every((row) => row.defaultEffort === first.defaultEffort) &&
+          efforts.includes(first.defaultEffort)
             ? { defaultEffort: first.defaultEffort }
             : {}),
           ...(speeds.length ? { speeds } : {}),
@@ -156,31 +175,43 @@ export function createModelRouter(input: {
     namespaces.splice(0, namespaces.length, ...groups.keys())
   }
 
-  function route(
+  function evaluate(
     selection: ModelSelection,
-    requirements: Readonly<{
-      image?: boolean
-      preferredAccount?: string
-    }> = {},
-  ): ModelSelection {
-    const candidates = bindings.get(key(selection))
-    if (!candidates?.length)
-      throw new ModelRouteError(
-        `No connected account provides ${selection.provider}/${selection.model}.`,
-      )
-    const ordered = [...candidates].sort(
+    requirements: ModelRouteRequirements &
+      Readonly<{ preferredAccount?: string }> = {},
+  ): Readonly<{
+    candidate: Binding
+    target: ModelSelection
+    model?: ResolvedModel
+    rejection?: ModelRouteRejection
+  }>[] {
+    const candidates = [...(bindings.get(key(selection)) ?? [])].sort(
       (a, b) =>
         Number(b.accountId === requirements.preferredAccount) -
         Number(a.accountId === requirements.preferredAccount),
     )
-    for (const candidate of ordered) {
-      if (!input.registry.providers.includes(candidate.accountId)) continue
-      const models = input.registry.models(candidate.accountId)
+    return candidates.map((candidate) => {
       const target = {
         ...selection,
         provider: candidate.accountId,
         model: candidate.model,
       }
+      const reject = (code: ModelRouteRejection["code"], message: string) => ({
+        candidate,
+        target,
+        rejection: {
+          accountId: candidate.accountId,
+          model: candidate.model,
+          code,
+          message,
+        },
+      })
+      if (!input.registry.providers.includes(candidate.accountId))
+        return reject(
+          "model_unavailable",
+          "The account is no longer connected.",
+        )
+      const models = input.registry.models(candidate.accountId)
       let model: ReturnType<typeof models.resolve>
       try {
         model = models.resolve(target)
@@ -189,26 +220,122 @@ export function createModelRouter(input: {
           error instanceof ModelNotConfiguredError ||
           error instanceof NonChatModelError
         )
-          continue
+          return reject(
+            "model_unavailable",
+            "The account does not provide this chat model.",
+          )
         throw error
       }
-      if (requirements.image && !model.inputModalities.includes("image"))
-        continue
+      const modality = requirements.inputModalities?.find(
+        (modality) => !model.inputModalities.includes(modality),
+      )
+      if (modality)
+        return reject(
+          "unsupported_modality",
+          `This account does not support ${modality} input.`,
+        )
+      if (
+        requirements.imageDetail &&
+        !model.imageDetailModes.includes(requirements.imageDetail)
+      )
+        return reject(
+          "unsupported_image_detail",
+          `This account does not support ${requirements.imageDetail} image detail.`,
+        )
       if (
         selection.effort !== undefined &&
         !model.efforts?.includes(selection.effort)
       )
-        continue
+        return reject(
+          "unsupported_effort",
+          `This account does not support effort ${selection.effort}.`,
+        )
       if (
         selection.speed !== undefined &&
-        !candidate.speeds?.includes(selection.speed)
+        !model.speeds?.includes(selection.speed)
       )
-        continue
+        return reject(
+          "unsupported_speed",
+          `This account does not support speed ${selection.speed}.`,
+        )
+      if (requirements.contextWindowTokens !== undefined) {
+        const capacity = models.capacity(target)
+        if (
+          capacity === undefined ||
+          capacity.maxContextWindowTokens < requirements.contextWindowTokens
+        )
+          return reject(
+            "budget_exceeded",
+            "This account cannot provide the requested context window.",
+          )
+      }
       models.validate(target)
-      return target
+      return { candidate, target, model }
+    })
+  }
+
+  function preview(
+    selection: ModelSelection,
+    requirements: ModelRouteRequirements &
+      Readonly<{ preferredAccount?: string }> = {},
+  ): ModelRoutePreview {
+    const results = evaluate(selection, requirements)
+    const accepted = results.filter((result) => result.model !== undefined)
+    const selected = accepted[0]
+    const { effort: _effort, ...withoutEffort } = selection
+    const { speed: _speed, ...withoutSpeed } = selection
+    const effortModels = evaluate(withoutEffort, requirements).flatMap(
+      (result) => (result.model ? [result.model] : []),
+    )
+    const speedCandidates = evaluate(withoutSpeed, requirements).flatMap(
+      (result) => (result.model ? [result.model] : []),
+    )
+    return {
+      available: selected !== undefined,
+      ...(selected === undefined ? {} : { target: selected.target }),
+      ...(selected?.model?.defaultEffort === undefined
+        ? {}
+        : { defaultEffort: selected.model.defaultEffort }),
+      efforts: [
+        ...new Set(effortModels.flatMap((model) => model.efforts ?? [])),
+      ],
+      speeds: [
+        ...new Set(speedCandidates.flatMap((model) => model.speeds ?? [])),
+      ],
+      inputModalities: [
+        ...new Set(
+          accepted.flatMap((result) => result.model?.inputModalities ?? []),
+        ),
+      ],
+      imageDetailModes: [
+        ...new Set(
+          accepted.flatMap((result) => result.model?.imageDetailModes ?? []),
+        ),
+      ],
+      rejections: results.flatMap((result) =>
+        result.rejection ? [result.rejection] : [],
+      ),
     }
+  }
+
+  function route(
+    selection: ModelSelection,
+    requirements: ModelRouteRequirements &
+      Readonly<{ preferredAccount?: string }> = {},
+  ): ModelSelection {
+    const results = evaluate(selection, requirements)
+    const selected = results.find((result) => result.model !== undefined)
+    if (selected) return selected.target
+    if (!results.length)
+      throw new ModelRouteError(
+        `No connected account provides ${selection.provider}/${selection.model}.`,
+      )
+    const rejections = results.flatMap((result) =>
+      result.rejection ? [result.rejection] : [],
+    )
     throw new ModelRouteError(
-      `No account can run ${selection.provider}/${selection.model} with the requested capabilities.`,
+      `No account can run ${selection.provider}/${selection.model} with the requested capabilities. ${rejections.map((reason) => `${reason.accountId}: ${reason.message}`).join(" ")}`,
+      rejections,
     )
   }
 
@@ -228,6 +355,7 @@ export function createModelRouter(input: {
     list: () => directory,
     accounts: () => accounts,
     route,
+    preview,
     selectionFor(accountId: string, model: string): ModelSelection | undefined {
       for (const [identity, candidates] of bindings) {
         if (

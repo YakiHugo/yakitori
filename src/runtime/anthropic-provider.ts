@@ -521,9 +521,17 @@ async function* streamAnthropic(
               type: "output_item",
               itemId,
               content: completed.content,
-              native: modelNativeItems(request, "anthropic_messages", [
-                completed.block,
-              ]),
+              native: modelNativeItems(
+                request,
+                "anthropic_messages",
+                canReplayAnthropicNativeBlock(
+                  completed.block,
+                  completed.completed,
+                  completed.invalidInput,
+                )
+                  ? [completed.block]
+                  : [],
+              ),
             }
           }
         }
@@ -562,18 +570,28 @@ async function* streamAnthropic(
             pending.block.type === "tool_use" &&
             (!pending.completed || pending.invalidInput),
         )
-        const content = [...blocks.entries()]
-          .sort(([left], [right]) => left - right)
-          .flatMap(([, pending]) =>
-            pending.block.type === "tool_use" &&
-            (!pending.completed || pending.invalidInput)
-              ? []
-              : [
-                  pending.block.type === "thinking" && !pending.completed
-                    ? { ...pending.block, signature: undefined }
-                    : pending.block,
-                ],
+        const orderedBlocks = [...blocks.entries()].sort(
+          ([left], [right]) => left - right,
+        )
+        const content = orderedBlocks.flatMap(([, pending]) =>
+          pending.block.type === "tool_use" &&
+          (!pending.completed || pending.invalidInput)
+            ? []
+            : [
+                pending.block.type === "thinking" && !pending.completed
+                  ? { ...pending.block, signature: undefined }
+                  : pending.block,
+              ],
+        )
+        const nativeBlocks = orderedBlocks.flatMap(([, pending]) =>
+          canReplayAnthropicNativeBlock(
+            pending.block,
+            pending.completed,
+            pending.invalidInput,
           )
+            ? [pending.block]
+            : [],
+        )
         const response = fromAnthropicMessage(
           { ...message, content },
           customFallbackKeys,
@@ -592,7 +610,7 @@ async function* streamAnthropic(
         terminalResponse = {
           ...response,
           ...(providerRequestId === undefined ? {} : { providerRequestId }),
-          native: modelNativeItems(request, "anthropic_messages", content),
+          native: modelNativeItems(request, "anthropic_messages", nativeBlocks),
           nativeMetadata: modelNativeResponseMetadata(
             request,
             "anthropic_messages",
@@ -635,6 +653,24 @@ async function* streamAnthropic(
       ...usageFields(),
     }
   }
+}
+
+// Live streams pass completion flags explicitly. Persisted native blocks have
+// already crossed this boundary, but replay rechecks signatures and inputs.
+function canReplayAnthropicNativeBlock(
+  block: Record<string, unknown>,
+  completed = true,
+  invalidInput = false,
+): boolean {
+  if (block.type === "thinking")
+    return (
+      completed &&
+      typeof block.signature === "string" &&
+      block.signature.length > 0
+    )
+  if (block.type === "tool_use" || block.type === "server_tool_use")
+    return completed && !invalidInput && isJsonValue(block.input)
+  return true
 }
 
 export function toAnthropicMessages(
@@ -715,7 +751,11 @@ export function toAnthropicMessages(
               )
               return converted === undefined ? [] : [converted]
             })
-          : native.map((block) => block as unknown as BetaContentBlockParam)
+          : native.flatMap((block) =>
+              canReplayAnthropicNativeBlock(block)
+                ? [block as unknown as BetaContentBlockParam]
+                : [],
+            )
       if (content.length === 0) continue
       // Streamed output items split one response into several history messages.
       // Compatible endpoints may not combine same-role turns like Anthropic does.

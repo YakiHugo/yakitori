@@ -17,6 +17,7 @@ import {
 } from "../runtime/model-provider.ts"
 import { createFileModelsCacheStore } from "../runtime/models-cache-store.ts"
 import { createDiscoveringModelsManager } from "../runtime/models-manager.ts"
+import { resolveProviderBackend } from "../runtime/provider-backend.ts"
 import { ConfigurationError } from "./config-errors.ts"
 
 // External credentials are a bound source, never a fallback to an environment
@@ -57,12 +58,21 @@ export async function createSubscriptionProvider(
     (await resolveCodexAccountIdentity({ path })) !== owner
   )
     return undefined
+  const backend = resolveProviderBackend({
+    ...configuration,
+    service: "codex",
+  })
+  const catalogScope = JSON.stringify([
+    configuration.baseURL,
+    configuration.wireApi,
+    owner,
+  ])
   return createModelProvider({
     info: {
       id,
       serviceId: "codex",
       wireApi: "openai_responses",
-      capabilities: { remoteCompaction: "codex_remote", nativePdf: false },
+      capabilities: backend.capabilities,
     },
     createTurnStream: () =>
       createCodexProvider({
@@ -72,14 +82,14 @@ export async function createSubscriptionProvider(
     models: createDiscoveringModelsManager({
       provider: id,
       catalogProvider: "codex",
-      catalogVersion: CODEX_CATALOG_CLIENT_VERSION,
+      catalogVersion: `${CODEX_CATALOG_CLIENT_VERSION}:${backend.id}`,
       async identity() {
         const current = await resolveCodexAccountIdentity({ path })
         if (current !== owner)
           throw new ConfigurationError(
             "The Codex account changed. Reconnect it before use.",
           )
-        return owner
+        return catalogScope
       },
       async discover() {
         const token = await resolveCodexAccessToken({
