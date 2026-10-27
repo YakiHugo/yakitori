@@ -16,6 +16,8 @@ const disconnectedCodes = new Set([
 // headers or the whole response body and is not a durable diagnostic source.
 // xAI often returns `{ code, error: "<reason>" }` with a string `error` field
 // instead of OpenAI's `{ error: { message } }` object.
+// OpenAI SDK callers must rewrap APIError.error: the SDK already extracted it
+// from the response object, so xAI's reason arrives as a bare string there.
 export function providerErrorMessage(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined
   if (

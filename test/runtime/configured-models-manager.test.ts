@@ -192,6 +192,7 @@ describe("configured models manager", () => {
       supportsNativeToolSearch: false,
     })
     expect(model.applyPatchToolType).toBeUndefined()
+    expect(model.speeds).toBeUndefined()
     expect((await manager.listModels())[0]?.speeds).toBeUndefined()
     expect(() =>
       manager.validate({
@@ -200,6 +201,24 @@ describe("configured models manager", () => {
         speed: "fast",
       }),
     ).toThrow("Speed fast is not supported")
+  })
+
+  it("retains explicitly configured speed options when inherited protocol defaults are masked", async () => {
+    const manager = createConfiguredModelsManager({
+      provider: "chat-gateway",
+      catalogProvider: "openai",
+      wireApi: "openai_chat_completions",
+      models: [{ id: "gpt-6-sol", speeds: ["standard"] }],
+    })
+    const selection = { provider: "chat-gateway", model: "gpt-6-sol" }
+    expect(manager.resolve(selection).speeds).toEqual(["standard"])
+    expect((await manager.listModels())[0]?.speeds).toEqual(["standard"])
+    expect(() =>
+      manager.validate({ ...selection, speed: "standard" }),
+    ).not.toThrow()
+    expect(() => manager.validate({ ...selection, speed: "fast" })).toThrow(
+      "not supported",
+    )
   })
 
   it("retains native Messages tool search only for an exact Anthropic model", () => {

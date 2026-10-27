@@ -1995,15 +1995,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       const intentRevision = get().sessionSelectionIntentRevision + 1
       const sourceSelection = { ...current, revision: intentRevision }
       const state = get()
-      const sourceModelSelection = normalizeModelSelection(
-        resolveEffectiveModel({
-          sessionCurrent: state.modelSelections[sourceSelection.sessionId],
-          userPreference: state.userPreference,
-          defaultProvider: state.defaultProvider,
-          defaultModel: state.defaultModel,
-        }),
-        state.providers,
-      )
+      const sourceModelSelection = resolveEffectiveModel({
+        sessionCurrent: state.modelSelections[sourceSelection.sessionId],
+        userPreference: state.userPreference,
+        defaultProvider: state.defaultProvider,
+        defaultModel: state.defaultModel,
+      })
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
         sessionSelectionIntentRevision: intentRevision,
@@ -2385,15 +2382,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             : undefined
         queuedForCreation = true
         const state = get()
-        queuedModelSelection = normalizeModelSelection(
-          resolveEffectiveModel({
-            sessionCurrent: state.draftModelSelection,
-            userPreference: state.userPreference,
-            defaultProvider: state.defaultProvider,
-            defaultModel: state.defaultModel,
-          }),
-          state.providers,
-        )
+        queuedModelSelection = resolveEffectiveModel({
+          sessionCurrent: state.draftModelSelection,
+          userPreference: state.userPreference,
+          defaultProvider: state.defaultProvider,
+          defaultModel: state.defaultModel,
+        })
         set((current) => ({
           inFlightActions: new Set(current.inFlightActions).add(queuedKey),
         }))
@@ -2706,7 +2700,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           })
           const admittedModelSelection = queuedForCreation
             ? queuedModelSelection
-            : normalizeModelSelection(modelSelection, state.providers)
+            : modelSelection
           const pendingAdmission = inputRecoveryMemory.reserveAdmission({
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
@@ -3508,27 +3502,6 @@ export function resolveEffectiveModel(input: {
   if (input.userPreference) return input.userPreference
   if (!input.defaultProvider || !input.defaultModel) return undefined
   return { provider: input.defaultProvider, model: input.defaultModel }
-}
-
-export function normalizeModelSelection(
-  selection: ModelSelection | undefined,
-  providers: readonly ApiProviderSummary[],
-): ModelSelection | undefined {
-  const effortStyle = providers
-    .find((provider) => provider.name === selection?.provider)
-    ?.models.find((model) => model.id === selection?.model)?.effortStyle
-  if (
-    selection === undefined ||
-    effortStyle !== "none" ||
-    selection.effort === undefined
-  ) {
-    return selection
-  }
-  return {
-    provider: selection.provider,
-    model: selection.model,
-    ...(selection.speed === undefined ? {} : { speed: selection.speed }),
-  }
 }
 
 export function useExecutionView(): ExecutionView {

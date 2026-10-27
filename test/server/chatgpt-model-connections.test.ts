@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { ChatGPTPlanAccess } from "../../src/runtime/chatgpt-plan-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { captureModelsManager } from "../../src/runtime/models-manager.ts"
 import { createChatGPTModelConnections } from "../../src/server/chatgpt-model-connections.ts"
 import { createModelDirectory } from "../../src/server/model-directory.ts"
 
@@ -135,11 +136,14 @@ describe("ChatGPT model connections", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     failed = true
     await expect(provider.models.refresh({ force: true })).rejects.toThrow(
-      "ChatGPT model catalog failed",
+      "ChatGPT models are unavailable",
     )
     await expect(provider.models.listModels()).rejects.toThrow(
       "ChatGPT models are unavailable",
     )
+    await expect(
+      captureModelsManager(provider.models).listModels(),
+    ).rejects.toThrow("ChatGPT models are unavailable")
     failed = false
     await expect(provider.models.listModels()).resolves.toHaveLength(1)
   })
@@ -191,6 +195,40 @@ describe("ChatGPT model connections", () => {
     expect(() => provider.models.resolve(target)).toThrow("not configured")
   })
 
+  it("keeps a Turn's admitted catalog when the same account publishes a new catalog", async () => {
+    let ids = ["gpt-5.4"]
+    const provider = createChatGPTModelConnections({
+      resolve: async (identity) => ({ ...identity, accessToken: "fake-token" }),
+      fetchFn: async (url) =>
+        String(url).endsWith("/models") ? catalog(ids) : completed(),
+    }).provider(account, providerId)
+    const registry = createProviderRegistry({ [providerId]: provider })
+    const client = registry.createClient()
+    try {
+      const active = client.startTurn(providerId)
+      await active.models.refresh()
+      ids = ["future-model"]
+      await provider.models.refresh({ force: true })
+      const next = client.startTurn(providerId)
+      await next.models.refresh()
+      expect(
+        (await active.models.listModels()).map((model) => model.model),
+      ).toEqual(["gpt-5.4"])
+      expect(
+        (await next.models.listModels()).map((model) => model.model),
+      ).toEqual(["future-model"])
+      expect(
+        (await collect(active.stream(request))).some(
+          (event) => event.type === "response",
+        ),
+      ).toBe(true)
+      expect(() => next.models.resolve(target)).toThrow("not configured")
+    } finally {
+      await client.close()
+      await registry.close()
+    }
+  })
+
   it("retains the old account for active Turns while new Turns use the replacement", async () => {
     const calls: string[] = []
     let suffix = "one"
@@ -202,7 +240,8 @@ describe("ChatGPT model connections", () => {
     )
     const connections = createChatGPTModelConnections({
       resolve,
-      fetchFn: async (_url, init) => {
+      fetchFn: async (url, init) => {
+        if (String(url).endsWith("/models")) return catalog()
         calls.push(new Headers(init?.headers).get("authorization") ?? "")
         return completed()
       },

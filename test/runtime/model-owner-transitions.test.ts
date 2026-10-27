@@ -127,6 +127,30 @@ describe("model catalog owner transitions", () => {
     expect(manager.resolve(selection).instructions).toBe("new-B")
   })
 
+  it("does not publish persisted model facts before confirming their credential owner", async () => {
+    const owner = deferred<string>()
+    const identity = vi.fn(() => owner.promise)
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity,
+      discover: async () => [{ id: "account-model", instructions: "new-B" }],
+      cacheStore: {
+        load: async () => ({
+          identity: "A",
+          fetchedAt: Date.now(),
+          models: [{ id: "account-model", instructions: "old-A" }],
+        }),
+        save: async () => {},
+      },
+    })
+    const refreshing = manager.refresh()
+    await vi.waitFor(() => expect(identity).toHaveBeenCalledTimes(1))
+    expect(manager.resolve(selection).instructions).toBeUndefined()
+    owner.resolve("B")
+    await refreshing
+    expect(manager.resolve(selection).instructions).toBe("new-B")
+  })
+
   it("retains stale same-account data on refresh failure and releases the failed single flight", async () => {
     let now = 0
     let tries = 0

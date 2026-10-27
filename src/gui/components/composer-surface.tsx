@@ -151,6 +151,7 @@ export function ComposerSurface({
   apiBase,
   focusRevision = 0,
   busy = false,
+  submissionBlocked = false,
   sending = false,
   stopping = false,
   activeTurnId,
@@ -190,6 +191,7 @@ export function ComposerSurface({
   apiBase: string
   focusRevision?: number
   busy?: boolean
+  submissionBlocked?: boolean
   sending?: boolean
   stopping?: boolean
   activeTurnId?: string | undefined
@@ -464,7 +466,12 @@ export function ComposerSurface({
     text === COMPACT_DIRECTIVE &&
     (attachments.length > 0 || excerpts.length > 0)
   const canSend =
-    containsInput && !busy && !sending && !readingAttachments && !compactBlocked
+    containsInput &&
+    !busy &&
+    !sending &&
+    !readingAttachments &&
+    !compactBlocked &&
+    !submissionBlocked
   const canResume =
     !containsInput && onResume !== undefined && activeTurnId === undefined
 
@@ -854,11 +861,15 @@ export function ComposerSurface({
                     <button
                       type="button"
                       aria-label={
-                        supportsOriginal
+                        supportsOriginal || attachment.detail === "original"
                           ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
                           : `Original detail unavailable for ${attachment.name}`
                       }
-                      disabled={!supportsOriginal || sending}
+                      disabled={
+                        (!supportsOriginal &&
+                          attachment.detail !== "original") ||
+                        sending
+                      }
                       onClick={() =>
                         editorRef.current?.setImageDetail(
                           index,
@@ -868,15 +879,13 @@ export function ComposerSurface({
                         )
                       }
                       title={
-                        supportsOriginal
+                        supportsOriginal || attachment.detail === "original"
                           ? "Toggle image detail"
                           : "Original detail unavailable"
                       }
                       className="absolute bottom-1 left-1 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] leading-none font-medium text-white opacity-0 backdrop-blur-sm transition-opacity group-hover/image:opacity-100 hover:bg-black focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
                     >
-                      {supportsOriginal && attachment.detail === "original"
-                        ? "Original"
-                        : "High"}
+                      {attachment.detail === "original" ? "Original" : "High"}
                     </button>
                   ) : null}
                 </div>
@@ -887,15 +896,17 @@ export function ComposerSurface({
             (attachment) => attachment.mediaType !== "application/pdf",
           ) && !supportsImages ? (
             <p className="px-3 pt-2 text-xs text-amber-700 dark:text-amber-300">
-              The selected model does not support images. Attachments will be
-              omitted and the model will receive a notice.
+              {submissionBlocked
+                ? "No connected account supports these images with the current model options. Change the model options or remove the images."
+                : "The selected model does not support images. Attachments will be omitted and the model will receive a notice."}
             </p>
           ) : attachments.some(
               (attachment) => attachment.mediaType !== "application/pdf",
             ) && !supportsOriginal ? (
             <p className="px-3 pt-2 text-xs text-muted-foreground">
-              Original detail is unavailable for the selected model. Images will
-              use High detail.
+              {submissionBlocked
+                ? "Original detail is unavailable with the current model options. Switch images to High detail or choose another model."
+                : "Original detail is unavailable for the selected model. Images will use High detail."}
             </p>
           ) : null}
 

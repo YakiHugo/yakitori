@@ -20,95 +20,133 @@ export function validateModelRequestControls(
     throw new ModelRequestControlsError(
       "Provider request controls belong to another provider or API.",
     )
-  const reserved = new Set([
-    "model",
-    "input",
-    "messages",
-    "contents",
-    "system",
-    "instructions",
-    "systemInstruction",
-    "stream",
-    "store",
-    "n",
-    "stream_options",
-    "previous_response_id",
-    "conversation",
-  ])
-  if (wireApi === "gemini_interactions") {
-    for (const key of [
-      "system_instruction",
-      "previous_interaction_id",
-      "background",
-      "agent",
-      "agent_config",
-      "environment",
-      "environment_id",
-      "response_modalities",
-      "response_mime_type",
-      "response_format",
-    ])
-      reserved.add(key)
-    const generation = options.body.generation_config
-    if (generation !== undefined && !isRecord(generation))
-      throw new ModelRequestControlsError(
-        "Native generation_config controls must be an object.",
-      )
-    if (
-      isRecord(generation) &&
-      ["max_output_tokens", "tool_choice", "thinking_level"].some(
-        (key) => generation[key] !== undefined,
-      )
-    )
-      throw new ModelRequestControlsError(
-        "Provider controls cannot replace captured output, effort or tool settings.",
-      )
-    // Local function definitions belong to the harness tool plan.
-    if (
-      Array.isArray(options.body.tools) &&
-      options.body.tools.some(
-        (tool) =>
-          isRecord(tool) &&
-          (tool.type === "function" || tool.type === "custom"),
-      )
-    )
-      throw new ModelRequestControlsError(
-        "Local tool definitions must belong to the harness tool plan.",
-      )
-  }
   for (const key of Object.keys(options.body)) {
-    if (reserved.has(key))
+    if (harnessOwnedControls.has(key))
       throw new ModelRequestControlsError(
         `Provider controls cannot replace harness-owned ${key}.`,
       )
   }
-  if (options.body.tools !== undefined && !Array.isArray(options.body.tools))
+  const tools = options.body.tools
+  if (tools !== undefined && !Array.isArray(tools))
     throw new ModelRequestControlsError("Native tools must be an array.")
-  const thinking = options.body.thinking
+  if (Array.isArray(tools) && tools.some((tool) => !isRecord(tool)))
+    throw new ModelRequestControlsError("Native tools must be objects.")
+  // Hosted tools extend the provider's own execution. Local function/custom
+  // definitions must pass through the harness tool plan and permission owner.
+  if (
+    Array.isArray(tools) &&
+    tools.some(
+      (tool) =>
+        isRecord(tool) &&
+        (tool.type === "function" ||
+          tool.type === "custom" ||
+          tool.type === "tool_search" ||
+          tool.input_schema !== undefined ||
+          tool.functionDeclarations !== undefined),
+    )
+  )
+    throw new ModelRequestControlsError(
+      "Local tool definitions must belong to the harness tool plan.",
+    )
+  const reasoning = options.body.reasoning
+  for (const key of [
+    "reasoning",
+    "text",
+    "output_config",
+    "generationConfig",
+    "generation_config",
+    "thinking",
+  ]) {
+    if (options.body[key] !== undefined && !isRecord(options.body[key]))
+      throw new ModelRequestControlsError(
+        `Native ${key} controls must be an object.`,
+      )
+  }
+  if (isRecord(reasoning) && reasoning.effort !== undefined)
+    throw new ModelRequestControlsError(
+      "Reasoning effort must use the captured model selection.",
+    )
+  const text = options.body.text
+  const output = options.body.output_config
   const generation = options.body.generationConfig
+  const interactionGeneration = options.body.generation_config
   const thinkingConfig = isRecord(generation)
     ? generation.thinkingConfig
     : undefined
-  if (thinking !== undefined && !isRecord(thinking))
-    throw new ModelRequestControlsError(
-      "Native thinking controls must be an object.",
-    )
   if (thinkingConfig !== undefined && !isRecord(thinkingConfig))
     throw new ModelRequestControlsError(
       "Native thinkingConfig controls must be an object.",
     )
   if (
-    request.target.effort !== undefined &&
-    ((isRecord(thinking) &&
-      (thinking.type !== undefined || thinking.budget_tokens !== undefined)) ||
-      (isRecord(thinkingConfig) &&
-        (thinkingConfig.thinkingLevel !== undefined ||
-          thinkingConfig.thinkingBudget !== undefined)))
+    (isRecord(text) && text.format !== undefined) ||
+    (isRecord(output) &&
+      (output.effort !== undefined || output.format !== undefined)) ||
+    (isRecord(generation) &&
+      [
+        "candidateCount",
+        "maxOutputTokens",
+        "responseMimeType",
+        "responseSchema",
+        "responseJsonSchema",
+      ].some((key) => generation[key] !== undefined)) ||
+    (isRecord(interactionGeneration) &&
+      ["max_output_tokens", "tool_choice", "thinking_level"].some(
+        (key) => interactionGeneration[key] !== undefined,
+      ))
   )
     throw new ModelRequestControlsError(
-      "Native thinking controls cannot replace captured reasoning effort.",
+      "Provider controls cannot replace captured output, effort or candidate settings.",
     )
+  if (request.target.effort !== undefined) {
+    const thinking = options.body.thinking
+    if (
+      (isRecord(thinking) &&
+        (thinking.type !== undefined ||
+          thinking.budget_tokens !== undefined)) ||
+      (isRecord(reasoning) && reasoning.enabled !== undefined) ||
+      (isRecord(thinkingConfig) &&
+        (thinkingConfig.thinkingLevel !== undefined ||
+          thinkingConfig.thinkingBudget !== undefined))
+    )
+      throw new ModelRequestControlsError(
+        "Native thinking controls cannot replace captured reasoning effort.",
+      )
+  }
 }
+
+const harnessOwnedControls = new Set([
+  "model",
+  "input",
+  "messages",
+  "contents",
+  "system",
+  "instructions",
+  "systemInstruction",
+  "system_instruction",
+  "stream",
+  "store",
+  "n",
+  "stream_options",
+  "previous_response_id",
+  "previous_interaction_id",
+  "conversation",
+  "background",
+  "agent",
+  "agent_config",
+  "environment",
+  "environment_id",
+  "response_modalities",
+  "response_mime_type",
+  "max_tokens",
+  "max_output_tokens",
+  "max_completion_tokens",
+  "tool_choice",
+  "parallel_tool_calls",
+  "toolConfig",
+  "response_format",
+  "reasoning_effort",
+  "service_tier",
+])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)

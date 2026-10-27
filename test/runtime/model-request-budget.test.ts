@@ -6,6 +6,29 @@ import {
 } from "../../src/runtime/model-request-budget.ts"
 
 describe("complete model request budgeting", () => {
+  it("includes hosted tools and structured output controls in the prepared budget", () => {
+    const base = requestWithImage("high")
+    const plain = estimateModelRequestBudget(base)
+    const extended = estimateModelRequestBudget({
+      ...base,
+      providerOptions: {
+        provider: base.target.provider,
+        wireApi: "openai_responses",
+        body: {
+          tools: [{ type: "web_search", description: "x".repeat(4_000) }],
+        },
+      },
+      outputFormat: {
+        type: "json_schema",
+        name: "answer",
+        schema: { description: "x".repeat(4_000) },
+      },
+    })
+    expect(extended.toolTokens - plain.toolTokens).toBeGreaterThanOrEqual(1_000)
+    expect(
+      extended.envelopeTokens - plain.envelopeTokens,
+    ).toBeGreaterThanOrEqual(1_000)
+  })
   it("counts user PDF content bytes without charging base64 transport bytes", () => {
     const document = {
       type: "document" as const,

@@ -12,11 +12,8 @@ import {
 } from "../runtime/index.ts"
 import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
+import { resolveProviderBackend } from "../runtime/provider-backend.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import {
-  providerServiceForEndpoint,
-  providerServices,
-} from "../runtime/provider-services.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
 export function createConfiguredProvider(
@@ -29,12 +26,8 @@ export function createConfiguredProvider(
     result(state: "ready" | "error", message?: string): void
   }>,
 ): ModelProvider {
-  const preset = providerServices.find(
-    (entry) => entry.id === configuration.service,
-  )
-  const service = providerServiceForEndpoint(configuration)
-  const knownPresetEndpoint = service !== undefined
-  const catalogProvider = service?.catalogProvider
+  const backend = resolveProviderBackend(configuration)
+  const { service, catalogProvider } = backend
   const buildModels = (configured: readonly ConfiguredModel[]) =>
     createConfiguredModelsManager({
       provider: id,
@@ -50,6 +43,9 @@ export function createConfiguredProvider(
   const models: ModelsManager = dynamic
     ? {
         provider: id,
+        // The factory already published its initial catalog. A Turn captures
+        // it without making optional discovery a prerequisite for inference.
+        capture: () => currentModels,
         async refresh(options) {
           const before = JSON.stringify(await currentModels.listModels())
           currentModels = buildModels(await dynamic.loadModels(options?.force))
@@ -72,26 +68,11 @@ export function createConfiguredProvider(
   return createModelProvider({
     info: {
       id,
-      ...(service === undefined ? {} : { serviceId: service.id }),
+      ...(backend.serviceId === undefined
+        ? {}
+        : { serviceId: backend.serviceId }),
       wireApi: configuration.wireApi,
-      capabilities: {
-        remoteCompaction:
-          knownPresetEndpoint &&
-          catalogProvider === "openai" &&
-          configuration.wireApi === "openai_responses"
-            ? "responses_compact"
-            : false,
-        nativePdf:
-          knownPresetEndpoint &&
-          ((catalogProvider === "openai" &&
-            (configuration.wireApi === "openai_responses" ||
-              configuration.wireApi === "openai_chat_completions")) ||
-            (catalogProvider === "anthropic" &&
-              configuration.wireApi === "anthropic_messages") ||
-            (service.id === "gemini" &&
-              (configuration.wireApi === "gemini_generate_content" ||
-                configuration.wireApi === "gemini_interactions"))),
-      },
+      capabilities: backend.capabilities,
     },
     models,
     continuationScope: createProviderContinuationScope(
@@ -125,22 +106,12 @@ export function createConfiguredProvider(
           ? createOpenAITurnTransport({
               ...options,
               warmup: configuration.requestWarmup === true,
-              responseProfile:
-                service?.id === "xai"
-                  ? "grok"
-                  : service?.id === "moonshot"
-                    ? "kimi"
-                    : "openai",
+              responseProfile: backend.responseProfile,
             })
           : configuration.wireApi === "anthropic_messages"
             ? createAnthropicTurnTransport({
                 ...options,
-                profile:
-                  knownPresetEndpoint &&
-                  (catalogProvider === "anthropic" ||
-                    catalogProvider === "kimi-code")
-                    ? catalogProvider
-                    : "generic",
+                profile: backend.anthropicProfile,
               })
             : undefined
       const stream =
@@ -151,9 +122,7 @@ export function createConfiguredProvider(
             ? createGeminiInteractionsProvider(options)
             : createChatCompletionsProvider({
                 ...options,
-                ...(preset?.flavor === undefined
-                  ? {}
-                  : { flavor: preset.flavor }),
+                flavor: backend.chatCompletionsFlavor,
               }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
@@ -174,18 +143,7 @@ export function createConfiguredProvider(
             }
             return
           }
-          const model = (await models.listModels()).find(
-            (entry) => entry.model === request.target.model,
-          )
-          const effort = request.target.effort ?? model?.defaultEffort
-          const target = {
-            ...request.target,
-            ...(effort === undefined ? {} : { effort }),
-          }
-          for await (const event of stream({
-            ...request,
-            target,
-          })) {
+          for await (const event of stream(request)) {
             if (event.type === "response") dynamic?.result("ready")
             else if (event.type === "failure")
               dynamic?.result(

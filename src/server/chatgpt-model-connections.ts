@@ -10,7 +10,10 @@ import {
   createModelProvider,
   type ModelProvider,
 } from "../runtime/model-provider.ts"
-import type { ModelsManager } from "../runtime/models-manager.ts"
+import {
+  createModelsManagerCapture,
+  type ModelsManager,
+} from "../runtime/models-manager.ts"
 import { ChatGPTCredentialStoreError } from "./chatgpt-credential-store.ts"
 
 export class ChatGPTModelCatalogError extends Error {
@@ -63,7 +66,7 @@ export function createChatGPTModelConnections(input: {
       const listeners = new Set<() => void>()
       let fetchedAt: number | undefined
       let refreshing: Promise<void> | undefined
-      const refresh = async (policy?: Readonly<{ force?: boolean }>) => {
+      const refreshCatalog = async (policy?: Readonly<{ force?: boolean }>) => {
         await auth.resolve()
         if (
           !policy?.force &&
@@ -102,9 +105,30 @@ export function createChatGPTModelConnections(input: {
           })
         return refreshing
       }
+      const refresh = async (policy?: Readonly<{ force?: boolean }>) => {
+        try {
+          await refreshCatalog(policy)
+        } catch (error) {
+          // Captured and live readers share the catalog's operational error path.
+          if (
+            error instanceof ChatGPTCredentialStoreError ||
+            error instanceof ModelFailureError ||
+            error instanceof TypeError ||
+            (error instanceof DOMException &&
+              ["AbortError", "TimeoutError"].includes(error.name)) ||
+            (error instanceof Error &&
+              /^ChatGPT (model catalog failed|returned an invalid)/.test(
+                error.message,
+              ))
+          )
+            throw new ChatGPTModelCatalogError()
+          throw error
+        }
+      }
       const models: ModelsManager = {
         provider: providerId,
         refresh,
+        capture: () => createModelsManagerCapture(models, () => current),
         subscribe(listener) {
           listeners.add(listener)
           return () => {
@@ -113,26 +137,8 @@ export function createChatGPTModelConnections(input: {
         },
         status: () => (fetchedAt === undefined ? {} : { fetchedAt }),
         async listModels(options) {
-          try {
-            await refresh()
-            return await current.listModels(options)
-          } catch (error) {
-            // Expected account/auth/network failures stay local to this catalog.
-            // Never replace it with another account or a bundled API-key catalog.
-            if (
-              error instanceof ChatGPTCredentialStoreError ||
-              error instanceof ModelFailureError ||
-              error instanceof TypeError ||
-              (error instanceof DOMException &&
-                ["AbortError", "TimeoutError"].includes(error.name)) ||
-              (error instanceof Error &&
-                /^ChatGPT (model catalog failed|returned an invalid)/.test(
-                  error.message,
-                ))
-            )
-              throw new ChatGPTModelCatalogError()
-            throw error
-          }
+          await refresh()
+          return current.listModels(options)
         },
         resolve: (selection) => current.resolve(selection),
         validate: (selection) => current.validate(selection),
@@ -143,7 +149,11 @@ export function createChatGPTModelConnections(input: {
           id: providerId,
           serviceId: "chatgpt-plan",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false, nativePdf: false },
+          capabilities: {
+            remoteCompaction: false,
+            nativePdf: false,
+            tools: { supportsCustomTools: false },
+          },
         },
         models,
         continuationScope: scope,

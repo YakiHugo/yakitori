@@ -229,6 +229,13 @@ async function endpoint(label: string, id = "personal", failClose = false) {
     info: { id, wireApi: "unknown", capabilities: { remoteCompaction: false } },
     models: {
       ...models,
+      capture: () => ({
+        ...models,
+        async listModels() {
+          await load()
+          return models.listModels()
+        },
+      }),
       refresh: load,
       async listModels() {
         await load()

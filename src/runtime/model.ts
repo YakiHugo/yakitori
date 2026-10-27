@@ -114,7 +114,11 @@ export type ModelRequest = Readonly<{
   tools: readonly ModelToolDefinition[]
   toolWireProtocol: ToolWireProtocol
   // Captured model policy; adapters must not re-read bundled defaults.
-  reasoning?: Readonly<{ efforts?: readonly string[]; defaultEffort?: string }>
+  reasoning?: Readonly<{
+    efforts?: readonly string[]
+    defaultEffort?: string
+    multiAgentReasoningEffort?: string
+  }>
   maxOutputTokens?: number
   toolChoice?: "auto" | "none" | "required" | Readonly<{ name: string }>
   parallelToolCalls?: boolean

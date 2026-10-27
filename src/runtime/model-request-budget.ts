@@ -26,6 +26,16 @@ export function estimateModelRequestBudget(
       target: request.target,
       cacheKey: request.cacheKey,
       maxOutputTokens: request.maxOutputTokens,
+      toolChoice: request.toolChoice,
+      parallelToolCalls: request.parallelToolCalls,
+      outputFormat: request.outputFormat,
+      providerOptions:
+        request.providerOptions === undefined
+          ? undefined
+          : {
+              ...request.providerOptions,
+              body: { ...request.providerOptions.body, tools: undefined },
+            },
     }),
   )
   const systemTokens = estimateTextTokens(JSON.stringify(request.system))
@@ -37,7 +47,11 @@ export function estimateModelRequestBudget(
     nativeDeferredToolProtocol(request) === undefined
       ? request.tools
       : request.tools.filter((tool) => tool.deferLoading !== true)
-  const toolTokens = estimateTextTokens(JSON.stringify(budgetedTools))
+  const toolTokens =
+    estimateTextTokens(JSON.stringify(budgetedTools)) +
+    (request.providerOptions?.body.tools === undefined
+      ? 0
+      : estimateTextTokens(JSON.stringify(request.providerOptions.body.tools)))
   const imageTokens = request.messages.reduce(
     (total, message) =>
       message.role !== "user" && message.role !== "tool"

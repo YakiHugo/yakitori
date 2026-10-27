@@ -6,6 +6,7 @@ export type {
 } from "../protocol/providers.ts"
 
 import { requireInstructionProfileId } from "../runtime/model-catalog.ts"
+import { resolveProviderBackend } from "../runtime/provider-backend.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { providerServices } from "../runtime/provider-services.ts"
 import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
@@ -90,17 +91,6 @@ export function requireProviderConfiguration(
   const credentialOwner = external
     ? requireString(record.credentialOwner, "credentialOwner")
     : undefined
-  if (
-    external &&
-    (wireApi !== "openai_responses" ||
-      baseURL !==
-        (authentication === "codex_cli"
-          ? "https://chatgpt.com/backend-api/codex"
-          : "https://api.x.ai/v1"))
-  )
-    throw new ConfigurationError(
-      "CLI authentication must use its documented service endpoint and protocol.",
-    )
   const preset =
     record.preset === undefined
       ? undefined
@@ -115,6 +105,19 @@ export function requireProviderConfiguration(
     !providerServices.some((entry) => entry.id === service)
   )
     throw new ConfigurationError("Unknown account service.")
+  const backend = resolveProviderBackend({ service, baseURL, wireApi })
+  if (
+    external &&
+    (wireApi !== "openai_responses" ||
+      backend.serviceId !== (authentication === "codex_cli" ? "codex" : "xai"))
+  )
+    throw new ConfigurationError(
+      "CLI authentication must use its matching service, documented endpoint and protocol.",
+    )
+  if (service === "codex" && authentication !== "codex_cli")
+    throw new ConfigurationError(
+      "The Codex service requires CLI authentication.",
+    )
   if (!Array.isArray(record.models))
     throw new ConfigurationError(
       "models must be an array; leave it empty to discover models.",

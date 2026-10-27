@@ -1,10 +1,7 @@
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
-import {
-  providerServiceForEndpoint,
-  providerServices,
-} from "../runtime/provider-services.ts"
+import { providerServiceForEndpoint } from "../runtime/provider-services.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
@@ -22,7 +19,7 @@ export async function discoverProviderModels(
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)
-  if (configuration.service === "siliconflow")
+  if (officialPreset?.id === "siliconflow")
     url.searchParams.set("sub_type", "chat")
   const headers: Record<string, string> = { accept: "application/json" }
   if (
@@ -195,7 +192,7 @@ export async function discoverProviderModels(
       // OpenRouter's official /models pricing is USD per token. Do not infer
       // prices for vendors that omit them, or apply another vendor's prices.
       const prices =
-        configuration.service === "openrouter" && isRecord(entry.pricing)
+        officialPreset?.id === "openrouter" && isRecord(entry.pricing)
           ? entry.pricing
           : undefined
       const price = (value: unknown) => {
@@ -274,10 +271,7 @@ export async function discoverProviderModels(
     throw new ConfigurationError(
       "This service reports no chat models. Load a model in the local service, or check this account's access.",
     )
-  const preferred =
-    providerServices
-      .find((entry) => entry.id === configuration.service)
-      ?.models.map((model) => model.id) ?? []
+  const preferred = officialPreset?.models.map((model) => model.id) ?? []
   return [...models.values()].sort((a, b) => {
     const first = preferred.indexOf(a.id)
     const second = preferred.indexOf(b.id)

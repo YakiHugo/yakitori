@@ -183,7 +183,7 @@ describe("account model routing", () => {
     const selection = { provider: "vendor", model: "model-x" }
     const route = router.route(
       { ...selection, effort: "high" },
-      { preferredAccount: "text", image: true },
+      { preferredAccount: "text", inputModalities: ["image"] },
     )
     expect(route.provider).toBe("vision")
     expect(
@@ -193,7 +193,10 @@ describe("account model routing", () => {
       "text",
     )
     expect(() =>
-      router.route({ ...selection, effort: "low" }, { image: true }),
+      router.route(
+        { ...selection, effort: "low" },
+        { inputModalities: ["image"] },
+      ),
     ).toThrow("requested capabilities")
     await registry.close()
   })
@@ -256,5 +259,147 @@ describe("account model routing", () => {
     ).toBe("live")
     expect(router.accounts().map((account) => account.name)).toEqual(["live"])
     await registry.close()
+  })
+  it("previews executable combinations and explains incompatible account choices", async () => {
+    const registry = createProviderRegistry({
+      text: account("text", [
+        {
+          id: "model-x",
+          efforts: ["low"],
+          defaultEffort: "low",
+          inputModalities: ["text"],
+          contextWindowTokens: 32_000,
+        },
+      ]),
+      vision: account("vision", [
+        {
+          id: "deployment",
+          efforts: ["high"],
+          defaultEffort: "high",
+          inputModalities: ["text", "image"],
+          imageDetailModes: ["high", "original"],
+          contextWindowTokens: 128_000,
+        },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("text", "vendor", "model-x", {
+          summary: {
+            name: "text",
+            models: [
+              {
+                id: "model-x",
+                instructionProfileId: "default",
+                efforts: ["low"],
+                defaultEffort: "low",
+              },
+            ],
+          },
+        }),
+        source("vision", "relay", "deployment", {
+          identities: { deployment: { namespace: "vendor", model: "model-x" } },
+          summary: {
+            name: "vision",
+            models: [
+              {
+                id: "deployment",
+                instructionProfileId: "default",
+                efforts: ["high"],
+                defaultEffort: "high",
+              },
+            ],
+          },
+        }),
+      ],
+    })
+    try {
+      await router.refresh()
+      const selection = { provider: "vendor", model: "model-x" }
+      expect(
+        router.list().find((group) => group.name === "vendor")?.models[0]
+          ?.defaultEffort,
+      ).toBeUndefined()
+      const rejected = router.preview(
+        { ...selection, effort: "low" },
+        { inputModalities: ["image"] },
+      )
+      expect(rejected.available).toBe(false)
+      expect(rejected.efforts).toEqual(["high"])
+      expect(rejected.rejections.map((reason) => reason.code)).toEqual([
+        "unsupported_modality",
+        "unsupported_effort",
+      ])
+      const accepted = router.preview(
+        { ...selection, effort: "high" },
+        {
+          inputModalities: ["image"],
+          imageDetail: "original",
+          contextWindowTokens: 64_000,
+        },
+      )
+      expect(accepted).toMatchObject({
+        available: true,
+        target: { provider: "vision", model: "deployment", effort: "high" },
+        defaultEffort: "high",
+      })
+      expect(
+        router.route(
+          { ...selection, effort: "high" },
+          {
+            inputModalities: ["image"],
+            imageDetail: "original",
+            contextWindowTokens: 64_000,
+          },
+        ),
+      ).toEqual(accepted.target)
+      expect(() =>
+        router.route(
+          { ...selection, effort: "low" },
+          { inputModalities: ["image"] },
+        ),
+      ).toThrow("requested capabilities")
+      expect(
+        router.route(selection, { contextWindowTokens: 64_000 }).provider,
+      ).toBe("vision")
+    } finally {
+      await registry.close()
+    }
+  })
+  it("admits a context override up to the member's confirmed maximum", async () => {
+    const registry = createProviderRegistry({
+      one: account("one", [
+        {
+          id: "model-x",
+          contextWindowTokens: 32_000,
+          maxContextWindowTokens: 128_000,
+        },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [source("one", "vendor", "model-x")],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.preview(
+          { provider: "vendor", model: "model-x" },
+          { contextWindowTokens: 64_000 },
+        ).available,
+      ).toBe(true)
+      expect(
+        router.preview(
+          { provider: "vendor", model: "model-x" },
+          { contextWindowTokens: 256_000 },
+        ),
+      ).toMatchObject({
+        available: false,
+        rejections: [expect.objectContaining({ code: "budget_exceeded" })],
+      })
+    } finally {
+      await registry.close()
+    }
   })
 })

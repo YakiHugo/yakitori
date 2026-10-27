@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
+import { captureModelsManager } from "../../src/runtime/models-manager.ts"
 import { prepareModelDocuments } from "../../src/runtime/prepare-model-document.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
@@ -21,6 +22,39 @@ afterEach(async () => {
       .splice(0)
       .map((path) => rm(path, { recursive: true, force: true })),
   )
+})
+
+it("keeps captured connection metadata stable while the live catalog refreshes", async () => {
+  let capacity = 10_000
+  const provider = createConfiguredProvider(
+    "account_custom",
+    {
+      name: "Custom account",
+      wireApi: "openai_responses",
+      baseURL: "https://relay.example/v1",
+      models: [{ id: "custom-model", contextWindowTokens: 10_000 }],
+    },
+    "fixture-key",
+    {
+      async loadModels() {
+        return [{ id: "custom-model", contextWindowTokens: capacity }]
+      },
+      result() {},
+    },
+  )
+  const captured = captureModelsManager(provider.models)
+  await captured.refresh()
+  const selection = { provider: "account_custom", model: "custom-model" }
+  expect(captured.capacity(selection)?.contextWindowTokens).toBe(10_000)
+  capacity = 20_000
+  await provider.models.refresh({ force: true })
+  expect(provider.models.capacity(selection)?.contextWindowTokens).toBe(20_000)
+  await captured.refresh({ force: true })
+  expect(captured.capacity(selection)?.contextWindowTokens).toBe(10_000)
+  expect(
+    captureModelsManager(provider.models).capacity(selection)
+      ?.contextWindowTokens,
+  ).toBe(20_000)
 })
 
 it.each([

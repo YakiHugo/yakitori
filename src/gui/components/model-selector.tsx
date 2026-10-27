@@ -1,3 +1,5 @@
+import type { ModelRoutePreview } from "../../protocol/model-routing.ts"
+import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { Check, ChevronDown, ChevronLeft, Zap } from "lucide-react"
 import {
   type CSSProperties,
@@ -10,11 +12,7 @@ import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiProviderModel } from "../../protocol/application.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
 import { cn } from "../lib/utils.ts"
-import {
-  normalizeModelSelection,
-  resolveEffectiveModel,
-  useAppStore,
-} from "../store/app-store.ts"
+import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
 
 function displayEffort(effort: string): string {
@@ -37,7 +35,9 @@ function hasEffortControls(model: ApiProviderModel | undefined): boolean {
 export function ModelSelector({
   selection,
   onChange,
+  routePreview,
 }: Readonly<{
+  routePreview?: Readonly<{ value: ModelRoutePreview | undefined }>
   selection?: ModelSelection | undefined
   onChange?: (selection: ModelSelection | undefined) => void
 }> = {}) {
@@ -142,15 +142,18 @@ export function ModelSelector({
       ...provider,
       models: provider.models.filter((model) => model.visible !== false),
     }))
-  const effective = normalizeModelSelection(
-    resolveEffectiveModel({
-      sessionCurrent: current,
-      userPreference,
-      defaultProvider,
-      defaultModel,
-    }),
-    providers,
+  const effective = resolveEffectiveModel({
+    sessionCurrent: current,
+    userPreference,
+    defaultProvider,
+    defaultModel,
+  })
+  const ownPreview = useModelRoutePreview(
+    routePreview === undefined ? effective : undefined,
+    {},
+    onChange === undefined ? sessionId : undefined,
   )
+  const preview = routePreview?.value ?? ownPreview?.preview
   const effectiveEntry =
     effective === undefined
       ? undefined
@@ -167,20 +170,28 @@ export function ModelSelector({
     (provider) => provider.models.length > 0,
   )
   const efforts =
-    effectiveEntry?.effortStyle === "none" ? undefined : effectiveEntry?.efforts
-  const speeds = effectiveEntry?.speeds
+    preview?.efforts ??
+    (effectiveEntry?.effortStyle === "none"
+      ? undefined
+      : effectiveEntry?.efforts)
+  const speeds = preview?.speeds ?? effectiveEntry?.speeds
   const fast = effectiveEntry !== undefined && effective?.speed === "fast"
-  const effortMenuAvailable = hasEffortControls(effectiveEntry)
+  const effortMenuAvailable =
+    fast || (efforts?.length ?? 0) > 0 || (speeds?.length ?? 0) > 0
   // An unpinned effort runs at the model's catalog default; show that stop
   // instead of an empty slider.
+  const defaultEffort =
+    preview === undefined
+      ? effectiveEntry?.defaultEffort
+      : preview.defaultEffort
   const currentEffort =
     effectiveEntry === undefined
       ? undefined
       : (effective?.effort ??
-        (effectiveEntry.defaultEffort !== undefined &&
-        efforts?.includes(effectiveEntry.defaultEffort)
-          ? effectiveEntry.defaultEffort
+        (defaultEffort !== undefined && efforts?.includes(defaultEffort)
+          ? defaultEffort
           : undefined))
+
   const peak =
     currentEffort !== undefined &&
     efforts !== undefined &&
@@ -314,7 +325,7 @@ export function ModelSelector({
             {menu === "effort" && effective !== undefined ? (
               <div className="p-3.5">
                 <div className="grid grid-cols-[2.25rem_1fr_2.25rem] items-start">
-                  {speeds !== undefined ? (
+                  {fast || speeds?.includes("fast") ? (
                     <button
                       type="button"
                       aria-label={

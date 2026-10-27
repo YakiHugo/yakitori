@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 import { isJsonObject, type JsonObject } from "../../src/kernel/index.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import type { ModelProvider } from "../../src/runtime/model-provider.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
 
@@ -18,7 +19,10 @@ describe("configured provider protocol adaptation", () => {
           baseURL: "https://API.MOONSHOT.AI:443/v1/",
           models: [{ id: "kimi-k3" }, { id: "kimi-k2.6" }],
         })
-        const turn = provider.startTurn({ maxAttempts: 1 })
+        const client = createProviderRegistry({
+          "personal-kimi": provider,
+        }).createClient()
+        const turn = client.startTurn("personal-kimi", { maxAttempts: 1 })
         try {
           expect(provider.info.serviceId).toBe("moonshot")
           expectLimitedCapabilities(provider, "kimi-k3")
@@ -61,6 +65,7 @@ describe("configured provider protocol adaptation", () => {
           expect(requests).toHaveLength(1)
         } finally {
           await turn.close()
+          await client.close()
         }
       },
     )

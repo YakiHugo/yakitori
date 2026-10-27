@@ -15,6 +15,7 @@ import {
 } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
+import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import {
   hasInputDraft,
@@ -24,11 +25,7 @@ import {
   trimInputDraft,
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
-import {
-  normalizeModelSelection,
-  resolveEffectiveModel,
-  useAppStore,
-} from "../store/app-store.ts"
+import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
 import {
   useWorkspaceStore,
   type WorkspaceTab,
@@ -74,19 +71,40 @@ export function SideChatPanel({
   const stoppingTurn = useRef<string | undefined>(undefined)
   const [selection, setSelection] = useState<ModelSelection | undefined>(() => {
     const state = useAppStore.getState()
-    return normalizeModelSelection(
-      resolveEffectiveModel({
-        sessionCurrent:
-          tab.sourceSessionId === undefined
-            ? state.draftModelSelection
-            : state.modelSelections[tab.sourceSessionId],
-        userPreference: state.userPreference,
-        defaultProvider: state.defaultProvider,
-        defaultModel: state.defaultModel,
-      }),
-      state.providers,
-    )
+    return resolveEffectiveModel({
+      sessionCurrent:
+        tab.sourceSessionId === undefined
+          ? state.draftModelSelection
+          : state.modelSelections[tab.sourceSessionId],
+      userPreference: state.userPreference,
+      defaultProvider: state.defaultProvider,
+      defaultModel: state.defaultModel,
+    })
   })
+  const draftAttachments = inputContentAttachments(inputContent(tab.draft))
+  const route = useModelRoutePreview(
+    selection ?? chat?.modelSelection,
+    {
+      ...(draftAttachments.some((attachment) =>
+        attachment.mediaType.startsWith("image/"),
+      )
+        ? { inputModalities: ["image"] }
+        : {}),
+      ...(draftAttachments.some(
+        (attachment) =>
+          "detail" in attachment && attachment.detail === "original",
+      )
+        ? { imageDetail: "original" }
+        : {}),
+    },
+    chat?.id,
+    chat?.activeTurnId === undefined ? chat?.revision : undefined,
+  )
+  const routeError =
+    route?.preview?.available === false
+      ? (route.preview.rejections[0]?.message ??
+        "No connected account can run this model selection.")
+      : undefined
   const initialSelection = useRef(selection)
   const initialCwd = useRef(cwd)
   const sourceSessionId = useRef(tab.sourceSessionId)
@@ -331,6 +349,7 @@ export function SideChatPanel({
     if (
       sending.current ||
       chatRef.current?.activeTurnId ||
+      routeError !== undefined ||
       expiredByServer ||
       (chatRef.current !== undefined && isExpired(chatRef.current)) ||
       (!hasInputDraft(parts) && tab.excerpts.length === 0)
@@ -680,11 +699,17 @@ export function SideChatPanel({
           stopping={stopping}
           supportsImages={
             modelEntry === undefined ||
-            (modelEntry.inputModalities?.includes("image") ?? false)
+            ((
+              route?.preview?.inputModalities ?? modelEntry.inputModalities
+            )?.includes("image") ??
+              false)
           }
           supportsOriginal={
             modelEntry === undefined ||
-            (modelEntry.imageDetailModes?.includes("original") ?? false)
+            ((
+              route?.preview?.imageDetailModes ?? modelEntry.imageDetailModes
+            )?.includes("original") ??
+              false)
           }
           historyParts={
             chat?.messages.flatMap((message) =>
@@ -702,7 +727,8 @@ export function SideChatPanel({
           onCancel={() => void cancel()}
           importAttachments={importAttachments}
           readingAttachments={readingAttachments}
-          attachmentError={attachmentError}
+          submissionBlocked={routeError !== undefined}
+          attachmentError={attachmentError ?? routeError}
           onAttachmentError={setAttachmentError}
           label="Message side chat"
           sendLabel="Send side chat message"
@@ -712,19 +738,17 @@ export function SideChatPanel({
           modelControls={
             <ModelSelector
               selection={selection}
+              routePreview={{ value: route?.preview }}
               onChange={(next) => {
                 const state = useAppStore.getState()
                 setSelection(
                   next ??
-                    normalizeModelSelection(
-                      resolveEffectiveModel({
-                        sessionCurrent: undefined,
-                        userPreference: state.userPreference,
-                        defaultProvider: state.defaultProvider,
-                        defaultModel: state.defaultModel,
-                      }),
-                      state.providers,
-                    ) ??
+                    resolveEffectiveModel({
+                      sessionCurrent: undefined,
+                      userPreference: state.userPreference,
+                      defaultProvider: state.defaultProvider,
+                      defaultModel: state.defaultModel,
+                    }) ??
                     chatRef.current?.modelSelection,
                 )
               }}

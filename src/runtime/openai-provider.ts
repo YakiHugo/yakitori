@@ -646,7 +646,11 @@ async function* streamOpenAI(
               type: "output_item",
               itemId: item.id ?? `output_${nextOutputIndex - 1}`,
               content: result.content,
-              native: modelNativeItems(request, "openai_responses", [item]),
+              native: modelNativeItems(
+                request,
+                "openai_responses",
+                result.replayOutput,
+              ),
             }
           }
         }
@@ -1397,7 +1401,7 @@ export function fromOpenAIResponse(
         ...(continuationScope === undefined ? {} : { continuationScope }),
       },
       "openai_responses",
-      response.output,
+      result.replayOutput,
     ),
     ...(rawStopReason === undefined
       ? refused
@@ -1422,8 +1426,13 @@ function fromOpenAIOutput(
   continuationScope: string | undefined,
   model: string,
   completedItemIds: ReadonlySet<string>,
-): { content: ModelContentBlock[]; incompleteToolCalls: boolean } {
+): {
+  content: ModelContentBlock[]
+  incompleteToolCalls: boolean
+  replayOutput: Response["output"]
+} {
   const content: ModelContentBlock[] = []
+  const rejectedItems = new Set<Response["output"][number]>()
   let incompleteToolCalls = false
   for (const item of output) {
     if (
@@ -1437,6 +1446,7 @@ function fromOpenAIOutput(
         (status === undefined &&
           !completedItemIds.has(outputItemId(item) ?? ""))
       ) {
+        rejectedItems.add(item)
         incompleteToolCalls = true
         continue
       }
@@ -1560,6 +1570,7 @@ function fromOpenAIOutput(
     }
     if (item.type === "custom_tool_call") {
       if (typeof item.input !== "string") {
+        rejectedItems.add(item)
         incompleteToolCalls = true
         continue
       }
@@ -1621,10 +1632,12 @@ function fromOpenAIOutput(
       parsed = JSON.parse(item.arguments)
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error
+      rejectedItems.add(item)
       incompleteToolCalls = true
       continue
     }
     if (!isJsonValue(parsed)) {
+      rejectedItems.add(item)
       incompleteToolCalls = true
       continue
     }
@@ -1636,7 +1649,11 @@ function fromOpenAIOutput(
     })
   }
 
-  return { content, incompleteToolCalls }
+  return {
+    content,
+    incompleteToolCalls,
+    replayOutput: output.filter((item) => !rejectedItems.has(item)),
+  }
 }
 
 function customToolInput(
@@ -1855,7 +1872,7 @@ function terminalFailure(
       ...(providerCode === undefined ? {} : { providerCode }),
       providerMessage:
         error instanceof OpenAI.APIError
-          ? providerErrorMessage(error.error)
+          ? providerErrorMessage({ error: error.error })
           : undefined,
       ...(providerRequestId === undefined ? {} : { providerRequestId }),
       ...(responseId === undefined ? {} : { providerResponseId: responseId }),

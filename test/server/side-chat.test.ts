@@ -95,6 +95,55 @@ async function fixture(stream: StreamFn, now?: () => number) {
 }
 
 describe("temporary side conversations", () => {
+  it("exposes current routing context only for an owned temporary conversation", async () => {
+    const context = await fixture(async function* () {
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "Independent answer" }],
+        },
+      }
+    })
+    try {
+      expect(context.service.routingContext("unknown-session")).toBeUndefined()
+      const created = await context.service.create({})
+      await context.service.send({
+        sideChatId: created.id,
+        requestId: "side-request",
+        content: createUserInput("Independent question"),
+      })
+      await until(() => !context.service.read(created.id).activeTurnId)
+      const routing = context.service.routingContext(created.id)
+      expect(routing?.configuration?.defaultTarget).toMatchObject({
+        provider: "faux",
+        model: "first-model",
+      })
+      expect(routing?.context.history).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            item: expect.objectContaining({
+              role: "user",
+              content: [{ type: "text", text: "Independent question" }],
+            }),
+          }),
+          expect.objectContaining({
+            item: expect.objectContaining({
+              role: "assistant",
+              content: expect.arrayContaining([
+                { type: "text", text: "Independent answer" },
+              ]),
+            }),
+          }),
+        ]),
+      )
+      await context.service.remove(created.id)
+      expect(context.service.routingContext(created.id)).toBeUndefined()
+    } finally {
+      await context.close()
+    }
+  })
+
   it("renews the deadline on successful admissions and keeps expired history readable", async () => {
     const day = 24 * 60 * 60 * 1_000
     const createdAt = Date.parse("2026-01-01T00:00:00.000Z")

@@ -12,6 +12,7 @@ import {
 import { createFileModelsCacheStore } from "./models-cache-store.ts"
 import { createDiscoveringModelsManager } from "./models-manager.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
+import { resolveProviderBackend } from "./provider-backend.ts"
 
 export function createGrokProvider(
   modelsCacheDir: string,
@@ -22,6 +23,11 @@ export function createGrokProvider(
   },
 ): ModelProvider {
   const provider = account.id
+  const backend = resolveProviderBackend({
+    service: "xai",
+    baseURL: GROK_API_BASE_URL,
+    wireApi: "openai_responses",
+  })
   // Resolve the bound CLI source per call so token renewal stays visible, while
   // its authenticated owner must remain the account selected for this Turn.
   return createModelProvider({
@@ -29,7 +35,7 @@ export function createGrokProvider(
       id: provider,
       serviceId: "xai",
       wireApi: "openai_responses",
-      capabilities: { remoteCompaction: false, nativePdf: false },
+      capabilities: backend.capabilities,
     },
     createTurnStream: () => {
       let expectedOwner: string | undefined
@@ -92,7 +98,7 @@ export function createGrokProvider(
           }
           expectedOwner = scope
           yield* createOpenAIProvider({
-            responseProfile: "grok",
+            responseProfile: backend.responseProfile,
             apiKey,
             model: request.target.model,
             baseURL: GROK_API_BASE_URL,
