@@ -49,13 +49,17 @@ describe("app shell", () => {
     })
     render(<App />)
     const editor = screen.getByRole("textbox", { name: "Message the Mate" })
-    await act(async () => fireEvent.keyDown(editor, { key: "Escape" }))
+    await act(async () =>
+      fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 }),
+    )
     await waitFor(() =>
       expect(cancelTurn).toHaveBeenCalledExactlyOnceWith("turn_esc"),
     )
     expect(editor.textContent).toBe("keep this draft")
     act(() => useAppStore.setState({ execution: createExecutionViewState() }))
-    await act(async () => fireEvent.keyDown(editor, { key: "Escape" }))
+    await act(async () =>
+      fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 }),
+    )
     expect(cancelTurn).toHaveBeenCalledOnce()
   })
 

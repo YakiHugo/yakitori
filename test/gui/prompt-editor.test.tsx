@@ -478,3 +478,25 @@ it("passes every dropped file in order so unsupported content is reported rather
   })
   expect(paste).toHaveBeenCalledExactlyOnceWith(files)
 })
+
+it.each([
+  false,
+  true,
+])("lets only unhandled native Escape reach the conversation (handled=%s)", (handled) => {
+  const onKeyDown = vi.fn(() => handled)
+  render(
+    <PromptEditor
+      apiBase="http://localhost"
+      label="Prompt"
+      value={textInputDraft("draft")}
+      onChange={() => {}}
+      onKeyDown={onKeyDown}
+    />,
+  )
+  const editor = screen.getByRole("textbox")
+  expect(fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 })).toBe(
+    !handled,
+  )
+  expect(onKeyDown).toHaveBeenCalledOnce()
+  expect(editor.textContent).toBe("draft")
+})

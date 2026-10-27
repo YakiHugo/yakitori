@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
@@ -207,11 +214,14 @@ describe("external engine workspace", () => {
     const user = userEvent.setup()
     const editor = screen.getByRole("textbox")
     await user.click(editor)
-    await user.keyboard("next question{Escape}")
-    expect(request).toHaveBeenCalledWith("engineSession/cancel", {
-      sessionId: "external_session",
-      turnId: "turn",
-    })
+    await user.keyboard("next question")
+    fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 })
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("engineSession/cancel", {
+        sessionId: "external_session",
+        turnId: "turn",
+      }),
+    )
     expect(editor.textContent).toContain("next question")
     expect(screen.getByRole("button", { name: "Stopping" })).toHaveProperty(
       "disabled",

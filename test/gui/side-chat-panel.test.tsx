@@ -186,7 +186,7 @@ describe("side chat panel", () => {
     const editor = screen.getByRole("textbox", { name: "Message side chat" })
     const user = userEvent.setup()
     await user.click(editor)
-    await user.keyboard("{Escape}")
+    fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 })
     await waitFor(() =>
       expect(requests("sideChat/cancel")).toEqual([
         { sideChatId: "side-chat", turnId: "side_turn" },

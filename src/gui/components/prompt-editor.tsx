@@ -22,6 +22,7 @@ import type {
   UserAttachment,
 } from "../../protocol/asset-types.ts"
 import { assetSourceKey } from "../../protocol/asset-types.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { appendDraftImages, sameInputDraft } from "../input-draft.ts"
@@ -406,6 +407,13 @@ export function PromptEditor(props: Props) {
           return true
         },
         keydown: (view, event) => {
+          if (isUnmodifiedEscape(event) && !view.composing) {
+            // ProseMirror otherwise prevents every native Esc (keyCode 27),
+            // even when no editor action handled it. Give local dismissals
+            // first refusal, then let an unhandled Esc reach the chat scope.
+            if (latest.current.onKeyDown?.(event)) event.preventDefault()
+            return true
+          }
           const document =
             event.target instanceof Element
               ? event.target.closest<HTMLElement>("[data-prompt-document]")

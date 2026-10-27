@@ -1770,7 +1770,9 @@ describe("slash command menu", () => {
     await pastePrompt(screen.getByRole("textbox"), "/")
     expect(screen.getByRole("listbox")).toBeDefined()
 
-    await user.keyboard("{Escape}")
+    expect(fireEvent.keyDown(textarea, { key: "Escape", keyCode: 27 })).toBe(
+      false,
+    )
     expect(screen.queryByRole("listbox")).toBeNull()
 
     await pastePrompt(screen.getByRole("textbox"), "c")
