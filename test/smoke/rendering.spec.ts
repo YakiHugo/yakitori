@@ -357,9 +357,16 @@ test("Escape dismisses the model menu before interrupting the focused conversati
     page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
   ).toHaveCount(0)
   await expect(composer).toHaveText("Keep this unsent draft.")
-  await expect(
-    page.getByRole("region", { name: "Response", exact: true }),
-  ).toContainText("Output before interruption.")
+  const interrupted = page.getByRole("region", {
+    name: "Response",
+    exact: true,
+  })
+  await expect(interrupted).toContainText("Turn interrupted")
+  // Interrupted output is retained as activity, not promoted to a final answer.
+  await interrupted.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(interrupted).toContainText(
+    "Output before interruption. Still running after ignored keys. Still running after menu dismissal.",
+  )
   await composer.fill("")
   await expect(
     page.getByRole("button", { name: "Resume", exact: true }),
