@@ -895,6 +895,17 @@ it("anchors requests while keeping steering messages inside their request", () =
     name: "Jump to request 1: First request",
   })
   expect(first).toBeDefined()
+  fireEvent.focus(first)
+  expect(fireEvent.keyDown(first, { key: "Escape", repeat: true })).toBe(true)
+  expect(
+    first.querySelector(".conversation-preview")?.getAttribute("data-visible"),
+  ).toBe("true")
+  expect(fireEvent.keyDown(first, { key: "Escape" })).toBe(false)
+  expect(
+    first.querySelector(".conversation-preview")?.getAttribute("data-visible"),
+  ).toBe("false")
+  expect(fireEvent.keyDown(first, { key: "Escape" })).toBe(true)
+
   expect(
     screen.getByRole("button", { name: "Jump to request 2: Second request" }),
   ).toBeDefined()

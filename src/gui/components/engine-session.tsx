@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
+import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {
@@ -113,8 +114,20 @@ export function EngineConversation() {
   }, [state.snapshot])
   const uncertain =
     (view?.uncertain.length ?? 0) > 0 || state.pendingRequestId !== undefined
+  const interrupt = useChatInterrupt({
+    sessionId: state.sessionId,
+    turnId: view?.activeTurnId,
+    stopping: state.stopping,
+    onInterrupt: () => {
+      if (
+        useEngineStore.getState().sessionId === state.sessionId &&
+        view?.activeTurnId
+      )
+        void cancelEngineTurn(view.activeTurnId)
+    },
+  })
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div {...interrupt} className="flex min-h-0 flex-1 flex-col">
       <section
         ref={scroll}
         onScroll={() => {

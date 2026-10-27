@@ -1,3 +1,4 @@
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { ArrowDown, ArrowUp, Pencil, Play, X } from "lucide-react"
 import { useRef, useState } from "react"
 import type { InputDraft } from "../../protocol/user-input.ts"
@@ -89,7 +90,8 @@ export function QueuedInputs() {
                   )
                 }}
                 onKeyDown={(event) => {
-                  if (event.key === "Escape") {
+                  if (isUnmodifiedEscape(event)) {
+                    event.preventDefault()
                     closeEditor()
                     return true
                   }

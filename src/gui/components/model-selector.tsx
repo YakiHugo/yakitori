@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiProviderModel } from "../../protocol/application.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
 import { cn } from "../lib/utils.ts"
@@ -126,10 +127,13 @@ export function ModelSelector({
   useEffect(() => {
     if (menu === undefined) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenu(undefined)
+      if (!isUnmodifiedEscape(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setMenu(undefined)
     }
-    window.addEventListener("keydown", closeOnEscape)
-    return () => window.removeEventListener("keydown", closeOnEscape)
+    document.addEventListener("keydown", closeOnEscape)
+    return () => document.removeEventListener("keydown", closeOnEscape)
   }, [menu])
 
   const availableProviders = providers

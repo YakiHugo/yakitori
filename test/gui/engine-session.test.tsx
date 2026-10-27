@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
@@ -189,6 +196,117 @@ describe("external engine workspace", () => {
     request.mockResolvedValue(finished)
     await act(() => selectEngineSession(finished.session))
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy()
+  })
+
+  it("Escape in the engine composer interrupts its addressed turn and preserves the draft", async () => {
+    const running = snapshot([
+      { type: "turn.status", turnId: "turn", status: "running" },
+    ])
+    useEngineStore.setState({
+      engineId: engine.id,
+      sessionId: running.session.id,
+      snapshot: running,
+    })
+    request.mockImplementation(async (method) =>
+      method === "engineSession/cancel" ? { status: "requested" } : running,
+    )
+    render(<EngineConversation />)
+    const user = userEvent.setup()
+    const editor = screen.getByRole("textbox")
+    await user.click(editor)
+    await user.keyboard("next question")
+    fireEvent.keyDown(editor, { key: "Escape", keyCode: 27 })
+    await waitFor(() =>
+      expect(request).toHaveBeenCalledWith("engineSession/cancel", {
+        sessionId: "external_session",
+        turnId: "turn",
+      }),
+    )
+    expect(editor.textContent).toContain("next question")
+    expect(screen.getByRole("button", { name: "Stopping" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
+
+  it("does not carry an interrupt into the next active engine turn", async () => {
+    const running = snapshot([
+      { type: "turn.status", turnId: "turn", status: "running" },
+    ])
+    useEngineStore.setState({
+      engineId: engine.id,
+      sessionId: running.session.id,
+      snapshot: running,
+    })
+    const next = snapshot([
+      { type: "turn.status", turnId: "turn", status: "cancelled" },
+      { type: "turn.status", turnId: "next", status: "running" },
+    ])
+    request.mockImplementation(async (method) =>
+      method === "engineSession/cancel" ? { status: "requested" } : next,
+    )
+    await cancelEngineTurn("turn")
+    expect(useEngineStore.getState().stopping).toBe(false)
+    await cancelEngineTurn("turn")
+    expect(
+      request.mock.calls.filter(
+        ([method]) => method === "engineSession/cancel",
+      ),
+    ).toHaveLength(1)
+    await cancelEngineTurn("next")
+    expect(request).toHaveBeenCalledWith("engineSession/cancel", {
+      sessionId: running.session.id,
+      turnId: "next",
+    })
+  })
+
+  it("a late cancel acknowledgement does not refresh a different engine selection", async () => {
+    const running = snapshot([
+      { type: "turn.status", turnId: "turn", status: "running" },
+    ])
+    useEngineStore.setState({
+      engineId: engine.id,
+      sessionId: running.session.id,
+      snapshot: running,
+    })
+    let acknowledge!: () => void
+    request.mockImplementation(async (method) => {
+      if (method === "engineSession/cancel")
+        await new Promise<void>((resolve) => {
+          acknowledge = resolve
+        })
+      return running
+    })
+    const cancelling = cancelEngineTurn("turn")
+    chooseNewEngine("another_engine")
+    acknowledge()
+    await cancelling
+    expect(request).not.toHaveBeenCalledWith(
+      "engineSession/read",
+      expect.anything(),
+    )
+    expect(useEngineStore.getState().engineId).toBe("another_engine")
+    expect(useEngineStore.getState().stopping).toBe(false)
+  })
+
+  it("allows retry after an engine interrupt fails", async () => {
+    const running = snapshot([
+      { type: "turn.status", turnId: "turn", status: "running" },
+    ])
+    useEngineStore.setState({
+      engineId: engine.id,
+      sessionId: running.session.id,
+      snapshot: running,
+    })
+    request.mockRejectedValueOnce(new Error("cancel unavailable"))
+    await cancelEngineTurn("turn")
+    expect(useEngineStore.getState().stopping).toBe(false)
+    expect(useEngineStore.getState().error).toContain("cancel unavailable")
+    request.mockImplementation(async (method) =>
+      method === "engineSession/cancel" ? { status: "requested" } : running,
+    )
+    await cancelEngineTurn("turn")
+    expect(useEngineStore.getState().stopping).toBe(true)
   })
 
   it("does not create a native session when switching engine or selecting external history", async () => {

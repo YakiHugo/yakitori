@@ -7,6 +7,7 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import type { SidebarChange } from "../../protocol/sidebar.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { sessionListKey, useAppStore } from "../store/app-store.ts"
 
 export const SidebarDragKind = createContext<string | undefined>(undefined)
@@ -309,7 +310,7 @@ export function SidebarDragSurface({
     }
     const cancel = () => finish(false)
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && pending.current) {
+      if (isUnmodifiedEscape(event) && pending.current) {
         event.preventDefault()
         event.stopPropagation()
         finish(false)

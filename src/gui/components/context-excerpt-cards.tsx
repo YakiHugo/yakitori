@@ -1,6 +1,7 @@
 import { CornerUpLeft, Quote, X } from "lucide-react"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import {
   type ExcerptEditRequest,
@@ -111,7 +112,7 @@ export function ContextExcerptCards({
         setEditing(undefined)
     }
     const keydown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return
+      if (!isUnmodifiedEscape(event)) return
       event.preventDefault()
       event.stopPropagation()
       if (onChange && editing && active.comment !== editing.originalComment) {

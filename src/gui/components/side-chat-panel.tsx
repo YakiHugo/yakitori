@@ -14,6 +14,7 @@ import {
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
+import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import {
@@ -67,6 +68,7 @@ export function SideChatPanel({
   const providers = useAppStore((state) => state.providers)
   const sending = useRef(false)
   const [stopping, setStopping] = useState(false)
+  const stoppingTurn = useRef<string | undefined>(undefined)
   const [selection, setSelection] = useState<ModelSelection | undefined>(() => {
     const state = useAppStore.getState()
     return resolveEffectiveModel({
@@ -163,6 +165,13 @@ export function SideChatPanel({
       }
       const previousExpiry = chatRef.current?.expiresAt
       chatRef.current = next
+      if (
+        stoppingTurn.current !== undefined &&
+        next.activeTurnId !== stoppingTurn.current
+      ) {
+        stoppingTurn.current = undefined
+        setStopping(false)
+      }
       // A server rejection remains authoritative when the local clock lags.
       // Only another admitted message extending the lease can reopen this chat.
       if (
@@ -440,7 +449,15 @@ export function SideChatPanel({
     }
   }
   const cancel = async () => {
-    if (!chat?.activeTurnId || stopping) return
+    if (
+      !chat?.activeTurnId ||
+      stoppingTurn.current !== undefined ||
+      chatRef.current?.id !== chat.id ||
+      chatRef.current.activeTurnId !== chat.activeTurnId
+    )
+      return
+    const turnId = chat.activeTurnId
+    stoppingTurn.current = turnId
     setStopping(true)
     try {
       applySnapshot(
@@ -450,10 +467,11 @@ export function SideChatPanel({
         }),
       )
     } catch (cause) {
-      if (!disposed.current)
+      if (!disposed.current && stoppingTurn.current === turnId) {
+        stoppingTurn.current = undefined
+        setStopping(false)
         setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      if (!disposed.current) setStopping(false)
+      }
     }
   }
   const resolvePermission = async (
@@ -489,8 +507,14 @@ export function SideChatPanel({
   const modelEntry = providers
     .find((provider) => provider.name === selection?.provider)
     ?.models.find((model) => model.id === selection?.model)
+  const interrupt = useChatInterrupt({
+    sessionId: chat?.id,
+    turnId: active ? chat?.activeTurnId : undefined,
+    stopping,
+    onInterrupt: () => void cancel(),
+  })
   return (
-    <div className="side-chat-panel" data-side-chat-id={tab.id}>
+    <div {...interrupt} className="side-chat-panel" data-side-chat-id={tab.id}>
       <div
         ref={viewport}
         role="log"

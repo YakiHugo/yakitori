@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import { SidebarDialog } from "../../src/gui/components/sidebar-surfaces.tsx"
 import { SessionItems } from "../../src/gui/components/sidebar-sessions.tsx"
 import {
   createInitialAppState,
@@ -65,4 +66,25 @@ it("keeps a reopened rename dialog when a cancelled dialog's save finishes", asy
   expect(
     (screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value,
   ).toBe("New draft")
+})
+
+it("dismisses a dialog only for a fresh unmodified non-composing Escape", () => {
+  const close = vi.fn()
+  render(
+    <SidebarDialog title="Rename" onClose={close} dismissImmediately>
+      <input aria-label="Title" />
+    </SidebarDialog>,
+  )
+  const input = screen.getByRole("textbox", { name: "Title" })
+  for (const detail of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { repeat: true },
+    { shiftKey: true },
+  ]) {
+    fireEvent.keyDown(input, { key: "Escape", ...detail })
+    expect(close).not.toHaveBeenCalled()
+  }
+  fireEvent.keyDown(input, { key: "Escape" })
+  expect(close).toHaveBeenCalledOnce()
 })

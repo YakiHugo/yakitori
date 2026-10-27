@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiSearchSessionOccurrencesResponse } from "../../protocol/application.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -89,14 +90,25 @@ export function ConversationFind({
       ) {
         event.preventDefault()
         show()
-      } else if (open && event.key === "Escape") {
-        event.preventDefault()
-        close()
       }
     }
+    const dismissEscape = (event: KeyboardEvent) => {
+      if (
+        !open ||
+        !isUnmodifiedEscape(event) ||
+        document.querySelector("dialog[open]") ||
+        (event.target instanceof Element && event.target.closest(".cm-editor"))
+      )
+        return
+      event.preventDefault()
+      event.stopPropagation()
+      close()
+    }
     window.addEventListener("keydown", keydown)
+    document.addEventListener("keydown", dismissEscape)
     return () => {
       window.removeEventListener("keydown", keydown)
+      document.removeEventListener("keydown", dismissEscape)
     }
   }, [open, close])
   useLayoutEffect(() => {

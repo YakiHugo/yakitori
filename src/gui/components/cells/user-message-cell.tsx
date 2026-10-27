@@ -1,3 +1,4 @@
+import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
 import { ImageOff, LoaderCircle, PencilLine, Target } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { assetSourceKey } from "../../../protocol/asset-types.ts"
@@ -220,7 +221,8 @@ export function UserMessageCell({
               )
             }}
             onKeyDown={(event) => {
-              if (event.key === "Escape") {
+              if (isUnmodifiedEscape(event)) {
+                event.preventDefault()
                 setEditing(false)
                 return true
               }

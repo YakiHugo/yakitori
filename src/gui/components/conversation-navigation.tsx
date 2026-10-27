@@ -1,4 +1,5 @@
 import { type RefObject, useLayoutEffect, useState } from "react"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ExecutionEntry } from "../execution-view.ts"
 
 function previewText(text: string): string {
@@ -100,7 +101,13 @@ export function ConversationNavigation({
             onBlur={() => setHovered(undefined)}
             onClick={() => onJump(message.id)}
             onKeyDown={(event) => {
-              if (event.key === "Escape") setHovered(undefined)
+              if (
+                hovered !== undefined &&
+                isUnmodifiedEscape(event.nativeEvent)
+              ) {
+                event.preventDefault()
+                setHovered(undefined)
+              }
               const next =
                 event.key === "ArrowDown"
                   ? index + 1
