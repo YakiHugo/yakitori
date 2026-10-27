@@ -1,5 +1,13 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen, within } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SidebarChange } from "../../src/core/session-sidebar.ts"
@@ -30,6 +38,27 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
+  it("interrupts the main turn with Escape without changing its draft, and does nothing when idle", async () => {
+    const cancelTurn = vi.fn(async (_turnId: string) => {})
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail(),
+      execution: { ...createExecutionViewState(), activeTurnId: "turn_esc" },
+      promptDraft: inputParts("keep this draft"),
+      cancelTurn,
+    })
+    render(<App />)
+    const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+    await act(async () => fireEvent.keyDown(editor, { key: "Escape" }))
+    await waitFor(() =>
+      expect(cancelTurn).toHaveBeenCalledExactlyOnceWith("turn_esc"),
+    )
+    expect(editor.textContent).toBe("keep this draft")
+    act(() => useAppStore.setState({ execution: createExecutionViewState() }))
+    await act(async () => fireEvent.keyDown(editor, { key: "Escape" }))
+    expect(cancelTurn).toHaveBeenCalledOnce()
+  })
+
   it("keeps the selected conversation title in the window toolbar", () => {
     useAppStore.setState({
       selection: { sessionId },

@@ -351,7 +351,7 @@ export function createInitialAppState(): AppStoreData {
 
 let activeTaskCount = 0
 
-export const useAppStore = create<AppStore>()((set, get) => {
+export const useAppStore = create<AppStore>()((set, get, store) => {
   const sessionListRevisions: Record<string, number> = {}
   // Snapshot identity distinguishes a later clear from an earlier null goal.
   const goalSnapshots = new Map<string, Readonly<{ goal: ThreadGoal | null }>>()
@@ -400,6 +400,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
   // Set only after a complete replay or a durable terminal event. A live
   // snapshot alone may still have subsequent history to deliver.
   const authoritativeTurns = new Map<string, string | undefined>()
+  const pendingCancellations = new Map<
+    string,
+    { sessionId: string; finish(): void }
+  >()
   const subscriptionReadRevisions: Record<string, number> = {}
   let projectChangesSubscribedClient: AppRpcClient | undefined
   let subscriptionsListRevision = 0
@@ -1033,6 +1037,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
               selection.sessionId,
               get().execution.activeTurnId,
             )
+            for (const [turnId, pending] of pendingCancellations) {
+              if (
+                pending.sessionId === selection.sessionId &&
+                turnId !== get().execution.activeTurnId
+              )
+                pending.finish()
+            }
             if (get().execution.activeTurnId !== undefined) {
               for (const steer of get().pendingSteers[selection.sessionId] ??
                 []) {
@@ -2823,13 +2834,48 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     cancelTurn: async (turnId) => {
       const selection = currentSelection()
-      if (!selection) return
+      if (
+        !selection ||
+        (get().execution.activeTurnId !== turnId &&
+          (get().execution.activeTurnId !== undefined ||
+            get().execution.turnTimings[turnId]?.outcome !== undefined))
+      )
+        return
       const key = `cancel:${turnId}`
       if (get().inFlightActions.has(key)) return
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
-      await runTask(
+      // Acknowledgement only means the interrupt was requested. Keep the
+      // addressed turn disabled until observation moves on, or the RPC fails.
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        unsubscribe()
+        pendingCancellations.delete(turnId)
+        set((state) => {
+          const inFlightActions = new Set(state.inFlightActions)
+          inFlightActions.delete(key)
+          return { inFlightActions }
+        })
+      }
+      const unsubscribe = store.subscribe((state) => {
+        if (
+          !isCurrentSelection(selection) ||
+          state.execution.turnTimings[turnId]?.completedAt !== undefined ||
+          (state.execution.activeTurnId !== undefined &&
+            state.execution.activeTurnId !== turnId)
+        )
+          finish()
+      })
+      // Losing the stream hides active execution but is not terminal evidence.
+      // An idle authoritative replay also releases this pending interruption.
+      pendingCancellations.set(turnId, {
+        sessionId: selection.sessionId,
+        finish,
+      })
+      const acknowledged = await runTask(
         async () => {
           try {
             await getAppRpcClient(get().apiBase).request(
@@ -2844,20 +2890,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (
               error instanceof ApiRequestError &&
               error.code === "not_found" &&
-              isCurrentSelection(selection)
+              isCurrentSelection(selection) &&
+              !settled
             ) {
               connectEvents(selection, get().execution.lastSeq)
             }
             throw error
           }
         },
-        () => isCurrentSelection(selection),
+        () => isCurrentSelection(selection) && !settled,
       )
-      set((state) => {
-        const inFlightActions = new Set(state.inFlightActions)
-        inFlightActions.delete(key)
-        return { inFlightActions }
-      })
+      if (!acknowledged) finish()
     },
 
     refreshQueuedInputs: async () => {

@@ -8,6 +8,7 @@ import {
   useState,
 } from "react"
 import { createPortal } from "react-dom"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 
 export function SidebarDialog({
   title,
@@ -66,10 +67,17 @@ export function SidebarDialog({
         close()
       }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault()
-          close()
-        }
+        if (
+          event.key !== "Escape" ||
+          event.nativeEvent.isComposing ||
+          event.nativeEvent.keyCode === 229
+        )
+          return
+        const dismiss = isUnmodifiedEscape(event.nativeEvent)
+        // Prevent the native dialog cancel action for held or modified Escape.
+        event.preventDefault()
+        event.stopPropagation()
+        if (dismiss) close()
       }}
       onClick={(event) => {
         // Opening a native modal retargets the rest of a trigger double-click
@@ -367,7 +375,7 @@ function MenuPanel({
           onBack()
           return
         }
-        if (event.key === "Escape" || event.key === "Tab") {
+        if (isUnmodifiedEscape(event.nativeEvent) || event.key === "Tab") {
           event.preventDefault()
           onClose()
           return

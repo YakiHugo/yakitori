@@ -166,6 +166,69 @@ afterEach(() => {
 })
 
 describe("side chat panel", () => {
+  it("routes Escape only to the side turn and remains stopping after its acknowledgement", async () => {
+    const mainCancel = vi.fn(async () => {})
+    useAppStore.setState({ cancelTurn: mainCancel })
+    client.request.mockImplementation(async (method) => {
+      if (method === "sideChat/create")
+        return snapshot(1, { activeTurnId: "side_turn" })
+      if (method === "sideChat/cancel")
+        return snapshot(2, { activeTurnId: "side_turn" })
+      return {}
+    })
+    render(
+      <>
+        <Composer />
+        <Panel />
+      </>,
+    )
+    await screen.findByRole("button", { name: "Stop side chat" })
+    const editor = screen.getByRole("textbox", { name: "Message side chat" })
+    const user = userEvent.setup()
+    await user.click(editor)
+    await user.keyboard("{Escape}")
+    await waitFor(() =>
+      expect(requests("sideChat/cancel")).toEqual([
+        { sideChatId: "side-chat", turnId: "side_turn" },
+      ]),
+    )
+    expect(screen.getByRole("button", { name: "Stopping" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    await user.keyboard("{Escape}{Escape}")
+    expect(requests("sideChat/cancel")).toHaveLength(1)
+    expect(mainCancel).not.toHaveBeenCalled()
+    expect(editor.textContent).toBe("Explain")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
+    await act(async () => {
+      for (const listener of listeners)
+        listener(snapshot(3, { activeTurnId: "next_turn" }))
+    })
+    expect(
+      screen.getByRole("button", { name: "Stop side chat" }),
+    ).toHaveProperty("disabled", false)
+  })
+
+  it("allows retrying a failed side-chat interrupt", async () => {
+    client.request.mockImplementation(async (method) => {
+      if (method === "sideChat/create")
+        return snapshot(1, { activeTurnId: "side_turn" })
+      if (method === "sideChat/cancel") throw new Error("Cancel unavailable")
+      return {}
+    })
+    render(<Panel />)
+    const button = await screen.findByRole("button", { name: "Stop side chat" })
+    const user = userEvent.setup()
+    await user.click(button)
+    await screen.findByText("Cancel unavailable")
+    expect(button).toHaveProperty("disabled", false)
+    await user.click(button)
+    expect(requests("sideChat/cancel")).toHaveLength(2)
+  })
+
   it("keeps a streaming Mermaid response readable without attempting a diagram", async () => {
     client.request.mockImplementation(async (method) =>
       method === "sideChat/create"

@@ -423,6 +423,164 @@ describe("app store event stream", () => {
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
   })
 
+  it("keeps an acknowledged interrupt pending until its turn completes without touching draft or queue", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    // Let the initial replay's queue read settle before seeding queued state.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const draft = inputParts("next question")
+    useAppStore.setState({
+      promptDraft: draft,
+      execution: {
+        ...useAppStore.getState().execution,
+        queuedInputs: {
+          queued: {
+            id: "queued",
+            text: "queued question",
+            admittedAt: "2026-07-24T00:00:00.000Z",
+          },
+        },
+      },
+    })
+    fakeRef.current.respond = () => ({ status: "requested" })
+    await useAppStore.getState().cancelTurn("turn_1")
+    await useAppStore.getState().cancelTurn("turn_1")
+    expect(fakeRef.current.requestsFor("session/turn/cancel")).toHaveLength(1)
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      true,
+    )
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: "turn_1", outcome: { status: "interrupted" } },
+        },
+      }),
+    )
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      false,
+    )
+    expect(useAppStore.getState().promptDraft).toEqual(draft)
+    expect(useAppStore.getState().execution.queuedInputs.queued?.text).toBe(
+      "queued question",
+    )
+    expect(fakeRef.current.requestsFor("session/input/admit")).toHaveLength(0)
+  })
+
+  it("keeps an acknowledged interrupt across disconnection until authoritative replay finishes the turn", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    fakeRef.current.respond = () => ({ status: "requested" })
+    await useAppStore.getState().cancelTurn("turn_1")
+    stream?.disconnect(new Error("connection lost"))
+    expect(useAppStore.getState().execution.activeTurnId).toBeUndefined()
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      true,
+    )
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    await useAppStore.getState().cancelTurn("turn_1")
+    expect(fakeRef.current.requestsFor("session/turn/cancel")).toHaveLength(1)
+    emitSnapshot(stream, { ...sessionDetail, seq: 2 })
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      true,
+    )
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      false,
+    )
+  })
+
+  it("allows another interrupt after a failed request and ignores a locally stale turn", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    fakeRef.current.respond = () => {
+      throw new Error("cancel unavailable")
+    }
+    await useAppStore.getState().cancelTurn("old_turn")
+    expect(fakeRef.current.requestsFor("session/turn/cancel")).toHaveLength(0)
+    await useAppStore.getState().cancelTurn("turn_1")
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      false,
+    )
+    expect(useAppStore.getState().message).toBe("cancel unavailable")
+    fakeRef.current.respond = () => ({ status: "requested" })
+    await useAppStore.getState().cancelTurn("turn_1")
+    expect(fakeRef.current.requestsFor("session/turn/cancel")).toHaveLength(2)
+  })
+
+  it("ignores a late interrupt failure after the addressed turn naturally completes", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    const response = deferredResponse()
+    fakeRef.current.respond = () => response.promise
+    const cancelling = useAppStore.getState().cancelTurn("turn_1")
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: "turn_1", outcome: { status: "completed" } },
+        },
+      }),
+    )
+    response.reject(new ApiRequestError("turn already finished", "not_found"))
+    await cancelling
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      false,
+    )
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(fakeRef.current.streams).toHaveLength(1)
+  })
+
+  it("an old cancel response cannot clear a newer turn's pending interrupt after navigation", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0], {
+      ...sessionDetail,
+      activeTurnId: "turn_1",
+    })
+    fakeRef.current.streams[0]?.emitReplayComplete()
+    const oldResponse = deferredResponse()
+    fakeRef.current.respond = () => oldResponse.promise
+    const oldCancel = useAppStore.getState().cancelTurn("turn_1")
+    await useAppStore.getState().selectSession("session_2")
+    emitSnapshot(fakeRef.current.streams[1], {
+      ...sessionDetail,
+      id: "session_2",
+      activeTurnId: "turn_2",
+    })
+    fakeRef.current.streams[1]?.emitReplayComplete()
+    fakeRef.current.respond = () => ({ status: "requested" })
+    await useAppStore.getState().cancelTurn("turn_2")
+    oldResponse.resolve({ status: "requested" })
+    await oldCancel
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_1")).toBe(
+      false,
+    )
+    expect(useAppStore.getState().inFlightActions.has("cancel:turn_2")).toBe(
+      true,
+    )
+    expect(
+      fakeRef.current
+        .requestsFor("session/turn/cancel")
+        .map(({ params }) => params),
+    ).toEqual([
+      { sessionId: "session_1", turnId: "turn_1", reason: "user_cancel" },
+      { sessionId: "session_2", turnId: "turn_2", reason: "user_cancel" },
+    ])
+  })
+
   it("resubscribes after a stale interrupt without cancelling a newer turn", async () => {
     await useAppStore.getState().selectSession("session_1")
     const initialStream = fakeRef.current.streams[0]

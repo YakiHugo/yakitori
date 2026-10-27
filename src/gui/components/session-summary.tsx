@@ -11,6 +11,7 @@ import {
 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { UserAttachment } from "../../protocol/asset-types.ts"
 import { assetSourceKey } from "../../protocol/asset-types.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
@@ -154,8 +155,9 @@ function SummaryPopover({
       if (!inside(event.target)) setAnchor(undefined)
     }
     const dismissEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return
+      if (!isUnmodifiedEscape(event)) return
       event.preventDefault()
+      event.stopPropagation()
       setAnchor(undefined)
       trigger.current?.focus()
     }

@@ -24,6 +24,7 @@ type EngineState = {
   loading: boolean
   sending: boolean
   stopping: boolean
+  stoppingTurnId?: string | undefined
 }
 export const initialEngineState: EngineState = {
   engines: [],
@@ -52,6 +53,7 @@ export function clearEngineSelection() {
     loading: false,
     sending: false,
     stopping: false,
+    stoppingTurnId: undefined,
   })
 }
 export function chooseNewEngine(engineId: string) {
@@ -111,13 +113,16 @@ async function refreshEngineSelection() {
               localStorage.getItem(pendingKey(id)) === current.pendingRequestId
             )
               localStorage.removeItem(pendingKey(id))
+            const stopping =
+              current.stopping &&
+              current.stoppingTurnId ===
+                projectEngineSession(snapshot).activeTurnId
             return {
               snapshot,
               loading: false,
               pendingRequestId: resolved ? undefined : current.pendingRequestId,
-              stopping:
-                current.stopping &&
-                projectEngineSession(snapshot).activeTurnId !== undefined,
+              stopping,
+              stoppingTurnId: stopping ? current.stoppingTurnId : undefined,
             }
           })
       } catch (error) {
@@ -243,16 +248,34 @@ export async function sendEngineInput(text: string) {
 }
 
 export async function cancelEngineTurn(turnId: string) {
-  const sessionId = useEngineStore.getState().sessionId
-  if (!sessionId || useEngineStore.getState().stopping) return
+  const state = useEngineStore.getState()
+  const sessionId = state.sessionId
+  if (
+    !sessionId ||
+    state.stopping ||
+    !state.snapshot ||
+    projectEngineSession(state.snapshot).activeTurnId !== turnId
+  )
+    return
   const captured = revision
-  useEngineStore.setState({ stopping: true, error: undefined })
+  useEngineStore.setState({
+    stopping: true,
+    stoppingTurnId: turnId,
+    error: undefined,
+  })
   try {
     await client().request("engineSession/cancel", { sessionId, turnId })
-    await refreshEngineSelection()
+    if (revision === captured) await refreshEngineSelection()
   } catch (error) {
-    if (revision === captured)
-      useEngineStore.setState({ error: String(error), stopping: false })
+    if (
+      revision === captured &&
+      useEngineStore.getState().stoppingTurnId === turnId
+    )
+      useEngineStore.setState({
+        error: String(error),
+        stopping: false,
+        stoppingTurnId: undefined,
+      })
   }
 }
 export async function answerEnginePermission(

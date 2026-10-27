@@ -118,6 +118,15 @@ it("cancels with Escape and preserves ordinary row clicks below the drag thresho
   await waitFor(() =>
     expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
   )
+  for (const detail of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { repeat: true },
+    { shiftKey: true },
+  ]) {
+    fireEvent.keyDown(window, { key: "Escape", ...detail })
+    expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull()
+  }
   fireEvent.keyDown(window, { key: "Escape" })
   fireEvent.pointerUp(window, { pointerId: 1, clientX: 60, clientY: 40 })
   expect(move).not.toHaveBeenCalled()

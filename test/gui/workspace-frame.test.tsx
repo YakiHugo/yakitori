@@ -8,8 +8,11 @@ import {
   within,
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
+import { createRef } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { BrowserPanelProps } from "../../src/gui/components/browser-panel.tsx"
+import { ConversationFind } from "../../src/gui/components/conversation-find.tsx"
+import { ModelSelector } from "../../src/gui/components/model-selector.tsx"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import { WorkspaceFrame } from "../../src/gui/components/workspace-frame.tsx"
 import { contextSourceAttributes } from "../../src/gui/conversation-context.ts"
@@ -996,4 +999,72 @@ it("rebinds native shortcuts to the selected session and releases listeners on u
     view.unmount()
     vi.unstubAllGlobals()
   }
+})
+
+it("Escape closes the model picker before a narrow workspace and ignores key repeats", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1000,
+  })
+  render(
+    <WorkspaceFrame>
+      <ModelSelector />
+    </WorkspaceFrame>,
+  )
+  const picker = screen.getByRole("button", { name: "Select model and effort" })
+  fireEvent.click(picker)
+  expect(picker.getAttribute("aria-expanded")).toBe("true")
+  for (const detail of [
+    { isComposing: true },
+    { keyCode: 229 },
+    { repeat: true },
+    { ctrlKey: true },
+    { shiftKey: true },
+    { altKey: true },
+    { metaKey: true },
+  ]) {
+    fireEvent.keyDown(picker, { key: "Escape", ...detail })
+    expect(picker.getAttribute("aria-expanded")).toBe("true")
+    expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+      true,
+    )
+  }
+  fireEvent.keyDown(picker, { key: "Escape" })
+  expect(picker.getAttribute("aria-expanded")).toBe("false")
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    true,
+  )
+  fireEvent.keyDown(picker, { key: "Escape", repeat: true })
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    true,
+  )
+  fireEvent.keyDown(picker, { key: "Escape" })
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    false,
+  )
+})
+
+it("Escape dismisses conversation find before a narrow workspace", () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1000,
+  })
+  const contentRef = createRef<HTMLDivElement>()
+  render(
+    <WorkspaceFrame>
+      <ConversationFind
+        sessionId="session"
+        contentRef={contentRef}
+        onJump={() => {}}
+      />
+      <div ref={contentRef}>Conversation</div>
+    </WorkspaceFrame>,
+  )
+  fireEvent.keyDown(document, { key: "f", ctrlKey: true })
+  const search = screen.getByRole("searchbox")
+  fireEvent.keyDown(search, { key: "Escape" })
+  expect(screen.queryByRole("searchbox")).toBeNull()
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    true,
+  )
 })

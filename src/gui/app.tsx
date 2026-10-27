@@ -16,6 +16,7 @@ import { Transcript } from "./components/transcript.tsx"
 import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
+import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 import { useEngineStore } from "./store/engine-store.ts"
 
@@ -53,6 +54,33 @@ export function App() {
     (state) => state.settingsSection !== undefined,
   )
 
+  const interruptSessionId = useAppStore((state) => state.selection.sessionId)
+  const interruptTurnId = useExecutionView().activeTurnId
+  const stopping = useAppStore(
+    (state) =>
+      interruptTurnId !== undefined &&
+      state.inFlightActions.has(`cancel:${interruptTurnId}`),
+  )
+  const interrupt = useChatInterrupt({
+    sessionId: interruptSessionId,
+    turnId:
+      settingsOpen || hydrating || externalSession !== undefined
+        ? undefined
+        : interruptTurnId,
+    stopping,
+    onInterrupt: () => {
+      const state = useAppStore.getState()
+      if (
+        state.selection.sessionId === interruptSessionId &&
+        state.execution.activeTurnId === interruptTurnId &&
+        interruptTurnId !== undefined &&
+        state.settingsSection === undefined &&
+        useEngineStore.getState().engineId === undefined
+      )
+        void state.cancelTurn(interruptTurnId)
+    },
+  })
+
   return (
     <TooltipProvider>
       <PreferencesEffects />
@@ -69,7 +97,10 @@ export function App() {
           )
         }
       >
-        <main className="flex min-w-0 flex-1 flex-col bg-background">
+        <main
+          {...interrupt}
+          className="flex min-w-0 flex-1 flex-col bg-background"
+        >
           {message !== undefined && message !== "" && (
             <div
               role="alert"
@@ -131,6 +162,7 @@ function SessionComposer() {
             type="button"
             className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5"
             disabled={stopping}
+            title="Interrupt (Esc)"
             onClick={() => void cancelTurn(activeTurnId)}
           >
             {stopping ? (

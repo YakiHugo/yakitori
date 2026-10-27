@@ -20,6 +20,7 @@ import {
   Target,
   X,
 } from "lucide-react"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import {
   type ReactNode,
   useCallback,
@@ -335,7 +336,10 @@ export function ComposerSurface({
         setAddMenuOpen(false)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAddMenuOpen(false)
+      if (isUnmodifiedEscape(event)) {
+        event.preventDefault()
+        setAddMenuOpen(false)
+      }
     }
     document.addEventListener("pointerdown", closeOnOutsideClick)
     document.addEventListener("keydown", closeOnEscape)
@@ -592,7 +596,8 @@ export function ComposerSurface({
   }
 
   const handleDraftKeyDown = (event: globalThis.KeyboardEvent): boolean => {
-    if (event.isComposing) return false
+    if (event.isComposing || event.keyCode === 229) return false
+    if (event.key === "Escape" && !isUnmodifiedEscape(event)) return false
     if (addMenuOpen) {
       if (event.key === "Escape") {
         event.preventDefault()
@@ -1035,7 +1040,7 @@ export function ComposerSurface({
                   disabled={stopping}
                   aria-busy={stopping}
                   aria-label={stopping ? "Stopping" : stopLabel}
-                  title={stopping ? "Stopping" : "Interrupt"}
+                  title={stopping ? "Stopping" : "Interrupt (Esc)"}
                   className="rounded-full"
                   onClick={onCancel}
                 >

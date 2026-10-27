@@ -19,6 +19,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -307,9 +308,17 @@ export function WorkspaceFrame({
           addTab("chat", sessionId)
         }
       }
-      if (event.key === "Escape") {
-        if (adding) setAdding(false)
-        else if (window.innerWidth < 1180) setOpen(false)
+      if (isUnmodifiedEscape(event)) {
+        if (adding) {
+          event.preventDefault()
+          setAdding(false)
+        } else if (
+          window.innerWidth < 1180 &&
+          selectWorkspacePresentation(useWorkspaceStore.getState()).open
+        ) {
+          event.preventDefault()
+          setOpen(false)
+        }
       }
     }
     const dismiss = (event: PointerEvent) => {

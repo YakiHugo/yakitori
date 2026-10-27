@@ -15,6 +15,8 @@ type CapturedSelection = {
   anchor: RenderedTextAnchor
 }
 
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
+
 export function SelectionActions({
   readOnlySideChatIds,
   onAddToConversation,
@@ -131,7 +133,7 @@ export function SelectionActions({
       setCaptured(undefined)
     }
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && menu.current) {
+      if (isUnmodifiedEscape(event) && menu.current) {
         event.preventDefault()
         event.stopPropagation()
         window.getSelection()?.removeAllRanges()
