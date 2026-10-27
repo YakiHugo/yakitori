@@ -206,18 +206,55 @@ export function providerServiceForEndpoint(
     (entry) => entry.id === configuration.service,
   )
   if (service === undefined) return undefined
+  const endpoints = [
+    { baseURL: service.baseURL, wireApi: service.wireApi },
+    ...(serviceEndpointVariants[service.id] ?? []),
+  ]
   const url = new URL(configuration.baseURL).href.replace(/\/$/, "")
-  if (
-    service.id === "gemini" &&
-    configuration.wireApi === "gemini_interactions"
+  return endpoints.some(
+    (endpoint) =>
+      endpoint.wireApi === configuration.wireApi &&
+      new URL(endpoint.baseURL).href.replace(/\/$/, "") === url,
   )
-    return [
-      "https://generativelanguage.googleapis.com/v1beta",
-      "https://generativelanguage.googleapis.com/v1",
-    ].includes(url)
-      ? service
-      : undefined
-  return url === new URL(service.baseURL).href.replace(/\/$/, "")
     ? service
     : undefined
+}
+
+// API variants are explicit contracts. A different protocol or path on the
+// same origin must not inherit native features from the creation template.
+const serviceEndpointVariants: Readonly<
+  Record<string, readonly Pick<ProviderConfiguration, "baseURL" | "wireApi">[]>
+> = {
+  openai: [
+    {
+      baseURL: "https://api.openai.com/v1",
+      wireApi: "openai_chat_completions",
+    },
+  ],
+  xai: [
+    {
+      baseURL: "https://api.x.ai/v1",
+      wireApi: "openai_chat_completions",
+    },
+  ],
+  gemini: [
+    {
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      wireApi: "gemini_interactions",
+    },
+    {
+      baseURL: "https://generativelanguage.googleapis.com/v1",
+      wireApi: "gemini_interactions",
+    },
+    {
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+      wireApi: "openai_chat_completions",
+    },
+  ],
+  "kimi-code": [
+    {
+      baseURL: "https://api.kimi.com/coding/v1",
+      wireApi: "anthropic_messages",
+    },
+  ],
 }

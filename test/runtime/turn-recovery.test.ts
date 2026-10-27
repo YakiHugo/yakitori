@@ -4,12 +4,12 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
-import { createRequestId } from "../../src/kernel/ids.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
+import { createRequestId } from "../../src/kernel/ids.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
@@ -869,6 +869,9 @@ async function fixture(
     faux: createModelProvider({
       models: {
         ...models,
+        capture() {
+          return this
+        },
         resolve(selection) {
           return {
             ...models.resolve(selection),

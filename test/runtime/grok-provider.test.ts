@@ -9,10 +9,86 @@ import type {
   ModelResponse,
   StreamFn,
 } from "../../src/runtime/model.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
+})
+
+it("uses function tools for deferred external tools on a Grok subscription account", async () => {
+  const fixture = await setup()
+  const id = "account_grok"
+  const providers = createProviderRegistry({
+    [id]: createGrokProvider(fixture.root, {
+      id,
+      credentialsPath: fixture.path,
+      ownerIdentity: "account:account_a",
+    }),
+  })
+  const tools = createToolRegistry([])
+  tools.replaceExternalSource("test", [
+    {
+      toolName: { namespace: "test", name: "lookup" },
+      description: "Look up an external record",
+      inputSchema: { type: "object", properties: {} },
+      exposure: "deferred",
+      effect: "observe",
+      approvalRequirement: { kind: "none" },
+      execute: async () => ({ ok: true, output: {}, content: "Found" }),
+    },
+  ])
+  const session = providers.createClient().startTurn(id)
+  let step: ReturnType<typeof captureStepContext> | undefined
+  try {
+    await session.models.refresh()
+    const selection = { provider: id, model: "grok-4.7" }
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: fixture.root,
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "grok-test",
+      },
+      session.models,
+    ).resolveStep(selection, session.models)
+    step = captureStepContext({
+      registry: tools,
+      configuration,
+      ...(session.wireApi === undefined ? {} : { wireApi: session.wireApi }),
+      ...(session.toolCapabilities === undefined
+        ? {}
+        : { toolCapabilities: session.toolCapabilities }),
+    })
+    await collect(session.stream, {
+      ...request,
+      target: step.target,
+      tools: step.toolRouter.modelDefinitions,
+      toolWireProtocol: step.toolWireProtocol,
+    })
+    expect(fixture.calls).toMatchObject([
+      {
+        body: {
+          model: "grok-4.7",
+          reasoning: { effort: "high" },
+          tools: [
+            { type: "function", name: "tool_search" },
+            { type: "function", name: "use_tool" },
+          ],
+        },
+      },
+    ])
+  } finally {
+    step?.toolRouter.release()
+    await session.close()
+    await providers.close()
+    await tools.dispose()
+    await rm(fixture.root, { recursive: true, force: true })
+  }
 })
 
 it("keeps native reasoning replay across same-account CLI token rotation and a new Turn", async () => {
@@ -133,6 +209,8 @@ async function setup() {
   const calls: { authorization: string | null; body: JsonObject }[] = []
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input)
+    if (url === "https://api.x.ai/v1/models")
+      return Response.json({ data: [{ id: "grok-4.7" }] })
     expect(url).toBe("https://api.x.ai/v1/responses")
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),

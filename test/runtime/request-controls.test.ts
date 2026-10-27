@@ -221,6 +221,31 @@ it.each([
     wireApi: "openai_responses" as const,
     body: { input: [] },
   },
+  {
+    provider: "test",
+    wireApi: "openai_responses" as const,
+    body: { max_output_tokens: 1 },
+  },
+  {
+    provider: "test",
+    wireApi: "openai_responses" as const,
+    body: { tool_choice: "none" },
+  },
+  {
+    provider: "test",
+    wireApi: "openai_responses" as const,
+    body: { reasoning: { effort: "high" } },
+  },
+  {
+    provider: "test",
+    wireApi: "openai_responses" as const,
+    body: { tools: [{ type: "function", name: "unowned" }] },
+  },
+  {
+    provider: "test",
+    wireApi: "openai_responses" as const,
+    body: { reasoning: null },
+  },
 ])("rejects provider controls that change owner, protocol or execution-loop input", async (providerOptions) => {
   const stream = createOpenAIProvider({
     apiKey: "test",

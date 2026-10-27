@@ -10,7 +10,10 @@ import {
   createModelProvider,
   type ModelProvider,
 } from "../runtime/model-provider.ts"
-import type { ModelsManager } from "../runtime/models-manager.ts"
+import {
+  createModelsManagerCapture,
+  type ModelsManager,
+} from "../runtime/models-manager.ts"
 import { ChatGPTCredentialStoreError } from "./chatgpt-credential-store.ts"
 
 export class ChatGPTModelCatalogError extends Error {
@@ -105,6 +108,7 @@ export function createChatGPTModelConnections(input: {
       const models: ModelsManager = {
         provider: providerId,
         refresh,
+        capture: () => createModelsManagerCapture(models, () => current),
         subscribe(listener) {
           listeners.add(listener)
           return () => {
@@ -143,7 +147,11 @@ export function createChatGPTModelConnections(input: {
           id: providerId,
           serviceId: "chatgpt-plan",
           wireApi: "openai_responses",
-          capabilities: { remoteCompaction: false, nativePdf: false },
+          capabilities: {
+            remoteCompaction: false,
+            nativePdf: false,
+            tools: { supportsCustomTools: false },
+          },
         },
         models,
         continuationScope: scope,

@@ -763,6 +763,9 @@ async function setup(fixtures: Record<string, ModelFixture>, stream: StreamFn) {
             stream,
             models: {
               ...base,
+              capture() {
+                return this
+              },
               validate() {},
               resolve(selection) {
                 const fixture = fixtures[selection.model]

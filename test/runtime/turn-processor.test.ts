@@ -1,4 +1,3 @@
-import type { TurnLoopOperationalFailure } from "../../src/runtime/turn-loop.ts"
 import { execFileSync } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -31,14 +30,15 @@ import {
 } from "../../src/runtime/model-provider.ts"
 import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 import {
+  createModelsManagerCapture,
   createStaticModelsManager,
   type ModelsManager,
 } from "../../src/runtime/models-manager.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
-import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { createThreadCollaboration } from "../../src/runtime/thread-collaboration.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createThreadCollaboration } from "../../src/runtime/thread-collaboration.ts"
 import { mcpResult } from "../../src/runtime/tools/mcp-result.ts"
 import { createReadDocumentTool } from "../../src/runtime/tools/read-media.ts"
 import {
@@ -47,6 +47,7 @@ import {
   type RuntimeTool,
   type ToolRegistry,
 } from "../../src/runtime/tools/registry.ts"
+import type { TurnLoopOperationalFailure } from "../../src/runtime/turn-loop.ts"
 import {
   createTurnProcessor,
   type TurnProcessorOptions,
@@ -1098,6 +1099,50 @@ describe("Turn processor", () => {
       { maxAttempts: 4, streamIdleTimeoutMs: 300_000 },
       { maxAttempts: 2, streamIdleTimeoutMs: 300_000 },
     ])
+  })
+
+  it("uses captured Turn tool capabilities for model requests", async () => {
+    const registry = createToolRegistry([])
+    registry.replaceExternalSource("calendar-server", [
+      identifiedDeferredTool("result"),
+    ])
+    let protocol: ModelRequest["toolWireProtocol"] | undefined
+    const modelClient: ModelClient = {
+      hasProvider: (provider) => provider === "openai",
+      models: () => createStaticModelsManager("openai"),
+      startTurn() {
+        return {
+          models: createStaticModelsManager("openai"),
+          wireApi: "openai_responses",
+          toolCapabilities: { supportsCustomTools: false },
+          stream: async function* (request) {
+            protocol = request.toolWireProtocol
+            expect(request.tools.every((tool) => tool.kind !== "custom")).toBe(
+              true,
+            )
+            yield responseEvent("done")
+          },
+          close() {},
+        }
+      },
+      close() {},
+    }
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("Fallback stream must not run.")
+      },
+      registry,
+      { modelClient, provider: "openai", model: "gpt-5" },
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({
+      content: inputFixture([{ type: "text" as const, text: "find it" }]),
+    })
+
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(protocol).toBe("meta_dispatch")
   })
 
   it("runs pre/post tool hooks around the approved tool invocation", async () => {
@@ -3763,8 +3808,10 @@ describe("Turn processor", () => {
     let samples = 0
     let turns = 0
     let catalogInvalidated = false
-    const models = {
-      ...createStaticModelsManager("faux"),
+    const published = createStaticModelsManager("faux")
+    const models: ModelsManager = {
+      ...published,
+      capture: () => createModelsManagerCapture(models, () => published),
       async refresh() {
         if (phase === "previous" && !catalogInvalidated) return
         entered.resolve()
@@ -3828,8 +3875,10 @@ describe("Turn processor", () => {
   it("retains admission-time provider and transport while discovery and steering overlap a host reload", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
-    const models = {
-      ...createStaticModelsManager("faux"),
+    const published = createStaticModelsManager("faux")
+    const models: ModelsManager = {
+      ...published,
+      capture: () => createModelsManagerCapture(models, () => published),
       async refresh() {
         entered.resolve()
         await release.promise
@@ -5441,6 +5490,14 @@ it("keeps a Turn's model directory and transport together across provider replac
       },
     ],
   })
+  const models: ModelsManager = {
+    ...oldModels,
+    capture: () => createModelsManagerCapture(models, () => oldModels),
+    async refresh() {
+      refreshEntered.resolve()
+      await releaseRefresh.promise
+    },
+  }
   const registry = createProviderRegistry()
   const registration = registry.register("test", {
     personal: createModelProvider({
@@ -5450,13 +5507,7 @@ it("keeps a Turn's model directory and transport together across provider replac
         capabilities: { remoteCompaction: false, nativePdf: true },
         retry: { maxAttempts: 1 },
       },
-      models: {
-        ...oldModels,
-        async refresh() {
-          refreshEntered.resolve()
-          await releaseRefresh.promise
-        },
-      },
+      models,
       stream: oldTransport.stream,
     }),
   })
@@ -5538,18 +5589,21 @@ it("keeps a Turn's model directory and transport together across provider replac
 it("closes the captured Turn when its model directory cannot refresh", async () => {
   let closes = 0
   let sampled = false
+  const published = createStaticModelsManager("faux")
+  const models: ModelsManager = {
+    ...published,
+    capture: () => createModelsManagerCapture(models, () => published),
+    async refresh() {
+      throw new Error("Model directory refresh failed")
+    },
+  }
   const provider = createModelProvider({
     info: {
       id: "faux",
       wireApi: "faux",
       capabilities: { remoteCompaction: false },
     },
-    models: {
-      ...createStaticModelsManager("faux"),
-      async refresh() {
-        throw new Error("Model directory refresh failed")
-      },
-    },
+    models,
     stream: async function* () {
       sampled = true
       yield responseEvent("unexpected")

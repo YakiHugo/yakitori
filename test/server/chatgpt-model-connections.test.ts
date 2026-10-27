@@ -191,6 +191,40 @@ describe("ChatGPT model connections", () => {
     expect(() => provider.models.resolve(target)).toThrow("not configured")
   })
 
+  it("keeps a Turn's admitted catalog when the same account publishes a new catalog", async () => {
+    let ids = ["gpt-5.4"]
+    const provider = createChatGPTModelConnections({
+      resolve: async (identity) => ({ ...identity, accessToken: "fake-token" }),
+      fetchFn: async (url) =>
+        String(url).endsWith("/models") ? catalog(ids) : completed(),
+    }).provider(account, providerId)
+    const registry = createProviderRegistry({ [providerId]: provider })
+    const client = registry.createClient()
+    try {
+      const active = client.startTurn(providerId)
+      await active.models.refresh()
+      ids = ["future-model"]
+      await provider.models.refresh({ force: true })
+      const next = client.startTurn(providerId)
+      await next.models.refresh()
+      expect(
+        (await active.models.listModels()).map((model) => model.model),
+      ).toEqual(["gpt-5.4"])
+      expect(
+        (await next.models.listModels()).map((model) => model.model),
+      ).toEqual(["future-model"])
+      expect(
+        (await collect(active.stream(request))).some(
+          (event) => event.type === "response",
+        ),
+      ).toBe(true)
+      expect(() => next.models.resolve(target)).toThrow("not configured")
+    } finally {
+      await client.close()
+      await registry.close()
+    }
+  })
+
   it("retains the old account for active Turns while new Turns use the replacement", async () => {
     const calls: string[] = []
     let suffix = "one"
@@ -202,7 +236,8 @@ describe("ChatGPT model connections", () => {
     )
     const connections = createChatGPTModelConnections({
       resolve,
-      fetchFn: async (_url, init) => {
+      fetchFn: async (url, init) => {
+        if (String(url).endsWith("/models")) return catalog()
         calls.push(new Headers(init?.headers).get("authorization") ?? "")
         return completed()
       },

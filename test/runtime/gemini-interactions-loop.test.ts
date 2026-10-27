@@ -175,6 +175,7 @@ it("executes successive Interactions tool rounds and replays complete native ste
           wireApi: "gemini_interactions",
           capabilities: {
             remoteCompaction: false,
+            tools: { supportsCustomTools: false, eagerTools: true },
           },
           retry: { maxAttempts: 1 },
         },

@@ -1,3 +1,5 @@
+import { modelRoutingRequirements } from "./model-routing-requirements.ts"
+import { prepareModelRequestPlan } from "./model-request-plan.ts"
 import { isDeepStrictEqual } from "node:util"
 import type { AgentConfiguration } from "../protocol/configuration.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
@@ -164,7 +166,12 @@ export type TurnLoopOptions = Readonly<{
   resolveModelRoute?(
     selection: ModelSelection,
     input: TurnInput,
-    context: Readonly<{ preferredAccount?: string; requiresImages: boolean }>,
+    context: Readonly<{
+      preferredAccount?: string
+      requiresImages: boolean
+      imageDetail?: "high" | "original"
+      contextWindowTokens?: number
+    }>,
   ): ModelSelection
   modelClient?: ModelClient
   stream?: StreamFn
@@ -541,19 +548,16 @@ function modelRouteContext(
   snapshot: import("../core/session.ts").SessionSnapshot,
   input: TurnInput,
 ) {
-  return {
+  const requirements = modelRoutingRequirements({
+    history: snapshot.context.history.map(({ item }) => item),
+    attachments: input.content.attachments,
     ...(snapshot.configuration === undefined
       ? {}
-      : { preferredAccount: snapshot.configuration.defaultTarget.provider }),
-    requiresImages:
-      input.content.attachments.some((attachment) =>
-        attachment.mediaType.startsWith("image/"),
-      ) ||
-      snapshot.context.history.some(
-        ({ item }) =>
-          (item.role === "user" || item.role === "tool") &&
-          item.content.some((block) => block.type === "image"),
-      ),
+      : { configuration: snapshot.configuration }),
+  })
+  return {
+    ...requirements,
+    requiresImages: requirements.inputModalities?.includes("image") ?? false,
   }
 }
 
@@ -856,6 +860,9 @@ async function executeTurnModelLoop(
         configuration: turn.requestSettings,
         ...(wireApi === undefined ? {} : { wireApi }),
         nativePdf,
+        ...(modelSession?.toolCapabilities === undefined
+          ? {}
+          : { toolCapabilities: modelSession.toolCapabilities }),
       })
       const configuration = step.configuration
       const toolPlan = step.toolRouter
@@ -1164,6 +1171,9 @@ async function executeTurnModelLoop(
                   ? {}
                   : { wireApi: sourceSession.wireApi }),
                 nativePdf: sourceSession?.nativePdf === true,
+                ...(sourceSession?.toolCapabilities === undefined
+                  ? {}
+                  : { toolCapabilities: sourceSession.toolCapabilities }),
               })
               try {
                 await compactLiveHistory({
@@ -1349,7 +1359,7 @@ async function executeTurnModelLoop(
       let requestHistoryAnchorItemId = input.session
         .executionSnapshot(input.execution)
         .context.history.at(-1)?.id
-      const request: ModelRequest = {
+      const rawRequest: ModelRequest = {
         waitForConnection:
           input.options.waitForConnection === true &&
           (inputSource(input.input) === "human" ||
@@ -1413,6 +1423,20 @@ async function executeTurnModelLoop(
           : { maxOutputTokens: configuration.maxOutputTokens }),
         signal: input.signal,
       }
+      const plan = prepareModelRequestPlan(rawRequest, {
+        model: step.modelInfo,
+        wireApi: wireApi ?? "unknown",
+        ...(modelSession?.toolCapabilities === undefined
+          ? {}
+          : { toolCapabilities: modelSession.toolCapabilities }),
+        ...(configuration.modelCapacity?.inputContextLimitTokens === undefined
+          ? {}
+          : {
+              inputLimitTokens:
+                configuration.modelCapacity.inputContextLimitTokens,
+            }),
+      })
+      const request = plan.request
       if (modelCalls === 0) {
         await input.session.recordModelContext(input.execution, {
           provider: step.target.provider,
@@ -1423,17 +1447,11 @@ async function executeTurnModelLoop(
         })
       }
       let responseItemId = `message_${globalThis.crypto.randomUUID()}`
-      const estimatedInputTokens =
-        estimateModelRequestBudget(request).estimatedInputTokens
-      const inputLimit = configuration.modelCapacity?.inputContextLimitTokens
+      const estimatedInputTokens = plan.budget.estimatedInputTokens
       // Recovery must also fit newly injected instructions and tool schemas.
       // Fresh user requests retain provider admission; a continuation must not
       // repeatedly spend its budget on a request we already know cannot fit.
-      if (
-        continuingAnswer &&
-        inputLimit !== undefined &&
-        estimatedInputTokens >= inputLimit
-      ) {
+      if (continuingAnswer && plan.inputBudgetExceeded) {
         if (compactedAtModelCall !== modelCalls) {
           continuationNeedsCompaction = true
           continue
