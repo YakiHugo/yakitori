@@ -12,6 +12,7 @@ extension Computer {
         try ticket.validate(id: args["snapshot_id"] as? String, windows: windows(), displays: displays())
         let target = try ticket.target(args)
         let window = target.window, element = target.element, point = target.point
+        let accessibilityAction = ["press", "set_value", "select_text", "perform_action"].contains(action)
         // WindowServer can briefly retain a closed window while AppKit still
         // accepts AXPress on its retained controls. Confirm it is still exposed
         // by the application's current AX window list before using an element.
@@ -22,7 +23,7 @@ extension Computer {
         if let delivery = args["delivery"], !["foreground", "background"].contains(delivery as? String ?? "") {
             throw ComputerFailure("invalid_arguments", "delivery must be background or foreground.")
         }
-        if ticket.scope == .screen && !foreground && action != "press" {
+        if ticket.scope == .screen && !foreground && !accessibilityAction {
             throw ComputerFailure("foreground_required", "Screen input requires delivery=foreground; use window/app scope for background input.")
         }
         let chord = action == "key" ? try keyChord(args["key"] as? String) : nil
@@ -31,7 +32,7 @@ extension Computer {
         if action == "type", args["replace"] as? Bool == true, element == nil {
             throw ComputerFailure("invalid_arguments", "Replacement requires a target element so its complete selection can be confirmed before typing.")
         }
-        if action == "press", element == nil { throw ComputerFailure("invalid_arguments", "press requires an element.") }
+        if accessibilityAction, element == nil { throw ComputerFailure("invalid_arguments", "Accessibility actions require an element.") }
         let buttonName = args["button"] as? String ?? "left"
         guard ["left", "right", "middle"].contains(buttonName) else { throw ComputerFailure("invalid_arguments", "Unknown mouse button.") }
         let button: CGMouseButton = buttonName == "right" ? .right : buttonName == "middle" ? .center : .left
@@ -60,7 +61,7 @@ extension Computer {
                 backgroundRelease.postToPid(window.pid)
             }
         }
-        if !foreground, action != "press", let window,
+        if !foreground, !accessibilityAction, let window,
            NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid {
             // Directed CGEvents bypass WindowServer activation. AppKit otherwise
             // treats a background click as an inactive-window first click. Scope
@@ -108,7 +109,9 @@ extension Computer {
         let foregroundWindowID = ticket.scope != .screen || element != nil
             ? window?.windowID : try windows().first(where: { $0.pid == foregroundPID })?.windowID
         var screenTargetFocused = false
-        if action == "press", let element {
+        if accessibilityAction, action != "press", let element {
+            return try accessibilityInput(action, args, element: element)
+        } else if action == "press", let element {
             let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
             guard error == .success else { throw ComputerFailure("action_refused", "AXPress failed (\(error.rawValue)); observe before choosing another input method.") }
         } else {

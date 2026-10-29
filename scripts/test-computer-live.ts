@@ -19,6 +19,7 @@ const { values } = parseArgs({
   options: {
     repeat: { type: "string", default: "1" },
     report: { type: "string", default: "test-results/computer-live.json" },
+    direct: { type: "boolean", default: false },
   },
 })
 const repeats = Number(values.repeat)
@@ -50,6 +51,7 @@ const report = {
   startedAt: new Date().toISOString(),
   platform: `${process.platform} ${process.arch} ${release()}`,
   executable,
+  transport: values.direct ? "inherited-host" : "launch-services",
   driverSha256: createHash("sha256")
     .update(await readFile(executable))
     .digest("hex"),
@@ -61,7 +63,7 @@ const report = {
 }
 const client = new McpClient(
   "computer",
-  { command: executable, args: ["--mcp"] },
+  { command: executable, args: values.direct ? [] : ["--mcp"] },
   () => {},
   () => {},
   () => {},
@@ -113,6 +115,8 @@ try {
       secondary_window_id: number
       active: boolean
       foreground_pid: number
+      selection_location: number
+      selection_length: number
     }
     const state = async (): Promise<State> =>
       JSON.parse(await readFile(stateFile, "utf8"))
@@ -482,6 +486,79 @@ try {
         await waitFor(async () => (await state()).second === "Shortcut 中文")
       },
     )
+    await check(
+      "AX value writes change the application's own text",
+      async () => {
+        const observed = await observe()
+        const result = await input("set_value", observed, {
+          element: element(observed, "Second input"),
+          text: "alpha 😀 alpha",
+        })
+        assert.equal(result.structuredContent?.effect, "confirmed")
+        await waitFor(async () => (await state()).second === "alpha 😀 alpha")
+      },
+    )
+    await check(
+      "ambiguous selection refuses and contextual Unicode selection replaces only its match",
+      async () => {
+        let observed = await observe()
+        const refused = await call({
+          action: "select_text",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          element: element(observed, "Second input"),
+          text: "alpha",
+        })
+        assert.equal(refused.structuredContent?.code, "selection_ambiguous")
+        observed = await observe()
+        await input("select_text", observed, {
+          element: element(observed, "Second input"),
+          text: "alpha",
+          prefix: "😀 ",
+        })
+        await waitFor(
+          async () =>
+            (await state()).selection_location === 9 &&
+            (await state()).selection_length === 5,
+        )
+        observed = await observe()
+        await input("type", observed, {
+          element: element(observed, "Second input"),
+          text: "omega",
+        })
+        await waitFor(async () => (await state()).second === "alpha 😀 omega")
+        observed = await observe()
+        await input("select_text", observed, {
+          element: element(observed, "Second input"),
+          text: "alpha",
+          selection_type: "cursor_after",
+        })
+        observed = await observe()
+        await input("type", observed, {
+          element: element(observed, "Second input"),
+          text: "-",
+        })
+        await waitFor(async () => (await state()).second === "alpha- 😀 omega")
+      },
+    )
+    await check(
+      "advertised AX actions execute and unavailable actions refuse",
+      async () => {
+        let observed = await observe()
+        const refused = await call({
+          action: "perform_action",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          element: element(observed, "Increment"),
+          action_name: "AXNotAnAction",
+        })
+        assert.equal(refused.structuredContent?.code, "action_unavailable")
+        observed = await observe()
+        await input("perform_action", observed, {
+          element: element(observed, "Increment"),
+          action_name: "AXPress",
+        })
+        await waitFor(async () => (await state()).count === 6)
+      },
+    )
     await check("cancelled drag releases its held mouse button", async () => {
       const observed = await observe()
       const controller = new AbortController()
@@ -536,7 +613,7 @@ try {
         const next = await observe()
         assert((await state()).second.length < 100_000)
         await input("press", next, { element: element(next, "Increment") })
-        await waitFor(async () => (await state()).count === 6)
+        await waitFor(async () => (await state()).count === 7)
       },
     )
     await check("moved window rejects the previous observation", async () => {
@@ -549,7 +626,7 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 6)
+      assert.equal((await state()).count, 7)
     })
     await check("closed window rejects the previous observation", async () => {
       const observed = await observe()
@@ -561,7 +638,7 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 6)
+      assert.equal((await state()).count, 7)
       // The next case captures the whole display. Let WindowServer publish the
       // completed close rather than including its disappearing surface.
       await waitFor(async () => {
@@ -611,9 +688,9 @@ try {
           y,
         })
         assert.equal(refused.structuredContent?.code, "foreground_required")
-        assert.equal((await state()).count, 6)
+        assert.equal((await state()).count, 7)
         await input("click", screen, { x, y, delivery: "foreground" })
-        await waitFor(async () => (await state()).count === 7)
+        await waitFor(async () => (await state()).count === 8)
       },
     )
     const exited = once(fixture, "exit")

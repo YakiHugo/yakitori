@@ -46,3 +46,8 @@ not an agent/model benchmark or a score comparable with OSWorld. Missing macOS
 permissions produce a blocked report with zero executed cases and a failing exit
 status; they are never counted as passed cases. Both commands require enabling
 Accessibility and Screen Recording for **Yakitori Computer** in System Settings.
+
+For an isolated checkout, `pnpm test:computer:live --direct` exercises native
+actions under the invoking host's existing macOS grants. Its report identifies
+that transport as `inherited-host`; it does not verify LaunchServices permission
+attribution, which is covered separately by `pnpm test:computer`.

@@ -100,6 +100,8 @@ final class Fixture: NSObject, NSTextFieldDelegate {
                 "window_id": window.windowNumber, "secondary_window_id": secondary?.windowNumber ?? 0,
                 "events": events, "active": NSApp.isActive, "key_window": NSApp.keyWindow?.windowNumber ?? 0,
                 "foreground_pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
+                "selection_location": second.currentEditor()?.selectedRange.location ?? -1,
+                "selection_length": second.currentEditor()?.selectedRange.length ?? -1,
             ])
             try bytes.write(to: output, options: .atomic)
         } catch { fatalError("Fixture persistence failed: \(error)") }
@@ -123,6 +125,9 @@ let statePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1]
     : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("fixture-state.json").path
 let fixture = Fixture(output: URL(fileURLWithPath: statePath))
 app.received = { fixture.record($0) }
+// AX value writes need not emit a text-edit delegate notification. Persist the
+// actual AppKit state independently of which input route changed the control.
+let stateTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in fixture.save() }
 let activityObservers = [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification].map { name in
     NotificationCenter.default.addObserver(forName: name, object: app, queue: .main) { _ in fixture.save() }
 }

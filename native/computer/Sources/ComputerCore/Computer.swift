@@ -31,7 +31,7 @@ import Darwin
             return try await launch(args)
         case "observe":
             return try await observe(args)
-        case "click", "press", "type", "key", "scroll", "drag":
+        case "click", "press", "type", "key", "scroll", "drag", "set_value", "select_text", "perform_action":
             return try await input(action, args)
         default:
             throw ComputerFailure("invalid_arguments", "Unknown computer action: \(action).")
