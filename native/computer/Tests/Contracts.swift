@@ -58,6 +58,7 @@ import Foundation
         rejects { _ = try textOnly.point(x: 0, y: 0) }
         try observationContracts()
         try applicationContracts()
+        try textContracts()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
         rejects { _ = try keyChord("TYPO+A") }
@@ -153,5 +154,19 @@ import Foundation
         rejects { _ = try ApplicationTarget(["bundle_id": "test.editor", "app_name": "Editor"]) }
         rejects { _ = try ApplicationTarget(["app_name": ""]) }
         rejects { _ = try ApplicationTarget(["app_name": "/Applications/Editor.app"]) }
+    }
+
+    static func textContracts() throws {
+        let selected = try textSelection(source: "alpha 😀 alpha", text: "alpha", prefix: "😀 ", suffix: nil, kind: "text")
+        precondition(selected.location == 9 && selected.length == 5)
+        let before = try textSelection(source: "alpha 😀 alpha", text: "😀", prefix: nil, suffix: nil, kind: "cursor_before")
+        precondition(before.location == 6 && before.length == 0)
+        let after = try textSelection(source: "alpha 😀 alpha", text: "😀", prefix: nil, suffix: nil, kind: "cursor_after")
+        precondition(after.location == 8 && after.length == 0)
+        rejects(code: "selection_ambiguous") { _ = try textSelection(source: "alpha alpha", text: "alpha", prefix: nil, suffix: nil, kind: "text") }
+        rejects(code: "selection_ambiguous") { _ = try textSelection(source: "aaa", text: "aa", prefix: nil, suffix: nil, kind: "text") }
+        rejects(code: "text_not_found") { _ = try textSelection(source: "alpha", text: "alpha", prefix: "wrong", suffix: nil, kind: "text") }
+        rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "", prefix: nil, suffix: nil, kind: "text") }
+        rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "alpha", prefix: nil, suffix: nil, kind: "typo") }
     }
 }
