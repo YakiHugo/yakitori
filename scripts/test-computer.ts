@@ -1,5 +1,7 @@
+import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
-import { readdir } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
@@ -36,6 +38,8 @@ const client = new McpClient(
   () => {},
 )
 let helperPid: number | undefined
+let fixturePid: number | undefined
+const fixtureRoot = await mkdtemp(join(tmpdir(), "yakitori-launch-mcp-"))
 try {
   const tools = await client.start()
   const control = tools.find((tool) => tool.name === "control")
@@ -53,10 +57,58 @@ try {
     throw new Error("The native helper did not identify its process.")
   helperPid = pid
   console.log("Native MCP app permission status:", result.structuredContent)
+  const call = client.bindTool(control)
+  const app = join(fixtureRoot, "Yakitori Launch Fixture.app")
+  const contents = join(app, "Contents")
+  await mkdir(join(contents, "MacOS"), { recursive: true })
+  await run("swiftc", [
+    "native/computer/Tests/Fixture.swift",
+    "-o",
+    join(contents, "MacOS/fixture"),
+  ])
+  const bundleID = `com.yakitori.launch-fixture.${process.pid}`
+  await writeFile(
+    join(contents, "Info.plist"),
+    `<?xml version="1.0"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>${bundleID}</string>
+<key>CFBundleName</key><string>Yakitori Launch Fixture</string>
+<key>CFBundleExecutable</key><string>fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>`,
+  )
+  const launched = await call({ action: "launch", app_path: app })
+  assert(!launched.isError, JSON.stringify(launched))
+  assert.equal(typeof launched.structuredContent?.pid, "number")
+  fixturePid = launched.structuredContent?.pid as number
+  for (const target of [
+    { bundle_id: bundleID },
+    { app_name: "Yakitori Launch Fixture" },
+  ]) {
+    const resolved = await call({ action: "launch", ...target })
+    assert(!resolved.isError, JSON.stringify(resolved))
+    assert.equal(
+      resolved.structuredContent?.pid,
+      fixturePid,
+      "Repeated launch must resolve the running app",
+    )
+  }
+  const invalid = await call({
+    action: "launch",
+    app_path: app,
+    bundle_id: bundleID,
+  })
+  assert.equal(invalid.structuredContent?.code, "invalid_arguments")
+  const listed = await call({ action: "list" })
+  assert(Array.isArray(listed.structuredContent?.displays))
+  console.log(
+    "MCP launches by path, bundle ID and exact name resolve the same real application.",
+  )
   const released = await client.bindTool(cleanup)({})
   if (released.isError) throw new Error("Native turn cleanup failed.")
 } finally {
+  if (fixturePid !== undefined) process.kill(fixturePid, "SIGTERM")
   await client.close()
+  await rm(fixtureRoot, { recursive: true, force: true })
 }
 console.log(
   "LaunchServices, MCP discovery, permission probing and turn cleanup passed.",

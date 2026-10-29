@@ -1,6 +1,6 @@
 import Foundation
 
-// ScreenCaptureKit callbacks can outlive a cancelled tool. Resume the caller
+// Native callbacks can outlive a cancelled tool. Resume the caller
 // once on cancellation/timeout and ignore late native callbacks, so turn cleanup
 // cannot sit behind an uncancellable capture operation indefinitely.
 private final class NativeReply<Value>: @unchecked Sendable {
@@ -33,7 +33,7 @@ private final class NativeReply<Value>: @unchecked Sendable {
 func nativeRequest<Value>(timeout: TimeInterval = 8, start: (@escaping (Result<Value, Error>) -> Void) -> Void) async throws -> Value {
     let reply = NativeReply<Value>()
     // Bound a stuck OS request, not task duration. Cancellation remains immediate.
-    let deadline = DispatchWorkItem { reply.finish(.failure(ComputerFailure("native_timeout", "macOS did not finish the capture request; observe again."))) }
+    let deadline = DispatchWorkItem { reply.finish(.failure(ComputerFailure("native_timeout", "macOS did not finish the native request. It may still complete; inspect the application state before retrying."))) }
     DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
     defer { deadline.cancel() }
     return try await withTaskCancellationHandler {

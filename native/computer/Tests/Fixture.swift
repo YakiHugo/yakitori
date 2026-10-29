@@ -1,6 +1,14 @@
 import AppKit
 import Darwin
 
+final class FixtureApplication: NSApplication {
+    var received: ((NSEvent) -> Void)?
+    override func sendEvent(_ event: NSEvent) {
+        received?(event)
+        super.sendEvent(event)
+    }
+}
+
 final class DragTarget: NSView {
     var dragging = false
     var downCount = 0
@@ -32,6 +40,16 @@ final class Fixture: NSObject, NSTextFieldDelegate {
     let output: URL
     var count = 0
     var moves = 0
+    var secondary: NSWindow?
+    var events: [[String: Any]] = []
+
+    func record(_ event: NSEvent) {
+        guard [.leftMouseDown, .leftMouseUp, .keyDown, .flagsChanged, .appKitDefined].contains(event.type) else { return }
+        events.append(["type": event.type.rawValue, "window": event.windowNumber, "x": event.locationInWindow.x,
+            "y": event.locationInWindow.y, "flags": event.modifierFlags.rawValue])
+        events = Array(events.suffix(12))
+        save()
+    }
 
     init(output: URL) {
         self.output = output
@@ -52,6 +70,16 @@ final class Fixture: NSObject, NSTextFieldDelegate {
         canvas.changed = { [weak self] in self?.save() }
         window.contentView!.addSubview(canvas)
         window.orderBack(nil)
+        if CommandLine.arguments.contains("--multi-window") {
+            let extra = NSWindow(contentRect: NSRect(x: 700, y: 180, width: 220, height: 160), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            extra.title = "Yakitori Secondary Fixture"
+            extra.isReleasedWhenClosed = false
+            let control = NSButton(title: "Secondary increment", target: self, action: #selector(increment))
+            control.frame = NSRect(x: 20, y: 60, width: 180, height: 36)
+            extra.contentView!.addSubview(control)
+            extra.orderBack(nil)
+            secondary = extra
+        }
         save()
     }
 
@@ -69,15 +97,35 @@ final class Fixture: NSObject, NSTextFieldDelegate {
                 "pid": getpid(), "count": count, "first": first.stringValue, "second": second.stringValue,
                 "moves": moves, "visible": window.isVisible, "height": window.frame.height,
                 "dragging": canvas.dragging, "mouse_down": canvas.downCount, "mouse_up": canvas.upCount,
+                "window_id": window.windowNumber, "secondary_window_id": secondary?.windowNumber ?? 0,
+                "events": events, "active": NSApp.isActive, "key_window": NSApp.keyWindow?.windowNumber ?? 0,
+                "foreground_pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
             ])
             try bytes.write(to: output, options: .atomic)
         } catch { fatalError("Fixture persistence failed: \(error)") }
     }
 }
 
-let app = NSApplication.shared
+let app = FixtureApplication.shared as! FixtureApplication
 app.setActivationPolicy(.accessory)
-let fixture = Fixture(output: URL(fileURLWithPath: CommandLine.arguments[1]))
+// Exercise the standard responder-chain shortcut used by real AppKit apps.
+// A bare NSApplication has no Edit menu, so CMD+A otherwise has no action.
+let menu = NSMenu()
+let applicationMenu = NSMenuItem(title: "Fixture", action: nil, keyEquivalent: "")
+applicationMenu.submenu = NSMenu(title: "Fixture")
+menu.addItem(applicationMenu)
+let editMenu = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+editMenu.submenu = NSMenu(title: "Edit")
+editMenu.submenu!.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+menu.addItem(editMenu)
+app.mainMenu = menu
+let statePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1]
+    : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("fixture-state.json").path
+let fixture = Fixture(output: URL(fileURLWithPath: statePath))
+app.received = { fixture.record($0) }
+let activityObservers = [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification].map { name in
+    NotificationCenter.default.addObserver(forName: name, object: app, queue: .main) { _ in fixture.save() }
+}
 let signals = [(SIGUSR1, { fixture.move() }), (SIGUSR2, { fixture.closeWindow() })].map { code, action -> DispatchSourceSignal in
     signal(code, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: code, queue: .main)

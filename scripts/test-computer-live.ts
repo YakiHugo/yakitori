@@ -2,7 +2,14 @@ import assert from "node:assert/strict"
 import { type ChildProcess, execFile, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { once } from "node:events"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import { release, tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { parseArgs, promisify } from "node:util"
@@ -86,7 +93,9 @@ try {
   ])
   for (let iteration = 1; iteration <= repeats; iteration++) {
     const stateFile = join(root, `state-${iteration}.json`)
-    fixture = spawn(fixtureExecutable, [stateFile], { stdio: "ignore" })
+    fixture = spawn(fixtureExecutable, [stateFile, "--multi-window"], {
+      stdio: "ignore",
+    })
     await once(fixture, "spawn")
     const pid = fixture.pid
     assert(pid !== undefined, "The native fixture did not start")
@@ -100,6 +109,10 @@ try {
       dragging: boolean
       mouse_down: number
       mouse_up: number
+      window_id: number
+      secondary_window_id: number
+      active: boolean
+      foreground_pid: number
     }
     const state = async (): Promise<State> =>
       JSON.parse(await readFile(stateFile, "utf8"))
@@ -112,24 +125,52 @@ try {
           )
         if (Date.now() >= deadline)
           throw new Error(
-            "The fixture did not reach its expected application state",
+            `The fixture did not reach its expected application state: ${JSON.stringify(await state())}`,
           )
         await new Promise((done) => setTimeout(done, 10))
       }
     }
     let windowID: number | undefined
     await waitFor(async () => {
+      try {
+        await access(stateFile)
+        return true
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ENOENT"
+        )
+          return false
+        throw error
+      }
+    })
+    await waitFor(async () => {
       const listed = await call({ action: "list" })
       const windows = listed.structuredContent?.windows as {
         pid: number
         window_id: number
       }[]
-      windowID = windows.find((window) => window.pid === pid)?.window_id
+      const primary = (await state()).window_id
+      windowID = windows.find(
+        (window) => window.pid === pid && window.window_id === primary,
+      )?.window_id
       return windowID !== undefined
     })
     const observe = async () => {
-      const result = await call({ action: "observe", pid, window_id: windowID })
-      assert(!result.isError, JSON.stringify(result.structuredContent))
+      let result: Awaited<ReturnType<typeof call>> | undefined
+      // A read may race WindowServer publication/animation. Retry only that
+      // explicit stale-read outcome, within the existing fixture wait boundary.
+      // Inputs below are always issued once, including failed deliveries.
+      await waitFor(async () => {
+        const next = await call({ action: "observe", pid, window_id: windowID })
+        if (next.isError && next.structuredContent?.code === "stale_snapshot")
+          return false
+        assert(!next.isError, JSON.stringify(next.structuredContent))
+        result = next
+        return true
+      })
+      assert(result)
       return result
     }
     type Observation = Awaited<ReturnType<typeof observe>>
@@ -175,11 +216,43 @@ try {
           iteration,
           status: "failed",
           durationMs: performance.now() - started,
-          error: String(error),
+          error: `${String(error)}; fixture=${JSON.stringify(await state())}`,
         })
         throw error
       }
     }
+    // WindowServer publishes a new window before ScreenCaptureKit necessarily
+    // exposes its content or finishes the launch animation. Require the owned
+    // fixture's actual AppKit geometry to stay stable before measuring it.
+    let stableSince: number | undefined
+    await waitFor(async () => {
+      const ready = await call({
+        action: "observe",
+        pid,
+        window_id: windowID,
+        mode: "vision",
+      })
+      if (
+        ready.isError &&
+        ["window_not_found", "stale_snapshot"].includes(
+          String(ready.structuredContent?.code),
+        )
+      ) {
+        stableSince = undefined
+        return false
+      }
+      assert(!ready.isError, JSON.stringify(ready.structuredContent))
+      const frame = ready.structuredContent?.frame as {
+        width: number
+        height: number
+      }
+      if (frame.width !== 500 || frame.height !== (await state()).height) {
+        stableSince = undefined
+        return false
+      }
+      stableSince ??= performance.now()
+      return performance.now() - stableSince >= 250
+    })
     await check("window screenshot and actual PNG geometry", async () => {
       const observed = await observe()
       const image = observed.content.find((content) => content.type === "image")
@@ -196,12 +269,125 @@ try {
       assert.equal(png.readUInt32BE(16), 500)
       assert.equal(png.readUInt32BE(20), (await state()).height)
     })
+    await check(
+      "observation modes separate AX text from screenshot pixels",
+      async () => {
+        const ax = await call({
+          action: "observe",
+          pid,
+          window_id: windowID,
+          mode: "ax",
+        })
+        assert(!ax.isError, JSON.stringify(ax.structuredContent))
+        assert(!ax.content.some((part) => part.type === "image"))
+        assert.equal(ax.structuredContent?.image_width, undefined)
+        element(ax, "First input")
+        const refused = await call({
+          action: "click",
+          snapshot_id: ax.structuredContent?.snapshot_id,
+          x: 10,
+          y: 10,
+        })
+        assert.equal(refused.structuredContent?.code, "coordinates_unavailable")
+        const replacement = await call({
+          action: "type",
+          snapshot_id: ax.structuredContent?.snapshot_id,
+          text: "must not arrive",
+          replace: true,
+          delivery: "foreground",
+        })
+        assert.equal(replacement.structuredContent?.code, "invalid_arguments")
+        assert.equal((await state()).first, "")
+        assert.equal((await state()).second, "")
+        const vision = await call({
+          action: "observe",
+          pid,
+          window_id: windowID,
+          mode: "vision",
+        })
+        assert(!vision.isError, JSON.stringify(vision.structuredContent))
+        assert(vision.content.some((part) => part.type === "image"))
+        assert.deepEqual(vision.structuredContent?.elements, [])
+      },
+    )
+    await check(
+      "application scope includes both windows in one image and AX index",
+      async () => {
+        const app = await call({
+          action: "observe",
+          scope: "app",
+          mode: "both",
+          pid,
+        })
+        assert(!app.isError, JSON.stringify(app.structuredContent))
+        const image = app.content.find((part) => part.type === "image")
+        assert(image?.type === "image")
+        assert.equal(Buffer.from(image.data, "base64").readUInt32BE(16), 800)
+        const rows = app.structuredContent?.elements as {
+          element: number
+          window_id: number
+        }[]
+        const secondary = element(app, "Secondary increment")
+        assert.equal(
+          rows.find((row) => row.element === secondary)?.window_id,
+          (await state()).secondary_window_id,
+        )
+        element(app, "First input")
+        const before = (await state()).count
+        await input("press", app, { element: secondary })
+        await waitFor(async () => (await state()).count === before + 1)
+      },
+    )
+    await check(
+      "failed observation discards the previous input ticket",
+      async () => {
+        const observed = await observe()
+        const invalid = await call({ action: "observe", scope: "app" })
+        assert.equal(invalid.structuredContent?.code, "invalid_arguments")
+        const before = (await state()).count
+        const refused = await call({
+          action: "press",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          element: element(observed, "Increment"),
+        })
+        assert.equal(refused.structuredContent?.code, "stale_snapshot")
+        assert.equal((await state()).count, before)
+      },
+    )
+    await check(
+      "screen observation names an active display and keeps modes distinct",
+      async () => {
+        const listed = await call({ action: "list" })
+        const displays = listed.structuredContent?.displays as {
+          display_id: number
+          main: boolean
+        }[]
+        const main = displays.find((display) => display.main)
+        assert(main)
+        for (const mode of ["ax", "vision", "both"]) {
+          const screen = await call({
+            action: "observe",
+            scope: "screen",
+            mode,
+            display_id: main.display_id,
+          })
+          assert(!screen.isError, JSON.stringify(screen.structuredContent))
+          assert.equal(screen.structuredContent?.display_id, main.display_id)
+          assert.equal(
+            screen.content.some((part) => part.type === "image"),
+            mode !== "ax",
+          )
+          if (mode === "vision")
+            assert.deepEqual(screen.structuredContent?.elements, [])
+        }
+      },
+    )
     await check("AX press changes the application's own state", async () => {
       const observed = await observe()
       await input("press", observed, {
         element: element(observed, "Increment"),
       })
-      await waitFor(async () => (await state()).count === 1)
+      await waitFor(async () => (await state()).count === 2)
     })
     await check(
       "consumed observation cannot repeat a side effect",
@@ -209,7 +395,7 @@ try {
         const observed = await observe()
         const button = element(observed, "Increment")
         await input("press", observed, { element: button })
-        await waitFor(async () => (await state()).count === 2)
+        await waitFor(async () => (await state()).count === 3)
         const result = await call({
           action: "press",
           snapshot_id: observed.structuredContent?.snapshot_id,
@@ -217,7 +403,7 @@ try {
         })
         assert.equal(result.isError, true)
         assert.equal(result.structuredContent?.code, "stale_snapshot")
-        assert.equal((await state()).count, 2)
+        assert.equal((await state()).count, 3)
       },
     )
     await check("Unicode input switches to the addressed field", async () => {
@@ -236,7 +422,7 @@ try {
       assert.equal((await state()).first, "Keep this unchanged")
     })
     await check(
-      "select-all and replacement commit through real keyboard events",
+      "replacement confirms the complete selection before real text events",
       async () => {
         const observed = await observe()
         await input("type", observed, {
@@ -252,11 +438,17 @@ try {
       "per-process pixel click reaches the addressed window",
       async () => {
         const observed = await observe()
+        const foregroundPID = (await state()).foreground_pid
         await input("click", observed, {
           x: 100,
           y: (await state()).height - 118,
         })
-        await waitFor(async () => (await state()).count === 3)
+        await waitFor(async () => (await state()).count === 4)
+        assert.equal(
+          (await state()).foreground_pid,
+          foregroundPID,
+          "Background input must preserve the system's foreground application",
+        )
       },
     )
     await check(
@@ -269,7 +461,25 @@ try {
           y: (await state()).height - 118,
           delivery: "foreground",
         })
-        await waitFor(async () => (await state()).count === 4)
+        await waitFor(async () => (await state()).count === 5)
+      },
+    )
+    await check(
+      "foreground shortcut selects text and releases modifiers",
+      async () => {
+        let observed = await observe()
+        await input("key", observed, {
+          element: element(observed, "Second input"),
+          key: "CMD+A",
+          delivery: "foreground",
+        })
+        observed = await observe()
+        await input("type", observed, {
+          element: element(observed, "Second input"),
+          text: "Shortcut 中文",
+          delivery: "foreground",
+        })
+        await waitFor(async () => (await state()).second === "Shortcut 中文")
       },
     )
     await check("cancelled drag releases its held mouse button", async () => {
@@ -326,7 +536,7 @@ try {
         const next = await observe()
         assert((await state()).second.length < 100_000)
         await input("press", next, { element: element(next, "Increment") })
-        await waitFor(async () => (await state()).count === 5)
+        await waitFor(async () => (await state()).count === 6)
       },
     )
     await check("moved window rejects the previous observation", async () => {
@@ -339,7 +549,7 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 5)
+      assert.equal((await state()).count, 6)
     })
     await check("closed window rejects the previous observation", async () => {
       const observed = await observe()
@@ -351,8 +561,61 @@ try {
         element: element(observed, "Increment"),
       })
       assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 5)
+      assert.equal((await state()).count, 6)
+      // The next case captures the whole display. Let WindowServer publish the
+      // completed close rather than including its disappearing surface.
+      await waitFor(async () => {
+        const listed = await call({ action: "list" })
+        return !(
+          listed.structuredContent?.windows as { window_id: number }[]
+        ).some((window) => window.window_id === windowID)
+      })
     })
+    await check(
+      "screen pixels require foreground and reach the selected display target",
+      async () => {
+        const listed = await call({ action: "list" })
+        const windows = listed.structuredContent?.windows as {
+          window_id: number
+          frame: { x: number; y: number; width: number; height: number }
+        }[]
+        const secondaryID = (await state()).secondary_window_id
+        const secondary = windows.find(
+          (window) => window.window_id === secondaryID,
+        )
+        assert(secondary)
+        const screen = await call({
+          action: "observe",
+          scope: "screen",
+          mode: "vision",
+        })
+        assert(!screen.isError, JSON.stringify(screen.structuredContent))
+        const frame = screen.structuredContent?.frame as {
+          x: number
+          y: number
+          width: number
+          height: number
+        }
+        const width = screen.structuredContent?.image_width as number
+        const height = screen.structuredContent?.image_height as number
+        // Secondary button centre: (110, 78) AppKit points from window bottom.
+        const x = ((secondary.frame.x + 110 - frame.x) * width) / frame.width
+        const y =
+          ((secondary.frame.y + secondary.frame.height - 78 - frame.y) *
+            height) /
+          frame.height
+        const refused = await call({
+          action: "click",
+          snapshot_id: screen.structuredContent?.snapshot_id,
+          x,
+          y,
+        })
+        assert.equal(refused.structuredContent?.code, "foreground_required")
+        assert.equal((await state()).count, 6)
+        await input("click", screen, { x, y, delivery: "foreground" })
+        await waitFor(async () => (await state()).count === 7)
+      },
+    )
     const exited = once(fixture, "exit")
     fixture.kill("SIGTERM")
     await exited

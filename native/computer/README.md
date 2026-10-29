@@ -9,17 +9,27 @@ active input before release.
 
 Background events use public per-process CGEvents. Some applications ignore these
 events or consult the physical cursor instead; delivery is explicitly unverified.
-There is no automatic foreground retry. Current observation targets visible
-windows on the current desktop, and background typing requires confirmed AX
-focus. This does not yet establish support for every macOS application, other
+There is no automatic foreground retry. Observation targets the current desktop's
+visible windows or an explicitly selected display. Screen pixel input requires
+foreground delivery; window/app inputs keep an exact owning window even when
+their observation combines several windows. Background typing requires confirmed
+AX focus. This does not yet establish support for every macOS application, other
 Spaces, minimized windows, locked desktops, or arbitrary canvas keyboard input.
 
 The Wuu reference was inspected at
 `2903ea990580a92e53215781cd99a821c5df80f3` (2026-10-17), including its native
-input/capture, focus, virtual-display and process contracts. Implementation here
+input/capture, focus, virtual-display and process contracts. Launch resolution and
+observation changes also inspected `7d58d83d75d418b4d33802085d6482a6cf8ea1e9`
+(2026-10-21); these local snapshots do not establish current upstream behavior. Implementation here
 uses Apple frameworks directly, with no dependency on reference checkouts or
 Cua Driver. Directed pointer events encode an AppKit window identity as well as
 Quartz hit-test fields: the latter alone leave `NSEvent.windowNumber` at zero.
+PID-directed pointer input also requires the optional macOS
+`CGEventSetWindowLocation` SPI to populate AppKit's separate local coordinates.
+If unavailable, the helper refuses background pointer input before button-down;
+foreground delivery must be explicitly requested. Directed AppKit activation is
+scoped to one action and restored on completion/cancellation, without suppressing
+user activation events or bringing the application onto the shared foreground.
 
 `pnpm test:computer` checks native coordinate/identity/cancellation contracts and
 the real signed app's LaunchServices/MCP lifecycle without requesting access.
