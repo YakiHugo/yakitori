@@ -1,6 +1,14 @@
 import AppKit
 import Darwin
 
+final class FixtureLabel: NSTextField {
+    var onRead: (() -> Void)?
+    override func accessibilityValue() -> String? {
+        onRead?()
+        return super.accessibilityValue()
+    }
+}
+
 final class FixtureApplication: NSApplication {
     var received: ((NSEvent) -> Void)?
     override func sendEvent(_ event: NSEvent) {
@@ -35,13 +43,16 @@ final class Fixture: NSObject, NSTextFieldDelegate {
     let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 500, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let first = NSTextField(frame: NSRect(x: 30, y: 230, width: 420, height: 28))
     let second = NSTextField(frame: NSRect(x: 30, y: 185, width: 420, height: 28))
-    let label = NSTextField(labelWithString: "0")
+    let label = FixtureLabel(labelWithString: "0")
     let canvas = DragTarget(frame: NSRect(x: 250, y: 30, width: 200, height: 100))
     let output: URL
     var count = 0
     var moves = 0
     var secondary: NSWindow?
     var events: [[String: Any]] = []
+    var scheduledChanges = 0
+    var completedChanges = 0
+    var axReads = 0
 
     func record(_ event: NSEvent) {
         guard [.leftMouseDown, .leftMouseUp, .keyDown, .flagsChanged, .appKitDefined].contains(event.type) else { return }
@@ -54,6 +65,9 @@ final class Fixture: NSObject, NSTextFieldDelegate {
     init(output: URL) {
         self.output = output
         super.init()
+        label.onRead = { [weak self] in
+            if let self { self.axReads += 1; self.save() }
+        }
         window.title = "Yakitori Computer Fixture"
         window.isReleasedWhenClosed = false
         first.setAccessibilityLabel("First input")
@@ -91,6 +105,16 @@ final class Fixture: NSObject, NSTextFieldDelegate {
         save()
     }
     func closeWindow() { window.close(); save() }
+    func scheduleChange() {
+        scheduledChanges += 1
+        let text = "Wait ready \(scheduledChanges)"
+        save()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.label.stringValue = text
+            self.completedChanges += 1
+            self.save()
+        }
+    }
     func save() {
         do {
             let bytes = try JSONSerialization.data(withJSONObject: [
@@ -102,6 +126,8 @@ final class Fixture: NSObject, NSTextFieldDelegate {
                 "foreground_pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0,
                 "selection_location": second.currentEditor()?.selectedRange.location ?? -1,
                 "selection_length": second.currentEditor()?.selectedRange.length ?? -1,
+                "scheduled_changes": scheduledChanges, "completed_changes": completedChanges,
+                "ax_reads": axReads,
             ])
             try bytes.write(to: output, options: .atomic)
         } catch { fatalError("Fixture persistence failed: \(error)") }
@@ -131,7 +157,7 @@ let stateTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _
 let activityObservers = [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification].map { name in
     NotificationCenter.default.addObserver(forName: name, object: app, queue: .main) { _ in fixture.save() }
 }
-let signals = [(SIGUSR1, { fixture.move() }), (SIGUSR2, { fixture.closeWindow() })].map { code, action -> DispatchSourceSignal in
+let signals = [(SIGUSR1, { fixture.move() }), (SIGUSR2, { fixture.closeWindow() }), (SIGWINCH, { fixture.scheduleChange() })].map { code, action -> DispatchSourceSignal in
     signal(code, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: code, queue: .main)
     source.setEventHandler(handler: action)

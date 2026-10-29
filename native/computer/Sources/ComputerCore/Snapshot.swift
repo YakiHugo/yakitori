@@ -47,6 +47,7 @@ struct Snapshot {
     let imageWidth: Int?
     let imageHeight: Int?
     let elements: [ObservedElement]
+    var tree: AccessibilitySnapshot? = nil
 
     func target(_ args: [String: Any]) throws -> InputTarget {
         let hasElement = args["element"] != nil
@@ -102,6 +103,11 @@ struct Snapshot {
     }
 }
 
+struct AccessibilitySnapshot {
+    let rows: [[String: Any]]
+    let truncated: Bool
+}
+
 func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     AXUIElementSetMessagingTimeout(element, 0.2)
     var value: CFTypeRef?
@@ -150,14 +156,26 @@ func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], deadline: Date 
         guard visited.insert(element).inserted else { continue }
         if Date() >= deadline { truncated = true; break }
         AXUIElementSetMessagingTimeout(element, 0.2)
+        func read(_ name: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+            if status != .success && status != .noValue && status != .attributeUnsupported { truncated = true }
+            return status == .success ? value : nil
+        }
         var row: [String: Any] = ["element": elements.count, "pid": window.pid, "window_id": window.windowID]
         for (key, name) in [("role", kAXRoleAttribute), ("title", kAXTitleAttribute), ("description", kAXDescriptionAttribute)] {
-            if let value = attribute(element, name) as? String { row[key] = String(value.prefix(1000)) }
+            if let value = read(name) as? String {
+                row[key] = String(value.prefix(1000))
+                if value.count > 1000 { truncated = true }
+            }
         }
         // Secure fields must never be included in the text observation.
-        let secure = attribute(element, kAXSubroleAttribute) as? String == kAXSecureTextFieldSubrole
-        if !secure, let value = attribute(element, kAXValueAttribute) {
-            if let string = value as? String { row["value"] = String(string.prefix(1000)) }
+        let secure = read(kAXSubroleAttribute) as? String == kAXSecureTextFieldSubrole
+        if !secure, let value = read(kAXValueAttribute) {
+            if let string = value as? String {
+                row["value"] = String(string.prefix(1000))
+                if string.count > 1000 { truncated = true }
+            }
             else if let number = value as? NSNumber { row["value"] = number }
         }
         var actions: CFArray?
@@ -167,7 +185,7 @@ func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], deadline: Date 
         bytes += rowBytes
         rows.append(row)
         elements.append(ObservedElement(value: element, window: window))
-        let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        let children = read(kAXChildrenAttribute) as? [AXUIElement] ?? []
         queue.append(contentsOf: children.prefix(max(0, nodeBudget - queue.count)).map { (window, $0) })
     }
     return (rows, elements, truncated || index < queue.count || queue.count >= nodeBudget)
