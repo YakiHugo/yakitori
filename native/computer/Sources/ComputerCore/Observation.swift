@@ -159,11 +159,14 @@ extension Computer {
             for window in selected {
                 if Date() >= axDeadline { rootsTruncated = true; break }
                 if let root = windowElement(window, deadline: axDeadline) { roots.append((window, root)) }
+                else { rootsTruncated = true }
             }
         }
         let tree = accessibilityTree(roots, deadline: axDeadline)
         let next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
-            imageWidth: image?.width, imageHeight: image?.height, elements: tree.elements)
+            imageWidth: image?.width, imageHeight: image?.height, elements: tree.elements,
+            tree: request.mode != .vision && AXIsProcessTrusted()
+                ? AccessibilitySnapshot(rows: tree.rows, truncated: tree.truncated || rootsTruncated) : nil)
         try next.validate(id: next.id, windows: windows(), displays: displays())
         var png: Data?
         if let image {

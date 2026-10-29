@@ -116,6 +116,9 @@ try {
       active: boolean
       foreground_pid: number
       selection_location: number
+      scheduled_changes: number
+      completed_changes: number
+      ax_reads: number
       selection_length: number
     }
     const state = async (): Promise<State> =>
@@ -312,6 +315,193 @@ try {
         assert(!vision.isError, JSON.stringify(vision.structuredContent))
         assert(vision.content.some((part) => part.type === "image"))
         assert.deepEqual(vision.structuredContent?.elements, [])
+        const unavailable = await call({
+          action: "query_snapshot",
+          snapshot_id: vision.structuredContent?.snapshot_id,
+        })
+        assert.equal(
+          unavailable.structuredContent?.code,
+          "accessibility_unavailable",
+        )
+      },
+    )
+    await check(
+      "cached query pages preserve original element IDs",
+      async () => {
+        const observed = await observe()
+        const snapshotID = observed.structuredContent?.snapshot_id
+        const all = observed.structuredContent?.elements as Record<
+          string,
+          unknown
+        >[]
+        const pages: Record<string, unknown>[] = []
+        let offset = 0
+        while (true) {
+          const page = await call({
+            action: "query_snapshot",
+            snapshot_id: snapshotID,
+            offset,
+            limit: 2,
+          })
+          assert(!page.isError, JSON.stringify(page.structuredContent))
+          assert.equal(page.structuredContent?.cached, true)
+          assert.equal(page.structuredContent?.snapshot_id, snapshotID)
+          pages.push(
+            ...(page.structuredContent?.elements as Record<string, unknown>[]),
+          )
+          if (page.structuredContent?.next_offset === undefined) break
+          offset = page.structuredContent.next_offset as number
+        }
+        assert.deepEqual(pages, all)
+        const filtered = await call({
+          action: "query_snapshot",
+          snapshot_id: snapshotID,
+          query: "INPUT",
+        })
+        const matches = filtered.structuredContent?.elements as {
+          element: number
+        }[]
+        assert.deepEqual(
+          matches.map((row) => row.element),
+          [element(observed, "First input"), element(observed, "Second input")],
+        )
+        const refused = await call({
+          action: "query_snapshot",
+          snapshot_id: snapshotID,
+          limit: 0,
+        })
+        assert.equal(refused.structuredContent?.code, "invalid_arguments")
+        await observe()
+        const stale = await call({
+          action: "query_snapshot",
+          snapshot_id: snapshotID,
+        })
+        assert.equal(stale.structuredContent?.code, "stale_snapshot")
+      },
+    )
+    await check(
+      "condition waits observe delayed real UI changes and publish a fresh ticket",
+      async () => {
+        const observed = await observe()
+        process.kill(pid, "SIGWINCH")
+        await waitFor(async () => (await state()).scheduled_changes === 1)
+        const ready = await call({
+          action: "wait_for",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          condition: { role: "AXStaticText", value: "Wait ready 1" },
+          timeout_seconds: 3,
+        })
+        assert(!ready.isError, JSON.stringify(ready.structuredContent))
+        assert.equal(ready.structuredContent?.wait_status, "matched")
+        assert.equal((await state()).completed_changes, 1)
+        assert.notEqual(
+          ready.structuredContent?.snapshot_id,
+          observed.structuredContent?.snapshot_id,
+        )
+        assert(!ready.content.some((part) => part.type === "image"))
+        const page = await call({
+          action: "query_snapshot",
+          snapshot_id: ready.structuredContent?.snapshot_id,
+          query: "Wait ready",
+        })
+        assert.equal(page.structuredContent?.total, 1)
+        const stale = await call({
+          action: "query_snapshot",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+        })
+        assert.equal(stale.structuredContent?.code, "stale_snapshot")
+      },
+    )
+    await check(
+      "change wait compares against cached UI rather than refreshing its baseline",
+      async () => {
+        const observed = await observe()
+        process.kill(pid, "SIGWINCH")
+        await waitFor(async () => (await state()).completed_changes === 2)
+        const cached = await call({
+          action: "query_snapshot",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          query: "Wait ready 2",
+        })
+        assert.equal(cached.structuredContent?.total, 0)
+        const changed = await call({
+          action: "wait_for_change",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          timeout_seconds: 1,
+        })
+        assert(!changed.isError, JSON.stringify(changed.structuredContent))
+        assert.equal(changed.structuredContent?.wait_status, "changed")
+        const page = await call({
+          action: "query_snapshot",
+          snapshot_id: changed.structuredContent?.snapshot_id,
+          query: "Wait ready 2",
+        })
+        assert.equal(page.structuredContent?.total, 1)
+        const unchanged = await call({
+          action: "wait_for_change",
+          snapshot_id: changed.structuredContent?.snapshot_id,
+          timeout_seconds: 0.05,
+        })
+        assert.equal(unchanged.structuredContent?.wait_status, "timed_out")
+      },
+    )
+    await check(
+      "wait timeout and absence remain distinct outcomes",
+      async () => {
+        const observed = await observe()
+        const ambiguous = await call({
+          action: "wait_for",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          condition: { role: "AXTextField" },
+          timeout_seconds: 0,
+        })
+        assert.equal(ambiguous.structuredContent?.wait_status, "ambiguous")
+        const timeout = await call({
+          action: "wait_for",
+          snapshot_id: ambiguous.structuredContent?.snapshot_id,
+          condition: { title: "Never present" },
+          timeout_seconds: 0.05,
+        })
+        assert(!timeout.isError, JSON.stringify(timeout.structuredContent))
+        assert.equal(timeout.structuredContent?.wait_status, "timed_out")
+        const absent = await call({
+          action: "wait_for",
+          snapshot_id: timeout.structuredContent?.snapshot_id,
+          condition: { title: "Never present", exists: false },
+          timeout_seconds: 0,
+        })
+        assert.equal(absent.structuredContent?.wait_status, "matched")
+      },
+    )
+    await check(
+      "cancelled active wait discards unpublished snapshots and releases the queue",
+      async () => {
+        const observed = await observe()
+        const reads = (await state()).ax_reads
+        const controller = new AbortController()
+        const waiting = call(
+          {
+            action: "wait_for",
+            snapshot_id: observed.structuredContent?.snapshot_id,
+            condition: { title: "Never present" },
+            timeout_seconds: 5,
+          },
+          controller.signal,
+        )
+        const outcome = waiting.then(
+          () => "completed",
+          () => "cancelled",
+        )
+        // Independent application-side AX reads prove the wait has begun polling.
+        await waitFor(async () => (await state()).ax_reads > reads)
+        controller.abort()
+        assert.equal(await outcome, "cancelled")
+        const refused = await call({
+          action: "query_snapshot",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+        })
+        assert.equal(refused.structuredContent?.code, "stale_snapshot")
+        assert(!(await observe()).isError)
       },
     )
     await check(
@@ -338,7 +528,17 @@ try {
         )
         element(app, "First input")
         const before = (await state()).count
-        await input("press", app, { element: secondary })
+        const ready = await call({
+          action: "wait_for",
+          snapshot_id: app.structuredContent?.snapshot_id,
+          condition: { title: "Secondary increment" },
+          timeout_seconds: 0,
+        })
+        assert.equal(ready.structuredContent?.wait_status, "matched")
+        assert.equal(ready.structuredContent?.scope, "app")
+        await input("press", ready, {
+          element: element(ready, "Secondary increment"),
+        })
         await waitFor(async () => (await state()).count === before + 1)
       },
     )
@@ -383,6 +583,17 @@ try {
           )
           if (mode === "vision")
             assert.deepEqual(screen.structuredContent?.elements, [])
+          if (mode === "ax") {
+            const ready = await call({
+              action: "wait_for",
+              snapshot_id: screen.structuredContent?.snapshot_id,
+              condition: { title: "Secondary increment" },
+              timeout_seconds: 0,
+            })
+            assert(!ready.isError, JSON.stringify(ready.structuredContent))
+            assert.equal(ready.structuredContent?.scope, "screen")
+            assert.equal(ready.structuredContent?.display_id, main.display_id)
+          }
         }
       },
     )
@@ -557,6 +768,32 @@ try {
           action_name: "AXPress",
         })
         await waitFor(async () => (await state()).count === 6)
+      },
+    )
+    await check(
+      "truncated AX values never prove condition absence",
+      async () => {
+        let observed = await observe()
+        const text = (await state()).second
+        await input("set_value", observed, {
+          element: element(observed, "Second input"),
+          text: "long".repeat(300),
+        })
+        observed = await observe()
+        assert.equal(observed.structuredContent?.tree_truncated, true)
+        const result = await call({
+          action: "wait_for",
+          snapshot_id: observed.structuredContent?.snapshot_id,
+          condition: { title: "Never present", exists: false },
+          timeout_seconds: 0,
+        })
+        assert(!result.isError, JSON.stringify(result.structuredContent))
+        assert.equal(result.structuredContent?.wait_status, "unavailable")
+        await input("set_value", result, {
+          element: element(result, "Second input"),
+          text,
+        })
+        await waitFor(async () => (await state()).second === text)
       },
     )
     await check("cancelled drag releases its held mouse button", async () => {

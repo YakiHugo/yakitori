@@ -31,6 +31,10 @@ import Darwin
             return try await launch(args)
         case "observe":
             return try await observe(args)
+        case "query_snapshot":
+            return try querySnapshot(args)
+        case "wait_for", "wait_for_change":
+            return try await waitForObservation(action, args)
         case "click", "press", "type", "key", "scroll", "drag", "set_value", "select_text", "perform_action":
             return try await input(action, args)
         default:

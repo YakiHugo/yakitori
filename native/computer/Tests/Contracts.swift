@@ -59,6 +59,7 @@ import Foundation
         try observationContracts()
         try applicationContracts()
         try textContracts()
+        try conditionContracts()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
         rejects { _ = try keyChord("TYPO+A") }
@@ -168,5 +169,21 @@ import Foundation
         rejects(code: "text_not_found") { _ = try textSelection(source: "alpha", text: "alpha", prefix: "wrong", suffix: nil, kind: "text") }
         rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "", prefix: nil, suffix: nil, kind: "text") }
         rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "alpha", prefix: nil, suffix: nil, kind: "typo") }
+    }
+
+    static func conditionContracts() throws {
+        let unique = try ObservationCondition(["role": "AXButton", "title": "Save"])
+        let row: [String: Any] = ["role": "AXButton", "title": "Save", "element": 7]
+        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row], truncated: false)) == "matched")
+        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row, row], truncated: false)) == "ambiguous")
+        precondition(unique.evaluate(AccessibilitySnapshot(rows: [["role": "AXButton", "title": "save"]], truncated: false)) == "pending")
+        let absent = try ObservationCondition(["title": "Save", "exists": false])
+        precondition(absent.evaluate(AccessibilitySnapshot(rows: [], truncated: false)) == "matched")
+        precondition(absent.evaluate(AccessibilitySnapshot(rows: [row], truncated: false)) == "pending")
+        precondition(absent.evaluate(AccessibilitySnapshot(rows: [], truncated: true)) == "unavailable")
+        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row], truncated: true)) == "unavailable")
+        for invalid: [String: Any] in [[:], ["exists": false], ["title": 7], ["title": "Save", "unknown": "value"], ["role": "AXButton", "exists": "false"]] {
+            rejects(code: "invalid_arguments") { _ = try ObservationCondition(invalid) }
+        }
     }
 }
