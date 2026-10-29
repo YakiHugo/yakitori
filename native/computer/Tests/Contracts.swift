@@ -5,26 +5,59 @@ import Foundation
 // The macOS Command Line Tools ship no XCTest/Testing runtime. Compile these
 // process-failing contracts with the core sources so CI needs no full Xcode.
 @main struct Contracts {
-    static func rejects(_ operation: () throws -> Void) {
+    static func rejects(code: String? = nil, _ operation: () throws -> Void) {
         do { try operation(); fatalError("Expected a ComputerFailure") }
-        catch is ComputerFailure {}
+        catch let failure as ComputerFailure { if let code { precondition(failure.code == code, "Expected \(code), received \(failure.code)") } }
         catch { fatalError("Unexpected error: \(error)") }
     }
 
     static func main() async throws {
-        let window = WindowIdentity(pid: 42, launched: Date(timeIntervalSince1970: 100), windowID: 7, frame: CGRect(x: -300, y: 50, width: 400, height: 200))
-        let snapshot = Snapshot(window: window, imageWidth: 800, imageHeight: 400, elements: [])
+        let window = WindowIdentity(pid: 42, launched: Date(timeIntervalSince1970: 100), windowID: 7, frame: CGRect(x: -300, y: 50, width: 400, height: 200), layer: 0)
+        let snapshot = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: 800, imageHeight: 400, elements: [])
         let point = try snapshot.point(x: 200, y: 100)
         precondition(point == CGPoint(x: -200, y: 100))
         rejects { _ = try snapshot.point(x: 800, y: 0) }
         rejects { _ = try snapshot.point(x: 0, y: -1) }
         rejects { _ = try snapshot.point(x: .nan, y: 0) }
-        try snapshot.validate(id: snapshot.id, window: window)
-        rejects { try snapshot.validate(id: "old", window: window) }
-        let relaunched = WindowIdentity(pid: 42, launched: Date(timeIntervalSince1970: 200), windowID: 7, frame: window.frame)
-        rejects { try snapshot.validate(id: snapshot.id, window: relaunched) }
-        let moved = WindowIdentity(pid: 42, launched: window.launched, windowID: 7, frame: CGRect(x: 0, y: 0, width: 400, height: 200))
-        rejects { try snapshot.validate(id: snapshot.id, window: moved) }
+        try snapshot.validate(id: snapshot.id, windows: [window], displays: [])
+        rejects { try snapshot.validate(id: "old", windows: [window], displays: []) }
+        let relaunched = WindowIdentity(pid: 42, launched: Date(timeIntervalSince1970: 200), windowID: 7, frame: window.frame, layer: 0)
+        rejects { try snapshot.validate(id: snapshot.id, windows: [relaunched], displays: []) }
+        let moved = WindowIdentity(pid: 42, launched: window.launched, windowID: 7, frame: CGRect(x: 0, y: 0, width: 400, height: 200), layer: 0)
+        rejects { try snapshot.validate(id: snapshot.id, windows: [moved], displays: []) }
+        let other = WindowIdentity(pid: 42, launched: window.launched, windowID: 8, frame: CGRect(x: 100, y: 250, width: 200, height: 200), layer: 0)
+        let appSnapshot = Snapshot(scope: .app, frame: CGRect(x: -300, y: 50, width: 600, height: 400), windows: [window, other], display: nil,
+            imageWidth: 1200, imageHeight: 800, elements: [])
+        let appPoint = try appSnapshot.point(x: 1000, y: 600)
+        precondition(appPoint == CGPoint(x: 200, y: 350))
+        let pixelTarget = try appSnapshot.target(["x": 1000.0, "y": 600.0])
+        precondition(pixelTarget.window == other && pixelTarget.point == CGPoint(x: 200, y: 350))
+        rejects(code: "invalid_coordinates") { _ = try appSnapshot.target(["x": 900.0, "y": 200.0]) }
+        rejects(code: "invalid_arguments") { _ = try appSnapshot.target(["x": 100.0]) }
+        rejects(code: "invalid_arguments") { _ = try appSnapshot.target(["x": "100", "y": 100.0]) }
+        rejects(code: "invalid_arguments") { _ = try appSnapshot.target(["element": 0, "x": 100.0, "y": 100.0]) }
+        let owned = Snapshot(scope: .app, frame: appSnapshot.frame, windows: [window, other], display: nil,
+            imageWidth: 1200, imageHeight: 800, elements: [ObservedElement(value: AXUIElementCreateApplication(42), window: other)])
+        let elementTarget = try owned.target(["element": 0])
+        precondition(elementTarget.window == other && elementTarget.element != nil && elementTarget.point == nil)
+        rejects(code: "invalid_element") { _ = try owned.target(["element": "0"]) }
+        rejects(code: "invalid_element") { _ = try owned.target(["element": 1]) }
+        try appSnapshot.validate(id: appSnapshot.id, windows: [window, other], displays: [])
+        rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [window], displays: []) }
+        rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [other, window], displays: []) }
+        let display = DisplayIdentity(id: 5, frame: CGRect(x: -1000, y: 0, width: 1600, height: 900))
+        let screen = Snapshot(scope: .screen, frame: display.frame, windows: [window, other], display: display,
+            imageWidth: 800, imageHeight: 450, elements: [])
+        let screenPoint = try screen.point(x: 500, y: 200)
+        precondition(screenPoint == CGPoint(x: 0, y: 400))
+        let desktopTarget = try screen.target(["x": 0.0, "y": 0.0])
+        precondition(desktopTarget.window == nil && desktopTarget.point == CGPoint(x: -1000, y: 0))
+        try screen.validate(id: screen.id, windows: [window, other], displays: [display])
+        rejects { try screen.validate(id: screen.id, windows: [window, other], displays: []) }
+        let textOnly = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: nil, imageHeight: nil, elements: [])
+        rejects { _ = try textOnly.point(x: 0, y: 0) }
+        try observationContracts()
+        try applicationContracts()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
         rejects { _ = try keyChord("TYPO+A") }
@@ -60,6 +93,65 @@ import Foundation
             let _: Int = try await nativeRequest(timeout: 0.01) { _ in }
             fatalError("A stuck native request must time out")
         } catch let failure as ComputerFailure { precondition(failure.code == "native_timeout") }
-        print("Native geometry, observation identity, pointer routing, keyboard and capture cancellation contracts passed.")
+        print("Native launch resolution, observation modes/scopes/composition, input identity and cancellation contracts passed.")
+    }
+
+    static func observationContracts() throws {
+        let defaults = try ObservationRequest(["pid": 42, "window_id": 7])
+        precondition(defaults.mode == .both && defaults.scope == .window)
+        for mode in ["ax", "vision", "both"] {
+            _ = try ObservationRequest(["mode": mode, "scope": "app", "pid": 42])
+            _ = try ObservationRequest(["mode": mode, "scope": "screen", "display_id": 5])
+        }
+        rejects { _ = try ObservationRequest(["scope": "app", "pid": 42, "window_id": 7]) }
+        rejects { _ = try ObservationRequest(["scope": "screen", "pid": 42]) }
+        rejects { _ = try ObservationRequest(["scope": "screen", "display_id": "5"]) }
+        rejects { _ = try ObservationRequest(["scope": "screen", "display_id": 0]) }
+        rejects { _ = try ObservationRequest(["scope": "window", "pid": 42]) }
+        rejects { _ = try ObservationRequest(["scope": "app", "pid": 42, "mode": "typo"]) }
+        rejects { _ = try ObservationRequest(["scope": "app", "pid": 42, "mode": 1]) }
+        rejects { _ = try ObservationRequest(["scope": "typo"]) }
+        let background = try ObservationCanvas(frame: CGRect(x: 0, y: 0, width: 2, height: 2), width: 2, height: 2)
+        background.context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        background.context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let foreground = try ObservationCanvas(frame: CGRect(x: 0, y: 0, width: 2, height: 2), width: 2, height: 2)
+        foreground.context.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+        foreground.context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let composite = try ObservationCanvas(frame: CGRect(x: -20, y: 10, width: 4, height: 4), width: 8, height: 8)
+        composite.draw(try background.image(), bounds: CGRect(x: -20, y: 10, width: 4, height: 4))
+        composite.draw(try foreground.image(), bounds: CGRect(x: -18, y: 10, width: 2, height: 2))
+        let pixels = NSBitmapImageRep(cgImage: try composite.image())
+        precondition(pixels.colorAt(x: 6, y: 1)!.greenComponent > 0.9)
+        precondition(pixels.colorAt(x: 1, y: 1)!.redComponent > 0.9)
+        precondition(pixels.colorAt(x: 6, y: 6)!.redComponent > 0.9)
+    }
+
+    static func applicationContracts() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("yakitori-launch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for directory in ["one/Utilities/Editor.app", "two/Editor.app"] {
+            let contents = root.appendingPathComponent(directory).appendingPathComponent("Contents")
+            try FileManager.default.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: contents.appendingPathComponent("MacOS/editor"))
+            let info: [String: Any] = ["CFBundleIdentifier": "test.editor", "CFBundleExecutable": "editor", "CFBundlePackageType": "APPL"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: contents.appendingPathComponent("Info.plist"))
+        }
+        let first = root.appendingPathComponent("one/Utilities/Editor.app")
+        let found = try applicationURL(.name("editor"), roots: [root.appendingPathComponent("one")], running: [])
+        precondition(found == first.standardizedFileURL)
+        let direct = try applicationURL(ApplicationTarget(["app_path": first.path]), roots: [], running: [])
+        precondition(direct == found)
+        let running = try applicationURL(.name("Editor.app"), roots: [], running: [first, first])
+        precondition(running == found)
+        let byID = try applicationURL(.bundleID("test.editor"), roots: [], running: [first])
+        precondition(byID == found)
+        rejects(code: "app_ambiguous") { _ = try applicationURL(.name("Editor"), roots: [root], running: []) }
+        rejects(code: "app_not_found") { _ = try applicationURL(.name("Edit"), roots: [root], running: []) }
+        rejects(code: "invalid_arguments") { _ = try applicationURL(.path("Editor.app"), roots: [], running: []) }
+        rejects(code: "app_not_found") { _ = try applicationURL(.path(root.path), roots: [], running: []) }
+        rejects { _ = try ApplicationTarget(["bundle_id": "test.editor", "app_name": "Editor"]) }
+        rejects { _ = try ApplicationTarget(["app_name": ""]) }
+        rejects { _ = try ApplicationTarget(["app_name": "/Applications/Editor.app"]) }
     }
 }
