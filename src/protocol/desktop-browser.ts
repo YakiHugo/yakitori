@@ -31,6 +31,32 @@ export type BrowserPointerRequest = Readonly<
 export type BrowserInputRequest =
   | BrowserTextInputRequest
   | BrowserPointerRequest
+  | BrowserKeyRequest
+
+export const browserNamedKeys = [
+  "Enter",
+  "Tab",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "Insert",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Space",
+] as const
+export type BrowserKeyRequest = Readonly<{
+  action: "press"
+  target: BrowserTarget
+  reference: string
+  key: string
+  modifiers?: ("Alt" | "Control" | "Meta" | "Shift")[]
+}>
 
 export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   if (
@@ -101,6 +127,51 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   if (
     isJsonObject(value) &&
+    value.action === "press" &&
+    ["action", "target", "reference", "key"].every((key) =>
+      Object.hasOwn(value, key),
+    ) &&
+    Object.keys(value).every((key) =>
+      ["action", "target", "reference", "key", "modifiers"].includes(key),
+    ) &&
+    typeof value.reference === "string" &&
+    /^browser_click_[a-f0-9-]{36}$/.test(value.reference) &&
+    typeof value.key === "string" &&
+    (/^[!-~]$/.test(value.key) ||
+      /^F([1-9]|1[0-9]|2[0-4])$/.test(value.key) ||
+      browserNamedKeys.some((key) => key === value.key)) &&
+    (value.modifiers === undefined ||
+      (Array.isArray(value.modifiers) &&
+        value.modifiers.length <= 4 &&
+        new Set(value.modifiers).size === value.modifiers.length &&
+        value.modifiers.every(
+          (key) =>
+            typeof key === "string" &&
+            ["Alt", "Control", "Meta", "Shift"].includes(key),
+        )))
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "press",
+      target: observed.target,
+      reference: value.reference,
+      key: value.key,
+      ...(value.modifiers === undefined
+        ? {}
+        : {
+            modifiers: value.modifiers as NonNullable<
+              BrowserKeyRequest["modifiers"]
+            >,
+          }),
+    }
+  }
+  if (
+    isJsonObject(value) &&
     Object.keys(value).length === 4 &&
     Object.keys(value).every((key) =>
       ["action", "target", "reference", "text"].includes(key),
@@ -127,7 +198,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type/fill with an inputReference and text, or click/hover/scroll with a clickReference and exact target. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
+    "Use type/fill with an inputReference and text, or click/hover/scroll/press with a clickReference and exact target. Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
   )
 }
 
@@ -190,7 +261,8 @@ export function parseBrowserRequest(
       value.action === "fill" ||
       value.action === "click" ||
       value.action === "hover" ||
-      value.action === "scroll")
+      value.action === "scroll" ||
+      value.action === "press")
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
 }

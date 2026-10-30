@@ -3,6 +3,7 @@ import type { WebContents } from "electron"
 import { expect, it } from "vitest"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 import {
+  type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserTextInputRequest,
   parseBrowserInputRequest,
@@ -44,7 +45,10 @@ function fixture(
     wrongReceipt?: boolean
     blockKeyDown?: boolean
     failKeyUp?: boolean
+    failKeyUpKey?: string
     loseDebuggerOnKeyDown?: boolean
+    keys?: boolean
+    blockKeyDownAt?: number
     pointer?: boolean
     covered?: boolean
     coverAfterHover?: boolean
@@ -57,6 +61,7 @@ function fixture(
     insertion = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>()
   const mouseEvents: Record<string, unknown>[] = []
+  const keyEvents: Record<string, unknown>[] = []
   let destroyed = false,
     keyDowns = 0,
     keyUps = 0,
@@ -117,6 +122,8 @@ function fixture(
           return {}
         }
         if (method === "Runtime.callFunctionOn") {
+          if (options.keys)
+            return { result: { value: focused && !options.redirectFocus } }
           if (options.pointer)
             return { result: { value: { ok: !options.covered, x: 20, y: 30 } } }
           const args = params.arguments as { value: boolean }[]
@@ -153,18 +160,25 @@ function fixture(
           return {}
         }
         if (method === "Input.dispatchKeyEvent") {
-          if (params.type === "rawKeyDown") {
+          keyEvents.push(params)
+          if (params.type === "rawKeyDown" || params.type === "keyDown") {
             keyDowns++
-            value = value.slice(0, start) + value.slice(end)
-            end = start
+            if (params.key === "Backspace") {
+              value = value.slice(0, start) + value.slice(end)
+              end = start
+            }
             insertion.resolve()
             if (options.loseDebuggerOnKeyDown) {
               events.emit("detach", {}, "replaced_with_devtools")
               attached = true
             }
-            if (options.blockKeyDown) await release.promise
+            if (
+              options.blockKeyDown &&
+              keyDowns === (options.blockKeyDownAt ?? 1)
+            )
+              await release.promise
           } else {
-            if (options.failKeyUp)
+            if (options.failKeyUp || options.failKeyUpKey === params.key)
               throw new Error("Key-up acknowledgement lost")
             keyUps++
           }
@@ -202,12 +216,14 @@ function fixture(
     releases: () => releases,
     moves: () => moves,
     mouseEvents,
+    keyEvents,
     allowMouseUp: () => {
       options.failMouseUp = false
     },
     attached: () => attached,
     allowKeyUp: () => {
       options.failKeyUp = false
+      delete options.failKeyUpKey
     },
     destroy: () => {
       destroyed = true
@@ -668,4 +684,177 @@ it("stops an intentional double click when its first pair navigates the document
   } finally {
     await f.connection.close()
   }
+})
+
+it("accepts exact keyboard targets and rejects unvalidated keys, duplicate modifiers and nested values", () => {
+  const input = {
+    action: "press",
+    target,
+    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+    key: "Enter",
+  }
+  expect(parseBrowserInputRequest(input)).toEqual(input)
+  expect(
+    parseBrowserInputRequest({
+      ...input,
+      key: "p",
+      modifiers: ["Meta", "Shift"],
+    }),
+  ).toMatchObject({ modifiers: ["Meta", "Shift"] })
+  for (const override of [
+    { key: "你好" },
+    { key: "" },
+    { key: "F25" },
+    { key: "Cmd+A" },
+    { modifiers: ["Meta", "Meta"] },
+    { modifiers: ["Command"] },
+    { modifiers: [["Meta"]] },
+    { text: "unrequested" },
+    { reference: ownerReference },
+    { commands: ["paste"] },
+  ])
+    expect(() => parseBrowserInputRequest({ ...input, ...override })).toThrow()
+})
+
+it("delivers a keyboard chord and unwinds only its owned key and modifiers in reverse order", async () => {
+  const f = fixture({ pointer: true, keys: true })
+  try {
+    const input: BrowserKeyRequest = {
+      ...(await f.clickRequest()),
+      action: "press",
+      key: "p",
+      modifiers: ["Meta", "Shift"],
+    }
+    expect(
+      await f.connection.pressKey(input, new AbortController().signal),
+    ).toMatchObject({ delivered: true, action: "press", key: "p" })
+    expect(f.keyEvents).toEqual([
+      {
+        type: "rawKeyDown",
+        key: "Meta",
+        code: "MetaLeft",
+        windowsVirtualKeyCode: 91,
+        location: 1,
+        modifiers: 4,
+      },
+      {
+        type: "rawKeyDown",
+        key: "Shift",
+        code: "ShiftLeft",
+        windowsVirtualKeyCode: 16,
+        location: 1,
+        modifiers: 12,
+      },
+      {
+        type: "rawKeyDown",
+        key: "P",
+        code: "KeyP",
+        windowsVirtualKeyCode: 80,
+        modifiers: 12,
+      },
+      {
+        type: "keyUp",
+        key: "P",
+        code: "KeyP",
+        windowsVirtualKeyCode: 80,
+        modifiers: 12,
+      },
+      {
+        type: "keyUp",
+        key: "Shift",
+        code: "ShiftLeft",
+        windowsVirtualKeyCode: 16,
+        location: 1,
+        modifiers: 4,
+      },
+      {
+        type: "keyUp",
+        key: "Meta",
+        code: "MetaLeft",
+        windowsVirtualKeyCode: 91,
+        location: 1,
+        modifiers: 0,
+      },
+    ])
+    await expect(
+      f.connection.pressKey(input, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "browser_reference_stale" })
+    expect(f.keyDowns()).toBe(3)
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("refuses redirected keyboard focus before sending a modifier or primary key", async () => {
+  const f = fixture({ pointer: true, keys: true, redirectFocus: true })
+  try {
+    const input: BrowserKeyRequest = {
+      ...(await f.clickRequest()),
+      action: "press",
+      key: "p",
+      modifiers: ["Meta"],
+    }
+    await expect(
+      f.connection.pressKey(input, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "browser_input_unavailable" })
+    expect(f.keyEvents).toEqual([])
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("waits for canceled key-down acknowledgement before releasing the primary key and modifier", async () => {
+  const f = fixture({
+    pointer: true,
+    keys: true,
+    blockKeyDown: true,
+    blockKeyDownAt: 2,
+  })
+  const cancellation = new AbortController()
+  try {
+    const input: BrowserKeyRequest = {
+      ...(await f.clickRequest()),
+      action: "press",
+      key: "Enter",
+      modifiers: ["Meta"],
+    }
+    const pending = f.connection.pressKey(input, cancellation.signal)
+    const rejected = expect(pending).rejects.toThrow()
+    // The first modifier resolves insertion; wait for the blocked primary key.
+    await expect.poll(f.keyDowns).toBe(2)
+    cancellation.abort()
+    expect(f.keyUps()).toBe(0)
+    f.release.resolve()
+    await rejected
+    expect(
+      f.keyEvents
+        .filter((event) => event.type === "keyUp")
+        .map((event) => event.key),
+    ).toEqual(["Enter", "Meta"])
+  } finally {
+    f.release.resolve()
+    await f.connection.close()
+  }
+})
+
+it("retains only unreleased modifiers for cleanup retries and never repeats a confirmed key-up", async () => {
+  const f = fixture({ pointer: true, keys: true, failKeyUpKey: "Shift" })
+  const input: BrowserKeyRequest = {
+    ...(await f.clickRequest()),
+    action: "press",
+    key: "p",
+    modifiers: ["Meta", "Shift"],
+  }
+  await expect(
+    f.connection.pressKey(input, new AbortController().signal),
+  ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
+  expect(f.attached()).toBe(true)
+  f.allowKeyUp()
+  await f.connection.close()
+  expect(
+    f.keyEvents.filter((event) => event.type === "keyUp" && event.key === "P"),
+  ).toHaveLength(1)
+  expect(f.keyUps()).toBe(3)
+  expect(f.keyDowns()).toBe(3)
+  expect(f.attached()).toBe(false)
 })

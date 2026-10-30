@@ -5,6 +5,7 @@ import {
   ipcMain,
   Menu,
   session,
+  type WebContents,
   WebContentsView,
 } from "electron"
 import {
@@ -41,17 +42,24 @@ export function registerWorkspaceBrowser(
 ): DesktopBrowser {
   const tabs = new Map<string, BrowserTab>()
   const loads = new Set<string>()
+  type OwnedConnection = {
+    owner: BrowserOwner
+    targetId: string
+    contents: WebContents
+    connection: BrowserDocumentConnection
+    busy: boolean
+  }
   // One current debugger per turn. Switching tabs closes the previous target;
   // model steps reuse the connection until the owning turn confirms cleanup.
-  const connections = new Map<
-    string,
-    {
-      owner: BrowserOwner
-      targetId: string
-      connection: BrowserDocumentConnection
-      busy: boolean
-    }
-  >()
+  const connections = new Map<string, OwnedConnection>()
+  const isAgentOwned = (tab: BrowserTab) =>
+    [...connections.values()].some((entry) => entry.targetId === tab.instanceId)
+  const closeConnection = async (key: string, entry: OwnedConnection) => {
+    await entry.connection.close()
+    if (!entry.contents.isDestroyed())
+      entry.contents.setIgnoreMenuShortcuts(false)
+    connections.delete(key)
+  }
   const ownerKey = (owner: BrowserOwner) =>
     JSON.stringify([owner.sessionId, owner.turnId])
   const finishTurn = async (owner: BrowserOwner) => {
@@ -60,8 +68,7 @@ export function registerWorkspaceBrowser(
     if (!entry) return
     entry.busy = true
     try {
-      await entry.connection.close()
-      connections.delete(key)
+      await closeConnection(key, entry)
     } finally {
       entry.busy = false
     }
@@ -167,6 +174,7 @@ export function registerWorkspaceBrowser(
     window.contentView.addChildView(view)
     const contents = view.webContents
     contents.on("before-input-event", (event, input) => {
+      if (isAgentOwned(tab)) return
       if (
         input.type !== "keyDown" ||
         input.isComposing ||
@@ -231,12 +239,7 @@ export function registerWorkspaceBrowser(
       // Page contextmenu handlers still receive the trusted pointer event.
       // An agent-owned target must not open the host's native menu over the
       // user's desktop, even when its CDP acknowledgement arrives first.
-      if (
-        [...connections.values()].some(
-          (entry) => entry.targetId === tab.instanceId,
-        )
-      )
-        return
+      if (isAgentOwned(tab)) return
       // Electron supplies the actual selection, including selections in frames.
       // Capture its source now; navigation after opening the menu cannot retarget it.
       const source = {
@@ -645,8 +648,7 @@ export function registerWorkspaceBrowser(
       ) {
         entry.busy = true
         try {
-          await entry.connection.close()
-          connections.delete(key)
+          await closeConnection(key, entry)
         } finally {
           entry.busy = false
         }
@@ -661,22 +663,28 @@ export function registerWorkspaceBrowser(
         entry = {
           owner,
           targetId: target.instanceId,
+          contents: tab.view.webContents,
           connection: new BrowserDocumentConnection(tab.view.webContents),
           busy: false,
         }
         connections.set(key, entry)
+        // Agent key events belong to the page. App menu accelerators and the
+        // renderer's workspace shortcuts resume only after confirmed cleanup.
+        entry.contents.setIgnoreMenuShortcuts(true)
       }
       entry.busy = true
       let observation: JsonObject
       try {
         observation =
-          input.action === "click" ||
-          input.action === "hover" ||
-          input.action === "scroll"
-            ? await entry.connection.inputPointer(input, signal)
-            : input.action === "type" || input.action === "fill"
-              ? await entry.connection.inputText(input, signal)
-              : await entry.connection.observe(signal)
+          input.action === "press"
+            ? await entry.connection.pressKey(input, signal)
+            : input.action === "click" ||
+                input.action === "hover" ||
+                input.action === "scroll"
+              ? await entry.connection.inputPointer(input, signal)
+              : input.action === "type" || input.action === "fill"
+                ? await entry.connection.inputText(input, signal)
+                : await entry.connection.observe(signal)
       } finally {
         entry.busy = false
       }

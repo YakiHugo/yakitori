@@ -23,6 +23,7 @@ const electron = vi.hoisted(() => ({
       stop: ReturnType<typeof vi.fn>
       reload: ReturnType<typeof vi.fn>
       close: ReturnType<typeof vi.fn>
+      setIgnoreMenuShortcuts: ReturnType<typeof vi.fn>
       isFocused: ReturnType<typeof vi.fn>
       capturePage: ReturnType<typeof vi.fn>
     }
@@ -63,6 +64,7 @@ vi.mock("electron", async () => {
         isLoading: () => false,
         isLoadingMainFrame: () => false,
         isDestroyed: () => false,
+        setIgnoreMenuShortcuts: vi.fn(),
         isFocused: vi.fn(() => false),
         capturePage: vi.fn(async () => ({
           toDataURL: () => "data:image/png;base64,cGFnZQ==",
@@ -679,8 +681,8 @@ it("retains logical page geometry when an unmounted browser panel sends an empty
   expect(view.setVisible).toHaveBeenLastCalledWith(false)
 })
 
-it("keeps page context menus out of the host while a turn owns the browser and restores user menus after cleanup", async () => {
-  const { call, browser, controller } = setup()
+it("isolates host menus and workspace shortcuts during agent ownership and restores them after cleanup", async () => {
+  const { call, browser, controller, sent } = setup()
   call("create", { tabId: "owned", url: "https://owned.test/" })
   const view = electron.views[0]
   if (!view) throw new Error("Missing owned view")
@@ -719,12 +721,42 @@ it("keeps page context menus out of the host while a turn owns the browser and r
   const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
   if (!target) throw new Error("Missing owned target")
   await browser.request({ action: "observe", target })
+  const shortcut = {
+    type: "keyDown",
+    key: "t",
+    meta: true,
+    control: false,
+    shift: false,
+    alt: false,
+    isComposing: false,
+    isAutoRepeat: false,
+  }
+  sent.mockClear()
+  view.webContents.emit(
+    "before-input-event",
+    { preventDefault: vi.fn() },
+    shortcut,
+  )
+  expect(sent).not.toHaveBeenCalled()
+  expect(view.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(true)
   view.webContents.emit("context-menu", {}, { selectionText: "" })
   expect(electron.menu).toEqual([])
   await controller.finishTurn({
     sessionId: "session_owned",
     turnId: "turn_owned",
   })
+  expect(view.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(
+    false,
+  )
+  view.webContents.emit(
+    "before-input-event",
+    { preventDefault: vi.fn() },
+    shortcut,
+  )
+  expect(sent).toHaveBeenLastCalledWith(
+    "yakitori:browser-shortcut",
+    "new-browser",
+  )
   view.webContents.emit("context-menu", {}, { selectionText: "" })
   expect(electron.menu).toEqual(
     expect.arrayContaining([expect.objectContaining({ label: "Back" })]),
