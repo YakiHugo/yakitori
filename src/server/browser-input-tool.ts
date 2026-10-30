@@ -18,13 +18,13 @@ export function createBrowserInputTool(
   return {
     toolName: plainToolName("browser_input"),
     description:
-      "Type text into an exact text input or textarea observed by the browser tool in this turn. Use its inputReference and exact target. type inserts at the current selection; fill selects and replaces the entire field, including an empty string to clear it. Each attempt consumes all references from that observation. The document and focused control are checked before dispatch and the resulting value is checked afterward. On browser_input_unconfirmed, observe again and never automatically replay text. No physical keyboard, clipboard, arbitrary page code or remote debugging port is used. Computer use must be connected; normal permission and shared turn ownership apply. type requires nonempty text; fill permits empty text. A 64KiB per-event implementation safety bound applies.",
+      "Interact with an exact browser control observed in this turn. type/fill use inputReference and require text; click uses clickReference and accepts no text. Click scrolls the exact element into view, hit-tests it before and after moving the browser pointer, then sends one left-button press/release; delivered confirms input, not business success. Covered or disabled controls refuse clicking. Use the exact listed target. type inserts at the current selection; fill selects and replaces the entire field, including an empty string to clear it. Each attempt consumes all references from that observation. Text actions check the document and focused control before dispatch and verify the resulting value. On browser_input_unconfirmed, observe again and never automatically replay input. No OS mouse/keyboard, clipboard, arbitrary page code or remote debugging port is used. Computer use must be connected; normal permission and shared turn ownership apply. type requires nonempty text; fill permits empty text. A 64KiB per-event implementation safety bound applies.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["action", "target", "reference", "text"],
+      required: ["action", "target", "reference"],
       properties: {
-        action: { type: "string", enum: ["type", "fill"] },
+        action: { type: "string", enum: ["type", "fill", "click"] },
         target: {
           type: "object",
           additionalProperties: false,
@@ -45,7 +45,7 @@ export function createBrowserInputTool(
     approvalRequirement: {
       kind: "approval",
       action: "command_execution",
-      subject: "Type into the connected desktop browser",
+      subject: "Interact with the connected desktop browser",
     },
     async execute(input, context) {
       context.signal?.throwIfAborted()

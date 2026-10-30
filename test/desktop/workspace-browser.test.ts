@@ -642,3 +642,39 @@ it.each([
   )
   expect(contents.loadURL).toHaveBeenCalledTimes(action === "navigate" ? 2 : 1)
 })
+
+it("retains logical page geometry when an unmounted browser panel sends an empty hidden viewport", async () => {
+  const { call } = setup()
+  call("create", { tabId: "background", url: "https://example.test" })
+  const view = electron.views[0]
+  if (!view) throw new Error("Missing background view")
+  expect(view.setBounds).toHaveBeenLastCalledWith({
+    x: 0,
+    y: 0,
+    width: 1000,
+    height: 800,
+  })
+  await call("viewport", {
+    tabId: "background",
+    visible: true,
+    x: 500,
+    y: 50,
+    width: 450,
+    height: 700,
+  })
+  await call("viewport", {
+    tabId: "background",
+    visible: false,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+  })
+  expect(view.setBounds).toHaveBeenLastCalledWith({
+    x: 500,
+    y: 50,
+    width: 450,
+    height: 700,
+  })
+  expect(view.setVisible).toHaveBeenLastCalledWith(false)
+})

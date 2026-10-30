@@ -510,6 +510,9 @@ test("agent browser observations and actions use the exact owned tab through rea
     filledObservation: Record<string, unknown> | undefined,
     clearedObservation: Record<string, unknown> | undefined,
     clearReceipt: Record<string, unknown> | undefined,
+    clickedObservation: Record<string, unknown> | undefined,
+    shadowObservation: Record<string, unknown> | undefined,
+    pointerReceipt: Record<string, unknown> | undefined,
     navigationReceipt: Record<string, unknown> | undefined,
     navigatedObservation: Record<string, unknown> | undefined,
     insertion:
@@ -566,6 +569,22 @@ test("agent browser observations and actions use the exact owned tab through rea
       text,
     }
   }
+  const pointerRequest = (observed: Record<string, unknown>, name: string) => {
+    const button = (
+      observed.nodes as {
+        role: string
+        name: string
+        clickReference?: string
+      }[]
+    ).find((node) => node.role === "button" && node.name === name)
+    if (!button?.clickReference)
+      throw new Error(`Missing captured browser button ${name}`)
+    return {
+      action: "click",
+      target: observed.target,
+      reference: button.clickReference,
+    }
+  }
   const source = createServer((request, response) => {
     if (request.method === "POST" && request.url === "/key-up") {
       clearKeyUps++
@@ -583,7 +602,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label>`,
+        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script>`,
       )
       return
     }
@@ -713,16 +732,64 @@ test("agent browser observations and actions use the exact owned tab through rea
           } else if (step === 11) {
             clearedObservation = toolResult(body.messages ?? [], "nodes")
             tool = {
+              name: "browser_input",
+              input: pointerRequest(clearedObservation, "Covered action"),
+              id: "covered_browser_click",
+            }
+          } else if (step === 12) {
+            if (
+              !JSON.stringify(body.messages).includes(
+                "no visible unoccluded click point",
+              )
+            )
+              throw new Error("Covered browser click was not refused")
+            if (!clearedObservation) throw new Error("Missing cleared target")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: clearedObservation.target },
+              id: "observe_after_covered",
+            }
+          } else if (step === 13) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_input",
+              input: pointerRequest(current, "Click action"),
+              id: "click_browser",
+            }
+          } else if (step === 14) {
+            pointerReceipt = toolResult(body.messages ?? [], "point")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: pointerReceipt.target },
+              id: "observe_clicked",
+            }
+          } else if (step === 15) {
+            clickedObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_input",
+              input: pointerRequest(clickedObservation, "Shadow action"),
+              id: "click_closed_shadow",
+            }
+          } else if (step === 16) {
+            const clicked = toolResult(body.messages ?? [], "point")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: clicked.target },
+              id: "observe_shadow_clicked",
+            }
+          } else if (step === 17) {
+            shadowObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
               name: "browser_navigate",
               input: {
                 action: "navigate",
-                target: clearedObservation.target,
+                target: shadowObservation.target,
                 fromUrl: wantedUrl,
                 url: navigationUrl,
               },
               id: "navigate_browser",
             }
-          } else if (step === 12) {
+          } else if (step === 18) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -844,7 +911,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 12; approval++)
+    for (let approval = 0; approval < 18; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -910,6 +977,24 @@ test("agent browser observations and actions use the exact owned tab through rea
       ]),
     )
     await expect.poll(() => clearKeyUps).toBe(1)
+    expect(pointerReceipt).toMatchObject({
+      delivered: true,
+      documentChanged: false,
+      point: { x: expect.any(Number), y: expect.any(Number) },
+    })
+    expect(clickedObservation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "button", name: "Clicked action" }),
+      ]),
+    )
+    expect(JSON.stringify(clickedObservation?.nodes)).not.toContain(
+      "Wrongly clicked",
+    )
+    expect(shadowObservation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "button", name: "Shadow clicked" }),
+      ]),
+    )
     expect(navigationReceipt).toMatchObject({
       loaded: true,
       url: destinationUrl,
