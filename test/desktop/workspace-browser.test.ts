@@ -143,6 +143,63 @@ function setup() {
   return { call, window, sent, event, browser, controller }
 }
 
+it("displays only an exact current target through the trusted renderer claim and reports native visibility", async () => {
+  const { call, browser, sent, event, window } = setup()
+  call("create", { tabId: "owned", url: "https://owned.test/" })
+  const listed = await browser.request({ action: "list" })
+  const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  if (!target) throw new Error("Missing owned target")
+  await expect(
+    browser.request({ action: "show", target, fromUrl: "https://old.test/" }),
+  ).rejects.toMatchObject({ code: "browser_target_changed" })
+  expect(
+    sent.mock.calls.some(
+      ([channel]) => channel === "yakitori:browser-show-request",
+    ),
+  ).toBe(false)
+  const result = browser.request({
+    action: "show",
+    target,
+    fromUrl: "https://owned.test/",
+  })
+  const request = sent.mock.calls.find(
+    ([channel]) => channel === "yakitori:browser-show-request",
+  )?.[1] as
+    | { requestId: string; tabId: string; ownerSessionId: string }
+    | undefined
+  if (!request) throw new Error("Missing show request")
+  expect(request).toMatchObject({
+    tabId: "owned",
+    ownerSessionId: "session_owned",
+  })
+  expect(() =>
+    call(
+      "show-claim",
+      { requestId: request.requestId },
+      { ...event, senderFrame: {} },
+    ),
+  ).toThrow()
+  expect(call("show-claim", { requestId: request.requestId })).toBe(true)
+  call("viewport", {
+    tabId: "owned",
+    visible: true,
+    x: 0,
+    y: 0,
+    width: 500,
+    height: 400,
+  })
+  expect(
+    call("show-complete", { requestId: request.requestId, result: "applied" }),
+  ).toBe(true)
+  expect(await result).toEqual({
+    target,
+    selectionApplied: true,
+    visible: true,
+  })
+  expect(window.webContents.focus).not.toHaveBeenCalled()
+  await browser.finishTurn({ sessionId: "session_owned", turnId: "turn_owned" })
+})
+
 it("never observes another owned tab or a replacement under the same tab ID", async () => {
   const { call, browser } = setup()
   call("create", { tabId: "first", url: "https://first.test" })

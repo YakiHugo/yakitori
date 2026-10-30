@@ -368,6 +368,7 @@ export type BrowserRequest =
   | BrowserCaptureRequest
   | BrowserUploadRequest
   | BrowserDirectoryUploadRequest
+  | BrowserViewRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -525,6 +526,36 @@ export function parseBrowserDirectoryUploadRequest(
   }
 }
 
+export type BrowserViewRequest = Readonly<{
+  action: "show"
+  target: BrowserTarget
+  fromUrl: string
+}>
+
+export function parseBrowserViewRequest(value: unknown): BrowserViewRequest {
+  if (
+    !isJsonObject(value) ||
+    value.action !== "show" ||
+    Object.keys(value).length !== 3 ||
+    !["action", "target", "fromUrl"].every((key) =>
+      Object.hasOwn(value, key),
+    ) ||
+    typeof value.fromUrl !== "string" ||
+    value.fromUrl.length > 8192
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use show with an exact target and its current fromUrl from browser list.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid browser target parser result.")
+  return { action: "show", target: observed.target, fromUrl: value.fromUrl }
+}
+
 const requestMutates: Record<BrowserRequest["action"], boolean> = {
   list: false,
   observe: false,
@@ -540,6 +571,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   navigate: true,
   upload: true,
   upload_directory: true,
+  show: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -547,6 +579,8 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (isJsonObject(value) && value.action === "show")
+    return parseBrowserViewRequest(value)
   if (isJsonObject(value) && value.action === "upload_directory")
     return parseBrowserDirectoryUploadRequest(value)
   if (isJsonObject(value) && value.action === "upload")

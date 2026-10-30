@@ -16,10 +16,12 @@ import {
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 import { BrowserDocumentConnection } from "./browser-observation.ts"
+import { BrowserViewRequests } from "./browser-view-requests.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 import type {
   WorkspaceBrowserSelection,
   WorkspaceBrowserShortcut,
+  WorkspaceBrowserShowResult,
   WorkspaceBrowserState,
   WorkspaceBrowserViewport,
 } from "./workspace-browser-types.ts"
@@ -43,6 +45,8 @@ export function registerWorkspaceBrowser(
 ): DesktopBrowser {
   const tabs = new Map<string, BrowserTab>()
   const loads = new Set<string>()
+  const viewRequests = new BrowserViewRequests(window)
+  let showing = false
   type OwnedConnection = {
     owner: BrowserOwner
     targetId: string
@@ -64,6 +68,7 @@ export function registerWorkspaceBrowser(
   const ownerKey = (owner: BrowserOwner) =>
     JSON.stringify([owner.sessionId, owner.turnId])
   const finishTurn = async (owner: BrowserOwner) => {
+    viewRequests.finishTurn(owner)
     const key = ownerKey(owner),
       entry = connections.get(key)
     if (!entry) return
@@ -72,6 +77,36 @@ export function registerWorkspaceBrowser(
       await closeConnection(key, entry)
     } finally {
       entry.busy = false
+    }
+  }
+
+  async function waitForView(
+    tabId: string,
+    tab: BrowserTab,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Approval overlays temporarily hide embedded pages. Give their
+    // layout five seconds to settle without showing or focusing a tab.
+    const deadline = performance.now() + 5000
+    while (true) {
+      signal.throwIfAborted()
+      if (
+        window.isDestroyed() ||
+        tabs.get(tabId) !== tab ||
+        tab.view.webContents.isDestroyed()
+      )
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The browser view target closed while waiting for its view.",
+        )
+      if (tab.view.getVisible() && window.isVisible() && !window.isMinimized())
+        return
+      if (performance.now() >= deadline)
+        throw new BrowserControlError(
+          "browser_requires_visibility",
+          "Show this tab in Yakitori's workspace and restore its window before selecting a directory. No file selection was dispatched.",
+        )
+      await delay(25, undefined, { signal })
     }
   }
 
@@ -295,6 +330,29 @@ export function registerWorkspaceBrowser(
     return tab
   }
   const handlers = {
+    "show-claim"(input: Record<string, unknown>) {
+      if (
+        Object.keys(input).length !== 1 ||
+        typeof input.requestId !== "string" ||
+        !/^browser_show_[a-f0-9-]{36}$/.test(input.requestId)
+      )
+        throw new TypeError("Invalid browser show claim.")
+      return viewRequests.claim(input.requestId)
+    },
+    "show-complete"(input: Record<string, unknown>) {
+      if (
+        Object.keys(input).length !== 2 ||
+        typeof input.requestId !== "string" ||
+        !/^browser_show_[a-f0-9-]{36}$/.test(input.requestId) ||
+        typeof input.result !== "string" ||
+        !["applied", "refused", "failed"].includes(String(input.result))
+      )
+        throw new TypeError("Invalid browser show completion.")
+      return viewRequests.complete(
+        input.requestId,
+        input.result as WorkspaceBrowserShowResult,
+      )
+    },
     create(input: Record<string, unknown>) {
       const tabId = requireTabId(input)
       if (input.url !== undefined && typeof input.url !== "string")
@@ -478,6 +536,7 @@ export function registerWorkspaceBrowser(
     })
   }
   window.on("closed", () => {
+    viewRequests.close()
     for (const name of Object.keys(handlers))
       ipcMain.removeHandler(`yakitori:browser-${name}`)
     for (const tab of tabs.values()) {
@@ -489,6 +548,12 @@ export function registerWorkspaceBrowser(
   return {
     async request(input, owner, signal = new AbortController().signal) {
       signal.throwIfAborted()
+      viewRequests.assertIdle()
+      if (showing)
+        throw new BrowserControlError(
+          "browser_busy",
+          "A workspace display request is still settling.",
+        )
       if (window.isDestroyed())
         throw new BrowserControlError(
           "browser_unavailable",
@@ -547,6 +612,59 @@ export function registerWorkspaceBrowser(
           "browser_busy",
           "An agent navigation is still settling for this target.",
         )
+      if (input.action === "show") {
+        const current = connections.get(ownerKey(owner))
+        if (
+          current?.busy ||
+          [...connections.values()].some(
+            (entry) =>
+              entry !== current && entry.targetId === target.instanceId,
+          )
+        )
+          throw new BrowserControlError(
+            "browser_busy",
+            "This browser target has an active owner or request.",
+          )
+        current?.connection.assertInputIdle()
+        const isCurrent = () =>
+          !window.isDestroyed() &&
+          tabs.get(target.tabId) === tab &&
+          !tab.view.webContents.isDestroyed() &&
+          tab.view.webContents.getURL() === input.fromUrl
+        if (!isCurrent())
+          throw new BrowserControlError(
+            "browser_target_changed",
+            "The browser source URL changed before displaying it.",
+          )
+        showing = true
+        try {
+          await viewRequests.show(target.tabId, owner, isCurrent, signal)
+          if (!isCurrent())
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "The browser target changed during its display request.",
+            )
+          let visible = true
+          try {
+            await waitForView(target.tabId, tab, signal)
+          } catch (cause) {
+            if (
+              !(cause instanceof BrowserControlError) ||
+              cause.code !== "browser_requires_visibility"
+            )
+              throw cause
+            visible = false
+          }
+          if (!isCurrent())
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "The browser target or source URL changed while displaying it. Inspect the current target; do not replay automatically.",
+            )
+          return { target, selectionApplied: true, visible }
+        } finally {
+          showing = false
+        }
+      }
       if (input.action === "navigate") {
         if (!isBrowserNavigation(input.url))
           throw new BrowserControlError(
@@ -672,35 +790,7 @@ export function registerWorkspaceBrowser(
           contents: tab.view.webContents,
           connection: new BrowserDocumentConnection(
             tab.view.webContents,
-            async (signal) => {
-              // Approval overlays temporarily hide embedded pages. Give their
-              // layout five seconds to settle without showing or focusing a tab.
-              const deadline = performance.now() + 5000
-              while (true) {
-                signal.throwIfAborted()
-                if (
-                  window.isDestroyed() ||
-                  tabs.get(target.tabId) !== tab ||
-                  tab.view.webContents.isDestroyed()
-                )
-                  throw new BrowserControlError(
-                    "browser_target_changed",
-                    "The directory upload target closed while waiting for its view.",
-                  )
-                if (
-                  tab.view.getVisible() &&
-                  window.isVisible() &&
-                  !window.isMinimized()
-                )
-                  return
-                if (performance.now() >= deadline)
-                  throw new BrowserControlError(
-                    "browser_requires_visibility",
-                    "Show this tab in Yakitori's workspace and restore its window before selecting a directory. No file selection was dispatched.",
-                  )
-                await delay(25, undefined, { signal })
-              }
-            },
+            (signal) => waitForView(target.tabId, tab, signal),
           ),
           busy: false,
         }
@@ -760,6 +850,7 @@ export function registerWorkspaceBrowser(
     },
     finishTurn,
     async closeSession(sessionId) {
+      viewRequests.closeSession(sessionId)
       const results = await Promise.allSettled(
         [...connections.values()]
           .filter((entry) => entry.owner.sessionId === sessionId)

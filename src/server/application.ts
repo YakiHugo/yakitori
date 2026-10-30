@@ -92,6 +92,7 @@ import { createBrowserInputTool } from "./browser-input-tool.ts"
 import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
 import { createBrowserUploadTool } from "./browser-upload-tool.ts"
+import { createBrowserViewTool } from "./browser-view-tool.ts"
 import {
   type ChatGPTConnections,
   createChatGPTConnections,
@@ -1080,6 +1081,11 @@ export async function createYakitoriApplication(
                 markBrowserCleanupPending,
               ),
               createBrowserUploadTool(
+                options.desktopBrowser,
+                admitBrowser,
+                markBrowserCleanupPending,
+              ),
+              createBrowserViewTool(
                 options.desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,

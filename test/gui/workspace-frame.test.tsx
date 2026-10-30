@@ -11,9 +11,9 @@ import { userEvent } from "@testing-library/user-event"
 import { createRef } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { BrowserPanelProps } from "../../src/gui/components/browser-panel.tsx"
+import { Composer } from "../../src/gui/components/composer.tsx"
 import { ConversationFind } from "../../src/gui/components/conversation-find.tsx"
 import { ModelSelector } from "../../src/gui/components/model-selector.tsx"
-import { Composer } from "../../src/gui/components/composer.tsx"
 import { WorkspaceFrame } from "../../src/gui/components/workspace-frame.tsx"
 import { contextSourceAttributes } from "../../src/gui/conversation-context.ts"
 import {
@@ -966,6 +966,9 @@ it("rebinds native shortcuts to the selected session and releases listeners on u
   const listeners = new Set<(action: "new-side-chat") => void>()
   vi.stubGlobal("yakitoriDesktop", {
     browser: {
+      onShowRequest: () => () => {},
+      claimShow: async () => false,
+      completeShow: async () => false,
       onShortcut: (listener: (action: "new-side-chat") => void) => {
         listeners.add(listener)
         return () => listeners.delete(listener)

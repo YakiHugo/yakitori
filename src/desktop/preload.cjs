@@ -20,6 +20,16 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
     selection: (input) =>
       ipcRenderer.invoke("yakitori:browser-selection", input),
     close: (input) => ipcRenderer.invoke("yakitori:browser-close", input),
+    claimShow: (input) =>
+      ipcRenderer.invoke("yakitori:browser-show-claim", input),
+    completeShow: (input) =>
+      ipcRenderer.invoke("yakitori:browser-show-complete", input),
+    onShowRequest(listener) {
+      const handler = (_event, request) => listener(request)
+      ipcRenderer.on("yakitori:browser-show-request", handler)
+      return () =>
+        ipcRenderer.removeListener("yakitori:browser-show-request", handler)
+    },
     onState(listener) {
       const handler = (_event, state) => listener(state)
       ipcRenderer.on("yakitori:browser-state", handler)
