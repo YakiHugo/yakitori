@@ -2,6 +2,9 @@ import { spawn } from "node:child_process"
 
 let packagingError: unknown
 try {
+  // Electron downloads its binary lazily. Initialize it before electronDist is
+  // resolved so a clean install follows the same path as an existing workspace.
+  await run("pnpm", ["exec", "electron", "--version"])
   await run("pnpm", [
     "exec",
     "electron-rebuild",
