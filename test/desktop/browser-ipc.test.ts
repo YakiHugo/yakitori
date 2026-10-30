@@ -95,7 +95,7 @@ catch(error){process.send({error:error.message})}
   const deadline = setTimeout(() => child.kill("SIGKILL"), 10_000)
   try {
     const [code, signal] = await once(child, "exit")
-    expect({ code, signal, stderr }).toMatchObject({ code: 0, signal: null })
+    expect({ code, signal }, stderr).toEqual({ code: 0, signal: null })
     expect(failure).toMatchObject({
       error: expect.stringContaining("not a directory"),
     })
@@ -335,3 +335,48 @@ it("cleans idle browser ownership when its sidecar exits between model steps", a
   }
   await expect.poll(() => closed).toEqual(["session_owned"])
 })
+
+it("cancels a timed-out text dispatch without abandoning its acknowledgement", async () => {
+  const started = Promise.withResolvers<void>(),
+    aborted = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>()
+  const f = await fixture({
+    async request(_input, _owner, signal) {
+      started.resolve()
+      signal?.addEventListener("abort", () => aborted.resolve(), { once: true })
+      await release.promise
+      return { late: true }
+    },
+  })
+  try {
+    let completed = false
+    const result = f.nextResult().then((value) => {
+      completed = true
+      return value
+    })
+    f.server.child.send({
+      type: "test/request",
+      input: {
+        action: "type",
+        target: {
+          tabId: "owned",
+          webContentsId: 17,
+          instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+        },
+        reference: "browser_node_00000000-0000-4000-8000-000000000001",
+        text: "Only once",
+      },
+    })
+    await started.promise
+    await aborted.promise
+    expect(completed).toBe(false)
+    release.resolve()
+    expect(await result).toMatchObject({
+      ok: false,
+      code: "browser_input_unconfirmed",
+    })
+  } finally {
+    release.resolve()
+    await f.close()
+  }
+}, 20_000)

@@ -181,3 +181,32 @@ it("reports failed cleanup and allows a later close to confirm release", () => {
   connection.close()
   expect(f.attached()).toBe(false)
 })
+
+it("offers input references only for text controls, including when a label has the same name", async () => {
+  const f = fixture({
+    nodes: [
+      {
+        nodeId: "label",
+        backendDOMNodeId: 30,
+        role: { value: "StaticText" },
+        name: { value: "Owned field" },
+      },
+      {
+        nodeId: "field",
+        backendDOMNodeId: 31,
+        role: { value: "textbox" },
+        name: { value: "Owned field" },
+      },
+    ],
+  })
+  const result = await observeBrowserDocument(
+    f.contents,
+    new AbortController().signal,
+  )
+  const nodes = result.nodes as Record<string, unknown>[]
+  expect(nodes[0]).not.toHaveProperty("inputReference")
+  expect(nodes[1]).toMatchObject({
+    inputReference: expect.stringMatching(/^browser_node_/),
+    role: "textbox",
+  })
+})

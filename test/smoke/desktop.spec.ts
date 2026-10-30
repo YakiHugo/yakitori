@@ -491,16 +491,21 @@ test("embedded browser selections attach editable excerpts to main and side draf
   }
 })
 
-test("agent browser observations use the exact owned tab through real desktop IPC and approval", async ({
+test("agent browser observations and input use the exact owned tab through real desktop IPC and approval", async ({
   desktop,
 }, testInfo) => {
   const { page, application, userData, sidecarUrl, rendererErrors } = desktop
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
   const observed = Promise.withResolvers<void>(),
-    releaseCompletion = Promise.withResolvers<void>()
+    releaseCompletion = Promise.withResolvers<void>(),
+    failed = Promise.withResolvers<Error>()
   let modelCalls = 0
   let wantedUrl = ""
-  let observation: Record<string, unknown> | undefined
+  let observation: Record<string, unknown> | undefined,
+    receipt: Record<string, unknown> | undefined,
+    insertion:
+      | { action: "type"; target: unknown; reference: string; text: string }
+      | undefined
   const errors: string[] = []
   const toolResult = (
     messages: { role?: string; content?: unknown }[],
@@ -537,7 +542,7 @@ test("agent browser observations use the exact owned tab through real desktop IP
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        '<!doctype html><title>Second owned source</title><label>Target field<input value="second"></label><label><input type="checkbox" checked>Approved option</label>',
+        '<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)"></label><label><input type="checkbox" checked>Approved option</label>',
       )
       return
     }
@@ -591,6 +596,51 @@ test("agent browser observations use the exact owned tab through real desktop IP
               input: { action: "observe", target: previous.target },
               id: "observe_again",
             }
+          } else if (step === 4) {
+            const previous = toolResult(body.messages ?? [], "nodes")
+            const field = (
+              previous.nodes as {
+                name: string
+                role: string
+                inputReference?: string
+              }[]
+            ).find(
+              (node) => node.name === "Target field" && node.role === "textbox",
+            )
+            if (!field?.inputReference)
+              throw new Error("Missing exact text control reference")
+            insertion = {
+              action: "type",
+              target: previous.target,
+              reference: field.inputReference,
+              text: "你好 🌍",
+            }
+            tool = {
+              name: "browser_input",
+              input: insertion,
+              id: "type_browser",
+            }
+          } else if (step === 5) {
+            receipt = toolResult(body.messages ?? [], "textVerified")
+            if (!insertion) throw new Error("Missing prior insertion")
+            tool = {
+              name: "browser_input",
+              input: { ...insertion, text: "MUST_NOT_REPEAT" },
+              id: "replay_browser",
+            }
+          } else if (step === 6) {
+            if (
+              !JSON.stringify(body.messages).includes(
+                "Observe this document again before typing",
+              )
+            )
+              throw new Error("Reused input reference was not refused")
+            if (!insertion) throw new Error("Missing prior target")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: insertion.target },
+              id: "observe_input_receipt",
+            }
           } else {
             observation = toolResult(body.messages ?? [], "nodes")
             observed.resolve()
@@ -620,6 +670,9 @@ test("agent browser observations use the exact owned tab through real desktop IP
         )
       } catch (cause) {
         errors.push(String(cause))
+        failed.resolve(
+          cause instanceof Error ? cause : new Error(String(cause)),
+        )
         response.writeHead(500)
         response.end("Owned browser fixture failed")
       }
@@ -701,10 +754,19 @@ test("agent browser observations use the exact owned tab through real desktop IP
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    await page.getByRole("button", { name: "Allow", exact: true }).click()
-    await page.getByRole("button", { name: "Allow", exact: true }).click()
-    await page.getByRole("button", { name: "Allow", exact: true }).click()
-    await observed.promise
+    for (let approval = 0; approval < 6; approval++)
+      await Promise.race([
+        page.getByRole("button", { name: "Allow", exact: true }).click(),
+        failed.promise.then((cause) => {
+          throw cause
+        }),
+      ])
+    await Promise.race([
+      observed.promise,
+      failed.promise.then((cause) => {
+        throw cause
+      }),
+    ])
     const attached = () =>
       application.evaluate(({ webContents }, url) => {
         const target = webContents
@@ -722,6 +784,7 @@ test("agent browser observations use the exact owned tab through real desktop IP
     ).toBeVisible()
     await expect.poll(attached).toBe(false)
     expect(errors).toEqual([])
+    expect(receipt).toMatchObject({ delivered: true, textVerified: true })
     expect(observation?.document).toMatchObject({
       url: wantedUrl,
       documentId: expect.any(String),
@@ -733,7 +796,7 @@ test("agent browser observations use the exact owned tab through real desktop IP
           backendNodeId: expect.any(Number),
           role: "textbox",
           name: "Target field",
-          value: "second",
+          value: "second你好 🌍",
           properties: expect.any(Object),
         }),
       ]),

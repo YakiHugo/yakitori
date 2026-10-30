@@ -10,6 +10,54 @@ export type BrowserObservationRequest =
   | Readonly<{ action: "list"; offset?: number }>
   | Readonly<{ action: "observe"; target: BrowserTarget }>
 
+export type BrowserInputRequest = Readonly<{
+  action: "type"
+  target: BrowserTarget
+  reference: string
+  text: string
+}>
+
+export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
+  if (
+    isJsonObject(value) &&
+    Object.keys(value).length === 4 &&
+    Object.keys(value).every((key) =>
+      ["action", "target", "reference", "text"].includes(key),
+    ) &&
+    value.action === "type" &&
+    typeof value.reference === "string" &&
+    /^browser_node_[a-f0-9-]{36}$/.test(value.reference) &&
+    typeof value.text === "string" &&
+    value.text.length > 0 &&
+    Buffer.byteLength(value.text) <= 64 * 1024
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "type",
+      target: observed.target,
+      reference: value.reference,
+      text: value.text,
+    }
+  }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Use type with an exact target, a current inputReference and nonempty text (64KiB input-event safety bound).",
+  )
+}
+
+export function parseBrowserRequest(
+  value: unknown,
+): BrowserObservationRequest | BrowserInputRequest {
+  return isJsonObject(value) && value.action === "type"
+    ? parseBrowserInputRequest(value)
+    : parseBrowserObservationRequest(value)
+}
+
 export class BrowserControlError extends Error {
   readonly code: string
   constructor(code: string, message: string) {
@@ -106,7 +154,7 @@ export type BrowserOperation = Readonly<
   | {
       operation: "request"
       owner: BrowserOwner
-      input: BrowserObservationRequest
+      input: BrowserObservationRequest | BrowserInputRequest
     }
   | { operation: "finishTurn"; owner: BrowserOwner }
   | { operation: "closeSession"; sessionId: string }
@@ -154,7 +202,7 @@ export function isDesktopBrowserResponse(
 
 export type DesktopBrowser = Readonly<{
   request(
-    input: BrowserObservationRequest,
+    input: BrowserObservationRequest | BrowserInputRequest,
     owner: BrowserOwner,
     signal?: AbortSignal,
   ): Promise<JsonObject>
