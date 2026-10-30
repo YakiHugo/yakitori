@@ -11,6 +11,7 @@ extension Computer {
               ["activate", "hide", "show", "raise", "minimize", "restore", "move", "resize", "close"].contains(action) else {
             throw ComputerFailure("invalid_arguments", "Window management requires pid, launch_time from list, and a supported window_action.")
         }
+        guard isolation?.owns(pid) != true else { throw ComputerFailure("app_concealed", "Reveal the isolated app before window management.") }
         let resource = try await NativeResources.acquire(["app-\(pid)"] + (action == "activate" ? ["foreground"] : []))
         defer { withExtendedLifetime(resource) {} }
         guard !app.isTerminated, app.launchDate?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The target application exited.") }

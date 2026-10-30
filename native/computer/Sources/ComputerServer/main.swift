@@ -2,6 +2,17 @@ import AppKit
 import ComputerCore
 import Darwin
 
+if CommandLine.arguments.contains("--display-service") {
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    Task { @MainActor in
+        do { try await runDisplayService() }
+        catch { FileHandle.standardError.write(Data("Display service failed: \(error)\n".utf8)); exit(1) }
+    }
+    application.run()
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--mcp") {
     try proxyThroughApplication()
     exit(0)
@@ -120,7 +131,7 @@ application.run()
         guard !finishingShutdown else { return }
         finishingShutdown = true
         Task { @MainActor in
-            do { try await computer.reset(); exit(0) }
+            do { try await computer.reset(releaseDisplay: true); exit(0) }
             catch { FileHandle.standardError.write(Data("Native cleanup failed; display service retains recovery: \(error)\n".utf8)); exit(1) }
         }
     }

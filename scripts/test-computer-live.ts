@@ -17,6 +17,7 @@ import { parseArgs } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
 import { verifyComputerCapabilities } from "./computer-capabilities.ts"
 import { prepareComputerFixture } from "./computer-fixture.ts"
+import { verifyComputerIsolation } from "./computer-isolation.ts"
 
 const { values } = parseArgs({
   options: {
@@ -29,12 +30,12 @@ const { values } = parseArgs({
 const repeats = Number(values.repeat)
 const group = values.group
 assert(
-  ["all", "base", "capabilities"].includes(group),
-  "group must be all, base, or capabilities",
+  ["all", "base", "capabilities", "isolation"].includes(group),
+  "group must be all, base, capabilities, or isolation",
 )
 assert(
-  !values.case || group === "capabilities",
-  "--case requires --group capabilities; base cases share a sequential state contract",
+  !values.case || group === "capabilities" || group === "isolation",
+  "--case requires --group capabilities or isolation; base cases share a sequential state contract",
 )
 // A safety boundary for this interactive local test runner, not a product quota.
 // Twenty repetitions already exercise hundreds of GUI effects on the host Mac.
@@ -119,7 +120,7 @@ try {
   )
   for (let iteration = 1; iteration <= repeats; iteration++) {
     for (const runGroup of group === "all"
-      ? ["base", "capabilities"]
+      ? ["base", "capabilities", "isolation"]
       : [group]) {
       const stateFile = join(root, `state-${iteration}-${runGroup}.json`)
       fixture = spawn(
@@ -732,6 +733,17 @@ try {
       if (runGroup === "capabilities")
         await verifyComputerCapabilities({
           call,
+          pid,
+          windowID: (await state()).secondary_window_id,
+          state,
+          waitFor,
+          check,
+          cleanup: () => client.bindTool(cleanup)({}),
+        })
+      if (runGroup === "isolation")
+        await verifyComputerIsolation({
+          call,
+          executable,
           pid,
           windowID: (await state()).secondary_window_id,
           state,

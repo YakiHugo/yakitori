@@ -17,8 +17,24 @@ import { prepareComputerFixture } from "./computer-fixture.ts"
 const run = promisify(execFile)
 const core = "native/computer/Sources/ComputerCore"
 const executable = resolve("build/computer-contracts")
+const { stdout: binPath } = await run("swift", [
+  "build",
+  "--package-path",
+  "native/computer",
+  "--scratch-path",
+  resolve("build/computer"),
+  "-c",
+  "release",
+  "--show-bin-path",
+])
+const bridge = join(binPath.trim(), "DisplayBridge.build")
 await run("swiftc", [
   "-parse-as-library",
+  "-Xcc",
+  `-fmodule-map-file=${join(bridge, "module.modulemap")}`,
+  ...(await readdir(bridge))
+    .filter((name) => name.endsWith(".m.o"))
+    .map((name) => join(bridge, name)),
   "-framework",
   "AppKit",
   "-framework",
