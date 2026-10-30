@@ -52,7 +52,15 @@ export function bindDesktopBrowserRequests(
         )
       send({ type: "desktop_browser/response", requestId, ok: true, result })
     } catch (cause) {
-      if (signal?.aborted)
+      // Cancellation does not prove that owned input was released. Preserve
+      // that failure so the sidecar can quarantine all computer input.
+      if (
+        signal?.aborted &&
+        !(
+          cause instanceof BrowserControlError &&
+          cause.code === "browser_cleanup_failed"
+        )
+      )
         send({
           type: "desktop_browser/response",
           requestId,
