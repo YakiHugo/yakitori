@@ -16,6 +16,10 @@ import {
 import { captureBrowserPage } from "./browser-capture.ts"
 import { BrowserFrames, type BrowserReadCommand } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
+import {
+  BrowserFramePointer,
+  browserPointerGeometry,
+} from "./browser-pointer.ts"
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -367,7 +371,7 @@ export class BrowserDocumentConnection {
         "browser_target_changed",
         "The observed document navigated. Observe it again.",
       )
-    return current
+    return frame
   }
 
   async #documentChanged(
@@ -432,25 +436,31 @@ export class BrowserDocumentConnection {
     group: string,
     failure: unknown,
     sessionId?: string,
+    additionalSessions: Iterable<string | undefined> = [],
   ): Promise<void> {
     // Release is independent of cancellation. A failed key-up is surfaced to
     // the shared input gate and remains retryable by finishTurn/closeSession.
-    const [inputCleanup, groupCleanup] = await Promise.allSettled([
+    const [inputCleanup, ...groupsCleanup] = await Promise.allSettled([
       this.#releaseInput(),
-      this.closed ||
-      (sessionId !== undefined && !this.#frameCatalog.ownsSession(sessionId))
-        ? undefined
-        : this.#debug.sendCommand(
-            "Runtime.releaseObjectGroup",
-            { objectGroup: group },
-            sessionId,
-          ),
+      ...[...new Set([sessionId, ...additionalSessions])].map((id) =>
+        this.closed
+          ? undefined
+          : this.#frameCatalog.releaseObjects(
+              group,
+              (method, params, session) =>
+                this.#debug.sendCommand(method, params, session),
+              id,
+            ),
+      ),
     ])
+    const groupFailures = groupsCleanup.flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : [],
+    )
     if (inputCleanup?.status === "rejected") {
       const causes = [
         inputCleanup.reason,
         ...(failure === undefined ? [] : [failure]),
-        ...(groupCleanup?.status === "rejected" ? [groupCleanup.reason] : []),
+        ...groupFailures,
       ]
       throw new BrowserControlError(
         "browser_cleanup_failed",
@@ -465,17 +475,14 @@ export class BrowserDocumentConnection {
     }
     // Remote object groups disappear with their protocol session. This does
     // not prove input release; the held-input failure above still wins.
-    if (
-      groupCleanup?.status === "rejected" &&
-      !this.closed &&
-      (sessionId === undefined || this.#frameCatalog.ownsSession(sessionId))
-    ) {
+    if (groupFailures.length && !this.closed) {
       if (failure !== undefined)
         throw new AggregateError(
-          [failure, groupCleanup.reason],
+          [failure, ...groupFailures],
           "Browser operation and object cleanup failed.",
         )
-      throw groupCleanup.reason
+      if (groupFailures.length === 1) throw groupFailures[0]
+      throw new AggregateError(groupFailures, "Browser object cleanup failed.")
     }
     if (failure !== undefined) throw failure
   }
@@ -710,48 +717,50 @@ export class BrowserDocumentConnection {
     signal.throwIfAborted()
     const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
-    if (reference.frame)
-      throw new BrowserControlError(
-        "browser_frame_pointer_unavailable",
-        "Pointer actions currently require the main frame. Text and keyboard actions can use this frame's references.",
-      )
     const command = (method: string, params: Record<string, unknown> = {}) =>
-      this.#inputCommand(method, params, signal)
+      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
+    let framePointer: BrowserFramePointer | undefined
+    const flushFrameLayout = async () => {
+      if (!framePointer) return
+      // Hidden WebContentsViews can retain stale compositor hit-test data:
+      // root mouse events then reach the parent instead of its OOPIF. A tiny
+      // capture requests a current frame without showing or focusing the view.
+      await this.#read(signal, async () => {
+        try {
+          await this.#contents.capturePage(
+            { x: 0, y: 0, width: 1, height: 1 },
+            { stayHidden: true, stayAwake: true },
+          )
+        } catch (cause) {
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The page could not produce current compositor hit-test data. Observe again before clicking. " +
+              (cause instanceof Error ? cause.message : String(cause)),
+          )
+        }
+      })
+    }
+    const verifyDocument = async () => {
+      const frame = await this.#verifyDocument(reference, signal)
+      if (framePointer && frame) framePointer.verifyPath(frame.path)
+    }
     let dispatched = false,
       result: JsonObject | undefined,
       failure: unknown
     try {
       const objectId = await this.#resolveReference(reference, group, signal)
-      // Fixed code in the target's isolated world. Hit-test the painted control,
-      // including its closest shadow root and the outer document's occlusion.
-      const geometry = `function(scroll, point) {
-        if (!(this instanceof Element) || !this.isConnected || this.ownerDocument !== document || Element.prototype.matches.call(this, ':disabled')) return {ok:false};
-        if (scroll) Element.prototype.scrollIntoView.call(this, {block:'center',inline:'center',behavior:'instant'});
-        const doc=this.ownerDocument, root=this.getRootNode();
-        let outer=this, outerRoot=root;
-        while (outerRoot instanceof ShadowRoot) { outer=outerRoot.host; outerRoot=outer.getRootNode(); }
-        const hits=(x,y)=>{
-          const globalHit=Document.prototype.elementFromPoint.call(doc,x,y);
-          if (root instanceof ShadowRoot && globalHit !== outer) return false;
-          let hit=root instanceof ShadowRoot ? root.elementFromPoint(x,y) : globalHit;
-          while (hit) {
-            if (Node.prototype.contains.call(this,hit)) return true;
-            const hitRoot=hit.getRootNode(); hit=hitRoot instanceof ShadowRoot ? hitRoot.host : null;
-          }
-          return false;
-        };
-        if (point) return {ok:hits(point.x,point.y),x:point.x,y:point.y};
-        const rects=Element.prototype.getClientRects.call(this), view=doc.defaultView;
-        // Bound geometry work for very long inline content; this is an input
-        // implementation safety boundary, not a limit on the page's contents.
-        for(let i=0;i<Math.min(rects.length,16);i++) {
-          const rect=rects[i], left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(view.innerWidth,rect.right),bottom=Math.min(view.innerHeight,rect.bottom);
-          if(right<=left || bottom<=top)continue;
-          const x=(left+right)/2,y=(top+bottom)/2;
-          if(hits(x,y))return {ok:true,x,y};
-        }
-        return {ok:false};
-      }`
+      if (reference.frame) {
+        const selected = await this.#verifyDocument(reference, signal)
+        if (!selected) throw new Error("Missing pointer frame binding.")
+        framePointer = new BrowserFramePointer(
+          selected.path,
+          (method, params = {}, sessionId) =>
+            this.#inputCommand(method, params, signal, sessionId),
+          group,
+        )
+        await framePointer.prepare()
+        await verifyDocument()
+      }
       const probe = async (
         scroll: boolean,
         point?: { x: number; y: number },
@@ -760,7 +769,7 @@ export class BrowserDocumentConnection {
           await command("Runtime.callFunctionOn", {
             objectId,
             returnByValue: true,
-            functionDeclaration: geometry,
+            functionDeclaration: browserPointerGeometry,
             arguments: [{ value: scroll }, { value: point ?? null }],
           }),
         )
@@ -779,16 +788,39 @@ export class BrowserDocumentConnection {
           throw new Error("Chromium returned an invalid browser click point.")
         return { x: value.x, y: value.y }
       }
-      const point = await probe(true)
+      const localPoint = await probe(true)
+      await flushFrameLayout()
+      const point = framePointer
+        ? await framePointer.project(localPoint)
+        : localPoint
+      const verifyPoint = async () => {
+        await probe(false, localPoint)
+        if (framePointer) {
+          const current = await framePointer.project(localPoint)
+          if (
+            Math.abs(current.x - point.x) > 0.5 ||
+            Math.abs(current.y - point.y) > 0.5
+          )
+            throw new BrowserControlError(
+              "browser_input_unavailable",
+              "The frame moved during pointer input. Observe again before clicking.",
+            )
+        }
+      }
       dispatched = input.action === "hover"
-      await command("Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        ...point,
-        buttons: 0,
-      })
-      await this.#verifyDocument(reference, signal)
-      await probe(false, point)
-      await this.#verifyDocument(reference, signal)
+      await this.#inputCommand(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseMoved",
+          ...point,
+          buttons: 0,
+        },
+        signal,
+      )
+      await verifyDocument()
+      await flushFrameLayout()
+      await verifyPoint()
+      await verifyDocument()
       signal.throwIfAborted()
       if (this.closed)
         throw new BrowserControlError(
@@ -804,8 +836,8 @@ export class BrowserDocumentConnection {
         ) {
           // A double click is two intentional press/release pairs. A failed
           // pair stops the sequence; cleanup never replays a press.
-          await this.#verifyDocument(reference, signal)
-          await probe(false, point)
+          await verifyDocument()
+          await verifyPoint()
           signal.throwIfAborted()
           if (this.closed)
             throw new BrowserControlError(
@@ -823,24 +855,32 @@ export class BrowserDocumentConnection {
             },
           })
           dispatched = true
-          await command("Input.dispatchMouseEvent", {
-            type: "mousePressed",
-            ...point,
-            button,
-            buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
-            clickCount,
-          })
+          await this.#inputCommand(
+            "Input.dispatchMouseEvent",
+            {
+              type: "mousePressed",
+              ...point,
+              button,
+              buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+              clickCount,
+            },
+            signal,
+          )
           await this.#releaseInput()
         }
       } else if (input.action === "scroll") {
         dispatched = true
-        await command("Input.dispatchMouseEvent", {
-          type: "mouseWheel",
-          ...point,
-          buttons: 0,
-          deltaX: input.deltaX,
-          deltaY: input.deltaY,
-        })
+        await this.#inputCommand(
+          "Input.dispatchMouseEvent",
+          {
+            type: "mouseWheel",
+            ...point,
+            buttons: 0,
+            deltaX: input.deltaX,
+            deltaY: input.deltaY,
+          },
+          signal,
+        )
       }
       const documentChanged = await this.#documentChanged(reference, signal)
       result = {
@@ -859,7 +899,12 @@ export class BrowserDocumentConnection {
             )
           : cause
     }
-    await this.#finishInput(group, failure)
+    await this.#finishInput(
+      group,
+      failure,
+      reference.frame?.sessionId,
+      framePointer?.sessions,
+    )
     if (!result) throw new Error("Browser pointer input produced no result.")
     return result
   }

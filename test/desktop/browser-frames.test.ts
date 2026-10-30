@@ -58,7 +58,6 @@ it.each([
       })
     else frames.close()
     await ended
-    expect(frames.ownsSession("old_renderer")).toBe(false)
   } finally {
     frames.close()
     reply.resolve({})
@@ -71,6 +70,10 @@ function fixture(
     manyLocal?: number
     overflow?: boolean
     dropOnKeyDown?: boolean
+    pointer?: boolean
+    covered?: boolean
+    coverAfterHover?: boolean
+    failCapture?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -96,7 +99,7 @@ function fixture(
     string,
     { value: string; start: number; end: number }
   >()
-  const groups = new Map<string, string | undefined>()
+  const groups = new Map<string, Set<string | undefined>>()
   let focused = "",
     destroyed = false
   const field = (id: string) => {
@@ -242,7 +245,23 @@ function fixture(
         requireSession(id, sessionId)
         return { executionContextId: 1000 + (ids[id] ?? 0) }
       }
+      if (method === "DOM.getFrameOwner") {
+        const id = String(params.frameId),
+          node = ids[id]
+        if (!node) throw new Error("Unknown iframe owner")
+        return { backendNodeId: 100 + node }
+      }
+      if (method === "DOM.getBoxModel")
+        return { model: { content: [100, 100, 200, 100, 200, 200, 100, 200] } }
+      if (method === "Runtime.evaluate")
+        return { result: { value: { width: 100, height: 100 } } }
       if (method === "DOM.resolveNode" || method === "DOM.focus") {
+        if (Number(params.backendNodeId) > 100) {
+          const owned = groups.get(String(params.objectGroup)) ?? new Set()
+          owned.add(sessionId)
+          groups.set(String(params.objectGroup), owned)
+          return { object: { objectId: `owner_${params.backendNodeId}` } }
+        }
         const id = Object.keys(ids).find(
           (id) => ids[id] === params.backendNodeId,
         )
@@ -254,12 +273,18 @@ function fixture(
         }
         if (params.executionContextId !== 1000 + (ids[id] ?? 0))
           throw new Error("Wrong frame execution context")
-        groups.set(String(params.objectGroup), sessionId)
+        const owned = groups.get(String(params.objectGroup)) ?? new Set()
+        owned.add(sessionId)
+        groups.set(String(params.objectGroup), owned)
         return { object: { objectId: id } }
       }
       if (method === "Runtime.callFunctionOn") {
         const id = String(params.objectId)
+        if (id.startsWith("owner_"))
+          return { result: { value: { ok: !options.covered } } }
         requireSession(id, sessionId)
+        if (options.pointer)
+          return { result: { value: { ok: true, x: 20, y: 30 } } }
         if (!Array.isArray(params.arguments))
           return { result: { value: focused === id } }
         const value = field(id),
@@ -283,6 +308,13 @@ function fixture(
         if (sessionId !== undefined)
           throw new Error("Text input left the root session")
         insert(focused, String(params.text))
+        return {}
+      }
+      if (method === "Input.dispatchMouseEvent") {
+        if (sessionId !== undefined)
+          throw new Error("Mouse input left root session")
+        if (params.type === "mouseMoved" && options.coverAfterHover)
+          options.covered = true
         return {}
       }
       if (method === "Input.dispatchKeyEvent") {
@@ -309,9 +341,11 @@ function fixture(
       }
       if (method === "Runtime.releaseObjectGroup") {
         const group = String(params.objectGroup)
-        if (groups.has(group) && groups.get(group) !== sessionId)
+        const owned = groups.get(group)
+        if (owned && !owned.has(sessionId))
           throw new Error("Object group cleanup crossed renderer ownership")
-        groups.delete(group)
+        owned?.delete(sessionId)
+        if (!owned?.size) groups.delete(group)
         return {}
       }
       throw new Error(`Unexpected frame command ${method}`)
@@ -322,6 +356,9 @@ function fixture(
     isDestroyed: () => destroyed,
     isLoadingMainFrame: () => false,
     isDevToolsOpened: () => false,
+    capturePage: async () => {
+      if (options.failCapture) throw new Error("No compositor surface")
+    },
     getURL: () => "https://owned.test/",
   } as unknown as WebContents)
   return {
@@ -378,6 +415,89 @@ function fixture(
     },
   }
 }
+
+it("finishes cleanup when the original frame session disappears but surfaces errors from a live session", async () => {
+  const events = new EventEmitter()
+  const frames = new BrowserFrames({
+    on: events.on.bind(events),
+    off: events.off.bind(events),
+  } as unknown as WebContents["debugger"])
+  await frames.list(async (method, _params, sessionId) => {
+    if (method === "Target.setAutoAttach") {
+      if (!sessionId)
+        events.emit("message", {}, "Target.attachedToTarget", {
+          sessionId: "owned_renderer",
+          targetInfo: { type: "iframe", parentFrameId: "main" },
+        })
+      return {}
+    }
+    if (method !== "Page.getFrameTree") throw new Error("Unexpected query")
+    return {
+      frameTree: {
+        frame: {
+          id: sessionId ? "child" : "main",
+          loaderId: "v1",
+          url: "https://owned.test/",
+          ...(sessionId ? { parentId: "main" } : {}),
+        },
+      },
+    }
+  }, 0)
+  const started = Promise.withResolvers<void>(),
+    reply = Promise.withResolvers<unknown>()
+  try {
+    await expect(
+      frames.releaseObjects(
+        "objects",
+        async () => {
+          throw new Error("Live cleanup failed")
+        },
+        "owned_renderer",
+      ),
+    ).rejects.toThrow("Live cleanup failed")
+    const pending = frames.releaseObjects(
+      "objects",
+      async () => {
+        started.resolve()
+        return reply.promise
+      },
+      "owned_renderer",
+    )
+    await started.promise
+    events.emit("message", {}, "Target.detachedFromTarget", {
+      sessionId: "owned_renderer",
+    })
+    await pending
+    await frames.releaseObjects(
+      "objects",
+      async () => {
+        throw new Error("Must not retarget disappeared objects")
+      },
+      "owned_renderer",
+    )
+  } finally {
+    reply.resolve({})
+    frames.close()
+  }
+})
+
+it("refuses frame pointer dispatch when current compositor hit-test data cannot be obtained", async () => {
+  const f = fixture({ pointer: true, failCapture: true })
+  try {
+    const node = await f.control("local")
+    await expect(
+      f.connection.inputPointer(
+        { action: "click", target, reference: node.elementReference },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: "browser_input_unavailable" })
+    expect(
+      f.calls.some((call) => call.method === "Input.dispatchMouseEvent"),
+    ).toBe(false)
+  } finally {
+    await f.connection.close()
+  }
+})
 
 it("accepts catalog frame references but refuses raw frame IDs, sessions and invalid pagination", () => {
   expect(
@@ -687,8 +807,55 @@ it("releases root-owned keys after a child renderer disappears without retargeti
   expect(f.attached()).toBe(false)
 })
 
-it("refuses child pointer input until frame geometry is available instead of dispatching local coordinates to the main frame", async () => {
-  const f = fixture()
+it.each([
+  "local",
+  "leaf",
+])("routes %s frame DOM geometry separately from root-owned mouse input and releases each renderer's objects", async (id) => {
+  const f = fixture({ pointer: true })
+  try {
+    const node = await f.control(id)
+    expect(
+      await f.connection.inputPointer(
+        { action: "click", target, reference: node.elementReference },
+        signal(),
+      ),
+    ).toMatchObject({ delivered: true })
+    expect(
+      f.calls
+        .filter((call) => call.method === "Input.dispatchMouseEvent")
+        .map((call) => ({ type: call.params.type, sessionId: call.sessionId })),
+    ).toEqual([
+      { type: "mouseMoved", sessionId: undefined },
+      { type: "mousePressed", sessionId: undefined },
+      { type: "mouseReleased", sessionId: undefined },
+    ])
+    expect(
+      new Set(
+        f.calls
+          .filter((call) => call.method === "Runtime.releaseObjectGroup")
+          .map((call) => call.sessionId),
+      ),
+    ).toEqual(
+      new Set(
+        id === "local"
+          ? [undefined]
+          : [undefined, "remote_session", "remote_session_leaf"],
+      ),
+    )
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it.each([
+  false,
+  true,
+])("refuses a child frame covered by its parent before press (cover after hover: %s)", async (afterHover) => {
+  const f = fixture({
+    pointer: true,
+    covered: !afterHover,
+    coverAfterHover: afterHover,
+  })
   try {
     const node = await f.control("local")
     await expect(
@@ -696,9 +863,13 @@ it("refuses child pointer input until frame geometry is available instead of dis
         { action: "click", target, reference: node.elementReference },
         signal(),
       ),
-    ).rejects.toMatchObject({ code: "browser_frame_pointer_unavailable" })
+    ).rejects.toMatchObject({ code: "browser_input_unavailable" })
     expect(
-      f.calls.some((call) => call.method === "Input.dispatchMouseEvent"),
+      f.calls.some(
+        (call) =>
+          call.method === "Input.dispatchMouseEvent" &&
+          call.params.type === "mousePressed",
+      ),
     ).toBe(false)
   } finally {
     await f.connection.close()
