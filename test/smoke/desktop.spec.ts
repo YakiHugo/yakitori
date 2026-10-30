@@ -1266,6 +1266,49 @@ test("agent browser observations and actions use the exact owned tab through rea
     await page
       .getByRole("textbox", { name: "Message the Mate" })
       .fill("Inspect the owned browser tabs and read the second page.")
+    await application.evaluate(({ webContents, session }) => {
+      const entries: Record<string, unknown>[] = []
+      Reflect.set(globalThis, "yakitoriBrowserProtocolTrace", entries)
+      const profile = session.fromPartition(
+        "persist:yakitori-workspace-browser",
+      )
+      const append = (entry: Record<string, unknown>) => {
+        entries.push(entry)
+        if (entries.length > 200) entries.shift()
+      }
+      for (const contents of webContents.getAllWebContents()) {
+        if (contents.session !== profile) continue
+        const debug = contents.debugger
+        const send = debug.sendCommand.bind(debug)
+        debug.sendCommand = async (method, params, sessionId) => {
+          const entry = {
+            method,
+            sessionId,
+            type: params?.type,
+            key: params?.key,
+            state: "pending",
+            error: "",
+          }
+          append(entry)
+          try {
+            const result = await send(method, params, sessionId)
+            entry.state = "done"
+            return result
+          } catch (cause) {
+            entry.state = "failed"
+            entry.error = String(cause)
+            throw cause
+          }
+        }
+        debug.on("message", (_event, method, params, parentSessionId) => {
+          if (
+            method === "Target.attachedToTarget" ||
+            method === "Target.detachedFromTarget"
+          )
+            append({ method, sessionId: params.sessionId, parentSessionId })
+        })
+      }
+    })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
     for (let approval = 0; approval < 57; approval++)
@@ -1565,6 +1608,9 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     expect(rendererErrors).toEqual([])
   } catch (cause) {
+    const protocol = await application.evaluate(() =>
+      Reflect.get(globalThis, "yakitoriBrowserProtocolTrace"),
+    )
     await testInfo.attach("browser-model-diagnostics", {
       body: JSON.stringify({
         modelCalls,
@@ -1572,6 +1618,9 @@ test("agent browser observations and actions use the exact owned tab through rea
         observation,
         navigationReceipt,
         navigatedObservation,
+        frameSubmittedValues,
+        frameAfterReady,
+        protocol,
       }),
       contentType: "application/json",
     })

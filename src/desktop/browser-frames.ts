@@ -45,7 +45,11 @@ export class BrowserFrames {
   #overflow = false
   #sessions = new Map<
     string,
-    { parentSessionId?: string; parentFrameId?: string }
+    {
+      parentSessionId?: string
+      parentFrameId?: string
+      closed: AbortController
+    }
   >()
   #references = new Map<string, FrameTicket>()
   readonly #message = (
@@ -64,6 +68,14 @@ export class BrowserFrames {
     if (method === "Target.detachedFromTarget") {
       const removed = new Set([params.sessionId])
       for (const id of removed) {
+        this.#sessions
+          .get(id)
+          ?.closed.abort(
+            new BrowserControlError(
+              "browser_frame_stale",
+              "The frame renderer disconnected. List frames again.",
+            ),
+          )
         this.#sessions.delete(id)
         this.#configured.delete(id)
         for (const [child, parent] of this.#sessions)
@@ -83,6 +95,8 @@ export class BrowserFrames {
       return
     }
     this.#sessions.set(params.sessionId, {
+      closed:
+        this.#sessions.get(params.sessionId)?.closed ?? new AbortController(),
       ...(parentSessionId ? { parentSessionId } : {}),
       ...(typeof params.targetInfo.parentFrameId === "string"
         ? { parentFrameId: params.targetInfo.parentFrameId }
@@ -97,6 +111,13 @@ export class BrowserFrames {
 
   close(): void {
     this.#enabled = false
+    for (const session of this.#sessions.values())
+      session.closed.abort(
+        new BrowserControlError(
+          "browser_unavailable",
+          "The owned browser connection closed.",
+        ),
+      )
     this.#sessions.clear()
     this.#configured.clear()
     this.#references.clear()
@@ -105,6 +126,39 @@ export class BrowserFrames {
 
   ownsSession(sessionId: string): boolean {
     return this.#sessions.has(sessionId)
+  }
+
+  async #querySession(
+    command: BrowserReadCommand,
+    method: "Page.getFrameTree" | "Target.setAutoAttach",
+    params: Record<string, unknown>,
+    sessionId: string,
+  ): Promise<unknown> {
+    const session = this.#sessions.get(sessionId)
+    if (!session)
+      throw new BrowserControlError(
+        "browser_frame_stale",
+        "The frame renderer disconnected. List frames again.",
+      )
+    const signal = session.closed.signal
+    let rejectClosed: (reason: unknown) => void = () => {}
+    const closed = new Promise<never>((_resolve, reject) => {
+      rejectClosed = reject
+    })
+    const abort = () => rejectClosed(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    try {
+      // Electron may never settle a child command after that session detaches.
+      // Only this session's fixed queries/configuration can be abandoned here;
+      // root-owned input must still await its acknowledgement and key release.
+      const pending = Promise.resolve().then(() => {
+        signal.throwIfAborted()
+        return command(method, params, sessionId)
+      })
+      return await Promise.race([pending, closed])
+    } finally {
+      signal.removeEventListener("abort", abort)
+    }
   }
 
   async #snapshot(command: BrowserReadCommand): Promise<{
@@ -127,7 +181,12 @@ export class BrowserFrames {
     for (const [sessionId] of this.#sessions) {
       if (this.#overflow) break
       if (!this.#configured.has(sessionId)) {
-        await command("Target.setAutoAttach", autoAttach, sessionId)
+        await this.#querySession(
+          command,
+          "Target.setAutoAttach",
+          autoAttach,
+          sessionId,
+        )
         if (this.#sessions.has(sessionId)) this.#configured.add(sessionId)
       }
     }
@@ -191,7 +250,7 @@ export class BrowserFrames {
     add(rootTree)
     for (const [sessionId, parent] of this.#sessions)
       add(
-        await command("Page.getFrameTree", {}, sessionId),
+        await this.#querySession(command, "Page.getFrameTree", {}, sessionId),
         sessionId,
         parent.parentFrameId,
       )

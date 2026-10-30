@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import type { WebContents } from "electron"
 import { expect, it } from "vitest"
+import { BrowserFrames } from "../../src/desktop/browser-frames.ts"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 import { parseBrowserObservationRequest } from "../../src/protocol/desktop-browser.ts"
 
@@ -10,6 +11,60 @@ const target = {
   instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
 }
 const signal = () => new AbortController().signal
+
+it.each([
+  "detach",
+  "close",
+])("ends a pending frame query when its session %s occurs without waiting for the dead renderer", async (terminal) => {
+  const events = new EventEmitter()
+  const frames = new BrowserFrames({
+    on: events.on.bind(events),
+    off: events.off.bind(events),
+  } as unknown as WebContents["debugger"])
+  const started = Promise.withResolvers<void>()
+  const reply = Promise.withResolvers<unknown>()
+  const pending = frames.list(async (method, _params, sessionId) => {
+    if (method === "Target.setAutoAttach") {
+      if (!sessionId)
+        events.emit("message", {}, "Target.attachedToTarget", {
+          sessionId: "old_renderer",
+          targetInfo: { type: "iframe", parentFrameId: "main" },
+        })
+      return {}
+    }
+    if (method !== "Page.getFrameTree") throw new Error("Unexpected query")
+    if (!sessionId)
+      return {
+        frameTree: {
+          frame: {
+            id: "main",
+            loaderId: "root_v1",
+            url: "https://owned.test/",
+          },
+        },
+      }
+    started.resolve()
+    return reply.promise
+  }, 0)
+  try {
+    await started.promise
+    const ended = expect(pending).rejects.toMatchObject({
+      code:
+        terminal === "detach" ? "browser_frame_stale" : "browser_unavailable",
+    })
+    if (terminal === "detach")
+      events.emit("message", {}, "Target.detachedFromTarget", {
+        sessionId: "old_renderer",
+      })
+    else frames.close()
+    await ended
+    expect(frames.ownsSession("old_renderer")).toBe(false)
+  } finally {
+    frames.close()
+    reply.resolve({})
+  }
+  expect(events.listenerCount("message")).toBe(0)
+})
 
 function fixture(
   options: {
