@@ -12,7 +12,12 @@ extension Computer {
         }
         try ticket.validate(id: args["snapshot_id"] as? String, windows: windows(), displays: displays())
         let target = try ticket.target(args)
-        let window = target.window, element = target.element, point = target.point
+        let window = target.window, element = target.element
+        var point = target.point
+        if action == "hover", point == nil, let element, let frame = elementFrame(element),
+           let window, !target.applicationUI, window.frame.contains(frame) {
+            point = CGPoint(x: frame.midX, y: frame.midY)
+        }
         // WindowServer can briefly retain a closed window while AppKit still
         // accepts AXPress on its retained controls. Confirm it is still exposed
         // by the application's current AX window list before using an element.
@@ -42,8 +47,9 @@ extension Computer {
         if action == "type", args["replace"] as? Bool == true, element == nil {
             throw ComputerFailure("invalid_arguments", "Replacement requires a target element so its complete selection can be confirmed before typing.")
         }
-        let axAction = ["press", "perform_action", "set_value", "select_text"].contains(action)
-        if axAction, element == nil { throw ComputerFailure("invalid_arguments", "This AX action requires an element.") }
+        let elementAction = ["press", "perform_action", "set_value", "select_text"].contains(action)
+        let axAction = elementAction || action == "invoke_menu"
+        if elementAction, element == nil { throw ComputerFailure("invalid_arguments", "This AX action requires an element.") }
         let buttonName = args["button"] as? String ?? "left"
         guard ["left", "right", "middle"].contains(buttonName) else { throw ComputerFailure("invalid_arguments", "Unknown mouse button.") }
         let button: CGMouseButton = buttonName == "right" ? .right : buttonName == "middle" ? .center : .left
@@ -52,7 +58,7 @@ extension Computer {
         let draggedType: CGEventType = button == .right ? .rightMouseDragged : button == .center ? .otherMouseDragged : .leftMouseDragged
         let clickCount = args["click_count"] as? Int ?? 1
         guard (1...3).contains(clickCount) else { throw ComputerFailure("invalid_arguments", "click_count must be 1, 2 or 3.") }
-        if ["click", "scroll", "drag"].contains(action), point == nil {
+        if ["click", "scroll", "drag", "hover"].contains(action), point == nil {
             throw ComputerFailure("invalid_arguments", "This action requires screenshot coordinates x and y.")
         }
         let end = action == "drag" ? try ticket.point(x: args["to_x"] as? Double ?? -1, y: args["to_y"] as? Double ?? -1, space: args["coordinate_space"] as? String ?? "screenshot") : nil
@@ -61,6 +67,9 @@ extension Computer {
         if action == "scroll", abs(Int64(dx)) > 2000 || abs(Int64(dy)) > 2000 {
             throw ComputerFailure("invalid_arguments", "Scroll deltas must be within 2000 pixels per action; observe between larger movements.")
         }
+        if action == "invoke_menu", window == nil || ticket.scope == .screen {
+            throw ComputerFailure("invalid_arguments", "invoke_menu requires an observed application window.")
+        }
         if foreground, let window, isolation?.owns(window.pid) == true {
             throw ComputerFailure("app_concealed", "Reveal the isolated app and observe again before foreground input.")
         }
@@ -68,20 +77,22 @@ extension Computer {
         let screenKeyboardPID = foreground && ticket.scope == .screen && element == nil && keyboard
             ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
         let resourcePID = window?.pid ?? screenKeyboardPID
-        let appResources = resourcePID.map { isolation?.owns($0) == true ? [] : ["app-\($0)"] } ?? []
+        let resourcePIDs = Set([resourcePID, hovered?.window.pid].compactMap { $0 })
+        let appResources = resourcePIDs.filter { isolation?.owns($0) != true }.map { "app-\($0)" }
         let resources = try await NativeResources.acquire(appResources + (foreground ? ["foreground"] : []))
         defer { withExtendedLifetime(resources) {} }
         try ticket.validate(id: ticket.id, windows: windows(), displays: displays())
         if let screenKeyboardPID, NSWorkspace.shared.frontmostApplication?.processIdentifier != screenKeyboardPID {
             throw ComputerFailure("focus_changed", "The screen keyboard target changed while waiting for input ownership.")
         }
-        if let resourcePID {
+        for resourcePID in resourcePIDs {
             if isolation?.owns(resourcePID) == true { try isolation?.advanceRevision(resourcePID) }
             else { try resources.advanceRevision(resourcePID) }
         }
         // Consume before any action, including focus. A failed delivery must
         // never invite replay against the same stale element or screenshot.
         snapshot = nil
+        let alternateHover = try updateHover(target, reveal: action == "hover")
         var backgroundRelease: CGEvent?
         defer {
             if let backgroundRelease, let window,
@@ -90,7 +101,7 @@ extension Computer {
                 backgroundRelease.postToPid(window.pid)
             }
         }
-        if !foreground, !axAction, let window,
+        if !foreground, !axAction, !alternateHover, let window,
            NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid {
             // Directed CGEvents bypass WindowServer activation. AppKit otherwise
             // treats a background click as an inactive-window first click. Scope
@@ -139,7 +150,12 @@ extension Computer {
             ? window?.windowID : try windows().first(where: { $0.pid == foregroundPID })?.windowID
         var screenTargetFocused = false
         var evidence: [String: Any] = [:]
-        if axAction, let element {
+        if action == "hover", alternateHover {
+            evidence["hover_route"] = "accessibility"
+        } else if action == "invoke_menu" {
+            guard let window, ticket.scope != .screen else { throw ComputerFailure("invalid_arguments", "invoke_menu requires an observed application window.") }
+            evidence = try await invokeMenu(menuPath(args["path"]), window: window)
+        } else if axAction, let element {
             evidence = try accessibilityInput(action, args: args, element: element)
         } else {
             if ["type", "key", "keys", "paste"].contains(action) {
@@ -209,7 +225,10 @@ extension Computer {
             try await withHeldChord(["click", "drag"].contains(action) ? chord?.0 : nil,
                 flags: ["click", "scroll", "drag"].contains(action) ? modifiers.union(chord?.1 ?? []) : [],
                 source: source, post: post, release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {
-                if let point, action == "click" {
+                if let point, action == "hover" {
+                    if !alternateHover { try post(mouse(.mouseMoved, point)) }
+                    evidence["hover_route"] = alternateHover ? "accessibility" : "pointer"
+                } else if let point, action == "click" {
                     for count in 1...clickCount {
                         let down = try mouse(downType, point)
                         let up = try mouse(upType, point)
@@ -284,7 +303,7 @@ extension Computer {
         }
         // Delivery/AX readback is not proof that the application committed a
         // business operation. Return that uncertainty rather than a fake success.
-        evidence.merge(["effect": "unverified", "delivery": axAction ? "accessibility" : foreground ? "foreground" : "background",
+        evidence.merge(["effect": "unverified", "delivery": axAction || alternateHover ? "accessibility" : foreground ? "foreground" : "background",
             "message": "Observe the application result before continuing or retrying."]) { _, value in value }
         return try await completeInput(evidence, args: args, ticket: ticket)
     }

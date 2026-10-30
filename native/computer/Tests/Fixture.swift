@@ -40,7 +40,37 @@ final class DragTarget: NSView {
     }
 }
 
-final class Fixture: NSObject, NSTextFieldDelegate {
+final class HoverTarget: NSView {
+    var allowsAlternate = true
+    var alternate = false
+    var transitions = 0
+    var moves = 0
+    var changed: (() -> Void)?
+    override func accessibilityPerformShowAlternateUI() -> Bool {
+        if !alternate { alternate = true; transitions += 1; changed?() }
+        return true
+    }
+    override func accessibilityPerformShowDefaultUI() -> Bool {
+        if alternate { alternate = false; transitions += 1; changed?() }
+        return true
+    }
+    override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(accessibilityPerformShowAlternateUI) || selector == #selector(accessibilityPerformShowDefaultUI) { return allowsAlternate }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseMoved(with event: NSEvent) { moves += 1; changed?() }
+    override func draw(_ dirtyRect: NSRect) {
+        (alternate ? NSColor.systemGreen : NSColor.systemOrange).setFill()
+        bounds.fill()
+    }
+}
+
+final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
     let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 500, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let first = NSTextField(frame: NSRect(x: 30, y: 230, width: 420, height: 28))
     let second = NSTextField(frame: NSRect(x: 30, y: 185, width: 420, height: 28))
@@ -54,10 +84,15 @@ final class Fixture: NSObject, NSTextFieldDelegate {
     var count = 0
     var moves = 0
     var secondary: NSWindow?
+    var interaction: NSWindow?
+    let hover = HoverTarget(frame: NSRect(x: 20, y: 60, width: 180, height: 160))
+    let pointerHover = HoverTarget(frame: NSRect(x: 230, y: 140, width: 160, height: 100))
+    var menuCount = 0
+    var menusOpen = 0
     var events: [[String: Any]] = []
 
     func record(_ event: NSEvent) {
-        guard [.leftMouseDown, .leftMouseUp, .keyDown, .flagsChanged, .appKitDefined].contains(event.type) else { return }
+        guard [.leftMouseDown, .leftMouseUp, .mouseMoved, .keyDown, .flagsChanged, .appKitDefined].contains(event.type) else { return }
         if event.type == .leftMouseDown { pointerDown += 1 }
         if event.type == .leftMouseUp { pointerUp += 1 }
         events.append(["type": event.type.rawValue, "window": event.windowNumber, "x": event.locationInWindow.x,
@@ -101,9 +136,37 @@ final class Fixture: NSObject, NSTextFieldDelegate {
             extra.orderBack(nil)
             secondary = extra
         }
+        if CommandLine.arguments.contains("--interaction-fixture") {
+            let extra = NSWindow(contentRect: NSRect(x: 950, y: 120, width: 420, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            extra.title = "Yakitori Interaction Fixture"
+            extra.isReleasedWhenClosed = false
+            extra.acceptsMouseMovedEvents = true
+            hover.setAccessibilityElement(true)
+            hover.setAccessibilityRole(.group)
+            hover.setAccessibilityLabel("Alternate hover")
+            hover.changed = { [weak self] in self?.hover.needsDisplay = true; self?.save() }
+            let child = NSButton(title: "Hover child", target: self, action: #selector(increment))
+            child.frame = NSRect(x: 20, y: 20, width: 140, height: 28)
+            hover.addSubview(child)
+            extra.contentView!.addSubview(hover)
+            pointerHover.allowsAlternate = false
+            pointerHover.setAccessibilityElement(true)
+            pointerHover.setAccessibilityRole(.group)
+            pointerHover.setAccessibilityLabel("Pointer hover")
+            pointerHover.changed = { [weak self] in self?.save() }
+            extra.contentView!.addSubview(pointerHover)
+            let exit = NSButton(title: "Hover exit", target: self, action: #selector(increment))
+            exit.frame = NSRect(x: 230, y: 80, width: 140, height: 28)
+            extra.contentView!.addSubview(exit)
+            interaction = extra
+            extra.orderBack(nil)
+        }
         save()
     }
 
+    @objc func menuIncrement() { menuCount += 1; save() }
+    func menuWillOpen(_ menu: NSMenu) { menusOpen += 1; save() }
+    func menuDidClose(_ menu: NSMenu) { menusOpen = max(0, menusOpen - 1); save() }
     @objc func increment() { count += 1; label.stringValue = String(count); save() }
     @objc func changeLater() {
         changes += 1
@@ -133,6 +196,8 @@ final class Fixture: NSObject, NSTextFieldDelegate {
                 "ax_window_ids": (NSApp.accessibilityWindows() ?? []).compactMap { ($0 as? NSWindow)?.windowNumber },
                 "window_server": windowServer,
                 "window_spaces": NSApp.windows.map { ["id": $0.windowNumber, "visible": $0.isVisible, "active_space": $0.isOnActiveSpace, "spaces": fixtureSpaces($0.windowNumber)] as [String: Any] },
+                "interaction_window_id": interaction?.windowNumber ?? 0, "hover_alternate": hover.alternate,
+                "hover_moves": pointerHover.moves, "hover_transitions": hover.transitions, "menu_count": menuCount, "menus_open": menusOpen,
                 "rich": rich.string, "changes": changes, "hidden": NSApp.isHidden,
                 "rich_selection": ["location": rich.selectedRange().location, "length": rich.selectedRange().length],
                 "pointer_down": pointerDown, "pointer_up": pointerUp,
@@ -165,6 +230,26 @@ let statePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1]
 let fixture = Fixture(output: URL(fileURLWithPath: statePath))
 let delayedMenuItem = editMenu.submenu!.addItem(withTitle: "Delayed menu update", action: #selector(Fixture.changeLater), keyEquivalent: "")
 delayedMenuItem.target = fixture
+if CommandLine.arguments.contains("--interaction-fixture") {
+    let top = NSMenuItem(title: "Automation", action: nil, keyEquivalent: "")
+    let automation = NSMenu(title: "Automation")
+    automation.autoenablesItems = false
+    automation.delegate = fixture
+    top.submenu = automation
+    menu.addItem(top)
+    let nested = NSMenuItem(title: "Actions", action: nil, keyEquivalent: "")
+    let actions = NSMenu(title: "Actions")
+    actions.autoenablesItems = false
+    actions.delegate = fixture
+    nested.submenu = actions
+    automation.addItem(nested)
+    let increment = actions.addItem(withTitle: "Increment", action: #selector(Fixture.menuIncrement), keyEquivalent: "")
+    increment.target = fixture
+    for _ in 0..<2 { automation.addItem(withTitle: "Ambiguous", action: #selector(Fixture.menuIncrement), keyEquivalent: "").target = fixture }
+    let disabled = automation.addItem(withTitle: "Disabled", action: #selector(Fixture.menuIncrement), keyEquivalent: "")
+    disabled.target = fixture
+    disabled.isEnabled = false
+}
 app.received = { fixture.record($0) }
 let activityObservers = [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification].map { name in
     NotificationCenter.default.addObserver(forName: name, object: app, queue: .main) { _ in fixture.save() }

@@ -6,12 +6,19 @@ import Darwin
     var snapshot: Snapshot?
     var lastObservation: Snapshot?
     var isolation: IsolationSession?
+    var hovered: HoveredAlternate?
 
     public init() {}
 
     public func reset(releaseDisplay: Bool = false) async throws {
         snapshot = nil; lastObservation = nil
         try await isolation?.reveal()
+        if let hovered {
+            let resource = try await NativeResources.acquire(["app-\(hovered.window.pid)"])
+            defer { withExtendedLifetime(resource) {} }
+            try resource.advanceRevision(hovered.window.pid)
+            _ = try updateHover(nil, reveal: false)
+        }
         // Keep an empty display lease for this MCP connection. Rapid turns must
         // not repeatedly tear down/recreate the host's display arrangement.
         if releaseDisplay { isolation = nil }
@@ -48,7 +55,7 @@ import Darwin
         case "isolation": return try await isolate(args)
         case "sequence": return try await sequence(args)
         case "wait_for", "wait_for_change": return try await wait(args, change: action == "wait_for_change")
-        case "click", "press", "type", "key", "keys", "scroll", "drag", "paste", "set_value", "select_text", "perform_action":
+        case "click", "press", "type", "key", "keys", "scroll", "drag", "paste", "set_value", "select_text", "perform_action", "hover", "invoke_menu":
             if args["after"] != nil, ObservationMode(rawValue: args["after"] as? String ?? "") == nil {
                 throw ComputerFailure("invalid_arguments", "after must be ax, vision, or both.")
             }
