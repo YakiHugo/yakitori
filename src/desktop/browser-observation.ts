@@ -14,6 +14,7 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
+import { BrowserFrames, type BrowserReadCommand } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 
 function object(value: unknown): Record<string, unknown> {
@@ -31,9 +32,11 @@ export class BrowserDocumentConnection {
   #references = new Map<string, BrowserControlReference>()
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
+  readonly #frameCatalog: BrowserFrames
   readonly #detached = () => {
     this.#closed = true
     this.#references.clear()
+    this.#frameCatalog.close()
   }
 
   constructor(contents: WebContents) {
@@ -62,6 +65,7 @@ export class BrowserDocumentConnection {
         cause instanceof Error ? cause.message : String(cause),
       )
     }
+    this.#frameCatalog = new BrowserFrames(debug)
     debug.on("detach", this.#detached)
   }
 
@@ -102,16 +106,12 @@ export class BrowserDocumentConnection {
     this.#closed = true
     this.#references.clear()
     this.#debug.off("detach", this.#detached)
+    this.#frameCatalog.close()
   }
 
   async #read<T>(
     signal: AbortSignal,
-    run: (
-      command: (
-        method: string,
-        params?: Record<string, unknown>,
-      ) => Promise<unknown>,
-    ) => Promise<T>,
+    run: (command: BrowserReadCommand) => Promise<T>,
   ): Promise<T> {
     signal.throwIfAborted()
     if (this.#heldInputs.length)
@@ -148,13 +148,14 @@ export class BrowserDocumentConnection {
     const command = async (
       method: string,
       params: Record<string, unknown> = {},
+      sessionId?: string,
     ) => {
       if (deadline.aborted) {
         abort()
         return aborted
       }
       const pending: Promise<unknown> = debug
-        .sendCommand(method, params)
+        .sendCommand(method, params, sessionId)
         .catch((cause: unknown) => {
           throw new BrowserControlError(
             "browser_protocol_error",
@@ -171,25 +172,52 @@ export class BrowserDocumentConnection {
     }
   }
 
-  async observe(signal: AbortSignal): Promise<JsonObject> {
+  async frames(offset: number, signal: AbortSignal): Promise<JsonObject> {
+    this.#references.clear()
+    return this.#read(signal, async (command) => {
+      const { result, root } = await this.#frameCatalog.list(command, offset)
+      if (this.#contents.isDestroyed() || this.#contents.getURL() !== root.url)
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The main document changed while listing frames.",
+        )
+      return result
+    })
+  }
+
+  async observe(
+    signal: AbortSignal,
+    frameReference?: string,
+  ): Promise<JsonObject> {
     this.#references.clear()
     const contents = this.#contents
     return this.#read(signal, async (command) => {
-      const before = documentIdentity(await command("Page.getFrameTree"))
+      const selected = frameReference
+        ? await this.#frameCatalog.resolve(frameReference, command)
+        : undefined
+      const before =
+        selected?.frame.document ??
+        documentIdentity(await command("Page.getFrameTree"))
+      const root = selected?.root ?? before
       const { nodes, references, truncated } = browserAccessibility(
-        await command("Accessibility.getFullAXTree", {
-          frameId: before.frameId,
-          depth: 8,
-        }),
+        await command(
+          "Accessibility.getFullAXTree",
+          { frameId: before.frameId, depth: 8 },
+          selected?.frame.sessionId,
+        ),
         before,
+        before.frameId === root.frameId,
       )
-      const after = documentIdentity(await command("Page.getFrameTree"))
+      const after = frameReference
+        ? (await this.#frameCatalog.resolve(frameReference, command)).frame
+            .document
+        : documentIdentity(await command("Page.getFrameTree"))
       if (
         before.frameId !== after.frameId ||
         before.documentId !== after.documentId ||
         before.url !== after.url ||
         contents.isDestroyed() ||
-        contents.getURL() !== after.url
+        contents.getURL() !== root.url
       )
         throw new BrowserControlError(
           "browser_target_changed",
@@ -199,6 +227,12 @@ export class BrowserDocumentConnection {
       this.#references = references
       return {
         document: { ...after, url: after.url.slice(0, 8192) },
+        ...(frameReference
+          ? {
+              frameReference,
+              mainDocument: { ...root, url: root.url.slice(0, 8192) },
+            }
+          : {}),
         nodes,
         truncated,
         depth: 8,
