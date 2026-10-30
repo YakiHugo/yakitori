@@ -502,6 +502,15 @@ test("agent browser observations and actions use the exact owned tab through rea
   let modelCalls = 0,
     thirdRequests = 0,
     clearKeyUps = 0
+  const pointerEvents: {
+    type: string
+    trusted: boolean
+    button: number
+    detail: number
+    deltaX: number
+    deltaY: number
+    scrollTop: number
+  }[] = []
   let wantedUrl = "",
     destinationUrl = "",
     navigationUrl = ""
@@ -586,6 +595,19 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
   }
   const source = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/pointer-event") {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
+      request.on("end", () => {
+        pointerEvents.push(JSON.parse(body))
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.method === "POST" && request.url === "/key-up") {
       clearKeyUps++
       response.writeHead(204)
@@ -602,7 +624,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script>`,
+        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));</script>`,
       )
       return
     }
@@ -777,19 +799,49 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "observe", target: clicked.target },
               id: "observe_shadow_clicked",
             }
-          } else if (step === 17) {
-            shadowObservation = toolResult(body.messages ?? [], "nodes")
+          } else if (step >= 17 && step <= 26) {
+            if (step === 17)
+              shadowObservation = toolResult(body.messages ?? [], "nodes")
+            if (step % 2 === 0) {
+              const previous = toolResult(body.messages ?? [], "point")
+              tool = {
+                name: "browser",
+                input: { action: "observe", target: previous.target },
+                id: `observe_pointer_${step}`,
+              }
+            } else {
+              const previous = toolResult(body.messages ?? [], "nodes")
+              const actions = [
+                { action: "hover" },
+                { action: "scroll", deltaX: 70, deltaY: 280 },
+                { action: "click", button: "right" },
+                { action: "click", clickCount: 2 },
+                { action: "click", button: "middle" },
+              ]
+              const action = actions[(step - 17) / 2]
+              if (!action) throw new Error("Missing pointer action")
+              tool = {
+                name: "browser_input",
+                input: {
+                  ...pointerRequest(previous, "Pointer surface"),
+                  ...action,
+                },
+                id: `pointer_${step}`,
+              }
+            }
+          } else if (step === 27) {
+            const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_navigate",
               input: {
                 action: "navigate",
-                target: shadowObservation.target,
+                target: current.target,
                 fromUrl: wantedUrl,
                 url: navigationUrl,
               },
               id: "navigate_browser",
             }
-          } else if (step === 18) {
+          } else if (step === 28) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -911,7 +963,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 18; approval++)
+    for (let approval = 0; approval < 28; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -993,6 +1045,36 @@ test("agent browser observations and actions use the exact owned tab through rea
     expect(shadowObservation?.nodes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "button", name: "Shadow clicked" }),
+      ]),
+    )
+    await expect
+      .poll(() =>
+        pointerEvents.some(
+          (event) => event.type === "scroll" && event.scrollTop > 0,
+        ),
+      )
+      .toBe(true)
+    expect(pointerEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "mouseenter", trusted: true }),
+        expect.objectContaining({
+          type: "wheel",
+          trusted: true,
+          deltaX: 70,
+          deltaY: 280,
+        }),
+        expect.objectContaining({
+          type: "contextmenu",
+          trusted: true,
+          button: 2,
+        }),
+        expect.objectContaining({
+          type: "dblclick",
+          trusted: true,
+          button: 0,
+          detail: 2,
+        }),
+        expect.objectContaining({ type: "auxclick", trusted: true, button: 1 }),
       ]),
     )
     expect(navigationReceipt).toMatchObject({

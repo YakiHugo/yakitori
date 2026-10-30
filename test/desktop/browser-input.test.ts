@@ -50,11 +50,13 @@ function fixture(
     coverAfterHover?: boolean
     blockPress?: boolean
     failMouseUp?: boolean
+    navigateAfterRelease?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
     insertion = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>()
+  const mouseEvents: Record<string, unknown>[] = []
   let destroyed = false,
     keyDowns = 0,
     keyUps = 0,
@@ -134,6 +136,7 @@ function fixture(
           }
         }
         if (method === "Input.dispatchMouseEvent") {
+          mouseEvents.push(params)
           if (params.type === "mouseMoved") {
             moves++
             if (options.coverAfterHover) options.covered = true
@@ -145,6 +148,7 @@ function fixture(
             if (options.failMouseUp)
               throw new Error("Mouse-up acknowledgement lost")
             releases++
+            if (options.navigateAfterRelease) documentId = "replacement"
           }
           return {}
         }
@@ -197,6 +201,7 @@ function fixture(
     presses: () => presses,
     releases: () => releases,
     moves: () => moves,
+    mouseEvents,
     allowMouseUp: () => {
       options.failMouseUp = false
     },
@@ -422,7 +427,7 @@ it("presses and releases once after hit testing the same captured control", asyn
   try {
     const input = await f.clickRequest()
     expect(
-      await f.connection.click(input, new AbortController().signal),
+      await f.connection.inputPointer(input, new AbortController().signal),
     ).toMatchObject({
       delivered: true,
       point: { x: 20, y: 30 },
@@ -431,7 +436,7 @@ it("presses and releases once after hit testing the same captured control", asyn
     expect(f.presses()).toBe(1)
     expect(f.releases()).toBe(1)
     await expect(
-      f.connection.click(input, new AbortController().signal),
+      f.connection.inputPointer(input, new AbortController().signal),
     ).rejects.toMatchObject({ code: "browser_reference_stale" })
     expect(f.presses()).toBe(1)
   } finally {
@@ -449,7 +454,7 @@ it("refuses controls covered before or after browser pointer movement without pr
     try {
       const input = await f.clickRequest()
       await expect(
-        f.connection.click(input, new AbortController().signal),
+        f.connection.inputPointer(input, new AbortController().signal),
       ).rejects.toMatchObject({ code: "browser_input_unavailable" })
       expect(f.presses()).toBe(0)
       expect(f.releases()).toBe(0)
@@ -465,7 +470,7 @@ it("releases a mouse button after cancellation waits for its press acknowledgeme
     cancellation = new AbortController()
   try {
     const input = await f.clickRequest(),
-      pending = f.connection.click(input, cancellation.signal)
+      pending = f.connection.inputPointer(input, cancellation.signal)
     await f.insertion
     cancellation.abort()
     expect(f.releases()).toBe(0)
@@ -483,7 +488,7 @@ it("does not detach a pressed mouse button until its release is acknowledged", a
   const f = fixture({ pointer: true, failMouseUp: true })
   const input = await f.clickRequest()
   await expect(
-    f.connection.click(input, new AbortController().signal),
+    f.connection.inputPointer(input, new AbortController().signal),
   ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
   await expect(f.connection.close()).rejects.toMatchObject({
     code: "browser_cleanup_failed",
@@ -501,12 +506,165 @@ it("does not use a text reference as a pointer target", async () => {
   try {
     const input = await f.request()
     await expect(
-      f.connection.click(
+      f.connection.inputPointer(
         { action: "click", target, reference: input.reference },
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "browser_reference_stale" })
     expect(f.presses()).toBe(0)
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("parses pointer variants without accepting cross-action fields or unbounded wheel jumps", () => {
+  const shared = {
+    target,
+    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+  }
+  for (const action of ["hover", "click"])
+    expect(parseBrowserInputRequest({ action, ...shared })).toMatchObject({
+      action,
+    })
+  expect(
+    parseBrowserInputRequest({
+      action: "click",
+      ...shared,
+      button: "right",
+      clickCount: 2,
+    }),
+  ).toMatchObject({ button: "right", clickCount: 2 })
+  expect(
+    parseBrowserInputRequest({
+      action: "scroll",
+      ...shared,
+      deltaX: -100,
+      deltaY: 400,
+    }),
+  ).toMatchObject({ deltaX: -100, deltaY: 400 })
+  for (const input of [
+    { action: "hover", ...shared, button: "left" },
+    { action: "scroll", ...shared, deltaX: 0, deltaY: 0 },
+    { action: "scroll", ...shared, deltaX: 0, deltaY: 10001 },
+    { action: "scroll", ...shared, deltaX: 0, deltaY: Number.NaN },
+    { action: "scroll", ...shared, deltaY: 100 },
+    { action: "click", ...shared, deltaX: 0, deltaY: 100 },
+    { action: "click", ...shared, button: "back" },
+    { action: "click", ...shared, clickCount: 3 },
+  ])
+    expect(() => parseBrowserInputRequest(input)).toThrow()
+})
+
+it("hovers without pressing a button and consumes the observation", async () => {
+  const f = fixture({ pointer: true })
+  try {
+    const request = { ...(await f.clickRequest()), action: "hover" as const }
+    expect(
+      await f.connection.inputPointer(request, new AbortController().signal),
+    ).toMatchObject({ delivered: true, action: "hover" })
+    expect(f.presses()).toBe(0)
+    expect(f.releases()).toBe(0)
+    expect(f.moves()).toBe(1)
+    await expect(
+      f.connection.inputPointer(request, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "browser_reference_stale" })
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("aims a wheel event at the hit-tested element without changing its CSS-pixel deltas", async () => {
+  const f = fixture({ pointer: true })
+  try {
+    const request = {
+      ...(await f.clickRequest()),
+      action: "scroll" as const,
+      deltaX: -120,
+      deltaY: 500,
+    }
+    expect(
+      await f.connection.inputPointer(request, new AbortController().signal),
+    ).toMatchObject({ delivered: true, action: "scroll" })
+    expect(f.mouseEvents).toEqual([
+      { type: "mouseMoved", x: 20, y: 30, buttons: 0 },
+      {
+        type: "mouseWheel",
+        x: 20,
+        y: 30,
+        buttons: 0,
+        deltaX: -120,
+        deltaY: 500,
+      },
+    ])
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("delivers both intentional double-click pairs with the requested button and releases each", async () => {
+  for (const button of ["left", "right", "middle"] as const) {
+    const f = fixture({ pointer: true })
+    try {
+      const request = {
+        ...(await f.clickRequest()),
+        action: "click" as const,
+        button,
+        clickCount: 2 as const,
+      }
+      await f.connection.inputPointer(request, new AbortController().signal)
+      expect(f.mouseEvents.slice(1)).toEqual([
+        {
+          type: "mousePressed",
+          x: 20,
+          y: 30,
+          button,
+          buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+          clickCount: 1,
+        },
+        {
+          type: "mouseReleased",
+          x: 20,
+          y: 30,
+          button,
+          buttons: 0,
+          clickCount: 1,
+        },
+        {
+          type: "mousePressed",
+          x: 20,
+          y: 30,
+          button,
+          buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+          clickCount: 2,
+        },
+        {
+          type: "mouseReleased",
+          x: 20,
+          y: 30,
+          button,
+          buttons: 0,
+          clickCount: 2,
+        },
+      ])
+    } finally {
+      await f.connection.close()
+    }
+  }
+})
+
+it("stops an intentional double click when its first pair navigates the document", async () => {
+  const f = fixture({ pointer: true, navigateAfterRelease: true })
+  try {
+    const request = {
+      ...(await f.clickRequest()),
+      action: "click" as const,
+      clickCount: 2 as const,
+    }
+    await expect(
+      f.connection.inputPointer(request, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "browser_input_unconfirmed" })
+    expect(f.presses()).toBe(1)
+    expect(f.releases()).toBe(1)
   } finally {
     await f.connection.close()
   }

@@ -228,6 +228,15 @@ export function registerWorkspaceBrowser(
       publish(tabId, tab)
     })
     contents.on("context-menu", (_event, params) => {
+      // Page contextmenu handlers still receive the trusted pointer event.
+      // An agent-owned target must not open the host's native menu over the
+      // user's desktop, even when its CDP acknowledgement arrives first.
+      if (
+        [...connections.values()].some(
+          (entry) => entry.targetId === tab.instanceId,
+        )
+      )
+        return
       // Electron supplies the actual selection, including selections in frames.
       // Capture its source now; navigation after opening the menu cannot retarget it.
       const source = {
@@ -661,8 +670,10 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         observation =
-          input.action === "click"
-            ? await entry.connection.click(input, signal)
+          input.action === "click" ||
+          input.action === "hover" ||
+          input.action === "scroll"
+            ? await entry.connection.inputPointer(input, signal)
             : input.action === "type" || input.action === "fill"
               ? await entry.connection.inputText(input, signal)
               : await entry.connection.observe(signal)
