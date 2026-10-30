@@ -22,6 +22,7 @@ export class BrowserPendingMutations {
   async run(
     command: () => Promise<unknown>,
     closed: AbortSignal,
+    completion: "protocol" | "effect" = "protocol",
   ): Promise<unknown> {
     closed.throwIfAborted()
     const marker = {}
@@ -35,7 +36,7 @@ export class BrowserPendingMutations {
       rejectClosed(
         new BrowserControlError(
           "browser_input_unconfirmed",
-          "The original browser session disconnected before mutation acknowledgement. Do not replay automatically.",
+          "The browser mutation lost its completion channel or exceeded its completion deadline. Do not replay automatically.",
         ),
       )
     closed.addEventListener("abort", abort, { once: true })
@@ -53,7 +54,8 @@ export class BrowserPendingMutations {
           return value
         },
         (cause: unknown) => {
-          if (!dispatched || !closed.aborted) this.#pending.delete(marker)
+          if (!dispatched || (completion === "protocol" && !closed.aborted))
+            this.#pending.delete(marker)
           throw cause
         },
       )

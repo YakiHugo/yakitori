@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { setTimeout as delay } from "node:timers/promises"
 import {
   type BrowserWindow,
   clipboard,
@@ -669,7 +670,38 @@ export function registerWorkspaceBrowser(
           owner,
           targetId: target.instanceId,
           contents: tab.view.webContents,
-          connection: new BrowserDocumentConnection(tab.view.webContents),
+          connection: new BrowserDocumentConnection(
+            tab.view.webContents,
+            async (signal) => {
+              // Approval overlays temporarily hide embedded pages. Give their
+              // layout five seconds to settle without showing or focusing a tab.
+              const deadline = performance.now() + 5000
+              while (true) {
+                signal.throwIfAborted()
+                if (
+                  window.isDestroyed() ||
+                  tabs.get(target.tabId) !== tab ||
+                  tab.view.webContents.isDestroyed()
+                )
+                  throw new BrowserControlError(
+                    "browser_target_changed",
+                    "The directory upload target closed while waiting for its view.",
+                  )
+                if (
+                  tab.view.getVisible() &&
+                  window.isVisible() &&
+                  !window.isMinimized()
+                )
+                  return
+                if (performance.now() >= deadline)
+                  throw new BrowserControlError(
+                    "browser_requires_visibility",
+                    "Show this tab in Yakitori's workspace and restore its window before selecting a directory. No file selection was dispatched.",
+                  )
+                await delay(25, undefined, { signal })
+              }
+            },
+          ),
           busy: false,
         }
         connections.set(key, entry)
@@ -703,6 +735,7 @@ export function registerWorkspaceBrowser(
             observation = await entry.connection.selectOptions(input, signal)
             break
           case "upload":
+          case "upload_directory":
             observation = await entry.connection.uploadFiles(input, signal)
             break
           case "click":

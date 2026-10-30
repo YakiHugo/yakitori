@@ -3,6 +3,7 @@ import type { WebContents } from "electron"
 import {
   type BrowserCaptureRequest,
   BrowserControlError,
+  type BrowserDirectoryUploadRequest,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserSelectRequest,
@@ -16,6 +17,7 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
+import { setBrowserDirectory } from "./browser-directory.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import {
   type BrowserFrameReadMethod,
@@ -53,6 +55,7 @@ export class BrowserDocumentConnection {
   readonly #debug: WebContents["debugger"]
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
+  readonly #directoryReady: (signal: AbortSignal) => Promise<void>
   readonly #detached = () => {
     this.#closed = true
     this.#lifetime.abort(
@@ -65,8 +68,14 @@ export class BrowserDocumentConnection {
     this.#frameCatalog.close()
   }
 
-  constructor(contents: WebContents) {
+  constructor(
+    contents: WebContents,
+    directoryReady: (signal: AbortSignal) => Promise<void> = async (signal) => {
+      signal.throwIfAborted()
+    },
+  ) {
     this.#contents = contents
+    this.#directoryReady = directoryReady
     this.#mutations = new BrowserPendingMutations(() => contents.isDestroyed())
     const debug = contents.debugger
     this.#debug = debug
@@ -386,6 +395,15 @@ export class BrowserDocumentConnection {
     return reference
   }
 
+  #mutationLifetime(sessionId?: string): AbortSignal {
+    return sessionId === undefined
+      ? this.#lifetime.signal
+      : AbortSignal.any([
+          this.#lifetime.signal,
+          this.#frameCatalog.sessionClosed(sessionId),
+        ])
+  }
+
   async #inputCommand(
     method: string,
     params: Record<string, unknown>,
@@ -405,13 +423,7 @@ export class BrowserDocumentConnection {
       throw new Error("Browser input must use the owned root session.")
     // Ordinary cancellation still waits for acknowledgement. A lost original
     // session can report promptly, but unconfirmed mutations prevent cleanup.
-    const closed =
-      sessionId === undefined
-        ? this.#lifetime.signal
-        : AbortSignal.any([
-            this.#lifetime.signal,
-            this.#frameCatalog.sessionClosed(sessionId),
-          ])
+    const closed = this.#mutationLifetime(sessionId)
     try {
       return await this.#mutations.run(
         () => this.#debug.sendCommand(method, params, sessionId),
@@ -710,7 +722,7 @@ export class BrowserDocumentConnection {
   }
 
   async uploadFiles(
-    input: BrowserUploadRequest,
+    input: BrowserUploadRequest | BrowserDirectoryUploadRequest,
     signal: AbortSignal,
   ): Promise<JsonObject> {
     signal.throwIfAborted()
@@ -758,19 +770,65 @@ export class BrowserDocumentConnection {
         typeof before.directory !== "boolean"
       )
         throw new Error("Chromium returned invalid file input capabilities.")
-      if (input.files.length > 1 && before.multiple !== true)
+      if (input.action === "upload_directory" && before.directory !== true)
+        throw new BrowserControlError(
+          "browser_input_unavailable",
+          "This file input does not accept a directory.",
+        )
+      if (
+        input.action === "upload" &&
+        input.files.length > 1 &&
+        before.multiple !== true
+      )
         throw new BrowserControlError(
           "browser_input_unavailable",
           "This file input does not accept multiple files.",
         )
-      if (input.files.length && before.directory === true)
+      if (
+        input.action === "upload" &&
+        input.files.length &&
+        before.directory === true
+      )
         throw new BrowserControlError(
           "browser_input_unavailable",
           "This input requires a directory workflow, not individual file paths.",
         )
+      if (input.action === "upload_directory")
+        await this.#directoryReady(
+          AbortSignal.any([
+            signal,
+            this.#mutationLifetime(reference.frame?.sessionId),
+          ]),
+        )
       await this.#verifyDocument(reference, signal)
       attempted = true
-      if (input.files.length)
+      if (input.action === "upload_directory") {
+        signal.throwIfAborted()
+        const sessionId = reference.frame?.sessionId
+        const applied = await this.#mutations.run(
+          () =>
+            setBrowserDirectory(
+              (method, params) =>
+                this.#debug.sendCommand(method, params, sessionId),
+              objectId,
+              reference.backendNodeId,
+              input.directory,
+              group,
+            ),
+          AbortSignal.any([
+            this.#mutationLifetime(sessionId),
+            AbortSignal.timeout(10_000),
+          ]),
+          "effect",
+        )
+        if (applied === false) {
+          attempted = false
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The exact directory input changed before selection.",
+          )
+        }
+      } else if (input.files.length)
         await command("DOM.setFileInputFiles", {
           backendNodeId: reference.backendNodeId,
           files: input.files.map((file) => file.path),
@@ -815,16 +873,25 @@ export class BrowserDocumentConnection {
           relativePath: file.relativePath,
         }
       })
+      const directoryFiles =
+        input.action === "upload_directory"
+          ? new Map(input.files.map((file) => [file.relativePath, file]))
+          : undefined
       if (
         files.length !== input.files.length ||
+        (directoryFiles !== undefined &&
+          new Set(files.map((file) => file.relativePath)).size !==
+            files.length) ||
         files.some((file, index) => {
-          const expected = input.files[index]
+          const expected = directoryFiles
+            ? directoryFiles.get(file.relativePath)
+            : input.files[index]
           return (
             !expected ||
             file.name !== expected.name ||
             file.size !== expected.size ||
             file.lastModified !== expected.lastModified ||
-            file.relativePath !== ""
+            (!directoryFiles && file.relativePath !== "")
           )
         })
       )
@@ -834,15 +901,21 @@ export class BrowserDocumentConnection {
         )
       result = {
         delivered: true,
-        action: "upload",
+        action: input.action,
         filesVerified: true,
-        files: files.map(({ name, size, lastModified }) => ({
-          name,
-          size,
-          lastModified,
-        })),
-        cleared: input.files.length === 0,
-        events: input.files.length ? "chromium" : "synthetic",
+        files:
+          input.action === "upload_directory"
+            ? files
+            : files.map(({ name, size, lastModified }) => ({
+                name,
+                size,
+                lastModified,
+              })),
+        cleared: input.action === "upload" && input.files.length === 0,
+        events:
+          input.action === "upload_directory" || input.files.length
+            ? "chromium"
+            : "synthetic",
       }
     } catch (cause) {
       failure =

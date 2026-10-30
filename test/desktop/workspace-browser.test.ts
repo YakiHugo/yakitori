@@ -3,8 +3,7 @@ import type { BrowserWindow } from "electron"
 import { beforeEach, expect, it, vi } from "vitest"
 import { registerWorkspaceBrowser } from "../../src/desktop/workspace-browser.ts"
 import type {
-  BrowserNavigationRequest,
-  BrowserObservationRequest,
+  BrowserRequest,
   BrowserTarget,
 } from "../../src/protocol/desktop-browser.ts"
 import { parseBrowserNavigationRequest } from "../../src/protocol/desktop-browser.ts"
@@ -28,6 +27,7 @@ const electron = vi.hoisted(() => ({
       capturePage: ReturnType<typeof vi.fn>
     }
     setVisible: ReturnType<typeof vi.fn>
+    getVisible(): boolean
     setBounds: ReturnType<typeof vi.fn>
   }>,
   menu: [] as Array<{ label?: string; click?: () => void }>,
@@ -81,7 +81,13 @@ vi.mock("electron", async () => {
           this.url = url
         },
       })
-      setVisible = vi.fn()
+      visible = false
+      setVisible = vi.fn((visible: boolean) => {
+        this.visible = visible
+      })
+      getVisible() {
+        return this.visible
+      }
       setBounds = vi.fn()
       constructor(public options: unknown) {
         electron.views.push(this)
@@ -107,6 +113,8 @@ function setup() {
   })
   const window = Object.assign(new EventEmitter(), {
     isDestroyed: () => false,
+    isVisible: () => true,
+    isMinimized: () => false,
     webContents,
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
@@ -116,11 +124,15 @@ function setup() {
   )
   const browser = {
     ...controller,
-    request: (input: BrowserObservationRequest | BrowserNavigationRequest) =>
-      controller.request(input, {
-        sessionId: "session_owned",
-        turnId: "turn_owned",
-      }),
+    request: (input: BrowserRequest, signal?: AbortSignal) =>
+      controller.request(
+        input,
+        {
+          sessionId: "session_owned",
+          turnId: "turn_owned",
+        },
+        signal,
+      ),
   }
   const event = { sender: webContents, senderFrame: mainFrame }
   function call(name: string, input: unknown, sender = event) {
@@ -761,4 +773,162 @@ it("isolates host menus and workspace shortcuts during agent ownership and resto
   expect(electron.menu).toEqual(
     expect.arrayContaining([expect.objectContaining({ label: "Back" })]),
   )
+})
+
+it.each([
+  "show",
+  "cancel",
+  "timeout",
+])("waits for explicit directory-page visibility before exposing paths (completion: %s)", async (completion) => {
+  const { call, browser, controller } = setup()
+  call("create", { tabId: "owned", url: "https://owned.test/" })
+  const view = electron.views[0]
+  if (!view) throw new Error("Missing owned view")
+  const events = new EventEmitter(),
+    inspected = Promise.withResolvers<void>(),
+    cancellation = new AbortController()
+  let attached = false
+  const selections: unknown[] = []
+  Object.assign(view.webContents, {
+    isDevToolsOpened: () => false,
+    debugger: {
+      on: events.on.bind(events),
+      off: events.off.bind(events),
+      isAttached: () => attached,
+      attach: () => {
+        attached = true
+      },
+      detach: () => {
+        attached = false
+        events.emit("detach")
+      },
+      async sendCommand(method: string, params: Record<string, unknown> = {}) {
+        if (method === "Page.getFrameTree")
+          return {
+            frameTree: {
+              frame: {
+                id: "main",
+                loaderId: "owned",
+                url: "https://owned.test/",
+              },
+            },
+          }
+        if (method === "Accessibility.getFullAXTree")
+          return {
+            nodes: [
+              {
+                nodeId: "folder",
+                backendDOMNodeId: 31,
+                role: { value: "button" },
+                name: { value: "Folder" },
+              },
+            ],
+          }
+        if (method === "Page.createIsolatedWorld")
+          return { executionContextId: 71 }
+        if (method === "DOM.resolveNode")
+          return { object: { objectId: "folder" } }
+        if (method === "Runtime.releaseObjectGroup") return {}
+        if (method === "DOM.setFileInputFiles") {
+          selections.push(params.files)
+          return {}
+        }
+        if (method === "Runtime.callFunctionOn") {
+          if (params.returnByValue === false)
+            return { result: { objectId: "completion" } }
+          if (params.awaitPromise === true)
+            return { result: { value: "change" } }
+          const args = params.arguments as { value: boolean }[]
+          if (!args[0]?.value) {
+            inspected.resolve()
+            return {
+              result: { value: { ok: true, multiple: false, directory: true } },
+            }
+          }
+          return {
+            result: {
+              value: {
+                ok: true,
+                files: [
+                  {
+                    name: "file.txt",
+                    relativePath: "folder/file.txt",
+                    size: 5,
+                    lastModified: 1000,
+                  },
+                ],
+              },
+            },
+          }
+        }
+        throw new Error(`Unexpected directory command ${method}`)
+      },
+    },
+  })
+  const listed = await browser.request({ action: "list" })
+  const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  if (!target) throw new Error("Missing owned target")
+  const observed = await browser.request({ action: "observe", target })
+  const reference = (observed.nodes as { elementReference: string }[])[0]
+    ?.elementReference
+  if (!reference) throw new Error("Missing directory reference")
+  if (completion === "timeout") vi.useFakeTimers({ toFake: ["performance"] })
+  const pending = browser.request(
+    {
+      action: "upload_directory",
+      target,
+      reference,
+      fromUrl: "https://owned.test/",
+      directory: "/folder",
+      files: [
+        {
+          name: "file.txt",
+          size: 5,
+          lastModified: 1000,
+          relativePath: "folder/file.txt",
+        },
+      ],
+    },
+    cancellation.signal,
+  )
+  void pending.catch(() => {})
+  try {
+    await inspected.promise
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(selections).toEqual([])
+    expect(view.getVisible()).toBe(false)
+    if (completion === "show") {
+      await call("viewport", {
+        tabId: "owned",
+        visible: true,
+        x: 20,
+        y: 30,
+        width: 600,
+        height: 400,
+      })
+      expect(await pending).toMatchObject({
+        delivered: true,
+        filesVerified: true,
+      })
+      expect(selections).toEqual([["/folder"]])
+    } else if (completion === "cancel") {
+      cancellation.abort()
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" })
+      expect(selections).toEqual([])
+    } else {
+      vi.advanceTimersByTime(5001)
+      await expect(pending).rejects.toMatchObject({
+        code: "browser_requires_visibility",
+      })
+      expect(selections).toEqual([])
+    }
+  } finally {
+    vi.useRealTimers()
+    cancellation.abort()
+    await pending.catch(() => {})
+    await controller.finishTurn({
+      sessionId: "session_owned",
+      turnId: "turn_owned",
+    })
+  }
 })

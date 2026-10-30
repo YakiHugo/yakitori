@@ -1,4 +1,5 @@
 import {
+  mkdir,
   mkdtemp,
   realpath,
   rm,
@@ -175,4 +176,138 @@ it("checks shared computer admission before resolving local paths and rejects mo
         files,
       }),
     ).toThrow()
+})
+
+it("discloses recursive directory selection and inventories canonical regular-file metadata before IPC", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
+  )
+  const requests: BrowserRequest[] = []
+  const tool = createBrowserUploadTool(
+    {
+      request: async (request) => {
+        requests.push(request)
+        return { filesVerified: true }
+      },
+      finishTurn: async () => {},
+      closeSession: async () => {},
+    },
+    async () => undefined,
+    () => {},
+  )
+  const context = { workspaceRoot: root, threadId: "session", turnId: "turn" }
+  const selected = { ...input, action: "upload_directory", paths: ["folder"] }
+  try {
+    await mkdir(join(root, "folder/nested/empty"), { recursive: true })
+    await writeFile(join(root, "folder/.hidden"), "你好")
+    await writeFile(join(root, "folder/nested/empty.txt"), "")
+    await utimes(join(root, "folder/.hidden"), 1700000000, 1700000000)
+    await utimes(join(root, "folder/nested/empty.txt"), 1700000001, 1700000001)
+    if (typeof tool.approvalRequirement !== "function")
+      throw new Error("Missing disclosure permission")
+    expect(await tool.approvalRequirement(selected, context)).toMatchObject({
+      subject: "Provide a local directory to https://owned.test/",
+      reason: expect.stringContaining("all regular files recursively"),
+    })
+    expect(await tool.execute(selected, context)).toMatchObject({ ok: true })
+    expect(requests).toEqual([
+      {
+        action: "upload_directory",
+        target,
+        reference: input.reference,
+        fromUrl: input.fromUrl,
+        directory: join(root, "folder"),
+        files: expect.arrayContaining([
+          {
+            name: ".hidden",
+            relativePath: "folder/.hidden",
+            size: 6,
+            lastModified: 1700000000000,
+          },
+          {
+            name: "empty.txt",
+            relativePath: "folder/nested/empty.txt",
+            size: 0,
+            lastModified: 1700000001000,
+          },
+        ]),
+      },
+    ])
+    const parsed = parseBrowserRequest(requests[0])
+    expect(browserRequestMutates(parsed)).toBe(true)
+    for (const paths of [[], ["folder", "folder"], ["folder/.hidden"]])
+      expect(await tool.execute({ ...selected, paths }, context)).toMatchObject(
+        { ok: false },
+      )
+    const request = requests[0]
+    if (request?.action !== "upload_directory")
+      throw new Error("Missing directory request")
+    for (const relativePath of [
+      "../secret",
+      "other/.hidden",
+      "folder/../.hidden",
+      "folder//.hidden",
+      "folder/wrong-name",
+    ])
+      expect(() =>
+        parseBrowserRequest({
+          ...request,
+          files: [{ ...request.files[0], relativePath }],
+        }),
+      ).toThrow()
+    await symlink(join(root, "folder/.hidden"), join(root, "folder/alias"))
+    expect(await tool.execute(selected, context)).toMatchObject({
+      ok: false,
+      code: "unsupported_file_type",
+    })
+    expect(requests).toHaveLength(1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("bounds directory traversal and checks shared ownership before enumerating any directory", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "yakitori-directory-test-")),
+  )
+  let admitted = true
+  const tool = createBrowserUploadTool(
+    {
+      request: async () => {
+        throw new Error("Oversized directories must not reach Chromium")
+      },
+      finishTurn: async () => {},
+      closeSession: async () => {},
+    },
+    async () =>
+      admitted
+        ? undefined
+        : {
+            ok: false,
+            code: "computer_taken_over",
+            message: "Taken over",
+            content: "Taken over",
+          },
+    () => {},
+  )
+  const selected = { ...input, action: "upload_directory", paths: ["folder"] }
+  const context = { workspaceRoot: root, threadId: "session", turnId: "turn" }
+  try {
+    await mkdir(join(root, "folder"))
+    await Promise.all(
+      Array.from({ length: 257 }, (_, index) =>
+        writeFile(join(root, "folder", `${index}.txt`), "x"),
+      ),
+    )
+    expect(await tool.execute(selected, context)).toMatchObject({
+      ok: false,
+      code: "directory_too_large",
+    })
+    admitted = false
+    expect(
+      await tool.execute({ ...selected, paths: ["missing"] }, context),
+    ).toMatchObject({ ok: false, code: "computer_taken_over" })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

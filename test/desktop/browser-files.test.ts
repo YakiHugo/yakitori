@@ -15,9 +15,11 @@ const file = {
   lastModified: 1000,
 }
 
-function fixture(mismatch = false) {
+function fixture(mismatch = false, directory = false) {
   const events = new EventEmitter(),
-    mutations: string[][] = []
+    mutations: string[][] = [],
+    enumerationStarted = Promise.withResolvers<void>(),
+    enumerationReply = Promise.withResolvers<void>()
   let attached = false,
     actual = [{ name: "old.txt", size: 1, lastModified: 0, relativePath: "" }],
     clears = 0
@@ -64,7 +66,7 @@ function fixture(mismatch = false) {
           mutations.push(paths)
           // Empty CDP selection acknowledges but leaves the files unchanged,
           // matching the owned Electron probe rather than the clear helper.
-          if (paths.length)
+          if (paths.length && !directory)
             actual = [
               {
                 name: mismatch ? "changed.txt" : "file.txt",
@@ -76,6 +78,21 @@ function fixture(mismatch = false) {
           return {}
         }
         if (method === "Runtime.callFunctionOn") {
+          if (directory && params.returnByValue === false)
+            return { result: { objectId: "directory_ticket" } }
+          if (directory && params.awaitPromise === true) {
+            enumerationStarted.resolve()
+            await enumerationReply.promise
+            actual = [
+              {
+                name: "file.txt",
+                size: 5,
+                lastModified: 1000,
+                relativePath: "folder/file.txt",
+              },
+            ]
+            return { result: { value: "change" } }
+          }
           if (!params.arguments) {
             actual = []
             clears++
@@ -86,7 +103,7 @@ function fixture(mismatch = false) {
             result: {
               value: args[0]?.value
                 ? { ok: true, files: actual }
-                : { ok: true, multiple: true, directory: false },
+                : { ok: true, multiple: true, directory },
             },
           }
         }
@@ -98,6 +115,8 @@ function fixture(mismatch = false) {
   return {
     connection,
     mutations,
+    enumerationStarted,
+    enumerationReply,
     clears: () => clears,
     async reference() {
       const observed = await connection.observe(new AbortController().signal),
@@ -187,6 +206,50 @@ it("refuses a disclosure URL that differs from the captured document before expo
     ).rejects.toMatchObject({ code: "browser_target_changed" })
     expect(f.mutations).toEqual([])
   } finally {
+    await f.connection.close()
+  }
+})
+
+it("keeps directory enumeration owned beyond its protocol acknowledgement and awaits native completion on cancellation", async () => {
+  const f = fixture(false, true),
+    cancellation = new AbortController()
+  let pending: Promise<unknown> | undefined
+  try {
+    pending = f.connection.uploadFiles(
+      {
+        action: "upload_directory",
+        target,
+        reference: await f.reference(),
+        fromUrl: "https://owned.test/",
+        directory: "/folder",
+        files: [
+          {
+            name: "file.txt",
+            size: 5,
+            lastModified: 1000,
+            relativePath: "folder/file.txt",
+          },
+        ],
+      },
+      cancellation.signal,
+    )
+    const failed = expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    })
+    await f.enumerationStarted.promise
+    cancellation.abort()
+    await expect(f.connection.close()).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    expect(f.mutations).toEqual([["/folder"]])
+    expect(f.clears()).toBe(0)
+    f.enumerationReply.resolve()
+    await failed
+    await f.connection.close()
+    expect(f.mutations).toEqual([["/folder"]])
+  } finally {
+    f.enumerationReply.resolve()
+    await pending?.catch(() => {})
     await f.connection.close()
   }
 })
