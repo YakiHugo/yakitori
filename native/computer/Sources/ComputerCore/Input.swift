@@ -61,18 +61,24 @@ extension Computer {
         if action == "scroll", abs(Int64(dx)) > 2000 || abs(Int64(dy)) > 2000 {
             throw ComputerFailure("invalid_arguments", "Scroll deltas must be within 2000 pixels per action; observe between larger movements.")
         }
+        if foreground, let window, isolation?.owns(window.pid) == true {
+            throw ComputerFailure("app_concealed", "Reveal the isolated app and observe again before foreground input.")
+        }
         let keyboard = ["type", "key", "keys", "paste"].contains(action)
         let screenKeyboardPID = foreground && ticket.scope == .screen && element == nil && keyboard
             ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
         let resourcePID = window?.pid ?? screenKeyboardPID
-        let appResources = resourcePID.map { ["app-\($0)"] } ?? []
+        let appResources = resourcePID.map { isolation?.owns($0) == true ? [] : ["app-\($0)"] } ?? []
         let resources = try await NativeResources.acquire(appResources + (foreground ? ["foreground"] : []))
         defer { withExtendedLifetime(resources) {} }
         try ticket.validate(id: ticket.id, windows: windows(), displays: displays())
         if let screenKeyboardPID, NSWorkspace.shared.frontmostApplication?.processIdentifier != screenKeyboardPID {
             throw ComputerFailure("focus_changed", "The screen keyboard target changed while waiting for input ownership.")
         }
-        if let resourcePID { try resources.advanceRevision(resourcePID) }
+        if let resourcePID {
+            if isolation?.owns(resourcePID) == true { try isolation?.advanceRevision(resourcePID) }
+            else { try resources.advanceRevision(resourcePID) }
+        }
         // Consume before any action, including focus. A failed delivery must
         // never invite replay against the same stale element or screenshot.
         snapshot = nil

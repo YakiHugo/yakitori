@@ -44,6 +44,32 @@ one process incarnation. It has no branches, planning, input retries, or target
 switching. Each step resolves fresh AX state; cancellation drains held input and
 reports completed steps. Task orchestration remains in the harness.
 
+Optional virtual-display SPI is isolated behind `DisplayBridge`. A detached helper
+owns that display, independently of an MCP process. Concealment journals restoration
+intent before moving windows, holds an application lease, and restores on turn end
+or disconnect. The service recovers abandoned leases after helper crashes. If the
+display service itself dies, WindowServer rescues window geometry but can assign
+windows to a different desktop. The journal also records original desktop membership;
+recovery restores that membership before resolving AX identity, while respecting
+subsequent user movement. Unsupported SPI fails explicitly before concealment.
+An empty display lease is cached for the MCP connection after turn cleanup;
+explicit reveal or disconnect releases it. This avoids repeated host-display
+reconfiguration between rapid turns. Completed window intent is retained until
+the display has been explicitly removed and its service has reconciled the final
+WindowServer reassignment, because correct AX restoration can precede that event.
+Restoration waits within a shared two-second read-only identity budget during
+display transitions. It re-exposes exact formerly visible windows that macOS left
+unordered, and retains unresolved records with a concrete reason. Cleanup is
+awaited before helper exit; it does not replay a failed window mutation.
+The virtual backing store and batch/wait/input bounds are local allocation and
+execution safety boundaries, not model or product quotas.
+
+The optional desktop bridge was checked against DockDoor's native selectors at
+`3044142c907b9cdd49917628847a04970450a8e6` (inspected 2026-10-30), in
+[`PrivateApis.swift`](https://github.com/ejbills/DockDoor/blob/3044142c907b9cdd49917628847a04970450a8e6/DockDoor/Utilities/PrivateApis.swift).
+This is a narrow recovery mechanism, not general desktop switching or a runtime
+dependency on that project.
+
 `pnpm test:computer` checks native coordinate/identity/cancellation contracts and
 the real signed app's LaunchServices/MCP lifecycle without requesting access.
 `pnpm test:computer:live` runs an owned AppKit fixture. The cases verify actual
@@ -57,9 +83,10 @@ During development, run only the affected group or independently prepared case:
 ```sh
 pnpm build:computer
 pnpm test:computer:live --group capabilities --case 'window management'
+pnpm test:computer:live --group isolation
 ```
 
-Groups are `base` and `capabilities`; the default `all` is the final
+Groups are `base`, `capabilities`, and `isolation`; the default `all` is the final
 acceptance run. Base cases intentionally share a sequential state contract and do
 not accept a case filter. Other cases prepare their own prerequisites. Unmatched
 filters fail, and reports identify the group/filter and actually executed cases.

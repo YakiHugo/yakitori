@@ -5,11 +5,16 @@ import Darwin
 @MainActor public final class Computer {
     var snapshot: Snapshot?
     var lastObservation: Snapshot?
+    var isolation: IsolationSession?
 
     public init() {}
 
-    public func reset() async throws {
+    public func reset(releaseDisplay: Bool = false) async throws {
         snapshot = nil; lastObservation = nil
+        try await isolation?.reveal()
+        // Keep an empty display lease for this MCP connection. Rapid turns must
+        // not repeatedly tear down/recreate the host's display arrangement.
+        if releaseDisplay { isolation = nil }
     }
 
     public func execute(_ args: [String: Any]) async throws -> [String: Any] {
@@ -40,6 +45,7 @@ import Darwin
             return try await observe(args)
         case "query": return try query(args)
         case "window": return try await manageWindow(args)
+        case "isolation": return try await isolate(args)
         case "sequence": return try await sequence(args)
         case "wait_for", "wait_for_change": return try await wait(args, change: action == "wait_for_change")
         case "click", "press", "type", "key", "keys", "scroll", "drag", "paste", "set_value", "select_text", "perform_action":

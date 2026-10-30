@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "yakitori-computer", targets: ["ComputerServer"])],
     targets: [
-        .target(name: "ComputerCore"),
+        .target(name: "DisplayBridge", publicHeadersPath: "include", cSettings: [.unsafeFlags(["-fobjc-arc"])], linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("CoreGraphics")]),
+        .target(name: "ComputerCore", dependencies: ["DisplayBridge"]),
         .executableTarget(name: "ComputerServer", dependencies: ["ComputerCore"]),
     ]
 )
