@@ -40,7 +40,8 @@ export function bindDesktopBrowserRequests(
     requestId: string,
     run: () => Promise<JsonObject>,
     signal?: AbortSignal,
-    mutationMayHaveRun: () => "type" | "navigate" | undefined = () => undefined,
+    mutationMayHaveRun: () => "input" | "navigate" | undefined = () =>
+      undefined,
   ) => {
     try {
       const result = await run()
@@ -59,7 +60,7 @@ export function bindDesktopBrowserRequests(
           code:
             mutationMayHaveRun() === "navigate"
               ? "browser_navigation_unconfirmed"
-              : mutationMayHaveRun() === "type"
+              : mutationMayHaveRun() === "input"
                 ? "browser_input_unconfirmed"
                 : "browser_cancelled",
           error: mutationMayHaveRun()
@@ -164,13 +165,12 @@ export function bindDesktopBrowserRequests(
             },
             cancellation.signal,
             () =>
-              attempted &&
-              (input.action === "type" ||
-                input.action === "fill" ||
-                input.action === "navigate")
-                ? input.action === "fill"
-                  ? "type"
-                  : input.action
+              attempted
+                ? input.action === "navigate"
+                  ? "navigate"
+                  : input.action === "list" || input.action === "observe"
+                    ? undefined
+                    : "input"
                 : undefined,
           ),
         )

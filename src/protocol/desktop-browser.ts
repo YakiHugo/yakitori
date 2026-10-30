@@ -10,14 +10,45 @@ export type BrowserObservationRequest =
   | Readonly<{ action: "list"; offset?: number }>
   | Readonly<{ action: "observe"; target: BrowserTarget }>
 
-export type BrowserInputRequest = Readonly<{
+export type BrowserTextInputRequest = Readonly<{
   action: "type" | "fill"
   target: BrowserTarget
   reference: string
   text: string
 }>
 
+export type BrowserPointerRequest = Readonly<{
+  action: "click"
+  target: BrowserTarget
+  reference: string
+}>
+export type BrowserInputRequest =
+  | BrowserTextInputRequest
+  | BrowserPointerRequest
+
 export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
+  if (
+    isJsonObject(value) &&
+    Object.keys(value).length === 3 &&
+    Object.keys(value).every((key) =>
+      ["action", "target", "reference"].includes(key),
+    ) &&
+    value.action === "click" &&
+    typeof value.reference === "string" &&
+    /^browser_click_[a-f0-9-]{36}$/.test(value.reference)
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "click",
+      target: observed.target,
+      reference: value.reference,
+    }
+  }
   if (
     isJsonObject(value) &&
     Object.keys(value).length === 4 &&
@@ -46,7 +77,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type or fill with an exact target and a current inputReference; only fill accepts empty text (64KiB input-event safety bound).",
+    "Use type/fill with an inputReference and text (empty only for fill), or click with a clickReference; an exact target is required (64KiB input-event safety bound).",
   )
 }
 
@@ -105,7 +136,9 @@ export function parseBrowserRequest(
   if (isJsonObject(value) && value.action === "navigate")
     return parseBrowserNavigationRequest(value)
   return isJsonObject(value) &&
-    (value.action === "type" || value.action === "fill")
+    (value.action === "type" ||
+      value.action === "fill" ||
+      value.action === "click")
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
 }

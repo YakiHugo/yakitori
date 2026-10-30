@@ -3,7 +3,8 @@ import type { WebContents } from "electron"
 import { expect, it } from "vitest"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 import {
-  type BrowserInputRequest,
+  type BrowserPointerRequest,
+  type BrowserTextInputRequest,
   parseBrowserInputRequest,
 } from "../../src/protocol/desktop-browser.ts"
 
@@ -44,6 +45,11 @@ function fixture(
     blockKeyDown?: boolean
     failKeyUp?: boolean
     loseDebuggerOnKeyDown?: boolean
+    pointer?: boolean
+    covered?: boolean
+    coverAfterHover?: boolean
+    blockPress?: boolean
+    failMouseUp?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -51,7 +57,10 @@ function fixture(
     release = Promise.withResolvers<void>()
   let destroyed = false,
     keyDowns = 0,
-    keyUps = 0
+    keyUps = 0,
+    presses = 0,
+    releases = 0,
+    moves = 0
   let attached = false,
     documentId = "original",
     value = "first",
@@ -92,7 +101,7 @@ function fixture(
               {
                 nodeId: "field",
                 backendDOMNodeId: 31,
-                role: { value: "textbox" },
+                role: { value: options.pointer ? "button" : "textbox" },
                 name: { value: "Owned field" },
               },
             ],
@@ -106,6 +115,8 @@ function fixture(
           return {}
         }
         if (method === "Runtime.callFunctionOn") {
+          if (options.pointer)
+            return { result: { value: { ok: !options.covered, x: 20, y: 30 } } }
           const args = params.arguments as { value: boolean }[]
           if (args[1]?.value) {
             start = 0
@@ -121,6 +132,21 @@ function fixture(
               },
             },
           }
+        }
+        if (method === "Input.dispatchMouseEvent") {
+          if (params.type === "mouseMoved") {
+            moves++
+            if (options.coverAfterHover) options.covered = true
+          } else if (params.type === "mousePressed") {
+            presses++
+            insertion.resolve()
+            if (options.blockPress) await release.promise
+          } else if (params.type === "mouseReleased") {
+            if (options.failMouseUp)
+              throw new Error("Mouse-up acknowledgement lost")
+            releases++
+          }
+          return {}
         }
         if (method === "Input.dispatchKeyEvent") {
           if (params.type === "rawKeyDown") {
@@ -168,6 +194,12 @@ function fixture(
     value: () => value,
     keyDowns: () => keyDowns,
     keyUps: () => keyUps,
+    presses: () => presses,
+    releases: () => releases,
+    moves: () => moves,
+    allowMouseUp: () => {
+      options.failMouseUp = false
+    },
     attached: () => attached,
     allowKeyUp: () => {
       options.failKeyUp = false
@@ -178,7 +210,14 @@ function fixture(
     navigate: () => {
       documentId = "replacement"
     },
-    async request(text = "你好 🌍"): Promise<BrowserInputRequest> {
+    async clickRequest(): Promise<BrowserPointerRequest> {
+      const observed = await connection.observe(new AbortController().signal)
+      const reference = (observed.nodes as { clickReference: string }[])[0]
+        ?.clickReference
+      if (!reference) throw new Error("Missing pointer reference")
+      return { action: "click", target, reference }
+    },
+    async request(text = "你好 🌍"): Promise<BrowserTextInputRequest> {
       const observed = await connection.observe(new AbortController().signal)
       const reference = (observed.nodes as { inputReference: string }[])[0]
         ?.inputReference
@@ -361,4 +400,114 @@ it("never takes a user debugger to release an uncertain key and accepts target d
   f.destroy()
   await f.connection.close()
   expect(f.keyDowns()).toBe(1)
+})
+
+it("accepts a click only through an exact pointer reference without text or raw commands", () => {
+  const input = {
+    action: "click",
+    target,
+    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+  }
+  expect(parseBrowserInputRequest(input)).toEqual(input)
+  for (const invalid of [
+    { ...input, text: "" },
+    { ...input, reference: ownerReference },
+    { ...input, action: "mousePressed" },
+  ])
+    expect(() => parseBrowserInputRequest(invalid)).toThrow()
+})
+
+it("presses and releases once after hit testing the same captured control", async () => {
+  const f = fixture({ pointer: true })
+  try {
+    const input = await f.clickRequest()
+    expect(
+      await f.connection.click(input, new AbortController().signal),
+    ).toMatchObject({
+      delivered: true,
+      point: { x: 20, y: 30 },
+      documentChanged: false,
+    })
+    expect(f.presses()).toBe(1)
+    expect(f.releases()).toBe(1)
+    await expect(
+      f.connection.click(input, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "browser_reference_stale" })
+    expect(f.presses()).toBe(1)
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("refuses controls covered before or after browser pointer movement without pressing", async () => {
+  for (const afterHover of [false, true]) {
+    const f = fixture({
+      pointer: true,
+      covered: !afterHover,
+      coverAfterHover: afterHover,
+    })
+    try {
+      const input = await f.clickRequest()
+      await expect(
+        f.connection.click(input, new AbortController().signal),
+      ).rejects.toMatchObject({ code: "browser_input_unavailable" })
+      expect(f.presses()).toBe(0)
+      expect(f.releases()).toBe(0)
+      expect(f.moves()).toBe(afterHover ? 1 : 0)
+    } finally {
+      await f.connection.close()
+    }
+  }
+})
+
+it("releases a mouse button after cancellation waits for its press acknowledgement", async () => {
+  const f = fixture({ pointer: true, blockPress: true }),
+    cancellation = new AbortController()
+  try {
+    const input = await f.clickRequest(),
+      pending = f.connection.click(input, cancellation.signal)
+    await f.insertion
+    cancellation.abort()
+    expect(f.releases()).toBe(0)
+    f.release.resolve()
+    await expect(pending).rejects.toThrow()
+    expect(f.presses()).toBe(1)
+    expect(f.releases()).toBe(1)
+  } finally {
+    f.release.resolve()
+    await f.connection.close()
+  }
+})
+
+it("does not detach a pressed mouse button until its release is acknowledged", async () => {
+  const f = fixture({ pointer: true, failMouseUp: true })
+  const input = await f.clickRequest()
+  await expect(
+    f.connection.click(input, new AbortController().signal),
+  ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
+  await expect(f.connection.close()).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  expect(f.attached()).toBe(true)
+  expect(f.presses()).toBe(1)
+  f.allowMouseUp()
+  await f.connection.close()
+  expect(f.releases()).toBe(1)
+  expect(f.attached()).toBe(false)
+})
+
+it("does not use a text reference as a pointer target", async () => {
+  const f = fixture()
+  try {
+    const input = await f.request()
+    await expect(
+      f.connection.click(
+        { action: "click", target, reference: input.reference },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "browser_reference_stale" })
+    expect(f.presses()).toBe(0)
+  } finally {
+    await f.connection.close()
+  }
 })

@@ -157,6 +157,13 @@ export function registerWorkspaceBrowser(
     }
     tabs.set(tabId, tab)
     view.setVisible(false)
+    const initialBounds = window.getContentBounds()
+    view.setBounds({
+      x: 0,
+      y: 0,
+      width: Math.max(1, initialBounds.width),
+      height: Math.max(1, initialBounds.height),
+    })
     window.contentView.addChildView(view)
     const contents = view.webContents
     contents.on("before-input-event", (event, input) => {
@@ -346,7 +353,9 @@ export function registerWorkspaceBrowser(
         0,
         Math.min(bounds.height - y, Math.round(rect.height * zoom)),
       )
-      tab.view.setBounds({ x, y, width, height })
+      // Unmount cleanup hides the native surface; retain its last logical
+      // viewport so background CDP input and captures do not collapse to 0x0.
+      if (width > 0 && height > 0) tab.view.setBounds({ x, y, width, height })
       const visible =
         rect.visible &&
         width > 0 &&
@@ -634,7 +643,7 @@ export function registerWorkspaceBrowser(
         }
         entry = undefined
       }
-      if (!entry && (input.action === "type" || input.action === "fill"))
+      if (!entry && input.action !== "observe")
         throw new BrowserControlError(
           "browser_reference_stale",
           "Observe this target in the current turn before typing.",
@@ -652,9 +661,11 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         observation =
-          input.action === "type" || input.action === "fill"
-            ? await entry.connection.inputText(input, signal)
-            : await entry.connection.observe(signal)
+          input.action === "click"
+            ? await entry.connection.click(input, signal)
+            : input.action === "type" || input.action === "fill"
+              ? await entry.connection.inputText(input, signal)
+              : await entry.connection.observe(signal)
       } finally {
         entry.busy = false
       }
