@@ -1,5 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import type { DesktopBrowser } from "../protocol/desktop-browser.ts"
+import { bindDesktopBrowserRequests } from "./browser-control-handler.ts"
 import {
   isServerControlResponse,
   type ServerControlCommand,
@@ -15,6 +17,7 @@ export type ServerProcess = {
 }
 
 export type SpawnServerProcessInput = {
+  readonly desktopBrowser?: DesktopBrowser
   readonly command: string
   readonly args: readonly string[]
   readonly cwd?: string
@@ -52,6 +55,11 @@ export function spawnServerProcess(
       readonly reject: (error: Error) => void
     }
   >()
+  bindDesktopBrowserRequests(child, input.desktopBrowser, (cause) =>
+    onStderr(
+      `desktop-browser: ${cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)}`,
+    ),
+  )
   child.on("message", (message) => {
     if (!isServerControlResponse(message)) return
     const request = pending.get(message.requestId)

@@ -3273,6 +3273,119 @@ describe("application composition", () => {
     })
   })
 
+  it("browser observations share computer ownership and remain disconnected after takeover", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const { release } = await writeComputerMcpFixture(rootDir)
+      await writeFile(release, "release")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "own_native",
+              name: "computer__control",
+              input: { action: "test" },
+            },
+          ],
+        },
+        { waitForAbort: true },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "competing_browser",
+              name: "browser",
+              input: { action: "list" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Browser is busy" }] },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "disconnected_browser",
+              name: "browser",
+              input: { action: "list" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Browser remains disconnected" }] },
+      ])
+      let inspections = 0
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: provider.stream,
+        desktopBrowser: {
+          async request() {
+            inspections++
+            return { tabs: [] }
+          },
+        },
+      })
+      const server = application.createHttpServer(),
+        baseUrl = await listen(server)
+      try {
+        const first = await application.handlers.createSession({
+            workingDirectory: workspace,
+          }),
+          second = await application.handlers.createSession({
+            workingDirectory: workspace,
+          })
+        expectOk(first)
+        expectOk(second)
+        const owner = first.value.session.id,
+          reader = second.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: owner,
+            requestId: "native_owner",
+            content: inputFixture([
+              { type: "text", text: "Use native fixture" },
+            ]),
+          }),
+        )
+        await expect.poll(() => provider.callCount).toBe(2)
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: reader,
+            requestId: "read_browser",
+            content: inputFixture([{ type: "text", text: "Read browser" }]),
+          }),
+        )
+        await waitForThreadIdle(application, reader)
+        expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
+          "Computer use is busy in another conversation",
+        )
+        expect(inspections).toBe(0)
+        await rpcRequest(baseUrl, "computer/takeover", {})
+        await waitForThreadIdle(application, owner)
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: reader,
+            requestId: "read_disconnected_browser",
+            content: inputFixture([
+              { type: "text", text: "Read browser again" },
+            ]),
+          }),
+        )
+        await waitForThreadIdle(application, reader)
+        expect(JSON.stringify(provider.requests[5]?.messages)).toContain(
+          "Connect computer use before inspecting desktop browser tabs",
+        )
+        expect(inspections).toBe(0)
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        )
+        await application.close()
+      }
+    })
+  })
+
   it("disconnect refuses a computer tool already captured by a pending model request", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { called, release } = await writeComputerMcpFixture(rootDir)

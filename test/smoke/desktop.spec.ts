@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { once } from "node:events"
-import { readFile, realpath } from "node:fs/promises"
+import { readFile, realpath, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
@@ -488,6 +488,257 @@ test("embedded browser selections attach editable excerpts to main and side draf
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     )
+  }
+})
+
+test("agent browser observations use the exact owned tab through real desktop IPC and approval", async ({
+  desktop,
+}, testInfo) => {
+  const { page, userData, sidecarUrl, rendererErrors } = desktop
+  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  let modelCalls = 0
+  let wantedUrl = ""
+  let observation: Record<string, unknown> | undefined
+  const errors: string[] = []
+  const toolResult = (
+    messages: { role?: string; content?: unknown }[],
+    key: string,
+  ): Record<string, unknown> => {
+    for (const message of [...messages].reverse()) {
+      if (message.role !== "tool" || typeof message.content !== "string")
+        continue
+      let data: unknown
+      try {
+        data = JSON.parse(message.content)
+      } catch (cause) {
+        if (cause instanceof SyntaxError) continue
+        throw cause
+      }
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        !Array.isArray(data) &&
+        key in data
+      )
+        return data as Record<string, unknown>
+    }
+    throw new Error(`Missing browser tool result ${key}`)
+  }
+  const source = createServer((request, response) => {
+    if (request.method === "GET" && request.url?.startsWith("/first")) {
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<!doctype html><title>First owned source</title><label>First field<input value="first"></label>',
+      )
+      return
+    }
+    if (request.method === "GET" && request.url?.startsWith("/second")) {
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<!doctype html><title>Second owned source</title><label>Target field<input value="second"></label><label><input type="checkbox" checked>Approved option</label>',
+      )
+      return
+    }
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({ data: [{ id: "browser-model" }] }))
+      return
+    }
+    let raw = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      raw += chunk
+    })
+    request.on("end", () => {
+      try {
+        const body = JSON.parse(raw) as {
+          tools?: unknown[]
+          messages?: { role?: string; content?: unknown }[]
+        }
+        let tool: { name: string; input: unknown; id: string } | undefined
+        let text = "Browser observation"
+        if (body.tools?.length) {
+          const step = modelCalls++
+          if (step === 0)
+            tool = {
+              name: "tool_search",
+              input: { query: "browser" },
+              id: "find_browser",
+            }
+          else if (step === 1)
+            tool = {
+              name: "browser",
+              input: { action: "list" },
+              id: "list_browser",
+            }
+          else if (step === 2) {
+            const listed = toolResult(body.messages ?? [], "tabs")
+            const tab = (
+              listed.tabs as { url: string; target: unknown }[]
+            ).find((tab) => tab.url === wantedUrl)
+            if (!tab) throw new Error("The second owned tab was not listed")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: tab.target },
+              id: "observe_browser",
+            }
+          } else {
+            observation = toolResult(body.messages ?? [], "nodes")
+            text = "Observed the second owned browser."
+          }
+        }
+        const delta = tool
+          ? {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: tool.id,
+                  type: "function",
+                  function: {
+                    name: tool.name,
+                    arguments: JSON.stringify(tool.input),
+                  },
+                },
+              ],
+            }
+          : { role: "assistant", content: text }
+        response.writeHead(200, { "content-type": "text/event-stream" })
+        response.end(
+          `data: ${JSON.stringify({ id: `browser_${modelCalls}`, object: "chat.completion.chunk", created: 1, model: "browser-model", choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`,
+        )
+      } catch (cause) {
+        errors.push(String(cause))
+        response.writeHead(500)
+        response.end("Owned browser fixture failed")
+      }
+    })
+  })
+  source.listen(0, "127.0.0.1")
+  await once(source, "listening")
+  const address = source.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing owned browser source")
+  const origin = `http://127.0.0.1:${address.port}`
+  wantedUrl = `${origin}/second#owned`
+  try {
+    const helper = join(userData, "computer.cjs")
+    await writeFile(
+      helper,
+      `const rl=require('node:readline').createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+    )
+    await client.request("config/write", {
+      keyPath: ["mcp_servers", "computer"],
+      value: {
+        command: process.execPath,
+        args: [helper],
+        enabled: true,
+        required: true,
+        enabled_tools: ["control"],
+      },
+    })
+    await client.request("provider/configuration/write", {
+      id: "browser-fixture",
+      configuration: {
+        name: "Browser fixture",
+        service: "openai",
+        authentication: "none",
+        baseURL: `${origin}/v1`,
+        wireApi: "openai_chat_completions",
+        models: [{ id: "browser-model", displayName: "Browser Model" }],
+      },
+    })
+    await client.request("userPreference/write", {
+      provider: "openai",
+      model: "browser-model",
+    })
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(
+      page.getByRole("combobox", { name: "New session project", exact: true }),
+    ).toBeDisabled()
+    await page
+      .getByRole("button", { name: "Select model and effort", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Browser Model", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    for (const [url, title] of [
+      [`${origin}/first`, "First owned source"],
+      [wantedUrl, "Second owned source"],
+    ]) {
+      if (!url || !title) throw new Error("Invalid owned page fixture")
+      await page
+        .getByRole("button", { name: "Add workspace tab", exact: true })
+        .click()
+      await page.getByRole("menuitem", { name: /^Browser/ }).click()
+      await page.getByRole("textbox", { name: "Browser address" }).fill(url)
+      await page
+        .getByRole("textbox", { name: "Browser address" })
+        .press("Enter")
+      await expect(
+        page.getByRole("tab", { name: title, exact: true }),
+      ).toBeVisible()
+    }
+    await page
+      .getByRole("button", { name: "Hide workspace", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Inspect the owned browser tabs and read the second page.")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    // Exercise the normal harness permission decision for both read operations.
+    await page.getByRole("button", { name: "Allow", exact: true }).click()
+    await page.getByRole("button", { name: "Allow", exact: true }).click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Observed the second owned browser.", { exact: true }),
+    ).toBeVisible()
+    expect(errors).toEqual([])
+    expect(observation?.document).toMatchObject({
+      url: wantedUrl,
+      documentId: expect.any(String),
+    })
+    expect(observation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          nodeId: expect.any(String),
+          backendNodeId: expect.any(Number),
+          role: "textbox",
+          name: "Target field",
+          value: "second",
+          properties: expect.any(Object),
+        }),
+      ]),
+    )
+    expect(JSON.stringify(observation?.nodes)).not.toContain("First field")
+    expect(observation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "checkbox",
+          name: "Approved option",
+          properties: expect.objectContaining({ checked: "true" }),
+        }),
+      ]),
+    )
+    await testInfo.attach("owned-browser-observation", {
+      body: JSON.stringify(observation, null, 2),
+      contentType: "application/json",
+    })
+    expect(rendererErrors).toEqual([])
+  } catch (cause) {
+    await testInfo.attach("browser-model-diagnostics", {
+      body: JSON.stringify({ modelCalls, errors, observation }),
+      contentType: "application/json",
+    })
+    throw cause
+  } finally {
+    client.close()
+    source.closeAllConnections()
+    await new Promise<void>((resolve) => source.close(() => resolve()))
   }
 })
 

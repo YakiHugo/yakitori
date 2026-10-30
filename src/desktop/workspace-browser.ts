@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import {
   type BrowserWindow,
   clipboard,
@@ -6,6 +7,12 @@ import {
   session,
   WebContentsView,
 } from "electron"
+import {
+  BrowserControlError,
+  type DesktopBrowser,
+} from "../protocol/desktop-browser.ts"
+import type { JsonObject } from "../protocol/events.ts"
+import { observeBrowserDocument } from "./browser-observation.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 import type {
   WorkspaceBrowserSelection,
@@ -19,6 +26,7 @@ import {
 } from "./workspace-browser-url.ts"
 
 type BrowserTab = {
+  instanceId: string
   view: WebContentsView
   navigation: number
   layout: number
@@ -27,7 +35,9 @@ type BrowserTab = {
   error?: string
 }
 
-export function registerWorkspaceBrowser(window: BrowserWindow): void {
+export function registerWorkspaceBrowser(
+  window: BrowserWindow,
+): DesktopBrowser {
   const tabs = new Map<string, BrowserTab>()
   // A dedicated profile never shares the trusted renderer's cookies or access.
   const profile = session.fromPartition("persist:yakitori-workspace-browser")
@@ -111,7 +121,12 @@ export function registerWorkspaceBrowser(window: BrowserWindow): void {
         webSecurity: true,
       },
     })
-    const tab: BrowserTab = { view, navigation: 0, layout: 0 }
+    const tab: BrowserTab = {
+      view,
+      instanceId: `browser_target_${randomUUID()}`,
+      navigation: 0,
+      layout: 0,
+    }
     tabs.set(tabId, tab)
     view.setVisible(false)
     window.contentView.addChildView(view)
@@ -415,6 +430,74 @@ export function registerWorkspaceBrowser(window: BrowserWindow): void {
     }
     tabs.clear()
   })
+  return {
+    async request(input, signal = new AbortController().signal) {
+      signal.throwIfAborted()
+      if (window.isDestroyed())
+        throw new BrowserControlError(
+          "browser_unavailable",
+          "The desktop window is closed.",
+        )
+      if (input.action === "list") {
+        const current = [...tabs].filter(
+          ([, tab]) => !tab.view.webContents.isDestroyed(),
+        )
+        const listed: JsonObject[] = []
+        let offset = input.offset ?? 0,
+          bytes = 0
+        for (; offset < current.length; offset++) {
+          const entry = current[offset]
+          if (!entry)
+            throw new Error("Browser catalog index changed synchronously.")
+          const [tabId, tab] = entry
+          const url = tab.view.webContents.getURL(),
+            title = tab.view.webContents.getTitle()
+          const item = {
+            target: {
+              tabId,
+              webContentsId: tab.view.webContents.id,
+              instanceId: tab.instanceId,
+            },
+            url: url.slice(0, 8192),
+            title: title.slice(0, 2048),
+            metadataTruncated: url.length > 8192 || title.length > 2048,
+            loading: tab.view.webContents.isLoadingMainFrame(),
+          }
+          const size = Buffer.byteLength(JSON.stringify(item))
+          // Bound one catalog reply while keeping later targets reachable.
+          if (bytes + size > 256 * 1024) break
+          listed.push(item)
+          bytes += size
+        }
+        return {
+          tabs: listed,
+          ...(offset < current.length ? { nextOffset: offset } : {}),
+        }
+      }
+      const { target } = input
+      const tab = tabs.get(target.tabId)
+      if (
+        !tab ||
+        tab.view.webContents.isDestroyed() ||
+        tab.view.webContents.id !== target.webContentsId ||
+        tab.instanceId !== target.instanceId
+      )
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The listed browser tab closed or was replaced. List targets again.",
+        )
+      const observation = await observeBrowserDocument(
+        tab.view.webContents,
+        signal,
+      )
+      if (tabs.get(target.tabId) !== tab || tab.view.webContents.isDestroyed())
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The browser tab closed during observation.",
+        )
+      return { target, ...observation }
+    },
+  }
 }
 
 function requireTabId(input: Record<string, unknown>): string {

@@ -7,6 +7,7 @@ import {
   type YakitoriApplication,
   type YakitoriApplicationOptions,
 } from "./application.ts"
+import { createDesktopBrowserClient } from "./desktop-browser.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -47,9 +48,19 @@ export async function runYakitoriServerProcess(
   }
   const reporter =
     input.reportOperationalFailure ?? consoleOperationalFailureReporter
+  const browserClient =
+    !input.application.desktopBrowser &&
+    process.send &&
+    process.env.YAKITORI_DESKTOP_BROWSER === "1"
+      ? createDesktopBrowserClient()
+      : undefined
   const application = await createYakitoriApplication({
     ...input.application,
+    ...(browserClient ? { desktopBrowser: browserClient } : {}),
     reportOperationalFailure: reporter,
+  }).catch((cause: unknown) => {
+    browserClient?.close()
+    throw cause
   })
   const requestGate = createRequestGate()
   const server = application.createHttpServer({ requestGate })
@@ -160,8 +171,10 @@ export async function runYakitoriServerProcess(
       })
     })
     const result = await shutdown.termination
+    browserClient?.close()
     process.exit(result.clean ? 0 : 1)
   } catch (error) {
+    browserClient?.close()
     try {
       if (server.listening) {
         await shutdownHttpApplication({
