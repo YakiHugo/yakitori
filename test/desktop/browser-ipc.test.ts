@@ -380,3 +380,53 @@ it("cancels a timed-out text dispatch without abandoning its acknowledgement", a
     await f.close()
   }
 }, 20_000)
+
+it("preserves failed held-input cleanup after cancellation across both IPC endpoints", async () => {
+  const started = Promise.withResolvers<void>(),
+    aborted = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>()
+  const f = await fixture({
+    async request(_input, _owner, signal) {
+      started.resolve()
+      signal?.addEventListener("abort", () => aborted.resolve(), { once: true })
+      await release.promise
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "The owned input is still held.",
+      )
+    },
+  })
+  try {
+    let completed = false
+    const result = f.nextResult().then((value) => {
+      completed = true
+      return value
+    })
+    f.server.child.send({
+      type: "test/request",
+      input: {
+        action: "fill",
+        target: {
+          tabId: "owned",
+          webContentsId: 17,
+          instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+        },
+        reference: "browser_node_00000000-0000-4000-8000-000000000001",
+        text: "",
+      },
+    })
+    await started.promise
+    f.server.child.send({ type: "test/abort" })
+    await aborted.promise
+    expect(completed).toBe(false)
+    release.resolve()
+    expect(await result).toMatchObject({
+      ok: false,
+      code: "browser_cleanup_failed",
+      message: "The owned input is still held.",
+    })
+  } finally {
+    release.resolve()
+    await f.close()
+  }
+})
