@@ -35,12 +35,12 @@ export type BrowserControlReference = Readonly<{
   kind: "text" | "element"
   backendNodeId: number
   document: BrowserDocumentIdentity
+  frame?: Readonly<{ reference: string; sessionId?: string }>
 }>
 
 export function browserAccessibility(
   value: unknown,
   document: BrowserDocumentIdentity,
-  controls: boolean,
 ): {
   nodes: JsonObject[]
   references: Map<string, BrowserControlReference>
@@ -102,7 +102,6 @@ export function browserAccessibility(
     const role = String(primitive(node.role, 512) ?? "")
     const backendNodeId = node.backendDOMNodeId
     const reference =
-      controls &&
       typeof backendNodeId === "number" &&
       Number.isSafeInteger(backendNodeId) &&
       backendNodeId > 0 &&
@@ -110,7 +109,6 @@ export function browserAccessibility(
         ? `browser_node_${randomUUID()}`
         : undefined
     const elementReference =
-      controls &&
       typeof backendNodeId === "number" &&
       Number.isSafeInteger(backendNodeId) &&
       backendNodeId > 0 &&

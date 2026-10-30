@@ -206,7 +206,6 @@ export class BrowserDocumentConnection {
           selected?.frame.sessionId,
         ),
         before,
-        before.frameId === root.frameId,
       )
       const after = frameReference
         ? (await this.#frameCatalog.resolve(frameReference, command)).frame
@@ -224,6 +223,16 @@ export class BrowserDocumentConnection {
           "The browser navigated during observation. List and observe the current target again.",
         )
       signal.throwIfAborted()
+      if (selected && before.frameId !== root.frameId && frameReference) {
+        const frame = {
+          reference: frameReference,
+          ...(selected.frame.sessionId
+            ? { sessionId: selected.frame.sessionId }
+            : {}),
+        }
+        for (const [token, reference] of references)
+          references.set(token, { ...reference, frame })
+      }
       this.#references = references
       return {
         document: { ...after, url: after.url.slice(0, 8192) },
@@ -304,6 +313,7 @@ export class BrowserDocumentConnection {
     method: string,
     params: Record<string, unknown>,
     signal: AbortSignal,
+    sessionId?: string,
   ): Promise<unknown> {
     signal.throwIfAborted()
     if (this.closed)
@@ -311,9 +321,14 @@ export class BrowserDocumentConnection {
         "browser_unavailable",
         "The owned debugger disconnected.",
       )
+    // DOM/Runtime commands can target a frame session. Browser input belongs
+    // to the root page's focused widget, even for out-of-process iframes.
+    // That release channel survives child renderer navigation.
+    if (sessionId !== undefined && method.startsWith("Input."))
+      throw new Error("Browser input must use the owned root session.")
     // A dispatched input command must acknowledge before cancellation can finish.
     try {
-      return await this.#debug.sendCommand(method, params)
+      return await this.#debug.sendCommand(method, params, sessionId)
     } catch (cause) {
       throw new BrowserControlError(
         "browser_protocol_error",
@@ -323,17 +338,30 @@ export class BrowserDocumentConnection {
   }
 
   async #verifyDocument(
-    expected: BrowserControlReference["document"],
+    reference: BrowserControlReference,
     signal: AbortSignal,
   ) {
-    const current = documentIdentity(
-      await this.#inputCommand("Page.getFrameTree", {}, signal),
-    )
+    const frame = reference.frame
+      ? await this.#frameCatalog.resolve(
+          reference.frame.reference,
+          (method, params = {}, sessionId) =>
+            this.#inputCommand(method, params, signal, sessionId),
+        )
+      : undefined
+    const expected = reference.document
+    const current =
+      frame?.frame.document ??
+      documentIdentity(
+        await this.#inputCommand("Page.getFrameTree", {}, signal),
+      )
     if (
       current.frameId !== expected.frameId ||
       current.documentId !== expected.documentId ||
       current.url !== expected.url ||
-      this.#contents.getURL() !== current.url
+      this.#contents.isDestroyed() ||
+      this.#contents.getURL() !== (frame?.root.url ?? current.url) ||
+      (frame !== undefined &&
+        frame.frame.sessionId !== reference.frame?.sessionId)
     )
       throw new BrowserControlError(
         "browser_target_changed",
@@ -342,12 +370,29 @@ export class BrowserDocumentConnection {
     return current
   }
 
+  async #documentChanged(
+    reference: BrowserControlReference,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      await this.#verifyDocument(reference, signal)
+      return false
+    } catch (cause) {
+      if (
+        cause instanceof BrowserControlError &&
+        ["browser_target_changed", "browser_frame_stale"].includes(cause.code)
+      )
+        return true
+      throw cause
+    }
+  }
+
   async #resolveReference(
     reference: BrowserControlReference,
     group: string,
     signal: AbortSignal,
   ): Promise<string> {
-    await this.#verifyDocument(reference.document, signal)
+    await this.#verifyDocument(reference, signal)
     const world = object(
       await this.#inputCommand(
         "Page.createIsolatedWorld",
@@ -356,6 +401,7 @@ export class BrowserDocumentConnection {
           worldName: "yakitori-browser-input",
         },
         signal,
+        reference.frame?.sessionId,
       ),
     )
     if (typeof world.executionContextId !== "number")
@@ -370,6 +416,7 @@ export class BrowserDocumentConnection {
             objectGroup: group,
           },
           signal,
+          reference.frame?.sessionId,
         ),
       ).object,
     )
@@ -381,16 +428,23 @@ export class BrowserDocumentConnection {
     return resolved.objectId
   }
 
-  async #finishInput(group: string, failure: unknown): Promise<void> {
+  async #finishInput(
+    group: string,
+    failure: unknown,
+    sessionId?: string,
+  ): Promise<void> {
     // Release is independent of cancellation. A failed key-up is surfaced to
     // the shared input gate and remains retryable by finishTurn/closeSession.
     const [inputCleanup, groupCleanup] = await Promise.allSettled([
       this.#releaseInput(),
-      this.closed
+      this.closed ||
+      (sessionId !== undefined && !this.#frameCatalog.ownsSession(sessionId))
         ? undefined
-        : this.#debug.sendCommand("Runtime.releaseObjectGroup", {
-            objectGroup: group,
-          }),
+        : this.#debug.sendCommand(
+            "Runtime.releaseObjectGroup",
+            { objectGroup: group },
+            sessionId,
+          ),
     ])
     if (inputCleanup?.status === "rejected") {
       const causes = [
@@ -400,7 +454,7 @@ export class BrowserDocumentConnection {
       ]
       throw new BrowserControlError(
         "browser_cleanup_failed",
-        "Held-input cleanup could not be confirmed.",
+        "Held-input cleanup could not be confirmed. Close this browser target before resuming input.",
         {
           cause: new AggregateError(
             causes,
@@ -409,7 +463,13 @@ export class BrowserDocumentConnection {
         },
       )
     }
-    if (groupCleanup?.status === "rejected") {
+    // Remote object groups disappear with their protocol session. This does
+    // not prove input release; the held-input failure above still wins.
+    if (
+      groupCleanup?.status === "rejected" &&
+      !this.closed &&
+      (sessionId === undefined || this.#frameCatalog.ownsSession(sessionId))
+    ) {
       if (failure !== undefined)
         throw new AggregateError(
           [failure, groupCleanup.reason],
@@ -431,9 +491,8 @@ export class BrowserDocumentConnection {
       result: JsonObject | undefined,
       failure: unknown
     const command = (method: string, params: Record<string, unknown> = {}) =>
-      this.#inputCommand(method, params, signal)
-    const verifyDocument = () =>
-      this.#verifyDocument(reference.document, signal)
+      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
+    const verifyDocument = () => this.#verifyDocument(reference, signal)
     try {
       const objectId = await this.#resolveReference(reference, group, signal)
       await command("DOM.focus", { backendNodeId: reference.backendNodeId })
@@ -490,14 +549,23 @@ export class BrowserDocumentConnection {
             windowsVirtualKeyCode: 8,
           },
         })
-        await command("Input.dispatchKeyEvent", {
-          type: "rawKeyDown",
-          key: "Backspace",
-          code: "Backspace",
-          windowsVirtualKeyCode: 8,
-        })
+        await this.#inputCommand(
+          "Input.dispatchKeyEvent",
+          {
+            type: "rawKeyDown",
+            key: "Backspace",
+            code: "Backspace",
+            windowsVirtualKeyCode: 8,
+          },
+          signal,
+        )
         await this.#releaseInput()
-      } else await command("Input.insertText", { text: input.text })
+      } else
+        await this.#inputCommand(
+          "Input.insertText",
+          { text: input.text },
+          signal,
+        )
       await verifyDocument()
       const after = await read(false)
       const expected =
@@ -524,7 +592,7 @@ export class BrowserDocumentConnection {
         )
       else failure = cause
     }
-    await this.#finishInput(group, failure)
+    await this.#finishInput(group, failure, reference.frame?.sessionId)
     if (!result) throw new Error("Browser input produced no result.")
     return result
   }
@@ -536,6 +604,8 @@ export class BrowserDocumentConnection {
     signal.throwIfAborted()
     const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
+    const command = (method: string, params: Record<string, unknown> = {}) =>
+      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
     const modifiers = input.modifiers ?? []
     let dispatched = false,
       result: JsonObject | undefined,
@@ -543,23 +613,15 @@ export class BrowserDocumentConnection {
       flags = 0
     try {
       const objectId = await this.#resolveReference(reference, group, signal)
-      await this.#inputCommand(
-        "DOM.focus",
-        { backendNodeId: reference.backendNodeId },
-        signal,
-      )
+      await command("DOM.focus", { backendNodeId: reference.backendNodeId })
       const ensureFocused = async () => {
-        await this.#verifyDocument(reference.document, signal)
+        await this.#verifyDocument(reference, signal)
         const response = object(
-          await this.#inputCommand(
-            "Runtime.callFunctionOn",
-            {
-              objectId,
-              returnByValue: true,
-              functionDeclaration: `function() { return this instanceof Element && this.isConnected && this.ownerDocument === document && this.getRootNode().activeElement === this && !Element.prototype.matches.call(this, ':disabled'); }`,
-            },
-            signal,
-          ),
+          await command("Runtime.callFunctionOn", {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: `function() { return this instanceof Element && this.isConnected && this.ownerDocument === document && this.getRootNode().activeElement === this && !Element.prototype.matches.call(this, ':disabled'); }`,
+          }),
         )
         if (object(response.result).value !== true)
           throw new BrowserControlError(
@@ -618,18 +680,13 @@ export class BrowserDocumentConnection {
         )
       }
       await this.#releaseInput()
-      const current = documentIdentity(
-        await this.#inputCommand("Page.getFrameTree", {}, signal),
-      )
+      const documentChanged = await this.#documentChanged(reference, signal)
       result = {
         delivered: true,
         action: "press",
         key: input.key,
         modifiers,
-        documentChanged:
-          current.frameId !== reference.document.frameId ||
-          current.documentId !== reference.document.documentId ||
-          current.url !== reference.document.url,
+        documentChanged,
       }
     } catch (cause) {
       failure =
@@ -641,7 +698,7 @@ export class BrowserDocumentConnection {
             )
           : cause
     }
-    await this.#finishInput(group, failure)
+    await this.#finishInput(group, failure, reference.frame?.sessionId)
     if (!result) throw new Error("Browser keyboard input produced no result.")
     return result
   }
@@ -653,6 +710,11 @@ export class BrowserDocumentConnection {
     signal.throwIfAborted()
     const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
+    if (reference.frame)
+      throw new BrowserControlError(
+        "browser_frame_pointer_unavailable",
+        "Pointer actions currently require the main frame. Text and keyboard actions can use this frame's references.",
+      )
     const command = (method: string, params: Record<string, unknown> = {}) =>
       this.#inputCommand(method, params, signal)
     let dispatched = false,
@@ -724,9 +786,9 @@ export class BrowserDocumentConnection {
         ...point,
         buttons: 0,
       })
-      await this.#verifyDocument(reference.document, signal)
+      await this.#verifyDocument(reference, signal)
       await probe(false, point)
-      await this.#verifyDocument(reference.document, signal)
+      await this.#verifyDocument(reference, signal)
       signal.throwIfAborted()
       if (this.closed)
         throw new BrowserControlError(
@@ -742,7 +804,7 @@ export class BrowserDocumentConnection {
         ) {
           // A double click is two intentional press/release pairs. A failed
           // pair stops the sequence; cleanup never replays a press.
-          await this.#verifyDocument(reference.document, signal)
+          await this.#verifyDocument(reference, signal)
           await probe(false, point)
           signal.throwIfAborted()
           if (this.closed)
@@ -780,15 +842,12 @@ export class BrowserDocumentConnection {
           deltaY: input.deltaY,
         })
       }
-      const current = documentIdentity(await command("Page.getFrameTree"))
+      const documentChanged = await this.#documentChanged(reference, signal)
       result = {
         delivered: true,
         action: input.action,
         point,
-        documentChanged:
-          current.frameId !== reference.document.frameId ||
-          current.documentId !== reference.document.documentId ||
-          current.url !== reference.document.url,
+        documentChanged,
       }
     } catch (cause) {
       failure =

@@ -103,6 +103,10 @@ export class BrowserFrames {
     this.#debug.off("message", this.#message)
   }
 
+  ownsSession(sessionId: string): boolean {
+    return this.#sessions.has(sessionId)
+  }
+
   async #snapshot(command: BrowserReadCommand): Promise<{
     root: BrowserDocumentIdentity
     frames: Map<string, BrowserFrameBinding>

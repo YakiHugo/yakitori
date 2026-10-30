@@ -11,7 +11,13 @@ const target = {
 }
 const signal = () => new AbortController().signal
 
-function fixture(options: { manyLocal?: number; overflow?: boolean } = {}) {
+function fixture(
+  options: {
+    manyLocal?: number
+    overflow?: boolean
+    dropOnKeyDown?: boolean
+  } = {},
+) {
   const events = new EventEmitter(),
     calls: {
       method: string
@@ -24,6 +30,45 @@ function fixture(options: { manyLocal?: number; overflow?: boolean } = {}) {
     remoteParent = "local",
     remoteSession = "remote_session"
   const configured = new Set<string>()
+  const ids: Record<string, number> = {
+    main: 1,
+    local: 2,
+    remote: 3,
+    remote_local: 4,
+    leaf: 5,
+  }
+  const fields = new Map<
+    string,
+    { value: string; start: number; end: number }
+  >()
+  const groups = new Map<string, string | undefined>()
+  let focused = "",
+    destroyed = false
+  const field = (id: string) => {
+    let value = fields.get(id)
+    if (!value) {
+      value = { value: id, start: id.length, end: id.length }
+      fields.set(id, value)
+    }
+    return value
+  }
+  const expectedSession = (id: string) =>
+    id === "remote" || id === "remote_local"
+      ? remoteSession
+      : id === "leaf"
+        ? `${remoteSession}_leaf`
+        : undefined
+  const requireSession = (id: string, sessionId?: string) => {
+    if (expectedSession(id) !== sessionId)
+      throw new Error("Input crossed frame renderer ownership")
+  }
+  const insert = (id: string, text: string) => {
+    const value = field(id)
+    value.value =
+      value.value.slice(0, value.start) + text + value.value.slice(value.end)
+    value.start += text.length
+    value.end = value.start
+  }
   const frame = (
     id: string,
     url: string,
@@ -129,20 +174,97 @@ function fixture(options: { manyLocal?: number; overflow?: boolean } = {}) {
           nodes: [
             {
               nodeId: id,
-              backendDOMNodeId: 17,
+              backendDOMNodeId: ids[id] ?? 17,
               role: { value: "textbox" },
               name: { value: `Field ${id}` },
-              value: { value: id },
+              value: { value: field(id).value },
             },
           ],
         }
+      }
+      if (method === "Page.createIsolatedWorld") {
+        const id = String(params.frameId)
+        requireSession(id, sessionId)
+        return { executionContextId: 1000 + (ids[id] ?? 0) }
+      }
+      if (method === "DOM.resolveNode" || method === "DOM.focus") {
+        const id = Object.keys(ids).find(
+          (id) => ids[id] === params.backendNodeId,
+        )
+        if (!id) throw new Error("Unknown input node")
+        requireSession(id, sessionId)
+        if (method === "DOM.focus") {
+          focused = id
+          return {}
+        }
+        if (params.executionContextId !== 1000 + (ids[id] ?? 0))
+          throw new Error("Wrong frame execution context")
+        groups.set(String(params.objectGroup), sessionId)
+        return { object: { objectId: id } }
+      }
+      if (method === "Runtime.callFunctionOn") {
+        const id = String(params.objectId)
+        requireSession(id, sessionId)
+        if (!Array.isArray(params.arguments))
+          return { result: { value: focused === id } }
+        const value = field(id),
+          args = params.arguments as { value: boolean }[]
+        if (args[1]?.value) {
+          value.start = 0
+          value.end = value.value.length
+        }
+        return {
+          result: {
+            value: {
+              ok: focused === id,
+              value: value.value,
+              start: value.start,
+              end: value.end,
+            },
+          },
+        }
+      }
+      if (method === "Input.insertText") {
+        if (sessionId !== undefined)
+          throw new Error("Text input left the root session")
+        insert(focused, String(params.text))
+        return {}
+      }
+      if (method === "Input.dispatchKeyEvent") {
+        if (sessionId !== undefined)
+          throw new Error("Keyboard input left the root session")
+        if (params.type !== "keyUp") {
+          const childSession = expectedSession(focused)
+          if (options.dropOnKeyDown && childSession)
+            events.emit("message", {}, "Target.detachedFromTarget", {
+              sessionId: childSession,
+            })
+          const value = field(focused)
+          if (
+            Array.isArray(params.commands) &&
+            params.commands.includes("selectAll")
+          ) {
+            value.start = 0
+            value.end = value.value.length
+          } else if (typeof params.text === "string")
+            insert(focused, params.text)
+          else if (params.key === "Backspace") insert(focused, "")
+        }
+        return {}
+      }
+      if (method === "Runtime.releaseObjectGroup") {
+        const group = String(params.objectGroup)
+        if (groups.has(group) && groups.get(group) !== sessionId)
+          throw new Error("Object group cleanup crossed renderer ownership")
+        groups.delete(group)
+        return {}
       }
       throw new Error(`Unexpected frame command ${method}`)
     },
   }
   const connection = new BrowserDocumentConnection({
     debugger: debug,
-    isDestroyed: () => false,
+    isDestroyed: () => destroyed,
     isLoadingMainFrame: () => false,
     isDevToolsOpened: () => false,
     getURL: () => "https://owned.test/",
@@ -152,6 +274,10 @@ function fixture(options: { manyLocal?: number; overflow?: boolean } = {}) {
     calls,
     events,
     attached: () => attached,
+    destroy() {
+      destroyed = true
+      debug.detach()
+    },
     change(kind: string) {
       if (kind === "document") remoteLoader = "remote_v2"
       if (kind === "parent") remoteParent = "main"
@@ -163,6 +289,24 @@ function fixture(options: { manyLocal?: number; overflow?: boolean } = {}) {
         remoteSession = "replacement_session"
         attachRemote(remoteSession, "local")
       }
+    },
+    async control(id: string) {
+      const catalog = await connection.frames(0, signal())
+      const frame = (
+        catalog.frames as { frameId: string; frameReference: string }[]
+      ).find((frame) => frame.frameId === id)
+      if (!frame) throw new Error("Missing observed frame control")
+      const observed = await connection.observe(signal(), frame.frameReference)
+      const control = (
+        observed.nodes as {
+          inputReference: string
+          elementReference: string
+          value: string
+        }[]
+      )[0]
+      if (!control?.inputReference || !control.elementReference)
+        throw new Error("Missing frame input references")
+      return control
     },
     async catalog(offset = 0) {
       const output = await connection.frames(offset, signal())
@@ -239,9 +383,12 @@ it("routes same-process, cross-process and nested cross-process frame observatio
       expect(observed.nodes).toEqual([
         expect.objectContaining({ name: `Field ${id}`, value: id }),
       ])
-      expect(JSON.stringify(observed.nodes)).not.toMatch(
-        /inputReference|elementReference/,
-      )
+      expect(observed.nodes).toEqual([
+        expect.objectContaining({
+          inputReference: expect.any(String),
+          elementReference: expect.any(String),
+        }),
+      ])
     }
     const main = await f.connection.observe(signal())
     expect(main.nodes).toEqual([
@@ -349,6 +496,155 @@ it("refuses a frame tree that exceeds the host identity bookkeeping bound", asyn
     await expect(f.connection.frames(0, signal())).rejects.toMatchObject({
       code: "browser_frame_limit",
     })
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("focuses exact frame DOM and sends text through the owned root input session", async () => {
+  const f = fixture()
+  try {
+    for (const id of ["local", "remote", "leaf"]) {
+      const node = await f.control(id)
+      expect(
+        await f.connection.inputText(
+          {
+            action: "fill",
+            target,
+            reference: node.inputReference,
+            text: `changed_${id}你好`,
+          },
+          signal(),
+        ),
+      ).toMatchObject({ delivered: true, textVerified: true })
+      expect((await f.control(id)).value).toBe(`changed_${id}你好`)
+    }
+    expect(
+      f.calls
+        .filter((call) => call.method === "Input.insertText")
+        .map((call) => call.sessionId),
+    ).toEqual([undefined, undefined, undefined])
+    expect(
+      f.calls
+        .filter((call) => call.method === "DOM.resolveNode")
+        .map((call) => call.sessionId),
+    ).toEqual([undefined, "remote_session", "remote_session_leaf"])
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it.each([
+  "local",
+  "leaf",
+])("preserves keyboard selection and text replacement in the %s frame without reporting a false document change", async (id) => {
+  const f = fixture()
+  try {
+    const node = await f.control(id)
+    expect(
+      await f.connection.pressKey(
+        {
+          action: "press",
+          target,
+          reference: node.elementReference,
+          key: "a",
+          modifiers: ["Meta"],
+        },
+        signal(),
+      ),
+    ).toMatchObject({ delivered: true, documentChanged: false })
+    const selected = await f.control(id)
+    await f.connection.inputText(
+      {
+        action: "type",
+        target,
+        reference: selected.inputReference,
+        text: "replaced你好",
+      },
+      signal(),
+    )
+    expect((await f.control(id)).value).toBe("replaced你好")
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("refuses a replaced frame renderer before focusing or sending input", async () => {
+  const f = fixture()
+  try {
+    const node = await f.control("remote")
+    f.change("renderer")
+    await expect(
+      f.connection.inputText(
+        {
+          action: "fill",
+          target,
+          reference: node.inputReference,
+          text: "must not dispatch",
+        },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: "browser_frame_stale" })
+    expect(f.calls.some((call) => /^(Input|DOM)\./.test(call.method))).toBe(
+      false,
+    )
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("releases root-owned keys after a child renderer disappears without retargeting its DOM cleanup", async () => {
+  const f = fixture({ dropOnKeyDown: true })
+  try {
+    const node = await f.control("remote")
+    expect(
+      await f.connection.pressKey(
+        {
+          action: "press",
+          target,
+          reference: node.elementReference,
+          key: "Enter",
+        },
+        signal(),
+      ),
+    ).toMatchObject({ delivered: true, documentChanged: true })
+    const keys = f.calls.filter(
+      (call) => call.method === "Input.dispatchKeyEvent",
+    )
+    expect(
+      keys.map((call) => ({
+        type: call.params.type,
+        sessionId: call.sessionId,
+      })),
+    ).toEqual([
+      { type: "keyDown", sessionId: undefined },
+      { type: "keyUp", sessionId: undefined },
+    ])
+    expect(
+      f.calls.some((call) => call.method === "Runtime.releaseObjectGroup"),
+    ).toBe(false)
+    expect((await f.connection.observe(signal())).nodes).toEqual([
+      expect.objectContaining({ name: "Field main" }),
+    ])
+  } finally {
+    await f.connection.close()
+  }
+  expect(f.attached()).toBe(false)
+})
+
+it("refuses child pointer input until frame geometry is available instead of dispatching local coordinates to the main frame", async () => {
+  const f = fixture()
+  try {
+    const node = await f.control("local")
+    await expect(
+      f.connection.inputPointer(
+        { action: "click", target, reference: node.elementReference },
+        signal(),
+      ),
+    ).rejects.toMatchObject({ code: "browser_frame_pointer_unavailable" })
+    expect(
+      f.calls.some((call) => call.method === "Input.dispatchMouseEvent"),
+    ).toBe(false)
   } finally {
     await f.connection.close()
   }
