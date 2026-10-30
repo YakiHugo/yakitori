@@ -2,7 +2,9 @@ import {
   type ComputerPreviewTarget,
   parseComputerPreviewTarget,
 } from "../../protocol/computer-preview.ts"
+import type { ComputerUseStatus } from "../../protocol/connections.ts"
 import { McpConnectionError } from "../../runtime/mcp-client.ts"
+import { ComputerControlError } from "../computer-control.ts"
 import { ComputerPreviewError } from "../computer-preview.ts"
 import {
   ComputerUseUnavailableError,
@@ -18,11 +20,30 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
     ["computer/status", readComputerUseStatus],
     ["computer/connect", connectComputerUse],
     ["computer/disconnect", disconnectComputerUse],
+    ["computer/takeover", disconnectComputerUse],
   ] as const
 ).map(([method, operation]) => ({
   method,
-  scope: () => ({ kind: "global" as const, name: "config" }),
+  shutdownContinuation: method === "computer/takeover",
+  // Urgent takeover must not wait behind a slow helper permission/status probe.
+  scope: () =>
+    method === "computer/takeover"
+      ? undefined
+      : { kind: "global" as const, name: "config" },
   async invoke(params, context) {
+    const withControlState = (result: ComputerUseStatus): ComputerUseStatus => {
+      const control = context.computerControl
+      const owner = control?.owner
+      return {
+        ...result,
+        ...(owner
+          ? { inputOwner: { sessionId: owner.sessionId, turnId: owner.turnId } }
+          : {}),
+        ...(control?.takenOver
+          ? { connected: false, tools: [], takenOver: true }
+          : {}),
+      }
+    }
     if (
       params !== undefined &&
       (typeof params !== "object" ||
@@ -35,22 +56,51 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
         `${method} accepts an empty object.`,
       )
     }
-    if (context.userConfig === undefined) {
+    const config = context.userConfig
+    if (config === undefined) {
       throw new RpcMethodError(
         INTERNAL_ERROR,
         "User configuration is unavailable.",
       )
     }
+    if (method === "computer/takeover" && !context.computerControl)
+      throw new RpcMethodError(
+        INTERNAL_ERROR,
+        "Computer control is unavailable.",
+      )
     try {
-      const result = await operation(context.userConfig)
+      if (method === "computer/takeover") {
+        await context.computerControl?.takeOver(async () => {
+          await operation(config)
+          await context.computerPreview?.stopAll()
+        })
+        const result = await readComputerUseStatus(config)
+        return { result: withControlState(result) }
+      }
+      const epoch =
+        method === "computer/connect"
+          ? context.computerControl?.prepareResume()
+          : undefined
+      const result = await operation(config)
       if (method === "computer/disconnect")
         await context.computerPreview?.stopAll()
+      if (epoch !== undefined) {
+        try {
+          context.computerControl?.resume(epoch)
+        } catch (cause) {
+          if (!(cause instanceof ComputerControlError)) throw cause
+          // A connect already in flight must not undo a later takeover write.
+          await disconnectComputerUse(config)
+          throw cause
+        }
+      }
       return {
-        result,
+        result: withControlState(result),
       }
     } catch (error) {
       if (
         error instanceof ComputerUseUnavailableError ||
+        error instanceof ComputerControlError ||
         error instanceof McpConnectionError
       ) {
         throw new RpcMethodError(INTERNAL_ERROR, error.message)

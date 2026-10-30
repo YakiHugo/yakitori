@@ -9,6 +9,7 @@ import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { ComputerLivePreview } from "./computer-live-preview.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
+import { Button } from "./ui/button.tsx"
 
 export function ComputerPanel({
   apiBase,
@@ -19,6 +20,7 @@ export function ComputerPanel({
 }) {
   const [status, setStatus] = useState<ComputerUseStatus>()
   const [pending, setPending] = useState(false)
+  const [takingOver, setTakingOver] = useState(false)
   const [error, setError] = useState<string>()
   const [preview, setPreview] = useState(false)
   const screenshot = useAppStore((state) => {
@@ -54,9 +56,14 @@ export function ComputerPanel({
       : undefined
   const run = useCallback(
     async (
-      method: "computer/status" | "computer/connect" | "computer/disconnect",
+      method:
+        | "computer/status"
+        | "computer/connect"
+        | "computer/disconnect"
+        | "computer/takeover",
     ) => {
       setPending(true)
+      setTakingOver(method === "computer/takeover")
       setError(undefined)
       try {
         setStatus(await getAppRpcClient(apiBase).request(method, {}))
@@ -64,6 +71,7 @@ export function ComputerPanel({
         setError(failure instanceof Error ? failure.message : String(failure))
       } finally {
         setPending(false)
+        setTakingOver(false)
       }
     },
     [apiBase],
@@ -138,15 +146,27 @@ export function ComputerPanel({
             <Monitor size={14} />
           )}
           {pending
-            ? "Checking connection…"
+            ? takingOver
+              ? "Stopping computer input…"
+              : "Checking connection…"
             : status?.connected
               ? "Disconnect"
               : "Connect computer"}
         </button>
+        {(status?.connected || status?.inputOwner) && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pending}
+            onClick={() => void run("computer/takeover")}
+          >
+            {takingOver ? "Waiting for input release…" : "Take over computer"}
+          </Button>
+        )}
         {status?.available && (
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Disconnect prevents new actions. Use Stop in the conversation to
-            interrupt a running task.
+            Take over stops the turn using the computer and waits for its input
+            to be released. Reconnect to allow agent control again.
           </p>
         )}
         {status?.connected && (

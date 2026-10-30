@@ -24,6 +24,8 @@ export type ComputerUseStatus = Readonly<{
   backend: "yakitori-native" | null
   serverName: typeof computerUseServerName
   tools: readonly string[]
+  inputOwner?: Readonly<{ sessionId: string; turnId: string }>
+  takenOver?: boolean
   permissions?: Readonly<{ accessibility: boolean; screenRecording: boolean }>
   message?: string
 }>

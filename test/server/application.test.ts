@@ -14,7 +14,6 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
-import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
@@ -43,6 +42,7 @@ import { handleServerControlRequest } from "../../src/server/server-process.ts"
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import {
   createFauxProvider,
   readRequestAsset,
@@ -3268,6 +3268,132 @@ describe("application composition", () => {
           ),
         ).toBe(1)
       } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("takes over the owning computer turn and waits for its native cleanup while other turns keep running", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const script = join(rootDir, "computer.mjs")
+      const marker = join(rootDir, "stopping")
+      const release = join(rootDir, "release")
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(
+        script,
+        `
+import {existsSync,writeFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+createInterface({input:process.stdin}).on('line', async line => {
+  const m=JSON.parse(line); if(m.id === undefined) return;
+  const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}
+    : m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}
+    : {content:[{type:'text',text:'done'}]};
+  if(m.params?.name==='turn_ended') {
+    writeFileSync(${JSON.stringify(marker)}, 'waiting');
+    while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
+});`,
+      )
+      await writeFile(
+        configPath,
+        `[mcp_servers.computer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(script)}]\nrequired = true\n`,
+      )
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "owned_input",
+              name: "computer__control",
+              input: { action: "test" },
+            },
+          ],
+        },
+        { waitForAbort: true },
+        { waitForAbort: true },
+      ])
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: provider.stream,
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      let takeover: Promise<unknown> | undefined
+      try {
+        const first = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(first)
+        const sessionId = first.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "own_computer",
+            content: inputFixture([
+              { type: "text", text: "Use the owned computer fixture" },
+            ]),
+          }),
+        )
+        await expect.poll(() => provider.callCount).toBe(2)
+        const other = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(other)
+        const otherId = other.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: otherId,
+            requestId: "independent_work",
+            content: inputFixture([{ type: "text", text: "Keep thinking" }]),
+          }),
+        )
+        await expect.poll(() => provider.callCount).toBe(3)
+        expect(
+          await rpcRequest(baseUrl, "computer/disconnect", {}),
+        ).toMatchObject({ connected: false, inputOwner: { sessionId } })
+        expect(application.threadManager.getThread(sessionId)?.status).toBe(
+          "active",
+        )
+        let completed = false
+        takeover = rpcRequest(baseUrl, "computer/takeover", {}).then(
+          (result) => {
+            completed = true
+            return result
+          },
+        )
+        await expect
+          .poll(() => readFile(marker, "utf8").catch(() => ""))
+          .toBe("waiting")
+        expect(completed).toBe(false)
+        expect(application.threadManager.getThread(otherId)?.status).toBe(
+          "active",
+        )
+        await writeFile(release, "release")
+        expect(await takeover).toMatchObject({
+          connected: false,
+          takenOver: true,
+        })
+        await waitForThreadIdle(application, sessionId)
+        const stored = await application.threadStore.readThread(sessionId)
+        expect(
+          stored?.rollout.some(
+            ({ item }) =>
+              item.type === "turn_completed" && item.outcome === "interrupted",
+          ),
+        ).toBe(true)
+        expect(application.threadManager.getThread(otherId)?.status).toBe(
+          "active",
+        )
+        expect(await readFile(configPath, "utf8")).toContain("enabled = false")
+      } finally {
+        await writeFile(release, "release")
+        await takeover
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        )
         await application.close()
       }
     })

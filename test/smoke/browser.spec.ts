@@ -30,6 +30,7 @@ test("live computer preview renders decoded frames and pointer positions and sen
   const logs: string[] = [],
     errors: string[] = []
   const requests: { method: string; params: unknown }[] = []
+  let finishTakeover: (() => void) | undefined
   const frame = computerPreviewFrame()
   let server: ServerProcess | undefined
   page.on("pageerror", (error) => errors.push(error.message))
@@ -47,6 +48,24 @@ test("live computer preview renders decoded frames and pointer positions and sen
         id?: number
         method?: string
         params?: unknown
+      }
+      if (sent.method === "computer/takeover") {
+        requests.push({ method: sent.method, params: sent.params })
+        finishTakeover = () =>
+          socket.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: sent.id,
+              result: {
+                available: true,
+                connected: false,
+                backend: "yakitori-native",
+                serverName: "computer",
+                tools: [],
+              },
+            }),
+          )
+        return
       }
       let result: unknown
       if (sent.method === "computer/status")
@@ -162,6 +181,23 @@ test("live computer preview renders decoded frames and pointer positions and sen
       requests.find((entry) => entry.method === "computer/preview/capture")
         ?.params,
     ).toMatchObject({ target: computerPreviewCatalog.targets[0]?.target })
+    await page
+      .getByRole("button", { name: "Take over computer", exact: true })
+      .click()
+    await expect(
+      page.getByRole("button", {
+        name: "Waiting for input release…",
+        exact: true,
+      }),
+    ).toBeDisabled()
+    await expect(
+      page.getByRole("button", { name: "Connect computer", exact: true }),
+    ).toHaveCount(0)
+    if (!finishTakeover) throw new Error("Takeover request was not sent")
+    finishTakeover()
+    await expect(
+      page.getByRole("button", { name: "Connect computer", exact: true }),
+    ).toBeEnabled()
     expect(errors).toEqual([])
   } catch (cause) {
     await testInfo.attach("server.log", {

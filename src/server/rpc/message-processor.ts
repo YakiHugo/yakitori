@@ -1,5 +1,6 @@
 import type { ModelRoutePreviewer } from "../../protocol/model-routing.ts"
 import type { ChatGPTConnections } from "../chatgpt-connections.ts"
+import type { ComputerControl } from "../computer-control.ts"
 // Injection mirrors createYakitoriHttpServer so the production wiring stage
 // stays mechanical.
 import type { ComputerPreviewService } from "../computer-preview.ts"
@@ -66,6 +67,7 @@ import {
 } from "./subscriptions.ts"
 
 export type MessageProcessorOptions = Readonly<{
+  computerControl?: ComputerControl
   computerPreview?: ComputerPreviewService
   chatgpt?: ChatGPTConnections
   providerConfiguration?: ProviderService
@@ -134,6 +136,7 @@ export class MessageProcessor {
       ) => Promise<ApiReadSubscriptionResponse>)
     | undefined
   private readonly userConfig: UserConfigStore | undefined
+  private readonly computerControl: ComputerControl | undefined
   private readonly computerPreview: ComputerPreviewService | undefined
   private readonly availableProviders: readonly string[] | undefined
   private readonly reporter: OperationalFailureReporter
@@ -161,6 +164,7 @@ export class MessageProcessor {
     this.providers = options.providers
     this.subscriptionUsage = options.subscriptionUsage
     this.userConfig = options.userConfig
+    this.computerControl = options.computerControl
     this.computerPreview = options.computerPreview
     this.availableProviders = options.availableProviders
     this.reporter =
@@ -345,6 +349,9 @@ export class MessageProcessor {
       previewModel: this.previewModel,
       subscriptionUsage: this.subscriptionUsage,
       userConfig: this.userConfig,
+      ...(this.computerControl === undefined
+        ? {}
+        : { computerControl: this.computerControl }),
       ...(this.computerPreview === undefined
         ? {}
         : { computerPreview: this.computerPreview }),
