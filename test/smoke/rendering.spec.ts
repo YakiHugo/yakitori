@@ -367,7 +367,11 @@ test("Escape dismisses the model menu before interrupting the focused conversati
   await expect(interrupted).toContainText(
     "Output before interruption. Still running after ignored keys. Still running after menu dismissal.",
   )
-  await composer.fill("")
+  // Select through the editor command: fill("") changes the DOM selection,
+  // which can reach Delete before ProseMirror has observed selectionchange.
+  await composer.press("ControlOrMeta+A")
+  await composer.press("Backspace")
+  await expect(composer).toHaveText("")
   await expect(
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toBeVisible()
