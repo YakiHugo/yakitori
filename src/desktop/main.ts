@@ -92,7 +92,7 @@ async function start(): Promise<void> {
   const workspace = await resolveWorkspace()
   const storeDir = process.env.YAKITORI_STORE_DIR || yakitoriHome
   const desktopBrowser: DesktopBrowser = {
-    request(input, signal) {
+    request(input, owner, signal) {
       if (!browserController)
         return Promise.reject(
           new BrowserControlError(
@@ -100,7 +100,13 @@ async function start(): Promise<void> {
             "The desktop browser window is not ready.",
           ),
         )
-      return browserController.request(input, signal)
+      return browserController.request(input, owner, signal)
+    },
+    async finishTurn(owner) {
+      await browserController?.finishTurn(owner)
+    },
+    async closeSession(sessionId) {
+      await browserController?.closeSession(sessionId)
     },
   }
   console.log(`yakitori: store=${storeDir}`)

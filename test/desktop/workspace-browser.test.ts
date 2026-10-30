@@ -2,7 +2,10 @@ import { EventEmitter } from "node:events"
 import type { BrowserWindow } from "electron"
 import { beforeEach, expect, it, vi } from "vitest"
 import { registerWorkspaceBrowser } from "../../src/desktop/workspace-browser.ts"
-import type { BrowserTarget } from "../../src/protocol/desktop-browser.ts"
+import type {
+  BrowserObservationRequest,
+  BrowserTarget,
+} from "../../src/protocol/desktop-browser.ts"
 
 type IpcEvent = { sender: unknown; senderFrame: unknown }
 type Handler = (event: IpcEvent, input: unknown) => unknown
@@ -99,7 +102,17 @@ function setup() {
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
   })
-  const browser = registerWorkspaceBrowser(window as unknown as BrowserWindow)
+  const controller = registerWorkspaceBrowser(
+    window as unknown as BrowserWindow,
+  )
+  const browser = {
+    ...controller,
+    request: (input: BrowserObservationRequest) =>
+      controller.request(input, {
+        sessionId: "session_owned",
+        turnId: "turn_owned",
+      }),
+  }
   const event = { sender: webContents, senderFrame: mainFrame }
   function call(name: string, input: unknown, sender = event) {
     const handler = electron.handlers.get(`yakitori:browser-${name}`)

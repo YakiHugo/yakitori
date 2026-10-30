@@ -7,7 +7,7 @@ export type ComputerUseOwner = Readonly<{
 
 export class ComputerControlError extends Error {}
 
-// The lease lasts through native cleanup, including between model steps.
+// The lease lasts through native and browser cleanup, including between model steps.
 // Taking over seals admission synchronously before requesting cancellation.
 export class ComputerControl {
   #owner: ComputerUseOwner | undefined
@@ -84,7 +84,7 @@ export class ComputerControl {
   #assertCanResume(): void {
     if (this.#stopping || this.#owner)
       throw new ComputerControlError(
-        "Wait for computer input and native cleanup to stop before reconnecting.",
+        "Wait for computer input and resource cleanup to stop before reconnecting.",
       )
   }
 

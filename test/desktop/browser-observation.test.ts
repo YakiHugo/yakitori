@@ -1,6 +1,19 @@
+import { EventEmitter } from "node:events"
 import type { WebContents } from "electron"
 import { expect, it } from "vitest"
-import { observeBrowserDocument } from "../../src/desktop/browser-observation.ts"
+import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
+
+async function observeBrowserDocument(
+  contents: WebContents,
+  signal: AbortSignal,
+) {
+  const connection = new BrowserDocumentConnection(contents)
+  try {
+    return await connection.observe(signal)
+  } finally {
+    connection.close()
+  }
+}
 
 function fixture(
   options: {
@@ -8,25 +21,31 @@ function fixture(
     blocked?: boolean
     nodes?: unknown[]
     devTools?: boolean
+    failDetach?: boolean
   } = {},
 ) {
   let attached = false,
     frames = 0,
     detached = 0
-  const started = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>(),
+    events = new EventEmitter()
   const contents = {
     isDestroyed: () => false,
     isLoadingMainFrame: () => false,
     isDevToolsOpened: () => options.devTools ?? false,
     getURL: () => "https://owned.test/",
     debugger: {
+      on: events.on.bind(events),
+      off: events.off.bind(events),
       isAttached: () => attached,
       attach: () => {
         attached = true
       },
       detach: () => {
+        if (options.failDetach) throw new Error("Detach failed")
         attached = false
         detached++
+        events.emit("detach", {}, "target_closed")
       },
       async sendCommand(method: string) {
         if (method === "Page.getFrameTree")
@@ -65,6 +84,13 @@ function fixture(
     started: started.promise,
     detached: () => detached,
     attached: () => attached,
+    takeDebugger: () => {
+      events.emit("detach", {}, "replaced_with_devtools")
+      attached = true
+    },
+    allowDetach: () => {
+      options.failDetach = false
+    },
   }
 }
 
@@ -117,4 +143,41 @@ it("leaves user DevTools attached instead of taking its debugger session", async
     observeBrowserDocument(f.contents, new AbortController().signal),
   ).rejects.toMatchObject({ code: "browser_busy" })
   expect(f.detached()).toBe(0)
+})
+
+it("retains its debugger across observations and releases it explicitly", async () => {
+  const f = fixture(),
+    connection = new BrowserDocumentConnection(f.contents)
+  try {
+    await connection.observe(new AbortController().signal)
+    expect(f.attached()).toBe(true)
+    await connection.observe(new AbortController().signal)
+    expect(f.attached()).toBe(true)
+  } finally {
+    connection.close()
+  }
+  expect(f.attached()).toBe(false)
+  expect(f.detached()).toBe(1)
+})
+
+it("never detaches a debugger installed by the user after ownership was lost", async () => {
+  const f = fixture(),
+    connection = new BrowserDocumentConnection(f.contents)
+  f.takeDebugger()
+  await expect(
+    connection.observe(new AbortController().signal),
+  ).rejects.toMatchObject({ code: "browser_unavailable" })
+  connection.close()
+  expect(f.attached()).toBe(true)
+  expect(f.detached()).toBe(0)
+})
+
+it("reports failed cleanup and allows a later close to confirm release", () => {
+  const f = fixture({ failDetach: true }),
+    connection = new BrowserDocumentConnection(f.contents)
+  expect(() => connection.close()).toThrow("Detach failed")
+  expect(f.attached()).toBe(true)
+  f.allowDetach()
+  connection.close()
+  expect(f.attached()).toBe(false)
 })

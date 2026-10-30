@@ -3320,6 +3320,8 @@ describe("application composition", () => {
         ...testApplicationOptions({ rootDir, workspace }),
         stream: provider.stream,
         desktopBrowser: {
+          async finishTurn() {},
+          async closeSession() {},
           async request() {
             inspections++
             return { tabs: [] }
@@ -3381,6 +3383,95 @@ describe("application composition", () => {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         )
+        await application.close()
+      }
+    })
+  })
+
+  it("waits for browser cleanup acknowledgement before completing computer takeover", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const { release } = await writeComputerMcpFixture(rootDir)
+      await writeFile(release, "release")
+      const cleaning = Promise.withResolvers<void>(),
+        releaseCleanup = Promise.withResolvers<void>()
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "browser_owner",
+              name: "browser",
+              input: { action: "list" },
+            },
+          ],
+        },
+        { waitForAbort: true },
+      ])
+      let requestOwner: { sessionId: string; turnId: string } | undefined,
+        cleanupOwner: { sessionId: string; turnId: string } | undefined
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: provider.stream,
+        desktopBrowser: {
+          async request(_input, owner) {
+            requestOwner = owner
+            return { tabs: [] }
+          },
+          async finishTurn(owner) {
+            cleanupOwner = owner
+            cleaning.resolve()
+            await releaseCleanup.promise
+          },
+          async closeSession() {},
+        },
+      })
+      const server = application.createHttpServer(),
+        baseUrl = await listen(server)
+      let takeover: Promise<unknown> | undefined
+      try {
+        const created = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "read_owned_browser",
+            content: inputFixture([
+              { type: "text", text: "Inspect the owned browser" },
+            ]),
+          }),
+        )
+        await expect.poll(() => provider.callCount).toBe(2)
+        expect(requestOwner).toMatchObject({ sessionId })
+        let completed = false
+        takeover = rpcRequest(baseUrl, "computer/takeover", {}).then(
+          (value) => {
+            completed = true
+            return value
+          },
+        )
+        await cleaning.promise
+        expect(cleanupOwner).toEqual(requestOwner)
+        expect(completed).toBe(false)
+        expect(await rpcRequest(baseUrl, "computer/status", {})).toMatchObject({
+          inputOwner: { sessionId },
+        })
+        releaseCleanup.resolve()
+        expect(await takeover).toMatchObject({
+          connected: false,
+          takenOver: true,
+        })
+        await waitForThreadIdle(application, sessionId)
+        expect(
+          await rpcRequest(baseUrl, "computer/status", {}),
+        ).not.toHaveProperty("inputOwner")
+      } finally {
+        releaseCleanup.resolve()
+        await takeover
+        await closeServer(server)
         await application.close()
       }
     })

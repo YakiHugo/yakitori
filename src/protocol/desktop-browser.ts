@@ -81,11 +81,41 @@ export function parseBrowserObservationRequest(
   )
 }
 
+export type BrowserOwner = Readonly<{ sessionId: string; turnId: string }>
+
+export function parseBrowserOwner(value: unknown): BrowserOwner {
+  if (
+    isJsonObject(value) &&
+    Object.keys(value).length === 2 &&
+    Object.keys(value).every(
+      (key) => key === "sessionId" || key === "turnId",
+    ) &&
+    typeof value.sessionId === "string" &&
+    /^[A-Za-z0-9_-]{1,256}$/.test(value.sessionId) &&
+    typeof value.turnId === "string" &&
+    /^[A-Za-z0-9_-]{1,256}$/.test(value.turnId)
+  )
+    return { sessionId: value.sessionId, turnId: value.turnId }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Browser operations require an owning session and turn.",
+  )
+}
+
+export type BrowserOperation = Readonly<
+  | {
+      operation: "request"
+      owner: BrowserOwner
+      input: BrowserObservationRequest
+    }
+  | { operation: "finishTurn"; owner: BrowserOwner }
+  | { operation: "closeSession"; sessionId: string }
+>
 export type DesktopBrowserRequest = Readonly<{
   type: "desktop_browser/request"
   requestId: string
-  input: BrowserObservationRequest
-}>
+}> &
+  BrowserOperation
 export type DesktopBrowserCancellation = Readonly<{
   type: "desktop_browser/cancel"
   requestId: string
@@ -125,6 +155,9 @@ export function isDesktopBrowserResponse(
 export type DesktopBrowser = Readonly<{
   request(
     input: BrowserObservationRequest,
+    owner: BrowserOwner,
     signal?: AbortSignal,
   ): Promise<JsonObject>
+  finishTurn(owner: BrowserOwner): Promise<void>
+  closeSession(sessionId: string): Promise<void>
 }>
