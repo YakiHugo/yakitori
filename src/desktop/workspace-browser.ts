@@ -654,7 +654,7 @@ export function registerWorkspaceBrowser(
         }
         entry = undefined
       }
-      if (!entry && input.action !== "observe")
+      if (!entry && input.action !== "observe" && input.action !== "capture")
         throw new BrowserControlError(
           "browser_reference_stale",
           "Observe this target in the current turn before typing.",
@@ -676,15 +676,17 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         observation =
-          input.action === "press"
-            ? await entry.connection.pressKey(input, signal)
-            : input.action === "click" ||
-                input.action === "hover" ||
-                input.action === "scroll"
-              ? await entry.connection.inputPointer(input, signal)
-              : input.action === "type" || input.action === "fill"
-                ? await entry.connection.inputText(input, signal)
-                : await entry.connection.observe(signal)
+          input.action === "capture"
+            ? await entry.connection.capture(input, signal)
+            : input.action === "press"
+              ? await entry.connection.pressKey(input, signal)
+              : input.action === "click" ||
+                  input.action === "hover" ||
+                  input.action === "scroll"
+                ? await entry.connection.inputPointer(input, signal)
+                : input.action === "type" || input.action === "fill"
+                  ? await entry.connection.inputText(input, signal)
+                  : await entry.connection.observe(signal)
       } finally {
         entry.busy = false
       }

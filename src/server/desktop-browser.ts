@@ -100,7 +100,8 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
         if (
           operation.operation === "request" &&
           operation.input.action !== "list" &&
-          operation.input.action !== "observe"
+          operation.input.action !== "observe" &&
+          operation.input.action !== "capture"
         )
           return
         pending.delete(requestId)
