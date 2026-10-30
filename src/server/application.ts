@@ -1307,7 +1307,23 @@ export async function createYakitoriApplication(
               const releaseComputer = async () => {
                 try {
                   if (computerControl.owner === owner) {
-                    await settleTaskResources(() => mcpManager?.finishTurn())
+                    await settleTaskResources(async () => {
+                      const results = await Promise.allSettled([
+                        mcpManager?.finishTurn(),
+                        options.desktopBrowser?.finishTurn({
+                          sessionId: owner.sessionId,
+                          turnId: owner.turnId,
+                        }),
+                      ])
+                      const errors = results.flatMap((result) =>
+                        result.status === "rejected" ? [result.reason] : [],
+                      )
+                      if (errors.length)
+                        throw new AggregateError(
+                          errors,
+                          "Computer turn cleanup failed.",
+                        )
+                    })
                     computerControl.release(owner)
                   }
                   released.resolve()
@@ -1333,7 +1349,10 @@ export async function createYakitoriApplication(
           elicitations.cancelSession(stored.metadata.id)
           if (mcpManagers.get(stored.metadata.id) === mcpManager)
             mcpManagers.delete(stored.metadata.id)
-          const mcpResult = await Promise.allSettled([mcpExtension?.close()])
+          const mcpResult = await Promise.allSettled([
+            mcpExtension?.close(),
+            options.desktopBrowser?.closeSession(stored.metadata.id),
+          ])
           const processorResult = await Promise.allSettled([
             processor.dispose?.(),
           ])
@@ -1341,8 +1360,8 @@ export async function createYakitoriApplication(
             hookRunner?.dispose(),
           ])
           // A failed turn cleanup keeps the computer occupied until its owning
-          // Session confirms that the managed MCP connection/process is closed.
-          if (mcpResult[0]?.status === "fulfilled")
+          // Session confirms that both native and browser resources are closed.
+          if (mcpResult.every((result) => result.status === "fulfilled"))
             computerControl.releaseSession(stored.metadata.id)
           const results = [...mcpResult, ...processorResult, ...resourceResults]
           const errors = results.flatMap((result) =>

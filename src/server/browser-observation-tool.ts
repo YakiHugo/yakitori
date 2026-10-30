@@ -51,7 +51,18 @@ export function createBrowserObservationTool(
         const request = parseBrowserObservationRequest(input)
         const refusal = await admit(context)
         if (refusal) return refusal
-        const result = await browser.request(request, context.signal)
+        if (!context.threadId || !context.turnId)
+          throw new Error(
+            "Browser observations require an owning session and turn.",
+          )
+        const result = await browser.request(
+          request,
+          {
+            sessionId: context.threadId,
+            turnId: context.turnId,
+          },
+          context.signal,
+        )
         context.signal?.throwIfAborted()
         return { ok: true, output: result, content: JSON.stringify(result) }
       } catch (cause) {

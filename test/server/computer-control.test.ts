@@ -63,7 +63,7 @@ describe("computer input ownership", () => {
     const epoch = control.prepareResume()
     const disconnected = Promise.withResolvers<void>()
     const stopping = control.takeOver(() => disconnected.promise)
-    expect(() => control.prepareResume()).toThrow("native cleanup")
+    expect(() => control.prepareResume()).toThrow("resource cleanup")
     disconnected.resolve()
     await stopping
     expect(() => control.resume(epoch)).toThrow(
@@ -92,7 +92,7 @@ describe("computer input ownership", () => {
     expect(completed).toBe(false)
     expect(current.cancellations()).toBe(1)
     expect(() => control.resume(control.prepareResume())).toThrow(
-      "native cleanup",
+      "resource cleanup",
     )
     control.release(other.owner)
     expect(control.owner).toBe(current.owner)
@@ -115,7 +115,7 @@ describe("computer input ownership", () => {
     await expect(stopping).rejects.toBe(error)
     control.releaseSession("other")
     expect(() => control.resume(control.prepareResume())).toThrow(
-      "native cleanup",
+      "resource cleanup",
     )
     expect(control.acquire(other.owner)).toBe("computer_taken_over")
     control.releaseSession("failed")

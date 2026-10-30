@@ -494,8 +494,10 @@ test("embedded browser selections attach editable excerpts to main and side draf
 test("agent browser observations use the exact owned tab through real desktop IPC and approval", async ({
   desktop,
 }, testInfo) => {
-  const { page, userData, sidecarUrl, rendererErrors } = desktop
+  const { page, application, userData, sidecarUrl, rendererErrors } = desktop
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  const observed = Promise.withResolvers<void>(),
+    releaseCompletion = Promise.withResolvers<void>()
   let modelCalls = 0
   let wantedUrl = ""
   let observation: Record<string, unknown> | undefined
@@ -549,7 +551,7 @@ test("agent browser observations use the exact owned tab through real desktop IP
     request.on("data", (chunk: string) => {
       raw += chunk
     })
-    request.on("end", () => {
+    request.on("end", async () => {
       try {
         const body = JSON.parse(raw) as {
           tools?: unknown[]
@@ -582,8 +584,17 @@ test("agent browser observations use the exact owned tab through real desktop IP
               input: { action: "observe", target: tab.target },
               id: "observe_browser",
             }
+          } else if (step === 3) {
+            const previous = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: previous.target },
+              id: "observe_again",
+            }
           } else {
             observation = toolResult(body.messages ?? [], "nodes")
+            observed.resolve()
+            await releaseCompletion.promise
             text = "Observed the second owned browser."
           }
         }
@@ -692,11 +703,24 @@ test("agent browser observations use the exact owned tab through real desktop IP
     // Exercise the normal harness permission decision for both read operations.
     await page.getByRole("button", { name: "Allow", exact: true }).click()
     await page.getByRole("button", { name: "Allow", exact: true }).click()
+    await page.getByRole("button", { name: "Allow", exact: true }).click()
+    await observed.promise
+    const attached = () =>
+      application.evaluate(({ webContents }, url) => {
+        const target = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+        if (!target) throw new Error("Owned browser target disappeared")
+        return target.debugger.isAttached()
+      }, wantedUrl)
+    expect(await attached()).toBe(true)
+    releaseCompletion.resolve()
     await expect(
       page
         .getByRole("main")
         .getByText("Observed the second owned browser.", { exact: true }),
     ).toBeVisible()
+    await expect.poll(attached).toBe(false)
     expect(errors).toEqual([])
     expect(observation?.document).toMatchObject({
       url: wantedUrl,
@@ -736,6 +760,7 @@ test("agent browser observations use the exact owned tab through real desktop IP
     })
     throw cause
   } finally {
+    releaseCompletion.resolve()
     client.close()
     source.closeAllConnections()
     await new Promise<void>((resolve) => source.close(() => resolve()))

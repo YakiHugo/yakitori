@@ -9,10 +9,11 @@ import {
 } from "electron"
 import {
   BrowserControlError,
+  type BrowserOwner,
   type DesktopBrowser,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
-import { observeBrowserDocument } from "./browser-observation.ts"
+import { BrowserDocumentConnection } from "./browser-observation.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 import type {
   WorkspaceBrowserSelection,
@@ -39,6 +40,27 @@ export function registerWorkspaceBrowser(
   window: BrowserWindow,
 ): DesktopBrowser {
   const tabs = new Map<string, BrowserTab>()
+  // One current debugger per turn. Switching tabs closes the previous target;
+  // model steps reuse the connection until the owning turn confirms cleanup.
+  const connections = new Map<
+    string,
+    {
+      owner: BrowserOwner
+      targetId: string
+      connection: BrowserDocumentConnection
+      busy: boolean
+    }
+  >()
+  const ownerKey = (owner: BrowserOwner) =>
+    JSON.stringify([owner.sessionId, owner.turnId])
+  const finishTurn = async (owner: BrowserOwner) => {
+    const key = ownerKey(owner),
+      entry = connections.get(key)
+    if (!entry) return
+    entry.connection.close()
+    connections.delete(key)
+  }
+
   // A dedicated profile never shares the trusted renderer's cookies or access.
   const profile = session.fromPartition("persist:yakitori-workspace-browser")
   profile.setPermissionRequestHandler((_contents, _permission, callback) =>
@@ -431,7 +453,7 @@ export function registerWorkspaceBrowser(
     tabs.clear()
   })
   return {
-    async request(input, signal = new AbortController().signal) {
+    async request(input, owner, signal = new AbortController().signal) {
       signal.throwIfAborted()
       if (window.isDestroyed())
         throw new BrowserControlError(
@@ -486,16 +508,62 @@ export function registerWorkspaceBrowser(
           "browser_target_changed",
           "The listed browser tab closed or was replaced. List targets again.",
         )
-      const observation = await observeBrowserDocument(
-        tab.view.webContents,
-        signal,
+      const key = ownerKey(owner)
+      let entry = connections.get(key)
+      if (
+        entry?.busy ||
+        [...connections.values()].some(
+          (current) =>
+            current !== entry && current.targetId === target.instanceId,
+        )
       )
+        throw new BrowserControlError(
+          "browser_busy",
+          "This browser target already has an active owner or request.",
+        )
+      if (
+        entry &&
+        (entry.targetId !== target.instanceId || entry.connection.closed)
+      ) {
+        entry.connection.close()
+        connections.delete(key)
+        entry = undefined
+      }
+      if (!entry) {
+        entry = {
+          owner,
+          targetId: target.instanceId,
+          connection: new BrowserDocumentConnection(tab.view.webContents),
+          busy: false,
+        }
+        connections.set(key, entry)
+      }
+      entry.busy = true
+      let observation: JsonObject
+      try {
+        observation = await entry.connection.observe(signal)
+      } finally {
+        entry.busy = false
+      }
       if (tabs.get(target.tabId) !== tab || tab.view.webContents.isDestroyed())
         throw new BrowserControlError(
           "browser_target_changed",
           "The browser tab closed during observation.",
         )
       return { target, ...observation }
+    },
+    finishTurn,
+    async closeSession(sessionId) {
+      const results = await Promise.allSettled(
+        [...connections.values()]
+          .filter((entry) => entry.owner.sessionId === sessionId)
+          .map((entry) => finishTurn(entry.owner)),
+      )
+      const errors = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      )
+      if (errors.length)
+        throw new AggregateError(errors, "Browser session cleanup failed.")
     },
   }
 }

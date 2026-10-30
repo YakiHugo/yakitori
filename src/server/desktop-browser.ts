@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import {
   BrowserControlError,
+  type BrowserOperation,
   type DesktopBrowser,
   type DesktopBrowserCancellation,
   type DesktopBrowserRequest,
@@ -70,60 +71,71 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
     }
     pending.clear()
   }
+  const send = (
+    operation: BrowserOperation,
+    signal?: AbortSignal,
+  ): Promise<JsonObject> => {
+    signal?.throwIfAborted()
+    if (closed || !process.connected || !process.send)
+      return Promise.reject(
+        new BrowserControlError(
+          "browser_unavailable",
+          "Use the desktop app for browser control.",
+        ),
+      )
+    const requestId = `browser_${randomUUID()}`
+    return new Promise((resolve, reject) => {
+      const abort = () => cancel(requestId)
+      // Observation has a 10s deadline; allow 2s for IPC teardown. A timed-out
+      // request never proves cleanup: finishTurn must still acknowledge it.
+      const timer = setTimeout(() => {
+        cancel(requestId)
+        pending.delete(requestId)
+        dispose()
+        reject(
+          new BrowserControlError(
+            "browser_timeout",
+            "The desktop browser did not acknowledge operation cleanup.",
+          ),
+        )
+      }, 12_000)
+      timer.unref()
+      const dispose = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener("abort", abort)
+      }
+      pending.set(requestId, {
+        resolve,
+        reject,
+        dispose,
+        ...(signal ? { signal } : {}),
+      })
+      signal?.addEventListener("abort", abort, { once: true })
+      const message: DesktopBrowserRequest = {
+        type: "desktop_browser/request",
+        requestId,
+        ...operation,
+      }
+      process.send?.(message, (error) => {
+        if (!error) return
+        pending.delete(requestId)
+        dispose()
+        reject(new BrowserControlError("browser_unavailable", error.message))
+      })
+      if (signal?.aborted) abort()
+    })
+  }
   process.on("message", receive)
   process.once("disconnect", close)
   return {
     close,
-    request(input, signal) {
-      signal?.throwIfAborted()
-      if (closed || !process.connected || !process.send)
-        return Promise.reject(
-          new BrowserControlError(
-            "browser_unavailable",
-            "Use the desktop app for browser control.",
-          ),
-        )
-      const requestId = `browser_${randomUUID()}`
-      return new Promise((resolve, reject) => {
-        const abort = () => cancel(requestId)
-        // Parent read-only observations have a 10s operation deadline. Allow
-        // IPC delivery/teardown an additional 2s; this is a host safety bound.
-        const timer = setTimeout(() => {
-          cancel(requestId)
-          pending.delete(requestId)
-          dispose()
-          reject(
-            new BrowserControlError(
-              "browser_timeout",
-              "The desktop browser did not acknowledge observation cleanup.",
-            ),
-          )
-        }, 12_000)
-        timer.unref()
-        const dispose = () => {
-          clearTimeout(timer)
-          signal?.removeEventListener("abort", abort)
-        }
-        pending.set(requestId, {
-          resolve,
-          reject,
-          dispose,
-          ...(signal ? { signal } : {}),
-        })
-        signal?.addEventListener("abort", abort, { once: true })
-        const message: DesktopBrowserRequest = {
-          type: "desktop_browser/request",
-          requestId,
-          input,
-        }
-        process.send?.(message, (error) => {
-          if (!error) return
-          pending.delete(requestId)
-          dispose()
-          reject(new BrowserControlError("browser_unavailable", error.message))
-        })
-        if (signal?.aborted) abort()
-      })
+    request: (input, owner, signal) =>
+      send({ operation: "request", input, owner }, signal),
+    async finishTurn(owner) {
+      await send({ operation: "finishTurn", owner })
+    },
+    async closeSession(sessionId) {
+      await send({ operation: "closeSession", sessionId })
     },
   }
 }
