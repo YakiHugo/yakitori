@@ -7,11 +7,15 @@ import Darwin
     var lastObservation: Snapshot?
     var isolation: IsolationSession?
     var hovered: HoveredAlternate?
+    var accessibilityProviders: [Int32: Date] = [:]
 
     public init() {}
 
     public func reset(releaseDisplay: Bool = false) async throws {
         snapshot = nil; lastObservation = nil
+        // Keep live provider requests across turns: reissuing can restart a
+        // Chromium debounce before its tree has appeared. Prune dead identities.
+        accessibilityProviders = accessibilityProviders.filter { processLaunchDate($0.key) == $0.value }
         try await isolation?.reveal()
         if let hovered {
             let resource = try await NativeResources.acquire(["app-\(hovered.window.pid)"])
@@ -42,7 +46,7 @@ import Darwin
         case "list":
             return try result(["apps": NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map {
                 ["pid": $0.processIdentifier, "name": $0.localizedName ?? "", "bundle_id": $0.bundleIdentifier ?? "", "app_path": $0.bundleURL?.path ?? "",
-                    "launch_time": $0.launchDate.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "hidden": $0.isHidden, "active": $0.isActive] as [String: Any]
+                    "launch_time": processLaunchDate($0.processIdentifier).map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "hidden": $0.isHidden, "active": $0.isActive] as [String: Any]
             }, "windows": try windows(includeHidden: args["include_hidden"] as? Bool == true).map { window in
                 ["pid": window.pid, "window_id": window.windowID, "frame": frameData(window.frame), "launch_time": window.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull()] as [String: Any]
             }, "displays": try displays().map { ["display_id": $0.id, "frame": frameData($0.frame), "main": $0.id == CGMainDisplayID()] as [String: Any] }])
@@ -85,7 +89,7 @@ import Darwin
                   let bounds = row[kCGWindowBounds as String] as? [String: Any],
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   frame.width > 1, frame.height > 1 else { return nil }
-            return WindowIdentity(pid: pid, launched: NSRunningApplication(processIdentifier: pid)?.launchDate, windowID: id, frame: frame, layer: layer)
+            return WindowIdentity(pid: pid, launched: processLaunchDate(pid), windowID: id, frame: frame, layer: layer)
         }
     }
 }

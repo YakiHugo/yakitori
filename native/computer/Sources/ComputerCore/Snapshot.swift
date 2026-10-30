@@ -181,17 +181,19 @@ func elementFrame(_ element: AXUIElement) -> CGRect? {
     return CGRect(origin: origin, size: dimensions)
 }
 
-func windowElement(_ window: WindowIdentity, deadline: Date = Date().addingTimeInterval(1), requireFrame: Bool = true) -> AXUIElement? {
+func windowElement(_ window: WindowIdentity, deadline: Date = Date().addingTimeInterval(1)) -> AXUIElement? {
     let app = AXUIElementCreateApplication(window.pid)
     AXUIElementSetMessagingTimeout(app, 0.5)
     let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
-    // Prefer the optional native window-ID bridge. The public fallback requires
-    // an exact, unique frame and never guesses between overlapping windows.
+    // The exact native ID joins AX to WindowServer. Their geometry can differ
+    // by system-drawn borders, so frame equality is only an identity fallback
+    // when the ID bridge is unavailable. Snapshot validation separately checks
+    // the process incarnation and current WindowServer geometry before input.
     var matches: [AXUIElement] = []
     for candidate in windows {
         guard Date() < deadline else { return nil }
         if let id = accessibilityWindowID(candidate) {
-            if id == window.windowID && (!requireFrame || elementFrame(candidate) == window.frame) { matches.append(candidate) }
+            if id == window.windowID { matches.append(candidate) }
         } else if elementFrame(candidate) == window.frame { matches.append(candidate) }
     }
     return matches.count == 1 ? matches[0] : nil

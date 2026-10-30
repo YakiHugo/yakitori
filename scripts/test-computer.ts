@@ -246,3 +246,5 @@ if (helperPid !== undefined) {
   }
   console.log("Native app exits after its MCP connection closes.")
 }
+// Compile the independent WebKit fixture in macOS CI without requiring GUI/TCC.
+await prepareComputerFixture(resolve("native/computer/Tests/WebFixture.swift"))

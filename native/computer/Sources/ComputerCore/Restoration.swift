@@ -9,9 +9,13 @@ struct ParkedWindow: Codable {
     let windowID: UInt32
     let original: CGRect
     let parked: CGRect
+    let serverOriginOffset: CGPoint
     let originalSpace: UInt64
     let parkedDisplay: UInt32
     let displayServicePID: Int32
+
+    var originalServerOrigin: CGPoint { CGPoint(x: original.minX + serverOriginOffset.x, y: original.minY + serverOriginOffset.y) }
+    var parkedServerOrigin: CGPoint { CGPoint(x: parked.minX + serverOriginOffset.x, y: parked.minY + serverOriginOffset.y) }
 }
 
 enum IsolationFiles {
@@ -45,7 +49,7 @@ enum WindowRestoration {
 
 @MainActor func restoreParkedWindow(_ record: ParkedWindow, allowSpaceMove: Bool = true) throws -> WindowRestoration {
     guard let app = NSRunningApplication(processIdentifier: record.pid), !app.isTerminated,
-          app.launchDate?.timeIntervalSince1970 == record.launchTime else { return .complete }
+          processLaunchDate(app.processIdentifier)?.timeIntervalSince1970 == record.launchTime else { return .complete }
     guard let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else { return .waiting("WindowServer list unavailable") }
     let row = rows.first(where: { $0[kCGWindowNumber as String] as? UInt32 == record.windowID && $0[kCGWindowOwnerPID as String] as? Int32 == record.pid })
     let current = (row?[kCGWindowBounds as String] as? [String: Any]).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
@@ -60,7 +64,7 @@ enum WindowRestoration {
     // matches our parked/original location, preserving a later user move.
     let displayLost = try kill(record.displayServicePID, 0) != 0 || !displayIsOnline(record.parkedDisplay)
     if space != 0, space != record.originalSpace, let current,
-       current.origin == record.original.origin || (displayLost && current.origin == record.parked.origin) {
+       current.origin == record.originalServerOrigin || (displayLost && current.origin == record.parkedServerOrigin) {
         return restoreSpace()
     }
     let appElement = AXUIElementCreateApplication(record.pid)
@@ -69,7 +73,7 @@ enum WindowRestoration {
     let candidates = windows.filter {
         if let id = accessibilityWindowID($0) { return id == record.windowID }
         guard let frame = elementFrame($0) else { return false }
-        return frame == current || frame == record.parked
+        return frame == current || frame == record.parked || frame == record.original
     }
     if candidates.isEmpty && row == nil { return .complete }
     guard candidates.count == 1, let window = candidates.first, let frame = elementFrame(window) else { return .waiting("Exact AX identity unresolved (\(candidates.count) candidates)") }
@@ -80,8 +84,8 @@ enum WindowRestoration {
         // AX can acknowledge the original frame before WindowServer applies it.
         // Keep the journal until both independent views agree; a subsequent
         // concealment must not adopt the still-parked geometry as its baseline.
-        guard let current, abs(current.minX - record.original.minX) < 2,
-              abs(current.minY - record.original.minY) < 2 else {
+        guard let current, abs(current.minX - record.originalServerOrigin.x) < 2,
+              abs(current.minY - record.originalServerOrigin.y) < 2 else {
             return .waiting("Waiting for WindowServer position confirmation")
         }
         // Display disconnection can restore geometry while leaving a formerly
@@ -98,7 +102,7 @@ enum WindowRestoration {
     // Real user movement, or WindowServer rescue after service death, ends our
     // ownership. Do not overwrite a position chosen after concealment.
     let axStillParked = abs(frame.minX - record.parked.minX) < 2 && abs(frame.minY - record.parked.minY) < 2
-    let serverStillParked = current.map { abs($0.minX - record.parked.minX) < 2 && abs($0.minY - record.parked.minY) < 2 } ?? false
+    let serverStillParked = current.map { abs($0.minX - record.parkedServerOrigin.x) < 2 && abs($0.minY - record.parkedServerOrigin.y) < 2 } ?? false
     // AX's coordinate conversion can lag a desktop transfer while WindowServer
     // still reports our exact parked origin. That disagreement is a transition,
     // not evidence that the user chose a new position.

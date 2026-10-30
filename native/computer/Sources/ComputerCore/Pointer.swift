@@ -8,7 +8,7 @@ private let windowLocation = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGE
 
 // postToPid bypasses WindowServer hit testing. The Quartz hit-test fields do
 // not set NSEvent.windowNumber, so encode the AppKit window identity as well.
-func windowPointerEvent(_ event: CGEvent, window: WindowIdentity) throws -> CGEvent {
+func windowPointerEvent(_ event: CGEvent, window: WindowIdentity, windowFrame: CGRect? = nil) throws -> CGEvent {
     // PID-directed AppKit transport reads a separate window-local point; the
     // public global location does not populate it. This macOS SPI is optional:
     // fail before sending a button down when unavailable, never auto-escalate.
@@ -23,7 +23,10 @@ func windowPointerEvent(_ event: CGEvent, window: WindowIdentity) throws -> CGEv
         throw ComputerFailure("input_failed", "Expected a pointer event for window routing.")
     }
     let point = event.location
-    let local = CGPoint(x: point.x - window.frame.minX, y: window.frame.maxY - point.y)
+    // WindowServer can include an outer border absent from NSWindow's event
+    // coordinates. Use the exact AX window frame when it is available.
+    let frame = windowFrame ?? window.frame
+    let local = CGPoint(x: point.x - frame.minX, y: frame.maxY - point.y)
     // AppKit's mouse factory supplies a window identity for the CGEvent bridge;
     // wheel payloads are then restored without changing their pixel units.
     guard let native = NSEvent.mouseEvent(with: type == .scrollWheel ? .mouseMoved : type,
@@ -37,7 +40,7 @@ func windowPointerEvent(_ event: CGEvent, window: WindowIdentity) throws -> CGEv
     }
     routed.type = event.type
     routed.location = point
-    windowLocation(routed, point.x - window.frame.minX, point.y - window.frame.minY)
+    windowLocation(routed, point.x - frame.minX, point.y - frame.minY)
     routed.flags = event.flags
     routed.setIntegerValueField(.mouseEventButtonNumber, value: event.getIntegerValueField(.mouseEventButtonNumber))
     if type == .scrollWheel {

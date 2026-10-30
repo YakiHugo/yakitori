@@ -1,12 +1,27 @@
 import AppKit
 import ApplicationServices
 
+@MainActor func requestApplicationActivation(_ app: NSRunningApplication) -> AXError {
+    let application = AXUIElementCreateApplication(app.processIdentifier)
+    var settable = DarwinBoolean(false)
+    let error = AXUIElementIsAttributeSettable(application, kAXFrontmostAttribute as CFString, &settable)
+    if error == .success, settable.boolValue {
+        // AppKit activation is cooperative and may be ignored even when its
+        // request returns true. Explicit foreground delivery can use granted AX.
+        return AXUIElementSetAttributeValue(application, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    }
+    if error == .attributeUnsupported || error == .notImplemented || (error == .success && !settable.boolValue) {
+        return app.activate() ? .success : .failure
+    }
+    return error
+}
+
 extension Computer {
     func manageWindow(_ args: [String: Any]) async throws -> [String: Any] {
         guard AXIsProcessTrusted() else { throw ComputerFailure("permission_required", "Enable Accessibility for window management.") }
         guard let pid = args["pid"] as? Int32, let launch = args["launch_time"] as? Double,
               let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
-              app.launchDate?.timeIntervalSince1970 == launch,
+              processLaunchDate(app.processIdentifier)?.timeIntervalSince1970 == launch,
               let action = args["window_action"] as? String,
               ["activate", "hide", "show", "raise", "minimize", "restore", "move", "resize", "close"].contains(action) else {
             throw ComputerFailure("invalid_arguments", "Window management requires pid, launch_time from list, and a supported window_action.")
@@ -14,13 +29,13 @@ extension Computer {
         guard isolation?.owns(pid) != true else { throw ComputerFailure("app_concealed", "Reveal the isolated app before window management.") }
         let resource = try await NativeResources.acquire(["app-\(pid)"] + (action == "activate" ? ["foreground"] : []))
         defer { withExtendedLifetime(resource) {} }
-        guard !app.isTerminated, app.launchDate?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The target application exited.") }
+        guard !app.isTerminated, processLaunchDate(app.processIdentifier)?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The target application exited.") }
         let window: AXUIElement?
         if ["activate", "hide", "show"].contains(action) { window = nil }
         else {
             guard let id = args["window_id"] as? UInt32,
                   let identity = try windows(includeHidden: true).first(where: { $0.pid == pid && $0.windowID == id }),
-                  let element = windowElement(identity, requireFrame: false) else {
+                  let element = windowElement(identity) else {
                 throw ComputerFailure("window_not_found", "The exact window is no longer accessible; list with include_hidden=true for minimized windows.")
             }
             window = element
@@ -48,8 +63,7 @@ extension Computer {
         else {
             switch action {
             case "activate":
-                guard app.isActive || app.activate() else { throw ComputerFailure("action_refused", "Application activation was refused.") }
-                error = .success
+                error = requestApplicationActivation(app)
             case "hide":
                 error = app.isHidden ? .success : AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), kAXHiddenAttribute as CFString, kCFBooleanTrue)
             case "show":

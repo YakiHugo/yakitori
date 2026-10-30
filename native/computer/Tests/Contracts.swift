@@ -12,6 +12,9 @@ import Foundation
     }
 
     static func main() async throws {
+        let born = processLaunchDate(getpid())
+        precondition(born != nil && born == processLaunchDate(getpid()))
+        precondition(processLaunchDate(-1) == nil)
         let window = WindowIdentity(pid: 42, launched: Date(timeIntervalSince1970: 100), windowID: 7, frame: CGRect(x: -300, y: 50, width: 400, height: 200), layer: 0)
         let snapshot = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: 800, imageHeight: 400, elements: [])
         let point = try snapshot.point(x: 200, y: 100)
@@ -100,11 +103,21 @@ import Foundation
         precondition(nativeClick.windowNumber == 7 && nativeClick.type == .rightMouseDown)
         precondition(nativeClick.buttonNumber == 1 && nativeClick.clickCount == 2)
         precondition(nativeClick.modifierFlags.contains(.shift) && routedClick.location == CGPoint(x: -200, y: 100))
+        let parked = ParkedWindow(pid: 42, launchTime: 100, windowID: 7,
+            original: CGRect(x: 140, y: 290, width: 640, height: 552), parked: CGRect(x: 1500, y: 1100, width: 640, height: 552),
+            serverOriginOffset: CGPoint(x: -1, y: -1), originalSpace: 5, parkedDisplay: 6, displayServicePID: 43)
+        precondition(parked.originalServerOrigin == CGPoint(x: 139, y: 289))
+        precondition(parked.parkedServerOrigin == CGPoint(x: 1499, y: 1099))
         let scroll = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: 13, wheel2: -7, wheel3: 0)!
         scroll.location = CGPoint(x: -200, y: 100)
         let nativeScroll = NSEvent(cgEvent: try windowPointerEvent(scroll, window: window))!
         precondition(nativeScroll.windowNumber == 7 && nativeScroll.type == .scrollWheel)
         precondition(nativeScroll.hasPreciseScrollingDeltas && nativeScroll.scrollingDeltaY == 13 && nativeScroll.scrollingDeltaX == -7)
+        let keyEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)!
+        let characters = Array("猫😀".utf16)
+        characters.withUnsafeBufferPointer { keyEvent.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
+        let addressedKey = NSEvent(cgEvent: try windowKeyboardEvent(keyEvent, window: window))!
+        precondition(addressedKey.windowNumber == 7 && addressedKey.type == .keyDown && addressedKey.characters == "猫😀")
         let (started, callback) = AsyncStream<(Result<Int, Error>) -> Void>.makeStream()
         let waiting = Task { try await nativeRequest { done in callback.yield(done) } }
         var events = started.makeAsyncIterator()
@@ -169,9 +182,17 @@ import Foundation
         precondition(item.string(forType: .string) == "bold" && item.data(forType: .rtf) != nil)
         try await withPasteContent(item, board: board) { precondition(board.string(forType: .string) == "bold") }
         precondition(board.string(forType: .string) == "original" && board.data(forType: .rtf) == Data([1, 2, 3]))
-        try await withPasteContent(try pasteboardItem(["text": "ours"]), board: board) {
-            board.clearContents(); board.setString("new writer", forType: .string)
-        }
+        do {
+            try await withPasteContent(try pasteboardItem(["text": "ours"]), board: board) {
+                board.clearContents(); board.setString("new writer", forType: .string)
+            }
+            preconditionFailure("Clipboard ownership loss must propagate")
+        } catch let error as ComputerFailure { precondition(error.code == "clipboard_changed") }
+        precondition(board.string(forType: .string) == "new writer")
+        do {
+            try await withPasteContent(try pasteboardItem(["text": "not requested"]), board: board) {}
+            preconditionFailure("An unconsumed paste must not return success")
+        } catch let error as ComputerFailure { precondition(error.code == "paste_not_consumed") }
         precondition(board.string(forType: .string) == "new writer")
         do {
             try await withPasteContent(try pasteboardItem(["text": "temporary"]), board: board) { throw CancellationError() }
