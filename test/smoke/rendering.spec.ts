@@ -368,7 +368,46 @@ for (let iteration = 0; iteration < 20; iteration++) {
     await expect(interrupted).toContainText(
       "Output before interruption. Still running after ignored keys. Still running after menu dismissal.",
     )
-    await composer.fill("")
+    if (iteration === 0) {
+      const pendingSelection = await composer.evaluateHandle(() => {
+        const result = { deletePrevented: false, suppressed: 0 }
+        const suppress = (event: Event) => {
+          result.suppressed++
+          event.stopImmediatePropagation()
+        }
+        const observe = (event: KeyboardEvent) => {
+          if (event.key === "Delete")
+            result.deletePrevented = event.defaultPrevented
+        }
+        document.addEventListener("selectionchange", suppress, true)
+        document.addEventListener("keydown", observe)
+        return {
+          result,
+          stop() {
+            document.removeEventListener("selectionchange", suppress, true)
+            document.removeEventListener("keydown", observe)
+          },
+        }
+      })
+      await composer.fill("")
+      const retained = await composer.textContent()
+      const result = await pendingSelection.evaluate((pending) => {
+        pending.stop()
+        return pending.result
+      })
+      await pendingSelection.dispose()
+      console.log(
+        "CONTROLLED_PENDING_SELECTION",
+        JSON.stringify({ ...result, retained }),
+      )
+      expect(result.deletePrevented).toBe(true)
+      expect(retained).toBe("Keep this unsent draft.")
+    }
+    // Select through the editor command: fill("") changes the DOM selection,
+    // which can reach Delete before ProseMirror has observed selectionchange.
+    await composer.press("ControlOrMeta+A")
+    await composer.press("Backspace")
+    await expect(composer).toHaveText("")
     await expect(
       page.getByRole("button", { name: "Resume", exact: true }),
     ).toBeVisible()
