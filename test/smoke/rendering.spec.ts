@@ -312,66 +312,68 @@ async function expectMermaidDiagram(
     expect(nodeLabels).toHaveLength(expectedNodeCount)
 }
 
-test("Escape dismisses the model menu before interrupting the focused conversation", async ({
-  page,
-  renderingApp,
-}) => {
-  const prompt = "Keep this response streaming until interrupted."
-  await renderingApp.send(prompt)
-  await renderingApp.append(prompt, "Output before interruption.")
-  const response = page.getByRole("region", {
-    name: "Current response",
-    exact: true,
+for (let iteration = 0; iteration < 20; iteration++) {
+  test(`Escape dismisses the model menu before interrupting the focused conversation (${iteration})`, async ({
+    page,
+    renderingApp,
+  }) => {
+    const prompt = "Keep this response streaming until interrupted."
+    await renderingApp.send(prompt)
+    await renderingApp.append(prompt, "Output before interruption.")
+    const response = page.getByRole("region", {
+      name: "Current response",
+      exact: true,
+    })
+    await expect(response).toContainText("Output before interruption.")
+    const composer = page.getByRole("textbox", { name: "Message the Mate" })
+    await composer.fill("Keep this unsent draft.")
+
+    // Synthetic IME signals exercise the browser event route, not an OS input
+    // method. The final ordinary Escape below is actual browser keyboard input.
+    await composer.dispatchEvent("compositionstart")
+    await composer.press("Escape")
+    await composer.dispatchEvent("compositionend")
+    for (const options of [
+      { isComposing: true },
+      { keyCode: 229 },
+      { repeat: true },
+      { ctrlKey: true },
+    ]) {
+      await composer.dispatchEvent("keydown", { key: "Escape", ...options })
+    }
+    await renderingApp.append(prompt, " Still running after ignored keys.")
+    await expect(response).toContainText("Still running after ignored keys.")
+
+    const models = page.getByRole("button", { name: "Select model and effort" })
+    await models.click()
+    await expect(models).toHaveAttribute("aria-expanded", "true")
+    await page.keyboard.press("Escape")
+    await expect(models).toHaveAttribute("aria-expanded", "false")
+    await renderingApp.append(prompt, " Still running after menu dismissal.")
+    await expect(response).toContainText("Still running after menu dismissal.")
+
+    await composer.focus()
+    await page.keyboard.press("Escape")
+    await expect(
+      page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
+    ).toHaveCount(0)
+    await expect(composer).toHaveText("Keep this unsent draft.")
+    const interrupted = page.getByRole("region", {
+      name: "Response",
+      exact: true,
+    })
+    await expect(interrupted).toContainText("Turn interrupted")
+    // Interrupted output is retained as activity, not promoted to a final answer.
+    await interrupted.getByRole("button", { name: /^Worked for/ }).click()
+    await expect(interrupted).toContainText(
+      "Output before interruption. Still running after ignored keys. Still running after menu dismissal.",
+    )
+    await composer.fill("")
+    await expect(
+      page.getByRole("button", { name: "Resume", exact: true }),
+    ).toBeVisible()
   })
-  await expect(response).toContainText("Output before interruption.")
-  const composer = page.getByRole("textbox", { name: "Message the Mate" })
-  await composer.fill("Keep this unsent draft.")
-
-  // Synthetic IME signals exercise the browser event route, not an OS input
-  // method. The final ordinary Escape below is actual browser keyboard input.
-  await composer.dispatchEvent("compositionstart")
-  await composer.press("Escape")
-  await composer.dispatchEvent("compositionend")
-  for (const options of [
-    { isComposing: true },
-    { keyCode: 229 },
-    { repeat: true },
-    { ctrlKey: true },
-  ]) {
-    await composer.dispatchEvent("keydown", { key: "Escape", ...options })
-  }
-  await renderingApp.append(prompt, " Still running after ignored keys.")
-  await expect(response).toContainText("Still running after ignored keys.")
-
-  const models = page.getByRole("button", { name: "Select model and effort" })
-  await models.click()
-  await expect(models).toHaveAttribute("aria-expanded", "true")
-  await page.keyboard.press("Escape")
-  await expect(models).toHaveAttribute("aria-expanded", "false")
-  await renderingApp.append(prompt, " Still running after menu dismissal.")
-  await expect(response).toContainText("Still running after menu dismissal.")
-
-  await composer.focus()
-  await page.keyboard.press("Escape")
-  await expect(
-    page.getByRole("button", { name: /^(Interrupt|Stopping)$/ }),
-  ).toHaveCount(0)
-  await expect(composer).toHaveText("Keep this unsent draft.")
-  const interrupted = page.getByRole("region", {
-    name: "Response",
-    exact: true,
-  })
-  await expect(interrupted).toContainText("Turn interrupted")
-  // Interrupted output is retained as activity, not promoted to a final answer.
-  await interrupted.getByRole("button", { name: /^Worked for/ }).click()
-  await expect(interrupted).toContainText(
-    "Output before interruption. Still running after ignored keys. Still running after menu dismissal.",
-  )
-  await composer.fill("")
-  await expect(
-    page.getByRole("button", { name: "Resume", exact: true }),
-  ).toBeVisible()
-})
+}
 
 test("user messages expose only copy and edit actions", async ({
   page,
