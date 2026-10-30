@@ -19,6 +19,7 @@ export default defineConfig({
       testMatch: [
         "browser.spec.ts",
         "browser-select.spec.ts",
+        "browser-files.spec.ts",
         "chatgpt-connections.spec.ts",
         "rendering.spec.ts",
       ],

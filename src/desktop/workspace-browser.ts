@@ -702,6 +702,9 @@ export function registerWorkspaceBrowser(
           case "select":
             observation = await entry.connection.selectOptions(input, signal)
             break
+          case "upload":
+            observation = await entry.connection.uploadFiles(input, signal)
+            break
           case "click":
           case "hover":
           case "scroll":

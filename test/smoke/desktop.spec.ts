@@ -503,6 +503,11 @@ test("agent browser observations and actions use the exact owned tab through rea
     thirdRequests = 0,
     clearKeyUps = 0,
     frameAfterReady = 0
+  const uploadPath = join(userData, "upload-你好.txt")
+  const uploadText = "Owned upload 你好 🌍\n"
+  const uploadedFiles: { name: string; text: string }[][] = []
+  const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
+    []
   const frameSelectEvents: {
     type: string
     values: string[]
@@ -657,6 +662,23 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
   }
   const source = createServer((request, response) => {
+    if (
+      request.method === "POST" &&
+      ["/file-bytes", "/file-choice"].includes(request.url ?? "")
+    ) {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
+      request.on("end", () => {
+        if (request.url === "/file-bytes") uploadedFiles.push(JSON.parse(body))
+        else fileChoiceEvents.push(JSON.parse(body))
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.method === "POST" && request.url === "/frame-select") {
       let body = ""
       request.setEncoding("utf8")
@@ -740,7 +762,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             ? "Remote"
             : "Nested"
       response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
       )
       return
     }
@@ -1204,14 +1226,57 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_selected_frame",
             }
-          } else if (step === 61) {
+          } else if (step === 61 || step === 63) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            const control = (
+              current.nodes as {
+                role: string
+                name: string
+                elementReference?: string
+              }[]
+            ).find(
+              (node) => node.role === "button" && node.name === "Remote files",
+            )
+            if (!control?.elementReference)
+              throw new Error("Missing remote file input")
+            tool = {
+              name: "browser_upload",
+              input: {
+                action: "upload",
+                target: current.target,
+                reference: control.elementReference,
+                fromUrl: (current.document as { url: string }).url,
+                paths: step === 61 ? [uploadPath] : [],
+              },
+              id: step === 61 ? "provide_remote_file" : "clear_remote_file",
+            }
+          } else if (step === 62 || step === 64) {
+            const selected = toolResult(body.messages ?? [], "filesVerified")
+            if (
+              selected.filesVerified !== true ||
+              selected.cleared !== (step === 64)
+            )
+              throw new Error("File list receipt was not verified")
+            if (step === 62)
+              await expect.poll(() => uploadedFiles.length).toBe(1)
+            const previous = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser",
+              input: {
+                action: "observe",
+                target: previous.target,
+                frameReference: previous.frameReference,
+              },
+              id: `observe_file_selection_${step}`,
+            }
+          } else if (step === 65) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 62) {
+          } else if (step === 66) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1221,7 +1286,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 63) {
+          } else if (step === 67) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1236,7 +1301,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 64) {
+          } else if (step === 68) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
@@ -1249,7 +1314,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 65) {
+          } else if (step === 69) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1303,6 +1368,7 @@ test("agent browser observations and actions use the exact owned tab through rea
   navigationUrl = `${origin}/jump`
   destinationUrl = `${origin}/third#arrived`
   try {
+    await writeFile(uploadPath, uploadText)
     const helper = join(userData, "computer.cjs")
     await writeFile(
       helper,
@@ -1432,7 +1498,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 65; approval++)
+    for (let approval = 0; approval < 69; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1630,6 +1696,16 @@ test("agent browser observations and actions use the exact owned tab through rea
       { type: "input", trusted: false, values: ["g", "b"] },
       { type: "change", trusted: false, values: ["g", "b"] },
     ])
+    expect(uploadedFiles).toEqual([
+      [{ name: "upload-你好.txt", text: uploadText }],
+    ])
+    await expect.poll(() => fileChoiceEvents.length).toBe(4)
+    expect(fileChoiceEvents).toEqual([
+      { type: "input", trusted: true, count: 1 },
+      { type: "change", trusted: true, count: 1 },
+      { type: "input", trusted: false, count: 0 },
+      { type: "change", trusted: false, count: 0 },
+    ])
     expect(frameSubmittedValues).toEqual(["filled_Remote你好"])
     expect(frameAfterObservation?.nodes).toEqual(
       expect.arrayContaining([
@@ -1752,6 +1828,8 @@ test("agent browser observations and actions use the exact owned tab through rea
         frameAfterReady,
         framePointerEvents,
         frameSelectEvents,
+        uploadedFiles,
+        fileChoiceEvents,
         protocol,
       }),
       contentType: "application/json",

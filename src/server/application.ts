@@ -91,6 +91,7 @@ import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
 import { createBrowserInputTool } from "./browser-input-tool.ts"
 import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
+import { createBrowserUploadTool } from "./browser-upload-tool.ts"
 import {
   type ChatGPTConnections,
   createChatGPTConnections,
@@ -1053,6 +1054,14 @@ export async function createYakitoriApplication(
         }
         return claimComputer(context)
       }
+      function markBrowserCleanupPending(context: ToolExecutionContext): void {
+        const owner = computerControl.owner
+        if (
+          owner?.sessionId === stored.metadata.id &&
+          owner.turnId === context.turnId
+        )
+          computerControl.markCleanupPending(owner)
+      }
       const toolRegistry = createToolRegistry([
         ...createTrustedTools(sessionShellEnv, !sideConversation).filter(
           (tool) =>
@@ -1068,14 +1077,12 @@ export async function createYakitoriApplication(
               createBrowserInputTool(
                 options.desktopBrowser,
                 admitBrowser,
-                (context) => {
-                  const owner = computerControl.owner
-                  if (
-                    owner?.sessionId === stored.metadata.id &&
-                    owner.turnId === context.turnId
-                  )
-                    computerControl.markCleanupPending(owner)
-                },
+                markBrowserCleanupPending,
+              ),
+              createBrowserUploadTool(
+                options.desktopBrowser,
+                admitBrowser,
+                markBrowserCleanupPending,
               ),
               createBrowserNavigationTool(options.desktopBrowser, admitBrowser),
               createBrowserCaptureTool(options.desktopBrowser, admitBrowser),

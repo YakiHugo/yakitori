@@ -366,6 +366,78 @@ export type BrowserRequest =
   | BrowserInputRequest
   | BrowserNavigationRequest
   | BrowserCaptureRequest
+  | BrowserUploadRequest
+
+export type BrowserUploadRequest = Readonly<{
+  action: "upload"
+  target: BrowserTarget
+  reference: string
+  fromUrl: string
+  files: Readonly<{
+    path: string
+    name: string
+    size: number
+    lastModified: number
+  }>[]
+}>
+
+export function parseBrowserUploadRequest(
+  value: unknown,
+): BrowserUploadRequest {
+  if (
+    isJsonObject(value) &&
+    value.action === "upload" &&
+    Object.keys(value).length === 5 &&
+    ["action", "target", "reference", "fromUrl", "files"].every((key) =>
+      Object.hasOwn(value, key),
+    ) &&
+    typeof value.reference === "string" &&
+    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
+    typeof value.fromUrl === "string" &&
+    value.fromUrl.length > 0 &&
+    value.fromUrl.length <= 8192 &&
+    Array.isArray(value.files) &&
+    value.files.length <= 256 &&
+    Buffer.byteLength(JSON.stringify(value.files)) <= 128 * 1024 &&
+    value.files.every(
+      (file) =>
+        isJsonObject(file) &&
+        Object.keys(file).length === 4 &&
+        typeof file.path === "string" &&
+        file.path.startsWith("/") &&
+        !file.path.includes("\0") &&
+        file.path.length <= 8192 &&
+        typeof file.name === "string" &&
+        file.name.length > 0 &&
+        file.name.length <= 4096 &&
+        !file.name.includes("/") &&
+        !file.name.includes("\0") &&
+        typeof file.size === "number" &&
+        Number.isSafeInteger(file.size) &&
+        file.size >= 0 &&
+        typeof file.lastModified === "number" &&
+        Number.isSafeInteger(file.lastModified),
+    )
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "upload",
+      target: observed.target,
+      reference: value.reference,
+      fromUrl: value.fromUrl,
+      files: value.files as BrowserUploadRequest["files"],
+    }
+  }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Use upload with an exact elementReference and observed document fromUrl. Desktop transport accepts up to 256 canonical macOS regular-file metadata records (128KiB transport safety bound).",
+  )
+}
 
 const requestMutates: Record<BrowserRequest["action"], boolean> = {
   list: false,
@@ -380,6 +452,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   press: true,
   select: true,
   navigate: true,
+  upload: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -387,6 +460,8 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (isJsonObject(value) && value.action === "upload")
+    return parseBrowserUploadRequest(value)
   if (isJsonObject(value) && value.action === "capture")
     return parseBrowserCaptureRequest(value)
   if (isJsonObject(value) && value.action === "navigate")
