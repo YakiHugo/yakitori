@@ -76,6 +76,7 @@ function fixture(
     failCapture?: boolean
     blockFocusReadAt?: number
     blockAX?: boolean
+    blockFocusMutation?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -85,7 +86,9 @@ function fixture(
       sessionId?: string
     }[] = [],
     focusReadStarted = Promise.withResolvers<void>(),
-    focusReadReply = Promise.withResolvers<void>()
+    focusReadReply = Promise.withResolvers<void>(),
+    focusMutationStarted = Promise.withResolvers<void>(),
+    focusMutationReply = Promise.withResolvers<void>()
   let attached = false,
     mainLoader = "main_v1",
     remoteLoader = "remote_v1",
@@ -277,6 +280,10 @@ function fixture(
         if (!id) throw new Error("Unknown input node")
         requireSession(id, sessionId)
         if (method === "DOM.focus") {
+          if (options.blockFocusMutation) {
+            focusMutationStarted.resolve()
+            await focusMutationReply.promise
+          }
           focused = id
           return {}
         }
@@ -381,6 +388,8 @@ function fixture(
     events,
     focusReadStarted,
     focusReadReply,
+    focusMutationStarted,
+    focusMutationReply,
     attached: () => attached,
     destroy() {
       destroyed = true
@@ -875,6 +884,57 @@ it.each([
     await pending?.catch(() => {})
     await f.connection.close()
   }
+})
+
+it.each([
+  "acknowledgement",
+  "target destruction",
+  "transport rejection",
+])("retains the original target after a child mutation loses its session until %s confirms cleanup", async (completion) => {
+  const f = fixture({ blockFocusMutation: true })
+  const node = await f.control("remote")
+  const pending = f.connection.pressKey(
+    {
+      action: "press",
+      target,
+      reference: node.elementReference,
+      key: "Enter",
+    },
+    signal(),
+  )
+  const failed = expect(pending).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  await f.focusMutationStarted.promise
+  f.change("renderer")
+  await failed
+  await expect(f.connection.close()).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  await expect(f.connection.observe(signal())).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  expect(f.attached()).toBe(true)
+  expect(f.calls.filter((call) => call.method === "DOM.focus")).toEqual([
+    expect.objectContaining({ sessionId: "remote_session" }),
+  ])
+  expect(f.calls.some((call) => call.method.startsWith("Input."))).toBe(false)
+  if (completion === "acknowledgement") {
+    f.focusMutationReply.resolve()
+    await expect.poll(() => f.connection.close()).toBeUndefined()
+  } else {
+    if (completion === "transport rejection") {
+      f.focusMutationReply.reject(new Error("Session transport disconnected"))
+      await f.focusMutationReply.promise.catch(() => {})
+      await expect(f.connection.close()).rejects.toMatchObject({
+        code: "browser_cleanup_failed",
+      })
+    }
+    f.destroy()
+    await f.connection.close()
+    f.focusMutationReply.resolve()
+  }
+  expect(f.attached()).toBe(false)
 })
 
 it("ends a pending accessibility observation at child renderer replacement and keeps the main target readable", async () => {

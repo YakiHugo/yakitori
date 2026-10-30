@@ -24,6 +24,7 @@ import {
   isBrowserFrameReadMethod,
 } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
+import { BrowserPendingMutations } from "./browser-mutations.ts"
 import {
   BrowserFramePointer,
   browserPointerGeometry,
@@ -51,6 +52,7 @@ export class BrowserDocumentConnection {
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
   readonly #frameCatalog: BrowserFrames
+  readonly #mutations: BrowserPendingMutations
   readonly #detached = () => {
     this.#closed = true
     this.#lifetime.abort(
@@ -65,6 +67,7 @@ export class BrowserDocumentConnection {
 
   constructor(contents: WebContents) {
     this.#contents = contents
+    this.#mutations = new BrowserPendingMutations(() => contents.isDestroyed())
     const debug = contents.debugger
     this.#debug = debug
     if (
@@ -102,6 +105,7 @@ export class BrowserDocumentConnection {
     // Read cancellation and turn cleanup can request release concurrently.
     // Install the shared promise before dispatching any owned key/button-up.
     const release = Promise.resolve().then(async () => {
+      this.#mutations.assertCompleted()
       while (this.#heldInputs.length) {
         const held = this.#heldInputs.at(-1)
         if (!held) throw new Error("Missing owned held input.")
@@ -136,6 +140,7 @@ export class BrowserDocumentConnection {
   }
 
   async close(): Promise<void> {
+    this.#mutations.assertCompleted()
     await this.#releaseInput()
     if (!this.closed && this.#debug.isAttached()) this.#debug.detach()
     this.#closed = true
@@ -156,6 +161,7 @@ export class BrowserDocumentConnection {
     duringInput = false,
   ): Promise<T> {
     signal.throwIfAborted()
+    this.#mutations.assertCompleted()
     if (this.#heldInputs.length && !duringInput)
       throw new BrowserControlError(
         "browser_cleanup_failed",
@@ -364,6 +370,7 @@ export class BrowserDocumentConnection {
     token: string,
     kind: BrowserControlReference["kind"],
   ): BrowserControlReference {
+    this.#mutations.assertCompleted()
     if (this.#heldInputs.length)
       throw new BrowserControlError(
         "browser_cleanup_failed",
@@ -396,10 +403,22 @@ export class BrowserDocumentConnection {
     // That release channel survives child renderer navigation.
     if (sessionId !== undefined && method.startsWith("Input."))
       throw new Error("Browser input must use the owned root session.")
-    // A dispatched input command must acknowledge before cancellation can finish.
+    // Ordinary cancellation still waits for acknowledgement. A lost original
+    // session can report promptly, but unconfirmed mutations prevent cleanup.
+    const closed =
+      sessionId === undefined
+        ? this.#lifetime.signal
+        : AbortSignal.any([
+            this.#lifetime.signal,
+            this.#frameCatalog.sessionClosed(sessionId),
+          ])
     try {
-      return await this.#debug.sendCommand(method, params, sessionId)
+      return await this.#mutations.run(
+        () => this.#debug.sendCommand(method, params, sessionId),
+        closed,
+      )
     } catch (cause) {
+      if (cause instanceof BrowserControlError) throw cause
       throw new BrowserControlError(
         "browser_protocol_error",
         cause instanceof Error ? cause.message : String(cause),
@@ -418,7 +437,11 @@ export class BrowserDocumentConnection {
             if (method === "Page.getFrameTree")
               return this.#inputReadCommand(method, params, signal, sessionId)
             if (method === "Target.setAutoAttach")
-              return this.#inputCommand(method, params, signal, sessionId)
+              return this.#read(
+                signal,
+                (command) => command(method, params, sessionId),
+                true,
+              )
             throw new Error(`Unexpected frame catalog command ${method}`)
           },
         )
@@ -509,6 +532,9 @@ export class BrowserDocumentConnection {
     sessionId?: string,
     additionalSessions: Iterable<string | undefined> = [],
   ): Promise<void> {
+    // Never send a key/button-up or detach while its down (or another owned
+    // mutation) can still complete later. Cleanup remains retryable on late ack.
+    this.#mutations.assertCompleted()
     // Release is independent of cancellation. A failed key-up is surfaced to
     // the shared input gate and remains retryable by finishTurn/closeSession.
     const [inputCleanup, ...groupsCleanup] = await Promise.allSettled([
