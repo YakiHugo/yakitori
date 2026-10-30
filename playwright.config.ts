@@ -22,6 +22,7 @@ export default defineConfig({
         "browser-files.spec.ts",
         "browser-directory.spec.ts",
         "browser-chooser.spec.ts",
+        "browser-dialogs.spec.ts",
         "chatgpt-connections.spec.ts",
         "rendering.spec.ts",
       ],

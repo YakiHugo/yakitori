@@ -370,6 +370,7 @@ export type BrowserRequest =
   | BrowserDirectoryUploadRequest
   | BrowserViewRequest
   | BrowserChooserRequest
+  | BrowserDialogRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -527,6 +528,99 @@ export function parseBrowserDirectoryUploadRequest(
   }
 }
 
+export type BrowserDialogRule = Readonly<{
+  type: "alert" | "confirm" | "beforeunload"
+  accept: boolean
+  message?: string
+}>
+export type BrowserDialogRequest =
+  | Readonly<{
+      action: "dialog_arm"
+      target: BrowserTarget
+      fromUrl: string
+      frameReference?: string
+      response: BrowserDialogRule
+    }>
+  | Readonly<{
+      action: "dialog_inspect" | "dialog_disarm"
+      target: BrowserTarget
+    }>
+
+export function parseBrowserDialogRequest(
+  value: unknown,
+): BrowserDialogRequest {
+  if (
+    !isJsonObject(value) ||
+    !["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
+      String(value.action),
+    )
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact target and a JavaScript dialog action.",
+    )
+  const arm = value.action === "dialog_arm",
+    response = value.response
+  if (
+    arm &&
+    (!isJsonObject(response) ||
+      Object.keys(response).some(
+        (key) => !["type", "accept", "message"].includes(key),
+      ) ||
+      !["alert", "confirm", "beforeunload"].includes(String(response.type)) ||
+      typeof response.accept !== "boolean" ||
+      (response.type === "alert" && !response.accept) ||
+      (response.message !== undefined &&
+        (typeof response.message !== "string" ||
+          Buffer.byteLength(response.message) > 8192)))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm with one response: alert (accept true), confirm or beforeunload, an explicit accept boolean and optional exact message (8KiB rule safety bound).",
+    )
+  if (
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "frameReference", "response"]
+            : ["action", "target"]
+        ).includes(key),
+    ) ||
+    (arm &&
+      (typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm requires the observed fromUrl, optional frameReference and response; inspect/disarm accept only a target.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+    ...(arm && value.frameReference !== undefined
+      ? { frameReference: value.frameReference }
+      : {}),
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid dialog target parser result.")
+  if (arm)
+    return {
+      action: "dialog_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(observed.frameReference
+        ? { frameReference: observed.frameReference }
+        : {}),
+      response: response as BrowserDialogRule,
+    }
+  return {
+    action: value.action as "dialog_inspect" | "dialog_disarm",
+    target: observed.target,
+  }
+}
+
 export type BrowserChooserRequest =
   | Readonly<{
       action: "chooser_arm"
@@ -644,6 +738,9 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   chooser_arm: true,
   chooser_inspect: false,
   chooser_disarm: true,
+  dialog_arm: true,
+  dialog_inspect: false,
+  dialog_disarm: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -651,6 +748,13 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (
+    isJsonObject(value) &&
+    ["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
+      String(value.action),
+    )
+  )
+    return parseBrowserDialogRequest(value)
   if (
     isJsonObject(value) &&
     ["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(

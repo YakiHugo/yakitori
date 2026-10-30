@@ -4,6 +4,7 @@ import {
   type BrowserCaptureRequest,
   type BrowserChooserRequest,
   BrowserControlError,
+  type BrowserDialogRequest,
   type BrowserDirectoryUploadRequest,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
@@ -18,10 +19,8 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
-import {
-  type BrowserChooserDocument,
-  BrowserFileChooser,
-} from "./browser-chooser.ts"
+import { BrowserFileChooser } from "./browser-chooser.ts"
+import { BrowserDialogs } from "./browser-dialogs.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import { BrowserFrames } from "./browser-frames.ts"
@@ -32,6 +31,7 @@ import {
   browserPointerGeometry,
 } from "./browser-pointer.ts"
 import {
+  type BrowserDocumentScope,
   type BrowserFrameReadMethod,
   type BrowserProtocolCommand,
   isBrowserFrameReadMethod,
@@ -60,6 +60,7 @@ export class BrowserDocumentConnection {
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
   readonly #sessions: BrowserFrameSessions
+  readonly #dialogs: BrowserDialogs
   readonly #chooser: BrowserFileChooser
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
@@ -76,6 +77,7 @@ export class BrowserDocumentConnection {
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
+    this.#dialogs.close()
   }
 
   constructor(
@@ -113,6 +115,7 @@ export class BrowserDocumentConnection {
     }
     this.#sessions = new BrowserFrameSessions(debug)
     this.#chooser = new BrowserFileChooser(debug)
+    this.#dialogs = new BrowserDialogs(debug)
     this.#frameCatalog = new BrowserFrames(this.#sessions)
     debug.on("detach", this.#detached)
   }
@@ -135,6 +138,7 @@ export class BrowserDocumentConnection {
     // Read cancellation and turn cleanup can request release concurrently.
     // Install the shared promise before dispatching any owned key/button-up.
     const release = Promise.resolve().then(async () => {
+      if (!this.#contents.isDestroyed()) await this.#dialogs.settle()
       this.#mutations.assertCompleted()
       while (this.#heldInputs.length) {
         const held = this.#heldInputs.at(-1)
@@ -183,6 +187,7 @@ export class BrowserDocumentConnection {
   async close(): Promise<void> {
     await this.#releaseInput()
     this.#mutations.assertCompleted()
+    if (!this.#contents.isDestroyed()) await this.#dialogs.disarm()
     if (!this.closed && this.#debug.isAttached()) {
       try {
         await this.#chooser.disarm((method, params, sessionId) =>
@@ -209,6 +214,7 @@ export class BrowserDocumentConnection {
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
+    this.#dialogs.close()
   }
 
   async #read<T>(
@@ -477,10 +483,12 @@ export class BrowserDocumentConnection {
     // session can report promptly, but unconfirmed mutations prevent cleanup.
     const closed = this.#mutationDeadline(sessionId)
     try {
-      return await this.#mutations.run(
+      const result = await this.#mutations.run(
         () => this.#debug.sendCommand(method, params, sessionId),
         closed,
       )
+      await this.#dialogs.settle()
+      return result
     } catch (cause) {
       if (cause instanceof BrowserControlError) throw cause
       throw new BrowserControlError(
@@ -513,6 +521,98 @@ export class BrowserDocumentConnection {
     }
   }
 
+  async #documentScope(
+    input: { fromUrl: string; frameReference?: string },
+    signal: AbortSignal,
+  ): Promise<BrowserDocumentScope> {
+    return this.#read(signal, async (command) => {
+      const frame = input.frameReference
+          ? await this.#frameCatalog.resolve(input.frameReference, command)
+          : undefined,
+        document =
+          frame?.frame.document ??
+          documentIdentity(await command("Page.getFrameTree"))
+      if (document.url !== input.fromUrl)
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The observed document URL changed. Observe it again.",
+        )
+      return {
+        document,
+        ...(input.frameReference
+          ? {
+              frame: {
+                reference: input.frameReference,
+                ...(frame?.frame.sessionId
+                  ? { sessionId: frame.frame.sessionId }
+                  : {}),
+              },
+            }
+          : {}),
+        closed: this.#mutationLifetime(frame?.frame.sessionId),
+      }
+    })
+  }
+
+  async dialog(
+    input: BrowserDialogRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    this.assertInputIdle()
+    if (input.action !== "dialog_arm") {
+      if (input.action === "dialog_disarm") {
+        await this.#dialogs.disarm()
+        return { armed: false }
+      }
+      return this.#dialogs.inspect()
+    }
+    const scope = await this.#documentScope(input, signal)
+    let attempted = false
+    try {
+      await this.#dialogs.arm(
+        scope,
+        input.response,
+        (method, params = {}, sessionId, confirmed) => {
+          // A response must run while the triggering Input command awaits ACK.
+          if (
+            method !== "Page.enable" &&
+            method !== "Page.handleJavaScriptDialog"
+          )
+            throw new Error("Unexpected JavaScript dialog command.")
+          if (method === "Page.enable") signal.throwIfAborted()
+          attempted = true
+          return this.#mutations.run(
+            () =>
+              this.#debug
+                .sendCommand(method, params, sessionId)
+                .then((result) => {
+                  confirmed?.()
+                  return result
+                }),
+            this.#mutationDeadline(sessionId),
+          )
+        },
+      )
+      signal.throwIfAborted()
+      await this.#verifyDocument(scope, signal)
+      return this.#dialogs.inspect()
+    } catch (cause) {
+      if (!attempted) throw cause
+      try {
+        this.#mutations.assertCompleted()
+        await this.#dialogs.disarm()
+      } catch (cleanup) {
+        throw new BrowserControlError(
+          "browser_cleanup_failed",
+          "JavaScript dialog configuration or response completion is unknown.",
+          { cause: new AggregateError([cause, cleanup]) },
+        )
+      }
+      throw cause
+    }
+  }
+
   async fileChooser(
     input: BrowserChooserRequest,
     signal: AbortSignal,
@@ -534,36 +634,7 @@ export class BrowserDocumentConnection {
       }
     }
     if (input.action === "chooser_arm") {
-      const scope: BrowserChooserDocument = await this.#read(
-        signal,
-        async (command) => {
-          const frame = input.frameReference
-              ? await this.#frameCatalog.resolve(input.frameReference, command)
-              : undefined,
-            document =
-              frame?.frame.document ??
-              documentIdentity(await command("Page.getFrameTree"))
-          if (document.url !== input.fromUrl)
-            throw new BrowserControlError(
-              "browser_target_changed",
-              "The file chooser document URL changed. Observe it again.",
-            )
-          return {
-            document,
-            ...(input.frameReference
-              ? {
-                  frame: {
-                    reference: input.frameReference,
-                    ...(frame?.frame.sessionId
-                      ? { sessionId: frame.frame.sessionId }
-                      : {}),
-                  },
-                }
-              : {}),
-            closed: this.#mutationLifetime(frame?.frame.sessionId),
-          }
-        },
-      )
+      const scope = await this.#documentScope(input, signal)
       let attempted = false
       try {
         signal.throwIfAborted()
@@ -762,6 +833,7 @@ export class BrowserDocumentConnection {
     sessionId?: string,
     additionalSessions: Iterable<string | undefined> = [],
   ): Promise<void> {
+    await this.#dialogs.settle()
     // Never send a key/button-up or detach while its down (or another owned
     // mutation) can still complete later. Cleanup remains retryable on late ack.
     this.#mutations.assertCompleted()
