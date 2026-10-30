@@ -2002,7 +2002,6 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
         { BrowserWindow, WebContentsView, session },
         { url, directory },
       ) => {
-        const previousFocus = BrowserWindow.getFocusedWindow()?.id
         const window = BrowserWindow.getAllWindows()[0]
         if (!window) throw new Error("Missing owned host window")
         const view = new WebContentsView({
@@ -2061,6 +2060,9 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
             },
             frameSession,
           )
+          // Measure file selection, after the fixture's own view load/show and
+          // debugger setup. Startup activation can finish during those awaits.
+          const previousFocus = BrowserWindow.getFocusedWindow()?.id
           await debug.sendCommand(
             "DOM.setFileInputFiles",
             { nodeId, files: [directory] },
