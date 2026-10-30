@@ -826,6 +826,9 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "Go forward", exact: true }).click()
     await expect(modelEditor).toContainText("contextWindowTokens = 64000")
     await page.reload()
+    // The graphical editor flow needs an active renderer after a full reload.
+    // Electron may otherwise defer paints while its window is in the background.
+    await page.bringToFront()
     await openProviderSettings(page)
     await page.getByRole("button", { name: /^Smoke API/ }).click()
     await page
