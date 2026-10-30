@@ -1,7 +1,10 @@
 import type { ModelRoutePreviewer } from "../../protocol/model-routing.ts"
-import type { EngineRegistry } from "../engine-registry.ts"
 import type { ChatGPTConnections } from "../chatgpt-connections.ts"
+// Injection mirrors createYakitoriHttpServer so the production wiring stage
+// stays mechanical.
+import type { ComputerPreviewService } from "../computer-preview.ts"
 import { ConfigurationError } from "../config-errors.ts"
+import type { EngineRegistry } from "../engine-registry.ts"
 import { createSessionEventHub, type SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import type { McpService } from "../mcp-service.ts"
@@ -62,9 +65,8 @@ import {
   type SessionSubscriptions,
 } from "./subscriptions.ts"
 
-// Injection mirrors createYakitoriHttpServer so the production wiring stage
-// stays mechanical.
 export type MessageProcessorOptions = Readonly<{
+  computerPreview?: ComputerPreviewService
   chatgpt?: ChatGPTConnections
   providerConfiguration?: ProviderService
   mcp?: McpService
@@ -132,6 +134,7 @@ export class MessageProcessor {
       ) => Promise<ApiReadSubscriptionResponse>)
     | undefined
   private readonly userConfig: UserConfigStore | undefined
+  private readonly computerPreview: ComputerPreviewService | undefined
   private readonly availableProviders: readonly string[] | undefined
   private readonly reporter: OperationalFailureReporter
   private readonly userAgent: string
@@ -158,6 +161,7 @@ export class MessageProcessor {
     this.providers = options.providers
     this.subscriptionUsage = options.subscriptionUsage
     this.userConfig = options.userConfig
+    this.computerPreview = options.computerPreview
     this.availableProviders = options.availableProviders
     this.reporter =
       options.reportOperationalFailure ?? consoleOperationalFailureReporter
@@ -210,10 +214,15 @@ export class MessageProcessor {
     this.subscriptions.removeConnection(id)
     const drain = connection.gate.shutdown(this.drainTimeoutMs)
     this.serializationQueues.discardClosed()
-    const result = await drain
+    const [drained, preview] = await Promise.allSettled([
+      drain,
+      this.computerPreview?.stopConnection(id),
+    ])
     this.subscriptions.removeConnection(id)
     this.connections.delete(id)
-    return result
+    if (preview.status === "rejected") throw preview.reason
+    if (drained.status === "rejected") throw drained.reason
+    return drained.value
   }
 
   private receive(connectionId: number, text: string): void {
@@ -336,6 +345,9 @@ export class MessageProcessor {
       previewModel: this.previewModel,
       subscriptionUsage: this.subscriptionUsage,
       userConfig: this.userConfig,
+      ...(this.computerPreview === undefined
+        ? {}
+        : { computerPreview: this.computerPreview }),
       availableProviders: this.availableProviders,
       diagnostics: () => ({
         ...this.diagnosticsSource(),

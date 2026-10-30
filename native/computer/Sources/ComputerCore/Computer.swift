@@ -44,11 +44,17 @@ import Darwin
                 "frontmost_pid": NSWorkspace.shared.frontmostApplication.map { $0.processIdentifier as Any } ?? NSNull(),
                 "pointer": point.map { ["x": $0.x, "y": $0.y] as Any } ?? NSNull()])
         case "list":
+            // Titles are optional display metadata, never part of an input
+            // identity. macOS can omit them when screen access is unavailable.
+            let titleRows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+            let titles = titleRows.reduce(into: [UInt32: String]()) { titles, row in
+                if let id = row[kCGWindowNumber as String] as? UInt32, let title = row[kCGWindowName as String] as? String { titles[id] = title }
+            }
             return try result(["apps": NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map {
                 ["pid": $0.processIdentifier, "name": $0.localizedName ?? "", "bundle_id": $0.bundleIdentifier ?? "", "app_path": $0.bundleURL?.path ?? "",
                     "launch_time": processLaunchDate($0.processIdentifier).map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "hidden": $0.isHidden, "active": $0.isActive] as [String: Any]
             }, "windows": try windows(includeHidden: args["include_hidden"] as? Bool == true).map { window in
-                ["pid": window.pid, "window_id": window.windowID, "frame": frameData(window.frame), "launch_time": window.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull()] as [String: Any]
+                ["pid": window.pid, "window_id": window.windowID, "title": titles[window.windowID] ?? "", "frame": frameData(window.frame), "launch_time": window.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull()] as [String: Any]
             }, "displays": try displays().map { ["display_id": $0.id, "frame": frameData($0.frame), "main": $0.id == CGMainDisplayID()] as [String: Any] }])
         case "launch":
             return try await launch(args)

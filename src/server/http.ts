@@ -1,5 +1,3 @@
-import type { ModelRoutePreviewer } from "../protocol/model-routing.ts"
-import type { EngineRegistry } from "./engine-registry.ts"
 import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
@@ -9,7 +7,10 @@ import {
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import type { RolloutAssets } from "../kernel/index.ts"
+import type { ModelRoutePreviewer } from "../protocol/model-routing.ts"
 import type { ChatGPTConnections } from "./chatgpt-connections.ts"
+import type { ComputerPreviewService } from "./computer-preview.ts"
+import type { EngineRegistry } from "./engine-registry.ts"
 import { createSessionEventHub, type SessionEventHub } from "./event-hub.ts"
 import type { ServerHandlers } from "./handlers.ts"
 import type { McpService } from "./mcp-service.ts"
@@ -53,6 +54,7 @@ type YakitoriHttpServerCommonOptions = {
     provider: ApiSubscriptionProvider,
   ) => Promise<ApiReadSubscriptionResponse>
   readonly userConfig?: UserConfigStore
+  readonly computerPreview?: ComputerPreviewService
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
   readonly reportOperationalFailure?: OperationalFailureReporter
@@ -152,6 +154,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
         : { previewModel: options.previewModel }),
       ...(subscriptionUsage === undefined ? {} : { subscriptionUsage }),
       ...(userConfig === undefined ? {} : { userConfig }),
+      ...(options.computerPreview === undefined
+        ? {}
+        : { computerPreview: options.computerPreview }),
       ...(availableProviders === undefined ? {} : { availableProviders }),
       ...(options.userAgent === undefined
         ? {}

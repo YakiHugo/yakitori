@@ -11,6 +11,7 @@ import type {
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
+import type { ComputerPreviewService } from "../computer-preview.ts"
 
 export type {
   ConfigReadParams,
@@ -63,7 +64,6 @@ import {
   type ApiCancelTurnResponse,
   type ApiClearGoalResponse,
   type ApiCompactSessionResponse,
-  type ApiResumeTurnResponse,
   type ApiCreateProjectResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
@@ -79,6 +79,7 @@ import {
   type ApiReadSessionResponse,
   type ApiReadSubscriptionResponse,
   type ApiReadUsageResponse,
+  type ApiResumeTurnResponse,
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
@@ -135,6 +136,7 @@ export type RpcMethodOutcome = Readonly<{
 }>
 
 export type RpcMethodContext = Readonly<{
+  computerPreview?: ComputerPreviewService
   mcp?: McpService
   providerConfiguration?: ProviderService
   chatgpt?: ChatGPTConnections

@@ -88,6 +88,12 @@ extension Computer {
         snapshot = nil
         lastObservation = nil
         let request = try ObservationRequest(args)
+        let expectedLaunch = args["launch_time"] as? Double
+        if args["launch_time"] != nil {
+            guard request.scope != .screen, let expectedLaunch, expectedLaunch.isFinite, expectedLaunch > 0 else {
+                throw ComputerFailure("invalid_arguments", "Observation launch_time must pin a positive process incarnation in window/app scope.")
+            }
+        }
         let recognize = try recognitionEnabled(args, mode: request.mode)
         var subtree: ObservedElement?
         if args["root_element"] != nil {
@@ -112,6 +118,9 @@ extension Computer {
         case .window, .app:
             selected = currentWindows.filter { $0.pid == request.pid && (request.scope == .app || $0.windowID == request.windowID) }
             guard !selected.isEmpty else { throw ComputerFailure("window_not_found", "No matching visible windows exist on the current desktop.") }
+            if let expectedLaunch, !selected.allSatisfy({ $0.launched?.timeIntervalSince1970 == expectedLaunch }) {
+                throw ComputerFailure("stale_snapshot", "The requested observation process incarnation changed; list targets again.")
+            }
             frame = selected.dropFirst().reduce(selected[0].frame) { $0.union($1.frame) }
             display = nil
         case .screen:
@@ -209,7 +218,7 @@ extension Computer {
             png = encoded
         }
         var data: [String: Any] = ["snapshot_id": next.id, "scope": request.scope.rawValue, "mode": request.mode.rawValue,
-            "frame": frameData(frame), "windows": selected.map { ["pid": $0.pid, "window_id": $0.windowID, "frame": frameData($0.frame)] as [String: Any] },
+            "frame": frameData(frame), "windows": selected.map { ["pid": $0.pid, "window_id": $0.windowID, "launch_time": $0.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "frame": frameData($0.frame)] as [String: Any] },
             "elements": tree.rows, "tree_truncated": tree.truncated || rootsTruncated, "accessibility": AXIsProcessTrusted()]
         if let pid = request.pid { data["pid"] = pid }
         if let windowID = request.windowID { data["window_id"] = windowID }

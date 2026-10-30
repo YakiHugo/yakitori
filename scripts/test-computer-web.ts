@@ -449,6 +449,75 @@ try {
         },
       )
       await check(
+        "a pinned preview connection preserves the agent's existing input ticket",
+        async () => {
+          const listed = await call({ action: "list" })
+          const identity = (
+            listed.structuredContent?.windows as {
+              pid: number
+              window_id: number
+              launch_time: number
+            }[]
+          ).find((row) => row.pid === pid && row.window_id === windowID)
+          assert(identity)
+          const observed = await observe()
+          const preview = new McpClient(
+            "computer",
+            {
+              command:
+                process.env.YAKITORI_COMPUTER_EXECUTABLE ??
+                resolve(
+                  "dist/native/Yakitori Computer.app/Contents/MacOS/yakitori-computer",
+                ),
+              args: ["--mcp"],
+            },
+            () => {},
+            () => {},
+            () => {},
+          )
+          try {
+            const tools = await preview.start()
+            const tool = tools.find((tool) => tool.name === "control")
+            assert(tool)
+            const capture = preview.bindTool(tool)
+            const stale = await capture({
+              action: "observe",
+              mode: "vision",
+              pid,
+              window_id: windowID,
+              launch_time: identity.launch_time + 1,
+            })
+            assert.equal(stale.structuredContent?.code, "stale_snapshot")
+            assert(!stale.content.some((part) => part.type === "image"))
+            const fresh = await capture({
+              action: "observe",
+              mode: "vision",
+              pid,
+              window_id: windowID,
+              launch_time: identity.launch_time,
+            })
+            assert(!fresh.isError, JSON.stringify(fresh.structuredContent))
+            assert(fresh.content.some((part) => part.type === "image"))
+            assert(
+              (
+                fresh.structuredContent?.windows as { launch_time: number }[]
+              ).every((row) => row.launch_time === identity.launch_time),
+            )
+            const before = (await state())?.count
+            assert(before !== undefined)
+            const pressed = await call({
+              action: "press",
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: target(observed, "Web increment").element,
+            })
+            assert(!pressed.isError, JSON.stringify(pressed.structuredContent))
+            await waitFor(async () => (await state())?.count === before + 1)
+          } finally {
+            await preview.close()
+          }
+        },
+      )
+      await check(
         "background paste changes the page or reports unread content",
         async () => {
           const before = (await state())?.first

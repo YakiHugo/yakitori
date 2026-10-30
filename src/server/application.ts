@@ -1,5 +1,3 @@
-import { ContextManager } from "../core/context-manager.ts"
-import { modelRoutingRequirements } from "../runtime/model-routing-requirements.ts"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -11,6 +9,7 @@ import {
   sep,
 } from "node:path"
 import packageJson from "../../package.json" with { type: "json" }
+import { ContextManager } from "../core/context-manager.ts"
 import {
   createSqliteAgentGraphStore,
   JsonlThreadStore,
@@ -42,6 +41,10 @@ import {
   sidebarChangedMethod,
   sideChatChangedMethod,
 } from "../protocol/rpc-wire.ts"
+import {
+  type AgentModelOverrides,
+  AgentModelSelectionError,
+} from "../runtime/agent-model-selection.ts"
 import { GoalRuntime } from "../runtime/goal-runtime.ts"
 import {
   type AgentRuntime,
@@ -68,15 +71,12 @@ import {
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
+import { modelRoutingRequirements } from "../runtime/model-routing-requirements.ts"
 import { providerServices } from "../runtime/provider-services.ts"
 import {
   createLocalSkillsSource,
   type SkillsSource,
 } from "../runtime/skills.ts"
-import {
-  AgentModelSelectionError,
-  type AgentModelOverrides,
-} from "../runtime/agent-model-selection.ts"
 import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
 import { createAccountRuntime } from "./account-runtime.ts"
@@ -90,6 +90,7 @@ import {
   ChatGPTModelCatalogError,
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
+import { ComputerPreviewService } from "./computer-preview.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import {
   type AcpEngineConfiguration,
@@ -108,8 +109,8 @@ import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
 import {
   type AccountModelSource,
-  ModelRouteError,
   createModelRouter,
+  ModelRouteError,
 } from "./model-router.ts"
 import { createModelSourceTool } from "./model-source-tools.ts"
 import {
@@ -265,15 +266,29 @@ export async function createYakitoriApplication(
   let mateStore: SqliteMateStore | undefined
   let projectStoreForCleanup: SqliteProjectStore | undefined
   let sideChatsForCleanup: SideChatService | undefined
+  let computerPreview: ComputerPreviewService | undefined
   const elicitations = createElicitationBroker()
   const mcpOAuth = createMcpOAuth({ storePath: join(rootDir, "mcp-auth") })
   const closeExtensions = async () => {
-    await goals?.stop()
-    elicitations.close()
-    await mcpOAuth.close()
-    await providerConfigPending
-    await subscriptionConnections?.close()
-    await chatgpt?.close()
+    const results = await Promise.allSettled([
+      computerPreview?.close(),
+      (async () => {
+        await goals?.stop()
+        elicitations.close()
+        await mcpOAuth.close()
+        await providerConfigPending
+        await subscriptionConnections?.close()
+        await chatgpt?.close()
+      })(),
+    ])
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    )
+    if (failures.length > 0)
+      throw new AggregateError(
+        failures,
+        "Failed to close application extensions.",
+      )
   }
   // Attached when an HTTP server binds a message processor; server-initiated
   // notifications (session activity, server-side renames) stay silent until
@@ -319,6 +334,13 @@ export async function createYakitoriApplication(
         ? {}
         : { configPath: options.userConfigPath }),
     })
+    computerPreview = new ComputerPreviewService(userConfig, (cause) =>
+      reportOperationalFailure(reporter, {
+        component: "computer-preview",
+        operation: "idle-close",
+        cause,
+      }),
+    )
     const sessionConfigurationPublishers = new Map<
       string,
       () => Promise<void>
@@ -356,6 +378,12 @@ export async function createYakitoriApplication(
       writeValue: async (input) => {
         if (input.cwd === undefined) {
           const result = await userConfig.writeValue(input)
+          if (
+            input.keyPath[0] === "mcp_servers" &&
+            (input.keyPath[1] === undefined ||
+              input.keyPath[1] === computerUseServerName)
+          )
+            await computerPreview?.stopAll()
           await publishSessionConfigurations()
           return result
         }
@@ -1545,6 +1573,7 @@ export async function createYakitoriApplication(
           chatgpt: chatGPTConnections,
           subscriptionUsage,
           userConfig: routedUserConfig,
+          ...(computerPreview === undefined ? {} : { computerPreview }),
           availableProviders: modelRouter.namespaces,
           rolloutAssets,
           reportOperationalFailure: reporter,
