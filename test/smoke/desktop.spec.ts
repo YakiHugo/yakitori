@@ -502,6 +502,14 @@ test("agent browser observations and actions use the exact owned tab through rea
   let modelCalls = 0,
     thirdRequests = 0,
     clearKeyUps = 0
+  const keyboardEvents: {
+    type: string
+    key?: string
+    trusted?: boolean
+    meta?: boolean
+    shift?: boolean
+    value?: string
+  }[] = []
   const pointerEvents: {
     type: string
     trusted: boolean
@@ -595,6 +603,19 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
   }
   const source = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/keyboard-event") {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
+      request.on("end", () => {
+        keyboardEvents.push(JSON.parse(body))
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.method === "POST" && request.url === "/pointer-event") {
       let body = ""
       request.setEncoding("utf8")
@@ -624,7 +645,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));</script>`,
+        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form>`,
       )
       return
     }
@@ -829,7 +850,52 @@ test("agent browser observations and actions use the exact owned tab through rea
                 id: `pointer_${step}`,
               }
             }
-          } else if (step === 27) {
+          } else if (step >= 27 && step <= 36) {
+            if (step % 2 === 0) {
+              const previous = toolResult(body.messages ?? [], "delivered")
+              if (previous.action !== "press")
+                throw new Error("Keyboard input was not acknowledged")
+              tool = {
+                name: "browser",
+                input: { action: "observe", target: previous.target },
+                id: `observe_key_${step}`,
+              }
+            } else {
+              const previous = toolResult(body.messages ?? [], "nodes")
+              const plans = [
+                { name: "Keyboard field", key: "a", modifiers: ["Meta"] },
+                { name: "Keyboard field", key: "r", modifiers: ["Shift"] },
+                { name: "Keyboard field", key: "Tab" },
+                { name: "Submit keys", key: "Enter" },
+                { name: "Pointer surface", key: "t", modifiers: ["Meta"] },
+              ]
+              const plan = plans[(step - 27) / 2]
+              const node = (
+                previous.nodes as {
+                  name: string
+                  role: string
+                  clickReference?: string
+                }[]
+              ).find(
+                (node) =>
+                  node.name === plan?.name &&
+                  ["textbox", "button"].includes(node.role),
+              )
+              if (!plan || !node?.clickReference)
+                throw new Error("Missing exact keyboard control")
+              tool = {
+                name: "browser_input",
+                input: {
+                  action: "press",
+                  target: previous.target,
+                  reference: node.clickReference,
+                  key: plan.key,
+                  ...(plan.modifiers ? { modifiers: plan.modifiers } : {}),
+                },
+                id: `press_${step}`,
+              }
+            }
+          } else if (step === 37) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_navigate",
@@ -841,7 +907,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 28) {
+          } else if (step === 38) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -963,7 +1029,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 28; approval++)
+    for (let approval = 0; approval < 38; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1077,6 +1143,58 @@ test("agent browser observations and actions use the exact owned tab through rea
         expect.objectContaining({ type: "auxclick", trusted: true, button: 1 }),
       ]),
     )
+    await expect
+      .poll(() =>
+        keyboardEvents.some(
+          (event) => event.type === "submit" && event.value === "R",
+        ),
+      )
+      .toBe(true)
+    expect(keyboardEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "keydown",
+          key: "a",
+          trusted: true,
+          meta: true,
+        }),
+        expect.objectContaining({
+          type: "keydown",
+          key: "R",
+          trusted: true,
+          shift: true,
+        }),
+        expect.objectContaining({ type: "keydown", key: "Tab", trusted: true }),
+        expect.objectContaining({ type: "keyup", key: "Tab", trusted: true }),
+        expect.objectContaining({
+          type: "keydown",
+          key: "Enter",
+          trusted: true,
+        }),
+        expect.objectContaining({
+          type: "keydown",
+          key: "t",
+          trusted: true,
+          meta: true,
+        }),
+        expect.objectContaining({
+          type: "keyup",
+          key: "Meta",
+          trusted: true,
+          meta: false,
+        }),
+      ]),
+    )
+    expect(
+      await application.evaluate(({ webContents, session }) => {
+        const profile = session.fromPartition(
+          "persist:yakitori-workspace-browser",
+        )
+        return webContents
+          .getAllWebContents()
+          .filter((contents) => contents.session === profile).length
+      }),
+    ).toBe(2)
     expect(navigationReceipt).toMatchObject({
       loaded: true,
       url: destinationUrl,

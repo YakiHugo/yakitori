@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto"
 import type { WebContents } from "electron"
 import {
   BrowserControlError,
+  type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserTextInputRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
+import { browserKeyStroke } from "./browser-key.ts"
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -39,12 +41,10 @@ type BrowserControlReference = Readonly<{
 
 export class BrowserDocumentConnection {
   #closed = false
-  #heldInput:
-    | Readonly<{
-        method: "Input.dispatchKeyEvent" | "Input.dispatchMouseEvent"
-        params: Record<string, unknown>
-      }>
-    | undefined
+  #heldInputs: Readonly<{
+    method: "Input.dispatchKeyEvent" | "Input.dispatchMouseEvent"
+    params: Record<string, unknown>
+  }>[] = []
   #references = new Map<string, BrowserControlReference>()
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
@@ -87,27 +87,29 @@ export class BrowserDocumentConnection {
   }
 
   async #releaseInput(): Promise<void> {
-    const held = this.#heldInput
-    if (!held) return
-    const contents = this.#contents
-    if (contents.isDestroyed()) {
-      this.#heldInput = undefined
-      return
-    }
-    if (this.closed || !this.#debug.isAttached())
-      throw new BrowserControlError(
-        "browser_cleanup_failed",
-        "The debugger disconnected with an unconfirmed held input. Close this browser target before resuming input.",
-      )
-    try {
-      await this.#debug.sendCommand(held.method, held.params)
-      this.#heldInput = undefined
-    } catch (cause) {
-      throw new BrowserControlError(
-        "browser_cleanup_failed",
-        "The held browser input could not be released: " +
-          (cause instanceof Error ? cause.message : String(cause)),
-      )
+    while (this.#heldInputs.length) {
+      const held = this.#heldInputs.at(-1)
+      if (!held) throw new Error("Missing owned held input.")
+      const contents = this.#contents
+      if (contents.isDestroyed()) {
+        this.#heldInputs.length = 0
+        return
+      }
+      if (this.closed || !this.#debug.isAttached())
+        throw new BrowserControlError(
+          "browser_cleanup_failed",
+          "The debugger disconnected with an unconfirmed held input. Close this browser target before resuming input.",
+        )
+      try {
+        await this.#debug.sendCommand(held.method, held.params)
+        this.#heldInputs.pop()
+      } catch (cause) {
+        throw new BrowserControlError(
+          "browser_cleanup_failed",
+          "The held browser input could not be released: " +
+            (cause instanceof Error ? cause.message : String(cause)),
+        )
+      }
     }
   }
 
@@ -122,7 +124,7 @@ export class BrowserDocumentConnection {
   async observe(signal: AbortSignal): Promise<JsonObject> {
     signal.throwIfAborted()
     this.#references.clear()
-    if (this.#heldInput)
+    if (this.#heldInputs.length)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before observing again.",
@@ -315,7 +317,7 @@ export class BrowserDocumentConnection {
     token: string,
     kind: BrowserControlReference["kind"],
   ): BrowserControlReference {
-    if (this.#heldInput)
+    if (this.#heldInputs.length)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before sending more input.",
@@ -511,7 +513,7 @@ export class BrowserDocumentConnection {
             "browser_unavailable",
             "The owned debugger disconnected.",
           )
-        this.#heldInput = {
+        this.#heldInputs.push({
           method: "Input.dispatchKeyEvent",
           params: {
             type: "keyUp",
@@ -519,7 +521,7 @@ export class BrowserDocumentConnection {
             code: "Backspace",
             windowsVirtualKeyCode: 8,
           },
-        }
+        })
         await command("Input.dispatchKeyEvent", {
           type: "rawKeyDown",
           key: "Backspace",
@@ -556,6 +558,123 @@ export class BrowserDocumentConnection {
     }
     await this.#finishInput(group, failure)
     if (!result) throw new Error("Browser input produced no result.")
+    return result
+  }
+
+  async pressKey(
+    input: BrowserKeyRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    const reference = this.#consumeReference(input.reference, "pointer"),
+      group = `yakitori_${randomUUID()}`
+    const modifiers = input.modifiers ?? []
+    let dispatched = false,
+      result: JsonObject | undefined,
+      failure: unknown,
+      flags = 0
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      await this.#inputCommand(
+        "DOM.focus",
+        { backendNodeId: reference.backendNodeId },
+        signal,
+      )
+      const ensureFocused = async () => {
+        await this.#verifyDocument(reference.document, signal)
+        const response = object(
+          await this.#inputCommand(
+            "Runtime.callFunctionOn",
+            {
+              objectId,
+              returnByValue: true,
+              functionDeclaration: `function() { return this instanceof Element && this.isConnected && this.ownerDocument === document && this.getRootNode().activeElement === this && !Element.prototype.matches.call(this, ':disabled'); }`,
+            },
+            signal,
+          ),
+        )
+        if (object(response.result).value !== true)
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The exact keyboard target is unavailable or no longer focused.",
+          )
+      }
+      for (const key of [...modifiers, input.key]) {
+        await ensureFocused()
+        const modifierIndex = ["Alt", "Control", "Meta", "Shift"].indexOf(key)
+        const previousFlags = flags
+        if (modifierIndex >= 0) flags |= 1 << modifierIndex
+        const stroke = browserKeyStroke(key, modifiers)
+        signal.throwIfAborted()
+        if (this.closed)
+          throw new BrowserControlError(
+            "browser_unavailable",
+            "The owned debugger disconnected.",
+          )
+        // Register each release before dispatch; unwind key then modifiers in
+        // reverse order, independently of cancellation or changed focus.
+        this.#heldInputs.push({
+          method: "Input.dispatchKeyEvent",
+          params: {
+            type: "keyUp",
+            key: stroke.key,
+            code: stroke.code,
+            windowsVirtualKeyCode: stroke.windowsVirtualKeyCode,
+            ...(stroke.location ? { location: stroke.location } : {}),
+            modifiers: previousFlags,
+          },
+        })
+        dispatched = true
+        const editingCommand =
+          key === input.key &&
+          modifiers.includes("Meta") &&
+          !modifiers.includes("Alt") &&
+          !modifiers.includes("Control")
+            ? key.toLowerCase() === "a" && !modifiers.includes("Shift")
+              ? "selectAll"
+              : key.toLowerCase() === "z"
+                ? modifiers.includes("Shift")
+                  ? "redo"
+                  : "undo"
+                : undefined
+            : undefined
+        await this.#inputCommand(
+          "Input.dispatchKeyEvent",
+          {
+            type: stroke.text ? "keyDown" : "rawKeyDown",
+            ...stroke,
+            modifiers: flags,
+            ...(editingCommand ? { commands: [editingCommand] } : {}),
+          },
+          signal,
+        )
+      }
+      await this.#releaseInput()
+      const current = documentIdentity(
+        await this.#inputCommand("Page.getFrameTree", {}, signal),
+      )
+      result = {
+        delivered: true,
+        action: "press",
+        key: input.key,
+        modifiers,
+        documentChanged:
+          current.frameId !== reference.document.frameId ||
+          current.documentId !== reference.document.documentId ||
+          current.url !== reference.document.url,
+      }
+    } catch (cause) {
+      failure =
+        dispatched && cause instanceof BrowserControlError
+          ? new BrowserControlError(
+              "browser_input_unconfirmed",
+              "Keyboard dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+                cause.message,
+            )
+          : cause
+    }
+    await this.#finishInput(group, failure)
+    if (!result) throw new Error("Browser keyboard input produced no result.")
     return result
   }
 
@@ -663,7 +782,7 @@ export class BrowserDocumentConnection {
               "browser_unavailable",
               "The owned debugger disconnected.",
             )
-          this.#heldInput = {
+          this.#heldInputs.push({
             method: "Input.dispatchMouseEvent",
             params: {
               type: "mouseReleased",
@@ -672,7 +791,7 @@ export class BrowserDocumentConnection {
               buttons: 0,
               clickCount,
             },
-          }
+          })
           dispatched = true
           await command("Input.dispatchMouseEvent", {
             type: "mousePressed",

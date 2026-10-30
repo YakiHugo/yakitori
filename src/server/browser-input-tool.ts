@@ -1,5 +1,6 @@
 import {
   BrowserControlError,
+  browserNamedKeys,
   type DesktopBrowser,
   parseBrowserInputRequest,
 } from "../protocol/desktop-browser.ts"
@@ -18,7 +19,7 @@ export function createBrowserInputTool(
   return {
     toolName: plainToolName("browser_input"),
     description:
-      "Interact with an exact browser control observed in this turn. type/fill use inputReference and require text; click/hover/scroll use clickReference and accept no text. Click accepts button left/middle/right (default left) and clickCount 1/2 (default 1). Hover moves only the browser pointer. Scroll requires deltaX and deltaY in CSS pixels, at least one nonzero; positive values scroll right/down. A 10000 CSS-pixel per-axis implementation safety bound limits each compositor scroll jump; observe again before longer scrolling. Pointer input scrolls the exact element into view, hit-tests it before and after moving the browser pointer, then dispatches the requested pointer event. Click releases every owned press, including both pairs for double click. delivered confirms input, not business success or changed scroll position. Covered or disabled controls refuse clicking. Use the exact listed target. type inserts at the current selection; fill selects and replaces the entire field, including an empty string to clear it. Each attempt consumes all references from that observation. Text actions check the document and focused control before dispatch and verify the resulting value. On browser_input_unconfirmed, observe again and never automatically replay input. No OS mouse/keyboard, clipboard, arbitrary page code or remote debugging port is used. Computer use must be connected; normal permission and shared turn ownership apply. type requires nonempty text; fill permits empty text. A 64KiB per-event implementation safety bound applies.",
+      "Interact with an exact browser control observed in this turn. type/fill use inputReference and require text; click/hover/scroll/press use clickReference and accept no text. press focuses the exact element, verifies focus before each key-down, sends one key with optional distinct Alt/Control/Meta/Shift modifiers, then releases the key and modifiers in reverse order. Only page input is delivered; Yakitori application shortcuts are suppressed until turn cleanup. Meta+A, Meta+Z and Meta+Shift+Z use Chromium editing commands. Keyboard shortcuts can invoke page handlers and normal browser editing behavior, including clipboard shortcuts. Click accepts button left/middle/right (default left) and clickCount 1/2 (default 1). Hover moves only the browser pointer. Scroll requires deltaX and deltaY in CSS pixels, at least one nonzero; positive values scroll right/down. A 10000 CSS-pixel per-axis implementation safety bound limits each compositor scroll jump; observe again before longer scrolling. Pointer input scrolls the exact element into view, hit-tests it before and after moving the browser pointer, then dispatches the requested pointer event. Click releases every owned press, including both pairs for double click. delivered confirms input, not business success or changed scroll position. Covered or disabled controls refuse clicking. Use the exact listed target. type inserts at the current selection; fill selects and replaces the entire field, including an empty string to clear it. Each attempt consumes all references from that observation. Text actions check the document and focused control before dispatch and verify the resulting value. On browser_input_unconfirmed, observe again and never automatically replay input. No OS mouse/keyboard, arbitrary page code or remote debugging port is used. Typing/filling uses no clipboard. Computer use must be connected; normal permission and shared turn ownership apply. type requires nonempty text; fill permits empty text. A 64KiB per-event implementation safety bound applies.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -26,7 +27,7 @@ export function createBrowserInputTool(
       properties: {
         action: {
           type: "string",
-          enum: ["type", "fill", "click", "hover", "scroll"],
+          enum: ["type", "fill", "click", "hover", "scroll", "press"],
         },
         target: {
           type: "object",
@@ -40,6 +41,16 @@ export function createBrowserInputTool(
         },
         reference: { type: "string" },
         text: { type: "string" },
+        key: {
+          type: "string",
+          description: `For press: one printable ASCII character, F1–F24, or ${browserNamedKeys.join(", ")}. Unicode text uses type/fill.`,
+        },
+        modifiers: {
+          type: "array",
+          uniqueItems: true,
+          maxItems: 4,
+          items: { type: "string", enum: ["Alt", "Control", "Meta", "Shift"] },
+        },
         button: { type: "string", enum: ["left", "middle", "right"] },
         clickCount: { type: "integer", enum: [1, 2] },
         deltaX: { type: "number", minimum: -10000, maximum: 10000 },
