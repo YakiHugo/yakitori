@@ -154,6 +154,22 @@ it("retires a dead original renderer without sending cleanup into a replacement"
   }
 })
 
+it("accepts Electron's empty root session identifier without crossing into a child session", async () => {
+  const f = fixture()
+  try {
+    await f.chooser.arm(
+      { document: f.scope.document, closed: f.closed.signal },
+      f.command,
+    )
+    f.emit({ frameId: "frame", backendNodeId: 17 }, "owned_session")
+    expect(f.chooser.inspect().backendNodeId).toBeUndefined()
+    f.emit({ frameId: "frame", backendNodeId: 17 }, "")
+    expect(f.chooser.inspect().backendNodeId).toBe(17)
+  } finally {
+    f.chooser.close()
+  }
+})
+
 function pendingConfiguration() {
   const events = new EventEmitter(),
     started = Promise.withResolvers<void>(),

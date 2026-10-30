@@ -30,10 +30,10 @@ test("an explicitly armed document exposes its dynamically created hidden file i
     detach: Promise<void> | undefined,
     connection: BrowserDocumentConnection | undefined
   session.on("Page.fileChooserOpened", (params) =>
-    events.emit("message", {}, "Page.fileChooserOpened", params),
+    events.emit("message", {}, "Page.fileChooserOpened", params, ""),
   )
   session.on("Page.frameNavigated", (params) =>
-    events.emit("message", {}, "Page.frameNavigated", params),
+    events.emit("message", {}, "Page.frameNavigated", params, ""),
   )
   try {
     await writeFile(path, text)

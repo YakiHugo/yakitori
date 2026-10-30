@@ -30,7 +30,13 @@ export class BrowserFileChooser {
     sessionId?: string,
   ) => {
     const scope = this.#scope
-    if (!scope || scope.closed.aborted || sessionId !== scope.frame?.sessionId)
+    // Electron reports root events with ""; root protocol commands omit it.
+    const sourceSessionId = sessionId || undefined
+    if (
+      !scope ||
+      scope.closed.aborted ||
+      sourceSessionId !== scope.frame?.sessionId
+    )
       return
     if (
       method === "Page.frameNavigated" &&
