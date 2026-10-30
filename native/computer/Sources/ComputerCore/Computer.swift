@@ -62,6 +62,8 @@ import Darwin
             return try await clipboardAccess(args)
         case "observe":
             return try await observe(args)
+        case "preview":
+            return try await observe(args, readOnly: true)
         case "query": return try query(args)
         case "zoom": return try await zoom(args)
         case "window": return try await manageWindow(args)

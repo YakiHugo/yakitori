@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { isDeepStrictEqual, parseArgs } from "node:util"
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { McpClient } from "../src/runtime/mcp-client.ts"
 import { prepareComputerFixture } from "./computer-fixture.ts"
 
@@ -457,6 +458,7 @@ try {
               pid: number
               window_id: number
               launch_time: number
+              frame: { x: number; y: number; width: number; height: number }
             }[]
           ).find((row) => row.pid === pid && row.window_id === windowID)
           assert(identity)
@@ -481,16 +483,16 @@ try {
             assert(tool)
             const capture = preview.bindTool(tool)
             const stale = await capture({
-              action: "observe",
+              action: "preview",
               mode: "vision",
               pid,
               window_id: windowID,
               launch_time: identity.launch_time + 1,
             })
-            assert.equal(stale.structuredContent?.code, "stale_snapshot")
+            assert.equal(stale.structuredContent?.code, "stale_target")
             assert(!stale.content.some((part) => part.type === "image"))
             const fresh = await capture({
-              action: "observe",
+              action: "preview",
               mode: "vision",
               pid,
               window_id: windowID,
@@ -498,6 +500,19 @@ try {
             })
             assert(!fresh.isError, JSON.stringify(fresh.structuredContent))
             assert(fresh.content.some((part) => part.type === "image"))
+            assert.equal(fresh.structuredContent?.snapshot_id, undefined)
+            assert.equal(fresh.structuredContent?.input_available, false)
+            assert.match(
+              String(fresh.structuredContent?.preview_id),
+              /^preview_/,
+            )
+            const refused = await capture({
+              action: "click",
+              snapshot_id: fresh.structuredContent?.preview_id,
+              x: 10,
+              y: 10,
+            })
+            assert.equal(refused.structuredContent?.code, "stale_snapshot")
             assert(
               (
                 fresh.structuredContent?.windows as { launch_time: number }[]
@@ -505,6 +520,16 @@ try {
             )
             const before = (await state())?.count
             assert(before !== undefined)
+            const sameConnectionPreview = await call({
+              action: "preview",
+              pid,
+              window_id: windowID,
+              launch_time: identity.launch_time,
+            })
+            assert(
+              !sameConnectionPreview.isError,
+              JSON.stringify(sameConnectionPreview.structuredContent),
+            )
             const pressed = await call({
               action: "press",
               snapshot_id: observed.structuredContent?.snapshot_id,
@@ -512,6 +537,46 @@ try {
             })
             assert(!pressed.isError, JSON.stringify(pressed.structuredContent))
             await waitFor(async () => (await state())?.count === before + 1)
+            const move = (x: number, y: number) =>
+              call({
+                action: "window",
+                window_action: "move",
+                pid,
+                window_id: windowID,
+                launch_time: identity.launch_time,
+                x,
+                y,
+              })
+            try {
+              for (let step = 0; step < 4; step++) {
+                const [moved, frame]: [CallToolResult, CallToolResult] =
+                  await Promise.all([
+                    move(
+                      identity.frame.x + (step % 2) * 8,
+                      identity.frame.y + (step % 2) * 8,
+                    ),
+                    capture({
+                      action: "preview",
+                      pid,
+                      window_id: windowID,
+                      launch_time: identity.launch_time,
+                    }),
+                  ])
+                assert(!moved.isError, JSON.stringify(moved.structuredContent))
+                assert(!frame.isError, JSON.stringify(frame.structuredContent))
+                assert.equal(frame.structuredContent?.input_available, false)
+                assert.equal(
+                  typeof frame.structuredContent?.geometry_stable,
+                  "boolean",
+                )
+              }
+            } finally {
+              const restored = await move(identity.frame.x, identity.frame.y)
+              assert(
+                !restored.isError,
+                JSON.stringify(restored.structuredContent),
+              )
+            }
           } finally {
             await preview.close()
           }

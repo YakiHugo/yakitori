@@ -257,7 +257,7 @@ export class ComputerPreviewService {
     return this.#run(owner, async (call, signal) => {
       const result = await call(
         {
-          action: "observe",
+          action: "preview",
           mode: "vision",
           scope: target.scope,
           ...(target.scope === "screen"
@@ -271,6 +271,11 @@ export class ComputerPreviewService {
       const image = result.content.find((part) => part.type === "image")
       const frame = record(data.frame)
       if (
+        data.input_available !== false ||
+        typeof data.preview_id !== "string" ||
+        !data.preview_id.startsWith("preview_") ||
+        data.snapshot_id !== undefined ||
+        typeof data.geometry_stable !== "boolean" ||
         image?.type !== "image" ||
         image.mimeType !== "image/png" ||
         image.data.length > 8 * 1024 * 1024 ||
@@ -319,7 +324,9 @@ export class ComputerPreviewService {
         throw new ComputerPreviewError(
           "The preview process incarnation changed; refresh the target list.",
         )
-      const status = structured(await call({ action: "status" }, signal))
+      const status = data.geometry_stable
+        ? structured(await call({ action: "status" }, signal))
+        : {}
       const pointer =
         status.pointer === null || status.pointer === undefined
           ? undefined
