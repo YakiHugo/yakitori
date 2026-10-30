@@ -109,6 +109,15 @@ export class BrowserDocumentConnection {
     return this.#closed || this.#contents.isDestroyed()
   }
 
+  assertInputIdle(): void {
+    this.#mutations.assertCompleted()
+    if (this.#heldInputs.length)
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Confirm held-input cleanup before changing the browser view or sending more input.",
+      )
+  }
+
   async #releaseInput(): Promise<void> {
     if (this.#releasingInput) return this.#releasingInput
     // Read cancellation and turn cleanup can request release concurrently.
@@ -379,12 +388,7 @@ export class BrowserDocumentConnection {
     token: string,
     kind: BrowserControlReference["kind"],
   ): BrowserControlReference {
-    this.#mutations.assertCompleted()
-    if (this.#heldInputs.length)
-      throw new BrowserControlError(
-        "browser_cleanup_failed",
-        "Confirm held-input cleanup before sending more input.",
-      )
+    this.assertInputIdle()
     const reference = this.#references.get(token)
     this.#references.clear()
     if (!reference || reference.kind !== kind || this.closed)

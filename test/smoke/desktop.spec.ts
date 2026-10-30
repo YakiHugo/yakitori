@@ -1276,9 +1276,22 @@ test("agent browser observations and actions use the exact owned tab through rea
               id: `observe_file_selection_${step}`,
             }
           } else if (step === 65) {
-            await page
-              .getByRole("button", { name: "Show workspace", exact: true })
-              .click()
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_view",
+              input: {
+                action: "show",
+                target: current.target,
+                fromUrl: wantedUrl,
+              },
+              id: "display_directory_target",
+            }
+          } else if (step === 66) {
+            const shown = toolResult(body.messages ?? [], "selectionApplied")
+            if (shown.selectionApplied !== true || shown.visible !== true)
+              throw new Error(
+                "The requested browser tab did not become visible",
+              )
             const current = toolResult(body.messages ?? [], "nodes")
             const control = (
               current.nodes as {
@@ -1302,7 +1315,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "provide_remote_directory",
             }
-          } else if (step === 66) {
+          } else if (step === 67) {
             const selected = toolResult(body.messages ?? [], "filesVerified")
             if (
               selected.action !== "upload_directory" ||
@@ -1324,14 +1337,14 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_directory_selection",
             }
-          } else if (step === 67) {
+          } else if (step === 68) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 68) {
+          } else if (step === 69) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1341,7 +1354,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 69) {
+          } else if (step === 70) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1356,7 +1369,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 70) {
+          } else if (step === 71) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
@@ -1369,7 +1382,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 71) {
+          } else if (step === 72) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1565,7 +1578,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 71; approval++)
+    for (let approval = 0; approval < 72; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1989,7 +2002,6 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
         { BrowserWindow, WebContentsView, session },
         { url, directory },
       ) => {
-        const previousFocus = BrowserWindow.getFocusedWindow()?.id
         const window = BrowserWindow.getAllWindows()[0]
         if (!window) throw new Error("Missing owned host window")
         const view = new WebContentsView({
@@ -2048,6 +2060,9 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
             },
             frameSession,
           )
+          // Measure file selection, after the fixture's own view load/show and
+          // debugger setup. Startup activation can finish during those awaits.
+          const previousFocus = BrowserWindow.getFocusedWindow()?.id
           await debug.sendCommand(
             "DOM.setFileInputFiles",
             { nodeId, files: [directory] },

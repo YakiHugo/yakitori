@@ -32,6 +32,13 @@ export type WorkspaceBrowserShortcut =
   | "new-side-chat"
   | "toggle-workspace"
 
+export type WorkspaceBrowserShowRequest = Readonly<{
+  requestId: string
+  tabId: string
+  ownerSessionId: string
+}>
+export type WorkspaceBrowserShowResult = "applied" | "refused" | "failed"
+
 export type WorkspaceBrowserBridge = Readonly<{
   create(input: { tabId: string; url?: string }): Promise<WorkspaceBrowserState>
   navigate(input: { tabId: string; url: string }): Promise<void>
@@ -42,6 +49,14 @@ export type WorkspaceBrowserBridge = Readonly<{
   viewport(input: WorkspaceBrowserViewport): Promise<string | undefined>
   selection(input: { tabId: string; action: "add" | "chat" }): Promise<void>
   close(input: { tabId: string }): Promise<void>
+  claimShow(input: { requestId: string }): Promise<boolean>
+  completeShow(input: {
+    requestId: string
+    result: WorkspaceBrowserShowResult
+  }): Promise<boolean>
+  onShowRequest(
+    listener: (request: WorkspaceBrowserShowRequest) => void,
+  ): () => void
   onState(listener: (state: WorkspaceBrowserState) => void): () => void
   onSelection(
     listener: (selection: WorkspaceBrowserSelection) => void,

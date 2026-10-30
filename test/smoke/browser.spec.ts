@@ -8,6 +8,11 @@ import {
   type ServerProcess,
   spawnServerProcess,
 } from "../../src/desktop/server-process.ts"
+import type {
+  WorkspaceBrowserBridge,
+  WorkspaceBrowserShowRequest,
+  WorkspaceBrowserShowResult,
+} from "../../src/desktop/workspace-browser-types.ts"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   computerPreviewCatalog,
@@ -22,6 +27,160 @@ import {
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+type BrowserViewSmoke = {
+  tabs: string[]
+  claims: string[]
+  completed: { requestId: string; result: WorkspaceBrowserShowResult }[]
+  emit: (request: WorkspaceBrowserShowRequest) => void
+}
+
+test("browser display requests select the owned tab and refuse cancelled or foreign requests", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  await page.addInitScript(() => {
+    let listener: ((request: WorkspaceBrowserShowRequest) => void) | undefined
+    const state: BrowserViewSmoke = {
+      tabs: [],
+      claims: [],
+      completed: [],
+      emit(request) {
+        if (!listener) throw new Error("Display listener is not mounted")
+        listener(request)
+      },
+    }
+    const browser: WorkspaceBrowserBridge = {
+      async create({ tabId }) {
+        if (!state.tabs.includes(tabId)) state.tabs.push(tabId)
+        return {
+          tabId,
+          title: "Owned browser",
+          url: "https://example.test/",
+          loading: false,
+          canGoBack: false,
+          canGoForward: false,
+        }
+      },
+      async navigate() {},
+      async action() {},
+      async viewport() {
+        return undefined
+      },
+      async selection() {},
+      async close() {},
+      async claimShow({ requestId }) {
+        state.claims.push(requestId)
+        return requestId !== "cancelled"
+      },
+      async completeShow(input) {
+        state.completed.push(input)
+        return true
+      },
+      onShowRequest(fn) {
+        listener = fn
+        return () => {
+          listener = undefined
+        }
+      },
+      onState() {
+        return () => {}
+      },
+      onSelection() {
+        return () => {}
+      },
+      onShortcut() {
+        return () => {}
+      },
+    }
+    Object.defineProperty(window, "yakitoriDesktop", { value: { browser } })
+    Reflect.set(window, "browserViewSmoke", state)
+  })
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runFauxTurn(page)
+    const client = createAppRpcClient({ apiBase: server.url })
+    const { sessions } = await client.request("session/list", {})
+    expect(sessions).toHaveLength(1)
+    const ownerSessionId = sessions[0]?.id
+    if (!ownerSessionId) throw new Error("Missing owning session")
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    const tab = page.getByRole("tab", { name: "Owned browser", exact: true })
+    await expect(tab).toHaveAttribute("aria-selected", "true")
+    const tabId = await page.evaluate(
+      () =>
+        (Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke).tabs[0],
+    )
+    if (!tabId) throw new Error("Missing owned browser tab")
+    await page
+      .getByRole("button", { name: "Hide workspace", exact: true })
+      .click()
+    const workspace = page.getByRole("complementary", {
+      name: "Workspace",
+      exact: true,
+    })
+    const emit = (requestId: string, owner = ownerSessionId) =>
+      page.evaluate(
+        (request) => {
+          ;(Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke).emit(
+            request,
+          )
+        },
+        { requestId, ownerSessionId: owner, tabId },
+      )
+    await emit("foreign", "another-session")
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke)
+              .completed,
+        ),
+      )
+      .toEqual([{ requestId: "foreign", result: "refused" }])
+    await emit("cancelled")
+    await emit("applied")
+    await expect(workspace).toBeVisible()
+    await expect(tab).toHaveAttribute("aria-selected", "true")
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke)
+              .completed,
+        ),
+      )
+      .toEqual([
+        { requestId: "foreign", result: "refused" },
+        { requestId: "applied", result: "applied" },
+      ])
+    expect(
+      await page.evaluate(
+        () =>
+          (Reflect.get(window, "browserViewSmoke") as BrowserViewSmoke).claims,
+      ),
+    ).toEqual(["cancelled", "applied"])
+    expect(errors).toEqual([])
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
 
 test("live computer preview renders decoded frames and pointer positions and sends Stop", async ({
   page,

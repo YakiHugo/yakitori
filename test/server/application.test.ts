@@ -3279,6 +3279,7 @@ describe("application composition", () => {
     "browser_input",
     "browser_navigate",
     "browser_upload",
+    "browser_view",
   ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
     const browserInput =
       browserTool === "browser"
@@ -3309,17 +3310,28 @@ describe("application composition", () => {
                 fromUrl: "https://owned.test/",
                 paths: [],
               }
-            : {
-                action: "navigate",
-                target: {
-                  tabId: "owned",
-                  webContentsId: 17,
-                  instanceId:
-                    "browser_target_00000000-0000-4000-8000-000000000001",
-                },
-                fromUrl: "",
-                url: "https://destination.test/",
-              }
+            : browserTool === "browser_view"
+              ? {
+                  action: "show",
+                  target: {
+                    tabId: "owned",
+                    webContentsId: 17,
+                    instanceId:
+                      "browser_target_00000000-0000-4000-8000-000000000001",
+                  },
+                  fromUrl: "https://owned.test/",
+                }
+              : {
+                  action: "navigate",
+                  target: {
+                    tabId: "owned",
+                    webContentsId: 17,
+                    instanceId:
+                      "browser_target_00000000-0000-4000-8000-000000000001",
+                  },
+                  fromUrl: "",
+                  url: "https://destination.test/",
+                }
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")

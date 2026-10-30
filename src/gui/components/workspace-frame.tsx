@@ -20,6 +20,7 @@ import {
   useState,
 } from "react"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
+import { connectBrowserViewRequests } from "../browser-view-requests.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { useAppStore } from "../store/app-store.ts"
@@ -257,6 +258,11 @@ export function WorkspaceFrame({
     if (!resizing && widthRatio !== undefined)
       localStorage.setItem("yakitori.workspaceSplit", String(widthRatio))
   }, [widthRatio, resizing])
+  useEffect(() => {
+    const bridge = window.yakitoriDesktop?.browser
+    if (!bridge) return
+    return connectBrowserViewRequests(bridge)
+  }, [])
   useEffect(() => {
     return window.yakitoriDesktop?.browser?.onShortcut((action) => {
       if (useAppStore.getState().settingsSection !== undefined) return
