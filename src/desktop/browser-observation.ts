@@ -5,6 +5,7 @@ import {
   BrowserControlError,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
+  type BrowserSelectRequest,
   type BrowserTextInputRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
@@ -20,6 +21,10 @@ import {
   BrowserFramePointer,
   browserPointerGeometry,
 } from "./browser-pointer.ts"
+import {
+  selectBrowserOptions,
+  verifyBrowserSelection,
+} from "./browser-select.ts"
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -601,6 +606,81 @@ export class BrowserDocumentConnection {
     }
     await this.#finishInput(group, failure, reference.frame?.sessionId)
     if (!result) throw new Error("Browser input produced no result.")
+    return result
+  }
+
+  async selectOptions(
+    input: BrowserSelectRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    const reference = this.#consumeReference(input.reference, "element"),
+      group = `yakitori_${randomUUID()}`
+    const command = (method: string, params: Record<string, unknown> = {}) =>
+      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
+    let attempted = false,
+      result: JsonObject | undefined,
+      failure: unknown
+    try {
+      const objectId = await this.#resolveReference(reference, group, signal)
+      await command("DOM.focus", { backendNodeId: reference.backendNodeId })
+      await this.#verifyDocument(reference, signal)
+      attempted = true
+      const reply = object(
+        await command("Runtime.callFunctionOn", {
+          objectId,
+          returnByValue: true,
+          functionDeclaration: selectBrowserOptions.toString(),
+          arguments: [{ value: input.options }],
+        }),
+      )
+      const selection = object(object(reply.result).value)
+      if (selection.applied === false) attempted = false
+      if (selection.ok !== true)
+        throw new BrowserControlError(
+          attempted ? "browser_input_unconfirmed" : "browser_input_unavailable",
+          typeof selection.reason === "string"
+            ? selection.reason
+            : "The select did not confirm the requested options.",
+        )
+      if (
+        !Array.isArray(selection.values) ||
+        !selection.values.every((value) => typeof value === "string")
+      )
+        throw new Error("Chromium returned invalid selected values.")
+      await this.#verifyDocument(reference, signal)
+      const confirmed = object(
+        await command("Runtime.callFunctionOn", {
+          objectId,
+          returnByValue: true,
+          functionDeclaration: verifyBrowserSelection.toString(),
+          arguments: [{ value: selection.values }],
+        }),
+      )
+      if (object(confirmed.result).value !== true)
+        throw new BrowserControlError(
+          "browser_input_unconfirmed",
+          "The select changed after its events. Observe again; do not replay automatically.",
+        )
+      result = {
+        delivered: true,
+        action: "select",
+        selectionVerified: true,
+        values: selection.values,
+        events: "synthetic",
+      }
+    } catch (cause) {
+      failure =
+        attempted && cause instanceof BrowserControlError
+          ? new BrowserControlError(
+              "browser_input_unconfirmed",
+              "Selection was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+                cause.message,
+            )
+          : cause
+    }
+    await this.#finishInput(group, failure, reference.frame?.sessionId)
+    if (!result) throw new Error("Browser selection produced no result.")
     return result
   }
 

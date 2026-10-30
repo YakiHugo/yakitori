@@ -37,6 +37,14 @@ export type BrowserInputRequest =
   | BrowserTextInputRequest
   | BrowserPointerRequest
   | BrowserKeyRequest
+  | BrowserSelectRequest
+
+export type BrowserSelectRequest = Readonly<{
+  action: "select"
+  target: BrowserTarget
+  reference: string
+  options: ({ value: string } | { label: string } | { index: number })[]
+}>
 
 export const browserNamedKeys = [
   "Enter",
@@ -64,6 +72,42 @@ export type BrowserKeyRequest = Readonly<{
 }>
 
 export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
+  if (
+    isJsonObject(value) &&
+    value.action === "select" &&
+    Object.keys(value).length === 4 &&
+    ["action", "target", "reference", "options"].every((key) =>
+      Object.hasOwn(value, key),
+    ) &&
+    typeof value.reference === "string" &&
+    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
+    Array.isArray(value.options) &&
+    value.options.length <= 256 &&
+    Buffer.byteLength(JSON.stringify(value.options)) <= 64 * 1024 &&
+    value.options.every(
+      (option) =>
+        isJsonObject(option) &&
+        Object.keys(option).length === 1 &&
+        (typeof option.value === "string" ||
+          typeof option.label === "string" ||
+          (typeof option.index === "number" &&
+            Number.isSafeInteger(option.index) &&
+            option.index >= 0)),
+    )
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "select",
+      target: observed.target,
+      reference: value.reference,
+      options: value.options as BrowserSelectRequest["options"],
+    }
+  }
   if (
     isJsonObject(value) &&
     ["action", "target", "reference"].every((key) =>
@@ -203,7 +247,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type/fill with an inputReference and text, or click/hover/scroll/press with an elementReference and exact target. Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
+    "Use type/fill with an inputReference and text, or click/hover/scroll/press/select with an elementReference and exact target. Select requires options, each with exactly one value, label or nonnegative index; an empty array clears selection (256-descriptor and 64KiB per-action safety bounds). Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
   )
 }
 
@@ -334,6 +378,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   hover: true,
   scroll: true,
   press: true,
+  select: true,
   navigate: true,
 }
 
@@ -352,7 +397,8 @@ export function parseBrowserRequest(value: unknown): BrowserRequest {
       value.action === "click" ||
       value.action === "hover" ||
       value.action === "scroll" ||
-      value.action === "press")
+      value.action === "press" ||
+      value.action === "select")
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
 }

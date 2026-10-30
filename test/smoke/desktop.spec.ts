@@ -503,6 +503,11 @@ test("agent browser observations and actions use the exact owned tab through rea
     thirdRequests = 0,
     clearKeyUps = 0,
     frameAfterReady = 0
+  const frameSelectEvents: {
+    type: string
+    values: string[]
+    trusted: boolean
+  }[] = []
   const framePointerEvents: { kind: string; trusted: boolean }[] = []
   const frameSubmittedValues: (string | null)[] = []
   let frameAfterObservation: Record<string, unknown> | undefined
@@ -652,6 +657,19 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
   }
   const source = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/frame-select") {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
+      request.on("end", () => {
+        frameSelectEvents.push(JSON.parse(body))
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.method === "POST" && request.url === "/frame-pointer") {
       let body = ""
       request.setEncoding("utf8")
@@ -722,7 +740,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             ? "Remote"
             : "Nested"
       response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
       )
       return
     }
@@ -1145,12 +1163,55 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 59) {
             const current = toolResult(body.messages ?? [], "nodes")
+            const control = (
+              current.nodes as {
+                role: string
+                name: string
+                elementReference?: string
+              }[]
+            ).find(
+              (node) =>
+                node.role === "listbox" && node.name === "Remote choices",
+            )
+            if (!control?.elementReference)
+              throw new Error("Missing remote select reference")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "select",
+                target: current.target,
+                reference: control.elementReference,
+                options: [{ label: "Green" }, { index: 2 }],
+              },
+              id: "select_remote_options",
+            }
+          } else if (step === 60) {
+            const selected = toolResult(body.messages ?? [], "delivered")
+            if (
+              selected.action !== "select" ||
+              selected.selectionVerified !== true ||
+              JSON.stringify(selected.values) !== JSON.stringify(["g", "b"]) ||
+              selected.events !== "synthetic"
+            )
+              throw new Error("Remote selection receipt was not verified")
+            const previous = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser",
+              input: {
+                action: "observe",
+                target: previous.target,
+                frameReference: previous.frameReference,
+              },
+              id: "observe_selected_frame",
+            }
+          } else if (step === 61) {
+            const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 60) {
+          } else if (step === 62) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1160,7 +1221,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 61) {
+          } else if (step === 63) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1175,7 +1236,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 62) {
+          } else if (step === 64) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
@@ -1188,7 +1249,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 63) {
+          } else if (step === 65) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1371,7 +1432,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 63; approval++)
+    for (let approval = 0; approval < 65; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1564,6 +1625,11 @@ test("agent browser observations and actions use the exact owned tab through rea
     expect(framePointerEvents).toEqual(
       ["Local", "Remote", "Nested"].map((kind) => ({ kind, trusted: true })),
     )
+    await expect.poll(() => frameSelectEvents.length).toBe(2)
+    expect(frameSelectEvents).toEqual([
+      { type: "input", trusted: false, values: ["g", "b"] },
+      { type: "change", trusted: false, values: ["g", "b"] },
+    ])
     expect(frameSubmittedValues).toEqual(["filled_Remote你好"])
     expect(frameAfterObservation?.nodes).toEqual(
       expect.arrayContaining([
@@ -1685,6 +1751,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         frameSubmittedValues,
         frameAfterReady,
         framePointerEvents,
+        frameSelectEvents,
         protocol,
       }),
       contentType: "application/json",
