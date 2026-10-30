@@ -19,12 +19,7 @@ import {
 import { captureBrowserPage } from "./browser-capture.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
-import {
-  type BrowserFrameReadMethod,
-  BrowserFrames,
-  type BrowserProtocolCommand,
-  isBrowserFrameReadMethod,
-} from "./browser-frames.ts"
+import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import { BrowserPendingMutations } from "./browser-mutations.ts"
 import {
@@ -32,9 +27,15 @@ import {
   browserPointerGeometry,
 } from "./browser-pointer.ts"
 import {
+  type BrowserFrameReadMethod,
+  type BrowserProtocolCommand,
+  isBrowserFrameReadMethod,
+} from "./browser-protocol.ts"
+import {
   selectBrowserOptions,
   verifyBrowserSelection,
 } from "./browser-select.ts"
+import { BrowserFrameSessions } from "./browser-sessions.ts"
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -53,6 +54,7 @@ export class BrowserDocumentConnection {
   #references = new Map<string, BrowserControlReference>()
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
+  readonly #sessions: BrowserFrameSessions
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
   readonly #directoryReady: (signal: AbortSignal) => Promise<void>
@@ -66,6 +68,7 @@ export class BrowserDocumentConnection {
     )
     this.#references.clear()
     this.#frameCatalog.close()
+    this.#sessions.close()
   }
 
   constructor(
@@ -101,7 +104,8 @@ export class BrowserDocumentConnection {
         cause instanceof Error ? cause.message : String(cause),
       )
     }
-    this.#frameCatalog = new BrowserFrames(debug)
+    this.#sessions = new BrowserFrameSessions(debug)
+    this.#frameCatalog = new BrowserFrames(this.#sessions)
     debug.on("detach", this.#detached)
   }
 
@@ -171,6 +175,7 @@ export class BrowserDocumentConnection {
     this.#references.clear()
     this.#debug.off("detach", this.#detached)
     this.#frameCatalog.close()
+    this.#sessions.close()
   }
 
   async #read<T>(
@@ -228,7 +233,7 @@ export class BrowserDocumentConnection {
         debug.sendCommand(name, args, session)
       const pending: Promise<unknown> = (
         sessionId !== undefined && isBrowserFrameReadMethod(method)
-          ? this.#frameCatalog.readInSession(send, method, params, sessionId)
+          ? this.#sessions.readInSession(send, method, params, sessionId)
           : send(method, params, sessionId)
       )
         .then((value) => (deadline.aborted ? aborted : value))
@@ -404,7 +409,7 @@ export class BrowserDocumentConnection {
       ? this.#lifetime.signal
       : AbortSignal.any([
           this.#lifetime.signal,
-          this.#frameCatalog.sessionClosed(sessionId),
+          this.#sessions.sessionClosed(sessionId),
         ])
   }
 
@@ -558,7 +563,7 @@ export class BrowserDocumentConnection {
       ...[...new Set([sessionId, ...additionalSessions])].map((id) =>
         this.closed
           ? undefined
-          : this.#frameCatalog.releaseObjects(
+          : this.#sessions.releaseObjects(
               group,
               (method, params, session) =>
                 this.#debug.sendCommand(method, params, session),

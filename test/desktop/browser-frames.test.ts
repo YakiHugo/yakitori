@@ -3,6 +3,7 @@ import type { WebContents } from "electron"
 import { expect, it } from "vitest"
 import { BrowserFrames } from "../../src/desktop/browser-frames.ts"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
+import { BrowserFrameSessions } from "../../src/desktop/browser-sessions.ts"
 import { parseBrowserObservationRequest } from "../../src/protocol/desktop-browser.ts"
 
 const target = {
@@ -17,10 +18,11 @@ it.each([
   "close",
 ])("ends a pending frame query when its session %s occurs without waiting for the dead renderer", async (terminal) => {
   const events = new EventEmitter()
-  const frames = new BrowserFrames({
+  const sessions = new BrowserFrameSessions({
     on: events.on.bind(events),
     off: events.off.bind(events),
   } as unknown as WebContents["debugger"])
+  const frames = new BrowserFrames(sessions)
   const started = Promise.withResolvers<void>()
   const reply = Promise.withResolvers<unknown>()
   const pending = frames.list(async (method, _params, sessionId) => {
@@ -56,10 +58,11 @@ it.each([
       events.emit("message", {}, "Target.detachedFromTarget", {
         sessionId: "old_renderer",
       })
-    else frames.close()
+    else sessions.close()
     await ended
   } finally {
     frames.close()
+    sessions.close()
     reply.resolve({})
   }
   expect(events.listenerCount("message")).toBe(0)
@@ -443,10 +446,11 @@ function fixture(
 
 it("finishes cleanup when the original frame session disappears but surfaces errors from a live session", async () => {
   const events = new EventEmitter()
-  const frames = new BrowserFrames({
+  const sessions = new BrowserFrameSessions({
     on: events.on.bind(events),
     off: events.off.bind(events),
   } as unknown as WebContents["debugger"])
+  const frames = new BrowserFrames(sessions)
   await frames.list(async (method, _params, sessionId) => {
     if (method === "Target.setAutoAttach") {
       if (!sessionId)
@@ -472,7 +476,7 @@ it("finishes cleanup when the original frame session disappears but surfaces err
     reply = Promise.withResolvers<unknown>()
   try {
     await expect(
-      frames.releaseObjects(
+      sessions.releaseObjects(
         "objects",
         async () => {
           throw new Error("Live cleanup failed")
@@ -480,7 +484,7 @@ it("finishes cleanup when the original frame session disappears but surfaces err
         "owned_renderer",
       ),
     ).rejects.toThrow("Live cleanup failed")
-    const pending = frames.releaseObjects(
+    const pending = sessions.releaseObjects(
       "objects",
       async () => {
         started.resolve()
@@ -493,7 +497,7 @@ it("finishes cleanup when the original frame session disappears but surfaces err
       sessionId: "owned_renderer",
     })
     await pending
-    await frames.releaseObjects(
+    await sessions.releaseObjects(
       "objects",
       async () => {
         throw new Error("Must not retarget disappeared objects")
@@ -503,6 +507,7 @@ it("finishes cleanup when the original frame session disappears but surfaces err
   } finally {
     reply.resolve({})
     frames.close()
+    sessions.close()
   }
 })
 

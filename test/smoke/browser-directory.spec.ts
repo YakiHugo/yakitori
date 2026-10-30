@@ -11,8 +11,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test } from "@playwright/test"
 import type { WebContents } from "electron"
-import type { BrowserProtocolCommand } from "../../src/desktop/browser-frames.ts"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
+import type { BrowserProtocolCommand } from "../../src/desktop/browser-protocol.ts"
 
 // The production connection talks to real Chromium, including asynchronous native
 // filesystem enumeration. The small adapter substitutes only Electron's transport.
