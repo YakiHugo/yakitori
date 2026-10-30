@@ -529,9 +529,10 @@ export function parseBrowserDirectoryUploadRequest(
 }
 
 export type BrowserDialogRule = Readonly<{
-  type: "alert" | "confirm" | "beforeunload"
+  type: "alert" | "confirm" | "beforeunload" | "prompt"
   accept: boolean
   message?: string
+  promptText?: string
 }>
 export type BrowserDialogRequest =
   | Readonly<{
@@ -565,18 +566,25 @@ export function parseBrowserDialogRequest(
     arm &&
     (!isJsonObject(response) ||
       Object.keys(response).some(
-        (key) => !["type", "accept", "message"].includes(key),
+        (key) => !["type", "accept", "message", "promptText"].includes(key),
       ) ||
-      !["alert", "confirm", "beforeunload"].includes(String(response.type)) ||
+      !["alert", "confirm", "beforeunload", "prompt"].includes(
+        String(response.type),
+      ) ||
       typeof response.accept !== "boolean" ||
       (response.type === "alert" && !response.accept) ||
+      (Object.hasOwn(response, "promptText") &&
+        (response.type !== "prompt" ||
+          !response.accept ||
+          typeof response.promptText !== "string" ||
+          Buffer.byteLength(response.promptText) > 8192)) ||
       (response.message !== undefined &&
         (typeof response.message !== "string" ||
           Buffer.byteLength(response.message) > 8192)))
   )
     throw new BrowserControlError(
       "invalid_arguments",
-      "Arm with one response: alert (accept true), confirm or beforeunload, an explicit accept boolean and optional exact message (8KiB rule safety bound).",
+      "Arm with one response: alert (accept true), confirm, beforeunload or prompt, an explicit accept boolean and optional exact message. Only an accepted prompt allows promptText (8KiB text safety bounds).",
     )
   if (
     Object.keys(value).some(

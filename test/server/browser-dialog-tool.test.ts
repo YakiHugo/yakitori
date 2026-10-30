@@ -77,7 +77,18 @@ it("requires shared computer admission and normal command permission for dialog 
     { ...arm, backendNodeId: 17 },
     { ...arm, paths: ["/private/file"] },
     { ...arm, fromUrl: "x".repeat(8193) },
-    { ...arm, response: { type: "prompt", accept: true } },
+    {
+      ...arm,
+      response: { type: "confirm", accept: true, promptText: "secret" },
+    },
+    {
+      ...arm,
+      response: { type: "prompt", accept: false, promptText: "secret" },
+    },
+    {
+      ...arm,
+      response: { type: "prompt", accept: true, promptText: "猫".repeat(3000) },
+    },
     { ...arm, response: { type: "alert", accept: false } },
     { ...arm, response: { type: "confirm", accept: true, extra: true } },
     {

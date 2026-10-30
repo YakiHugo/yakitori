@@ -22,12 +22,12 @@ function fixture(sessionId?: string) {
     ...(sessionId ? { frame: { reference: "frame_ticket", sessionId } } : {}),
     closed: closed.signal,
   }
-  let confirmed: (() => void) | undefined
+  let confirmed: ((result: unknown) => void) | undefined
   const command = async (
     method: string,
     _params?: Record<string, unknown>,
     _sessionId?: string,
-    ack?: () => void,
+    ack?: (result: unknown) => void,
   ) => {
     confirmed = ack
     calls.push(method)
@@ -57,7 +57,7 @@ function fixture(sessionId?: string) {
     closed,
     confirm: () => {
       if (!confirmed) throw new Error("No pending response")
-      confirmed()
+      confirmed({})
     },
   }
 }

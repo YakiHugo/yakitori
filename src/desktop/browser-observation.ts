@@ -77,7 +77,7 @@ export class BrowserDocumentConnection {
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
-    this.#dialogs.close()
+    this.#dialogs.disconnected()
   }
 
   constructor(
@@ -214,7 +214,7 @@ export class BrowserDocumentConnection {
     this.#frameCatalog.close()
     this.#sessions.close()
     this.#chooser.close()
-    this.#dialogs.close()
+    this.#dialogs.close(this.#contents.isDestroyed())
   }
 
   async #read<T>(
@@ -577,7 +577,11 @@ export class BrowserDocumentConnection {
           // A response must run while the triggering Input command awaits ACK.
           if (
             method !== "Page.enable" &&
-            method !== "Page.handleJavaScriptDialog"
+            method !== "Page.handleJavaScriptDialog" &&
+            method !== "Runtime.enable" &&
+            method !== "Runtime.disable" &&
+            method !== "Runtime.callFunctionOn" &&
+            method !== "Runtime.releaseObjectGroup"
           )
             throw new Error("Unexpected JavaScript dialog command.")
           if (method === "Page.enable") signal.throwIfAborted()
@@ -587,7 +591,7 @@ export class BrowserDocumentConnection {
               this.#debug
                 .sendCommand(method, params, sessionId)
                 .then((result) => {
-                  confirmed?.()
+                  confirmed?.(result)
                   return result
                 }),
             this.#mutationDeadline(sessionId),

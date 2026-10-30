@@ -34,7 +34,7 @@ export function createBrowserDialogTool(
   return {
     toolName: plainToolName("browser_dialog"),
     description:
-      "Arm one reply to the next matching native JavaScript alert, confirm or beforeunload in an observed managed-browser document. Use arm with exact target, observed fromUrl, optional frameReference and response {type, accept, optional exact message}. Alert requires accept true. Then trigger the dialog with browser_input; the response is sent while the click/key awaits native completion, preventing a serial-tool modal deadlock. inspect reports waiting/answering/answered/mismatch and expired state. One arm consumes at most one response. Other documents, renderer sessions, navigation and mismatched types/messages never receive the reply. A mismatched dialog remains open; it may require manual dismissal or closing the owned tab. disarm removes the rule, and turn cleanup waits for response acknowledgement before releasing input and detaching. Normal command approval and shared computer ownership apply to all actions. This stage does not restore Electron's unsupported main-world prompt().",
+      "Arm one reply to the next matching native JavaScript alert, confirm, prompt or beforeunload in an observed managed-browser document. Use arm with exact target, observed fromUrl, optional frameReference and response {type, accept, optional exact message}. Alert requires accept true. Then trigger the dialog with browser_input; the response is sent while the click/key awaits native completion, preventing a serial-tool modal deadlock. inspect reports waiting/answering/answered/mismatch and expired state. One arm consumes at most one response. Other documents, renderer sessions, navigation and mismatched types/messages never receive the reply. A mismatched dialog remains open; it may require manual dismissal or closing the owned tab. disarm removes the rule, and turn cleanup waits for response acknowledgement before releasing input and detaching. Normal command approval and shared computer ownership apply to all actions. Prompt rules temporarily restore a native synchronous prompt in the original main-world context and optionally provide promptText. Accepted prompts return promptText or an empty string when omitted; dismissal returns null. Disarm/turn cleanup restores the original function only if the page still uses this adapter; context destruction retires its remote ticket.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -60,10 +60,11 @@ export function createBrowserDialogTool(
           properties: {
             type: {
               type: "string",
-              enum: ["alert", "confirm", "beforeunload"],
+              enum: ["alert", "confirm", "beforeunload", "prompt"],
             },
             accept: { type: "boolean" },
             message: { type: "string", maxLength: 8192 },
+            promptText: { type: "string", maxLength: 8192 },
           },
         },
       },

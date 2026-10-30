@@ -4,19 +4,17 @@ import {
   type BrowserDialogRule,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
+import {
+  type BrowserDialogCommand,
+  BrowserPromptAdapter,
+} from "./browser-prompt.ts"
 import type { BrowserDocumentScope } from "./browser-protocol.ts"
-
-type BrowserDialogCommand = (
-  method: string,
-  params?: Record<string, unknown>,
-  sessionId?: string,
-  confirmed?: () => void,
-) => Promise<unknown>
 
 // A serial tool caller cannot reply after a click blocked by a modal dialog.
 // One explicitly armed rule is applied from the protocol event, before input ACK.
 export class BrowserDialogs {
   readonly #debug: WebContents["debugger"]
+  readonly #prompt: BrowserPromptAdapter
   #scope:
     | (BrowserDocumentScope & {
         response: BrowserDialogRule
@@ -96,7 +94,12 @@ export class BrowserDialogs {
     this.#reply = scope
       .command(
         "Page.handleJavaScriptDialog",
-        { accept: scope.response.accept },
+        {
+          accept: scope.response.accept,
+          ...(scope.response.promptText === undefined
+            ? {}
+            : { promptText: scope.response.promptText }),
+        },
         scope.frame?.sessionId,
         () => {
           scope.state = "answered"
@@ -125,6 +128,7 @@ export class BrowserDialogs {
 
   constructor(debug: WebContents["debugger"]) {
     this.#debug = debug
+    this.#prompt = new BrowserPromptAdapter(debug)
     debug.on("message", this.#message)
   }
 
@@ -149,6 +153,7 @@ export class BrowserDialogs {
     }
     this.#scope = armed
     await command("Page.enable", {}, scope.frame?.sessionId)
+    if (response.type === "prompt") await this.#prompt.install(scope, command)
     armed.ready = true
   }
 
@@ -176,14 +181,29 @@ export class BrowserDialogs {
 
   async disarm(): Promise<void> {
     await this.settle()
+    try {
+      await this.#prompt.restore()
+    } catch (cause) {
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Native prompt restoration could not be confirmed.",
+        { cause },
+      )
+    }
     this.#scope = undefined
     this.#reply = undefined
   }
 
-  close(): void {
+  disconnected(): void {
+    this.#prompt.disconnected()
+    this.#debug.off("message", this.#message)
+  }
+
+  close(targetDestroyed = false): void {
     this.#scope = undefined
     this.#reply = undefined
     this.#failure = undefined
+    this.#prompt.close(targetDestroyed)
     this.#debug.off("message", this.#message)
   }
 }
