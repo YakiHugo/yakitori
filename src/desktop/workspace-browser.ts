@@ -699,6 +699,9 @@ export function registerWorkspaceBrowser(
           case "press":
             observation = await entry.connection.pressKey(input, signal)
             break
+          case "select":
+            observation = await entry.connection.selectOptions(input, signal)
+            break
           case "click":
           case "hover":
           case "scroll":
