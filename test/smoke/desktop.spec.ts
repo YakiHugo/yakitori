@@ -491,7 +491,7 @@ test("embedded browser selections attach editable excerpts to main and side draf
   }
 })
 
-test("agent browser observations and input use the exact owned tab through real desktop IPC and approval", async ({
+test("agent browser observations and actions use the exact owned tab through real desktop IPC and approval", async ({
   desktop,
 }, testInfo) => {
   const { page, application, userData, sidecarUrl, rendererErrors } = desktop
@@ -499,10 +499,15 @@ test("agent browser observations and input use the exact owned tab through real 
   const observed = Promise.withResolvers<void>(),
     releaseCompletion = Promise.withResolvers<void>(),
     failed = Promise.withResolvers<Error>()
-  let modelCalls = 0
-  let wantedUrl = ""
+  let modelCalls = 0,
+    thirdRequests = 0
+  let wantedUrl = "",
+    destinationUrl = "",
+    navigationUrl = ""
   let observation: Record<string, unknown> | undefined,
     receipt: Record<string, unknown> | undefined,
+    navigationReceipt: Record<string, unknown> | undefined,
+    navigatedObservation: Record<string, unknown> | undefined,
     insertion:
       | { action: "type"; target: unknown; reference: string; text: string }
       | undefined
@@ -543,6 +548,19 @@ test("agent browser observations and input use the exact owned tab through real 
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
         '<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)"></label><label><input type="checkbox" checked>Approved option</label>',
+      )
+      return
+    }
+    if (request.method === "GET" && request.url === "/jump") {
+      response.writeHead(302, { location: "/third#arrived" })
+      response.end()
+      return
+    }
+    if (request.method === "GET" && request.url?.startsWith("/third")) {
+      thirdRequests++
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label>',
       )
       return
     }
@@ -641,11 +659,30 @@ test("agent browser observations and input use the exact owned tab through real 
               input: { action: "observe", target: insertion.target },
               id: "observe_input_receipt",
             }
-          } else {
+          } else if (step === 7) {
             observation = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_navigate",
+              input: {
+                action: "navigate",
+                target: observation.target,
+                fromUrl: wantedUrl,
+                url: navigationUrl,
+              },
+              id: "navigate_browser",
+            }
+          } else if (step === 8) {
+            navigationReceipt = toolResult(body.messages ?? [], "loaded")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: navigationReceipt.target },
+              id: "observe_navigation",
+            }
+          } else {
+            navigatedObservation = toolResult(body.messages ?? [], "nodes")
             observed.resolve()
             await releaseCompletion.promise
-            text = "Observed the second owned browser."
+            text = "Observed and navigated the owned browser."
           }
         }
         const delta = tool
@@ -685,6 +722,8 @@ test("agent browser observations and input use the exact owned tab through real 
     throw new Error("Missing owned browser source")
   const origin = `http://127.0.0.1:${address.port}`
   wantedUrl = `${origin}/second#owned`
+  navigationUrl = `${origin}/jump`
+  destinationUrl = `${origin}/third#arrived`
   try {
     const helper = join(userData, "computer.cjs")
     await writeFile(
@@ -754,7 +793,7 @@ test("agent browser observations and input use the exact owned tab through real 
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 6; approval++)
+    for (let approval = 0; approval < 8; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -774,17 +813,47 @@ test("agent browser observations and input use the exact owned tab through real 
           .find((contents) => contents.getURL() === url)
         if (!target) throw new Error("Owned browser target disappeared")
         return target.debugger.isAttached()
-      }, wantedUrl)
+      }, destinationUrl)
     expect(await attached()).toBe(true)
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page.getByRole("button", { name: "Reload page", exact: true }).click()
+    await expect.poll(() => thirdRequests).toBe(2)
+    await expect(
+      page.getByRole("button", { name: "Reload page", exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("textbox", { name: "Browser address", exact: true }),
+    ).toHaveValue(destinationUrl)
     releaseCompletion.resolve()
     await expect(
       page
         .getByRole("main")
-        .getByText("Observed the second owned browser.", { exact: true }),
+        .getByText("Observed and navigated the owned browser.", {
+          exact: true,
+        }),
     ).toBeVisible()
     await expect.poll(attached).toBe(false)
     expect(errors).toEqual([])
     expect(receipt).toMatchObject({ delivered: true, textVerified: true })
+    expect(navigationReceipt).toMatchObject({
+      loaded: true,
+      url: destinationUrl,
+    })
+    expect(navigatedObservation?.document).toMatchObject({
+      url: destinationUrl,
+    })
+    expect(navigatedObservation?.target).toEqual(observation?.target)
+    expect(navigatedObservation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "textbox",
+          name: "Navigated field",
+          value: "third",
+        }),
+      ]),
+    )
     expect(observation?.document).toMatchObject({
       url: wantedUrl,
       documentId: expect.any(String),
@@ -818,7 +887,13 @@ test("agent browser observations and input use the exact owned tab through real 
     expect(rendererErrors).toEqual([])
   } catch (cause) {
     await testInfo.attach("browser-model-diagnostics", {
-      body: JSON.stringify({ modelCalls, errors, observation }),
+      body: JSON.stringify({
+        modelCalls,
+        errors,
+        observation,
+        navigationReceipt,
+        navigatedObservation,
+      }),
       contentType: "application/json",
     })
     throw cause

@@ -50,9 +50,60 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   )
 }
 
+export type BrowserNavigationRequest = Readonly<{
+  action: "navigate"
+  target: BrowserTarget
+  fromUrl: string
+  url: string
+}>
+
+export function parseBrowserNavigationRequest(
+  value: unknown,
+): BrowserNavigationRequest {
+  if (
+    isJsonObject(value) &&
+    Object.keys(value).length === 4 &&
+    Object.keys(value).every((key) =>
+      ["action", "target", "fromUrl", "url"].includes(key),
+    ) &&
+    value.action === "navigate" &&
+    typeof value.fromUrl === "string" &&
+    value.fromUrl.length <= 8192 &&
+    typeof value.url === "string" &&
+    value.url.length <= 8192 &&
+    URL.canParse(value.url)
+  ) {
+    const url = new URL(value.url)
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      !url.username &&
+      !url.password
+    ) {
+      const observed = parseBrowserObservationRequest({
+        action: "observe",
+        target: value.target,
+      })
+      if (observed.action !== "observe")
+        throw new Error("Invalid browser target parser result.")
+      return {
+        action: "navigate",
+        target: observed.target,
+        fromUrl: value.fromUrl,
+        url: url.href,
+      }
+    }
+  }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Use navigate with an exact listed target, its current fromUrl and an absolute HTTP(S) destination without credentials (8192-character URL safety bound).",
+  )
+}
+
 export function parseBrowserRequest(
   value: unknown,
-): BrowserObservationRequest | BrowserInputRequest {
+): BrowserObservationRequest | BrowserInputRequest | BrowserNavigationRequest {
+  if (isJsonObject(value) && value.action === "navigate")
+    return parseBrowserNavigationRequest(value)
   return isJsonObject(value) && value.action === "type"
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
@@ -154,7 +205,10 @@ export type BrowserOperation = Readonly<
   | {
       operation: "request"
       owner: BrowserOwner
-      input: BrowserObservationRequest | BrowserInputRequest
+      input:
+        | BrowserObservationRequest
+        | BrowserInputRequest
+        | BrowserNavigationRequest
     }
   | { operation: "finishTurn"; owner: BrowserOwner }
   | { operation: "closeSession"; sessionId: string }
@@ -202,7 +256,10 @@ export function isDesktopBrowserResponse(
 
 export type DesktopBrowser = Readonly<{
   request(
-    input: BrowserObservationRequest | BrowserInputRequest,
+    input:
+      | BrowserObservationRequest
+      | BrowserInputRequest
+      | BrowserNavigationRequest,
     owner: BrowserOwner,
     signal?: AbortSignal,
   ): Promise<JsonObject>
