@@ -32,7 +32,10 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import { computerUseServerName } from "../protocol/connections.ts"
-import type { DesktopBrowser } from "../protocol/desktop-browser.ts"
+import {
+  BrowserControlError,
+  type DesktopBrowser,
+} from "../protocol/desktop-browser.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
@@ -448,6 +451,30 @@ export async function createYakitoriApplication(
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     const computerControl = new ComputerControl()
+    const rawBrowser = options.desktopBrowser
+    const desktopBrowser: DesktopBrowser | undefined = rawBrowser
+      ? {
+          async request(input, owner, signal) {
+            try {
+              return await rawBrowser.request(input, owner, signal)
+            } catch (cause) {
+              // Even a read can close an older connection. Its cleanup failure
+              // must quarantine native input as well as browser mutations.
+              const current = computerControl.owner
+              if (
+                cause instanceof BrowserControlError &&
+                cause.code === "browser_cleanup_failed" &&
+                current?.sessionId === owner.sessionId &&
+                current.turnId === owner.turnId
+              )
+                computerControl.markCleanupPending(current)
+              throw cause
+            }
+          },
+          finishTurn: (owner) => rawBrowser.finishTurn(owner),
+          closeSession: (sessionId) => rawBrowser.closeSession(sessionId),
+        }
+      : undefined
     if (
       userConfiguration.mcpServers?.[computerUseServerName]?.enabled === false
     )
@@ -1071,39 +1098,36 @@ export async function createYakitoriApplication(
             tool.toolName.name !== "request_user_input_async" ||
             (!sideConversation && !isSubagentThread(stored)),
         ),
-        ...(options.desktopBrowser
+        ...(desktopBrowser
           ? [
-              createBrowserObservationTool(
-                options.desktopBrowser,
-                admitBrowser,
-              ),
+              createBrowserObservationTool(desktopBrowser, admitBrowser),
               createBrowserInputTool(
-                options.desktopBrowser,
+                desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,
               ),
               createBrowserUploadTool(
-                options.desktopBrowser,
+                desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,
               ),
               createBrowserViewTool(
-                options.desktopBrowser,
+                desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,
               ),
-              createBrowserNavigationTool(options.desktopBrowser, admitBrowser),
+              createBrowserNavigationTool(desktopBrowser, admitBrowser),
               createBrowserDialogTool(
-                options.desktopBrowser,
+                desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,
               ),
               createBrowserChooserTool(
-                options.desktopBrowser,
+                desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,
               ),
-              createBrowserCaptureTool(options.desktopBrowser, admitBrowser),
+              createBrowserCaptureTool(desktopBrowser, admitBrowser),
             ]
           : []),
       ])
@@ -1358,7 +1382,7 @@ export async function createYakitoriApplication(
                     await settleTaskResources(async () => {
                       const results = await Promise.allSettled([
                         mcpManager?.finishTurn(),
-                        options.desktopBrowser?.finishTurn({
+                        desktopBrowser?.finishTurn({
                           sessionId: owner.sessionId,
                           turnId: owner.turnId,
                         }),
@@ -1399,7 +1423,7 @@ export async function createYakitoriApplication(
             mcpManagers.delete(stored.metadata.id)
           const mcpResult = await Promise.allSettled([
             mcpExtension?.close(),
-            options.desktopBrowser?.closeSession(stored.metadata.id),
+            desktopBrowser?.closeSession(stored.metadata.id),
           ])
           const processorResult = await Promise.allSettled([
             processor.dispose?.(),
