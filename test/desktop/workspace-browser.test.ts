@@ -678,3 +678,55 @@ it("retains logical page geometry when an unmounted browser panel sends an empty
   })
   expect(view.setVisible).toHaveBeenLastCalledWith(false)
 })
+
+it("keeps page context menus out of the host while a turn owns the browser and restores user menus after cleanup", async () => {
+  const { call, browser, controller } = setup()
+  call("create", { tabId: "owned", url: "https://owned.test/" })
+  const view = electron.views[0]
+  if (!view) throw new Error("Missing owned view")
+  const events = new EventEmitter()
+  let attached = false
+  Object.assign(view.webContents, {
+    isDevToolsOpened: () => false,
+    debugger: {
+      on: events.on.bind(events),
+      off: events.off.bind(events),
+      isAttached: () => attached,
+      attach: () => {
+        attached = true
+      },
+      detach: () => {
+        attached = false
+        events.emit("detach")
+      },
+      async sendCommand(method: string) {
+        if (method === "Page.getFrameTree")
+          return {
+            frameTree: {
+              frame: {
+                id: "main",
+                loaderId: "owned",
+                url: "https://owned.test/",
+              },
+            },
+          }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] }
+        throw new Error(`Unexpected command ${method}`)
+      },
+    },
+  })
+  const listed = await browser.request({ action: "list" })
+  const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  if (!target) throw new Error("Missing owned target")
+  await browser.request({ action: "observe", target })
+  view.webContents.emit("context-menu", {}, { selectionText: "" })
+  expect(electron.menu).toEqual([])
+  await controller.finishTurn({
+    sessionId: "session_owned",
+    turnId: "turn_owned",
+  })
+  view.webContents.emit("context-menu", {}, { selectionText: "" })
+  expect(electron.menu).toEqual(
+    expect.arrayContaining([expect.objectContaining({ label: "Back" })]),
+  )
+})

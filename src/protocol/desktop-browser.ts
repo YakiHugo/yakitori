@@ -17,11 +17,17 @@ export type BrowserTextInputRequest = Readonly<{
   text: string
 }>
 
-export type BrowserPointerRequest = Readonly<{
-  action: "click"
-  target: BrowserTarget
-  reference: string
-}>
+export type BrowserPointerRequest = Readonly<
+  { target: BrowserTarget; reference: string } & (
+    | {
+        action: "click"
+        button?: "left" | "middle" | "right"
+        clickCount?: 1 | 2
+      }
+    | { action: "hover" }
+    | { action: "scroll"; deltaX: number; deltaY: number }
+  )
+>
 export type BrowserInputRequest =
   | BrowserTextInputRequest
   | BrowserPointerRequest
@@ -29,11 +35,20 @@ export type BrowserInputRequest =
 export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   if (
     isJsonObject(value) &&
-    Object.keys(value).length === 3 &&
-    Object.keys(value).every((key) =>
-      ["action", "target", "reference"].includes(key),
+    ["action", "target", "reference"].every((key) =>
+      Object.hasOwn(value, key),
     ) &&
-    value.action === "click" &&
+    Object.keys(value).every((key) =>
+      [
+        "action",
+        "target",
+        "reference",
+        "button",
+        "clickCount",
+        "deltaX",
+        "deltaY",
+      ].includes(key),
+    ) &&
     typeof value.reference === "string" &&
     /^browser_click_[a-f0-9-]{36}$/.test(value.reference)
   ) {
@@ -43,11 +58,46 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
     })
     if (observed.action !== "observe")
       throw new Error("Invalid browser target parser result.")
-    return {
-      action: "click",
-      target: observed.target,
-      reference: value.reference,
-    }
+    const shared = { target: observed.target, reference: value.reference }
+    if (value.action === "hover" && Object.keys(value).length === 3)
+      return { action: "hover", ...shared }
+    if (
+      value.action === "click" &&
+      !Object.hasOwn(value, "deltaX") &&
+      !Object.hasOwn(value, "deltaY") &&
+      (value.button === undefined ||
+        value.button === "left" ||
+        value.button === "middle" ||
+        value.button === "right") &&
+      (value.clickCount === undefined ||
+        value.clickCount === 1 ||
+        value.clickCount === 2)
+    )
+      return {
+        action: "click",
+        ...shared,
+        ...(value.button === undefined ? {} : { button: value.button }),
+        ...(value.clickCount === undefined
+          ? {}
+          : { clickCount: value.clickCount }),
+      }
+    if (
+      value.action === "scroll" &&
+      Object.keys(value).length === 5 &&
+      typeof value.deltaX === "number" &&
+      Number.isFinite(value.deltaX) &&
+      Math.abs(value.deltaX) <= 10000 &&
+      typeof value.deltaY === "number" &&
+      Number.isFinite(value.deltaY) &&
+      Math.abs(value.deltaY) <= 10000 &&
+      (value.deltaX !== 0 || value.deltaY !== 0)
+    )
+      return {
+        action: "scroll",
+        ...shared,
+        deltaX: value.deltaX,
+        deltaY: value.deltaY,
+      }
   }
   if (
     isJsonObject(value) &&
@@ -77,7 +127,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type/fill with an inputReference and text (empty only for fill), or click with a clickReference; an exact target is required (64KiB input-event safety bound).",
+    "Use type/fill with an inputReference and text, or click/hover/scroll with a clickReference and exact target. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
   )
 }
 
@@ -138,7 +188,9 @@ export function parseBrowserRequest(
   return isJsonObject(value) &&
     (value.action === "type" ||
       value.action === "fill" ||
-      value.action === "click")
+      value.action === "click" ||
+      value.action === "hover" ||
+      value.action === "scroll")
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
 }

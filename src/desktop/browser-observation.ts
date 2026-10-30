@@ -559,7 +559,7 @@ export class BrowserDocumentConnection {
     return result
   }
 
-  async click(
+  async inputPointer(
     input: BrowserPointerRequest,
     signal: AbortSignal,
   ): Promise<JsonObject> {
@@ -631,6 +631,7 @@ export class BrowserDocumentConnection {
         return { x: value.x, y: value.y }
       }
       const point = await probe(true)
+      dispatched = input.action === "hover"
       await command("Input.dispatchMouseEvent", {
         type: "mouseMoved",
         ...point,
@@ -645,28 +646,57 @@ export class BrowserDocumentConnection {
           "browser_unavailable",
           "The owned debugger disconnected.",
         )
-      this.#heldInput = {
-        method: "Input.dispatchMouseEvent",
-        params: {
-          type: "mouseReleased",
+      if (input.action === "click") {
+        const button = input.button ?? "left"
+        for (
+          let clickCount = 1;
+          clickCount <= (input.clickCount ?? 1);
+          clickCount++
+        ) {
+          // A double click is two intentional press/release pairs. A failed
+          // pair stops the sequence; cleanup never replays a press.
+          await this.#verifyDocument(reference.document, signal)
+          await probe(false, point)
+          signal.throwIfAborted()
+          if (this.closed)
+            throw new BrowserControlError(
+              "browser_unavailable",
+              "The owned debugger disconnected.",
+            )
+          this.#heldInput = {
+            method: "Input.dispatchMouseEvent",
+            params: {
+              type: "mouseReleased",
+              ...point,
+              button,
+              buttons: 0,
+              clickCount,
+            },
+          }
+          dispatched = true
+          await command("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...point,
+            button,
+            buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+            clickCount,
+          })
+          await this.#releaseInput()
+        }
+      } else if (input.action === "scroll") {
+        dispatched = true
+        await command("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
           ...point,
-          button: "left",
           buttons: 0,
-          clickCount: 1,
-        },
+          deltaX: input.deltaX,
+          deltaY: input.deltaY,
+        })
       }
-      dispatched = true
-      await command("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        ...point,
-        button: "left",
-        buttons: 1,
-        clickCount: 1,
-      })
-      await this.#releaseInput()
       const current = documentIdentity(await command("Page.getFrameTree"))
       result = {
         delivered: true,
+        action: input.action,
         point,
         documentChanged:
           current.frameId !== reference.document.frameId ||
@@ -678,13 +708,13 @@ export class BrowserDocumentConnection {
         dispatched && cause instanceof BrowserControlError
           ? new BrowserControlError(
               "browser_input_unconfirmed",
-              "Click dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+              "Pointer dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
                 cause.message,
             )
           : cause
     }
     await this.#finishInput(group, failure)
-    if (!result) throw new Error("Browser click produced no result.")
+    if (!result) throw new Error("Browser pointer input produced no result.")
     return result
   }
 }
