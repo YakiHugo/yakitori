@@ -1,7 +1,8 @@
 import { BrowserControlError } from "../protocol/desktop-browser.ts"
 import type {
   BrowserFrameBinding,
-  BrowserReadCommand,
+  BrowserFrameReadCommand,
+  BrowserProtocolCommand,
 } from "./browser-frames.ts"
 
 export type BrowserPoint = Readonly<{ x: number; y: number }>
@@ -164,7 +165,8 @@ export const browserPointerGeometry = `function(scroll, point) {
 
 export class BrowserFramePointer {
   readonly #path: BrowserFrameBinding[]
-  readonly #command: BrowserReadCommand
+  readonly #read: BrowserFrameReadCommand
+  readonly #command: BrowserProtocolCommand
   readonly #group: string
   readonly sessions = new Set<string | undefined>()
   #worlds = new Map<string, number>()
@@ -177,10 +179,12 @@ export class BrowserFramePointer {
 
   constructor(
     path: BrowserFrameBinding[],
-    command: BrowserReadCommand,
+    read: BrowserFrameReadCommand,
+    command: BrowserProtocolCommand,
     group: string,
   ) {
     this.#path = path
+    this.#read = read
     this.#command = command
     this.#group = group
   }
@@ -208,7 +212,7 @@ export class BrowserFramePointer {
   async prepare(): Promise<void> {
     for (const frame of this.#path) {
       const world = record(
-        await this.#command(
+        await this.#read(
           "Page.createIsolatedWorld",
           {
             frameId: frame.document.frameId,
@@ -226,7 +230,7 @@ export class BrowserFramePointer {
         child = this.#path[index]
       if (!parent || !child) throw new Error("Missing frame ancestry.")
       const owner = record(
-        await this.#command(
+        await this.#read(
           "DOM.getFrameOwner",
           { frameId: child.document.frameId },
           parent.sessionId,
@@ -237,7 +241,7 @@ export class BrowserFramePointer {
       this.sessions.add(parent.sessionId)
       const resolved = record(
         record(
-          await this.#command(
+          await this.#read(
             "DOM.resolveNode",
             {
               backendNodeId: owner.backendNodeId,
@@ -284,7 +288,7 @@ export class BrowserFramePointer {
         throw new Error("Missing parent session projection.")
       const box = record(
         record(
-          await this.#command(
+          await this.#read(
             "DOM.getBoxModel",
             { backendNodeId },
             parent.sessionId,
@@ -294,7 +298,7 @@ export class BrowserFramePointer {
       const viewport = record(
         record(
           record(
-            await this.#command(
+            await this.#read(
               "Runtime.evaluate",
               {
                 expression: "({width:innerWidth,height:innerHeight})",
@@ -324,7 +328,7 @@ export class BrowserFramePointer {
       const localPoint = mapPoint(inverse(transform), mainPoint)
       const hit = record(
         record(
-          await this.#command(
+          await this.#read(
             "Runtime.callFunctionOn",
             {
               objectId,

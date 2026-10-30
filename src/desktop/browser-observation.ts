@@ -15,7 +15,12 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
-import { BrowserFrames, type BrowserReadCommand } from "./browser-frames.ts"
+import {
+  type BrowserFrameReadMethod,
+  BrowserFrames,
+  type BrowserProtocolCommand,
+  isBrowserFrameReadMethod,
+} from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import {
   BrowserFramePointer,
@@ -34,6 +39,8 @@ function object(value: unknown): Record<string, unknown> {
 
 export class BrowserDocumentConnection {
   #closed = false
+  readonly #lifetime = new AbortController()
+  #releasingInput: Promise<void> | undefined
   #heldInputs: Readonly<{
     method: "Input.dispatchKeyEvent" | "Input.dispatchMouseEvent"
     params: Record<string, unknown>
@@ -44,6 +51,12 @@ export class BrowserDocumentConnection {
   readonly #frameCatalog: BrowserFrames
   readonly #detached = () => {
     this.#closed = true
+    this.#lifetime.abort(
+      new BrowserControlError(
+        "browser_unavailable",
+        "The owned debugger disconnected.",
+      ),
+    )
     this.#references.clear()
     this.#frameCatalog.close()
   }
@@ -83,29 +96,40 @@ export class BrowserDocumentConnection {
   }
 
   async #releaseInput(): Promise<void> {
-    while (this.#heldInputs.length) {
-      const held = this.#heldInputs.at(-1)
-      if (!held) throw new Error("Missing owned held input.")
-      const contents = this.#contents
-      if (contents.isDestroyed()) {
-        this.#heldInputs.length = 0
-        return
+    if (this.#releasingInput) return this.#releasingInput
+    // Read cancellation and turn cleanup can request release concurrently.
+    // Install the shared promise before dispatching any owned key/button-up.
+    const release = Promise.resolve().then(async () => {
+      while (this.#heldInputs.length) {
+        const held = this.#heldInputs.at(-1)
+        if (!held) throw new Error("Missing owned held input.")
+        const contents = this.#contents
+        if (contents.isDestroyed()) {
+          this.#heldInputs.length = 0
+          return
+        }
+        if (this.closed || !this.#debug.isAttached())
+          throw new BrowserControlError(
+            "browser_cleanup_failed",
+            "The debugger disconnected with an unconfirmed held input. Close this browser target before resuming input.",
+          )
+        try {
+          await this.#debug.sendCommand(held.method, held.params)
+          this.#heldInputs.pop()
+        } catch (cause) {
+          throw new BrowserControlError(
+            "browser_cleanup_failed",
+            "The held browser input could not be released: " +
+              (cause instanceof Error ? cause.message : String(cause)),
+          )
+        }
       }
-      if (this.closed || !this.#debug.isAttached())
-        throw new BrowserControlError(
-          "browser_cleanup_failed",
-          "The debugger disconnected with an unconfirmed held input. Close this browser target before resuming input.",
-        )
-      try {
-        await this.#debug.sendCommand(held.method, held.params)
-        this.#heldInputs.pop()
-      } catch (cause) {
-        throw new BrowserControlError(
-          "browser_cleanup_failed",
-          "The held browser input could not be released: " +
-            (cause instanceof Error ? cause.message : String(cause)),
-        )
-      }
+    })
+    this.#releasingInput = release
+    try {
+      await release
+    } finally {
+      if (this.#releasingInput === release) this.#releasingInput = undefined
     }
   }
 
@@ -113,6 +137,12 @@ export class BrowserDocumentConnection {
     await this.#releaseInput()
     if (!this.closed && this.#debug.isAttached()) this.#debug.detach()
     this.#closed = true
+    this.#lifetime.abort(
+      new BrowserControlError(
+        "browser_unavailable",
+        "The owned browser connection closed.",
+      ),
+    )
     this.#references.clear()
     this.#debug.off("detach", this.#detached)
     this.#frameCatalog.close()
@@ -120,10 +150,11 @@ export class BrowserDocumentConnection {
 
   async #read<T>(
     signal: AbortSignal,
-    run: (command: BrowserReadCommand) => Promise<T>,
+    run: (command: BrowserProtocolCommand) => Promise<T>,
+    duringInput = false,
   ): Promise<T> {
     signal.throwIfAborted()
-    if (this.#heldInputs.length)
+    if (this.#heldInputs.length && !duringInput)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before observing again.",
@@ -134,7 +165,11 @@ export class BrowserDocumentConnection {
         "browser_unavailable",
         "The owned debugger disconnected. Observe the target again.",
       )
-    const deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+    const deadline = AbortSignal.any([
+      signal,
+      this.#lifetime.signal,
+      AbortSignal.timeout(10_000),
+    ])
     let rejectAbort: (cause: unknown) => void = () => {}
     const aborted = new Promise<never>((_resolve, reject) => {
       rejectAbort = reject
@@ -163,9 +198,17 @@ export class BrowserDocumentConnection {
         abort()
         return aborted
       }
-      const pending: Promise<unknown> = debug
-        .sendCommand(method, params, sessionId)
+      const send: BrowserProtocolCommand = (name, args, session) =>
+        debug.sendCommand(name, args, session)
+      const pending: Promise<unknown> = (
+        sessionId !== undefined && isBrowserFrameReadMethod(method)
+          ? this.#frameCatalog.readInSession(send, method, params, sessionId)
+          : send(method, params, sessionId)
+      )
+        .then((value) => (deadline.aborted ? aborted : value))
         .catch((cause: unknown) => {
+          if (deadline.aborted) return aborted
+          if (cause instanceof BrowserControlError) throw cause
           throw new BrowserControlError(
             "browser_protocol_error",
             cause instanceof Error ? cause.message : String(cause),
@@ -179,6 +222,22 @@ export class BrowserDocumentConnection {
     } finally {
       deadline.removeEventListener("abort", abort)
     }
+  }
+
+  #inputReadCommand(
+    method: BrowserFrameReadMethod,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    sessionId?: string,
+  ): Promise<unknown> {
+    // Input reads may run between acknowledged modifier presses. Cancellation
+    // first releases those inputs and closes the owned debugger; mutations
+    // continue to await their protocol acknowledgement in #inputCommand.
+    return this.#read(
+      signal,
+      (command) => command(method, params, sessionId),
+      true,
+    )
   }
 
   async frames(offset: number, signal: AbortSignal): Promise<JsonObject> {
@@ -353,15 +412,20 @@ export class BrowserDocumentConnection {
     const frame = reference.frame
       ? await this.#frameCatalog.resolve(
           reference.frame.reference,
-          (method, params = {}, sessionId) =>
-            this.#inputCommand(method, params, signal, sessionId),
+          (method, params = {}, sessionId) => {
+            if (method === "Page.getFrameTree")
+              return this.#inputReadCommand(method, params, signal, sessionId)
+            if (method === "Target.setAutoAttach")
+              return this.#inputCommand(method, params, signal, sessionId)
+            throw new Error(`Unexpected frame catalog command ${method}`)
+          },
         )
       : undefined
     const expected = reference.document
     const current =
       frame?.frame.document ??
       documentIdentity(
-        await this.#inputCommand("Page.getFrameTree", {}, signal),
+        await this.#inputReadCommand("Page.getFrameTree", {}, signal),
       )
     if (
       current.frameId !== expected.frameId ||
@@ -403,7 +467,7 @@ export class BrowserDocumentConnection {
   ): Promise<string> {
     await this.#verifyDocument(reference, signal)
     const world = object(
-      await this.#inputCommand(
+      await this.#inputReadCommand(
         "Page.createIsolatedWorld",
         {
           frameId: reference.document.frameId,
@@ -417,7 +481,7 @@ export class BrowserDocumentConnection {
       throw new Error("Chromium returned no isolated input context.")
     const resolved = object(
       object(
-        await this.#inputCommand(
+        await this.#inputReadCommand(
           "DOM.resolveNode",
           {
             backendNodeId: reference.backendNodeId,
@@ -512,12 +576,11 @@ export class BrowserDocumentConnection {
       // prototype methods or caller-supplied code. It verifies the exact node,
       // including focus redirection and the current text selection.
       const read = async (requireFocus: boolean, selectAll = false) => {
-        const response = object(
-          await command("Runtime.callFunctionOn", {
-            objectId,
-            returnByValue: true,
-            arguments: [{ value: requireFocus }, { value: selectAll }],
-            functionDeclaration: `function(requireFocus, selectAll) {
+        const params = {
+          objectId,
+          returnByValue: true,
+          arguments: [{ value: requireFocus }, { value: selectAll }],
+          functionDeclaration: `function(requireFocus, selectAll) {
             if (!this.isConnected || this.ownerDocument !== document || (requireFocus && this.getRootNode().activeElement !== this) || this.disabled || this.readOnly) return {ok:false};
             if (!(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement)) return {ok:false};
             if (typeof this.selectionStart !== 'number' || typeof this.selectionEnd !== 'number' || this.value.length > 65536) return {ok:false};
@@ -527,7 +590,16 @@ export class BrowserDocumentConnection {
             }
             return {ok:true,value:this.value,start:this.selectionStart,end:this.selectionEnd};
           }`,
-          }),
+        }
+        const response = object(
+          await (selectAll
+            ? command("Runtime.callFunctionOn", params)
+            : this.#inputReadCommand(
+                "Runtime.callFunctionOn",
+                params,
+                signal,
+                reference.frame?.sessionId,
+              )),
         )
         const value = object(object(response.result).value)
         if (
@@ -650,12 +722,17 @@ export class BrowserDocumentConnection {
         throw new Error("Chromium returned invalid selected values.")
       await this.#verifyDocument(reference, signal)
       const confirmed = object(
-        await command("Runtime.callFunctionOn", {
-          objectId,
-          returnByValue: true,
-          functionDeclaration: verifyBrowserSelection.toString(),
-          arguments: [{ value: selection.values }],
-        }),
+        await this.#inputReadCommand(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: verifyBrowserSelection.toString(),
+            arguments: [{ value: selection.values }],
+          },
+          signal,
+          reference.frame?.sessionId,
+        ),
       )
       if (object(confirmed.result).value !== true)
         throw new BrowserControlError(
@@ -704,11 +781,16 @@ export class BrowserDocumentConnection {
       const ensureFocused = async () => {
         await this.#verifyDocument(reference, signal)
         const response = object(
-          await command("Runtime.callFunctionOn", {
-            objectId,
-            returnByValue: true,
-            functionDeclaration: `function() { return this instanceof Element && this.isConnected && this.ownerDocument === document && this.getRootNode().activeElement === this && !Element.prototype.matches.call(this, ':disabled'); }`,
-          }),
+          await this.#inputReadCommand(
+            "Runtime.callFunctionOn",
+            {
+              objectId,
+              returnByValue: true,
+              functionDeclaration: `function() { return this instanceof Element && this.isConnected && this.ownerDocument === document && this.getRootNode().activeElement === this && !Element.prototype.matches.call(this, ':disabled'); }`,
+            },
+            signal,
+            reference.frame?.sessionId,
+          ),
         )
         if (object(response.result).value !== true)
           throw new BrowserControlError(
@@ -835,6 +917,8 @@ export class BrowserDocumentConnection {
         framePointer = new BrowserFramePointer(
           selected.path,
           (method, params = {}, sessionId) =>
+            this.#inputReadCommand(method, params, signal, sessionId),
+          (method, params = {}, sessionId) =>
             this.#inputCommand(method, params, signal, sessionId),
           group,
         )
@@ -845,13 +929,21 @@ export class BrowserDocumentConnection {
         scroll: boolean,
         point?: { x: number; y: number },
       ) => {
+        const params = {
+          objectId,
+          returnByValue: true,
+          functionDeclaration: browserPointerGeometry,
+          arguments: [{ value: scroll }, { value: point ?? null }],
+        }
         const response = object(
-          await command("Runtime.callFunctionOn", {
-            objectId,
-            returnByValue: true,
-            functionDeclaration: browserPointerGeometry,
-            arguments: [{ value: scroll }, { value: point ?? null }],
-          }),
+          await (scroll
+            ? command("Runtime.callFunctionOn", params)
+            : this.#inputReadCommand(
+                "Runtime.callFunctionOn",
+                params,
+                signal,
+                reference.frame?.sessionId,
+              )),
         )
         const value = object(object(response.result).value)
         if (value.ok !== true)
