@@ -7,9 +7,16 @@ import {
 import { attachmentUrl } from "../composer-attachments.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { ComputerLivePreview } from "./computer-live-preview.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
 
-export function ComputerPanel({ apiBase }: { apiBase: string }) {
+export function ComputerPanel({
+  apiBase,
+  active = true,
+}: {
+  apiBase: string
+  active?: boolean
+}) {
   const [status, setStatus] = useState<ComputerUseStatus>()
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string>()
@@ -66,7 +73,7 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
   }, [run])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div className="flex items-center justify-between border-b px-4 py-3">
         <span className="flex items-center gap-2 text-xs">
           <span
@@ -87,7 +94,7 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
           />
         </button>
       </div>
-      <div className="space-y-5 p-5">
+      <div className="flex flex-col gap-5 p-5">
         <div className="flex items-center gap-3">
           <div className="grid size-10 place-items-center rounded-xl border bg-muted/40">
             <Monitor size={21} strokeWidth={1.5} />
@@ -156,6 +163,13 @@ export function ComputerPanel({ apiBase }: { apiBase: string }) {
               Accessibility for Yakitori Computer in System Settings.
             </p>
           </div>
+        )}
+        {status?.connected && (
+          <ComputerLivePreview
+            apiBase={apiBase}
+            active={active}
+            enabled={status.permissions?.screenRecording === true}
+          />
         )}
       </div>
       <div className="mt-auto border-t p-4">

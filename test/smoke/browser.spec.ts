@@ -10,6 +10,10 @@ import {
 } from "../../src/desktop/server-process.ts"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
+  computerPreviewCatalog,
+  computerPreviewFrame,
+} from "../fixtures/computer-preview.ts"
+import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runExternalEngineFlow,
@@ -18,6 +22,158 @@ import {
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+test("live computer preview renders decoded frames and pointer positions and sends Stop", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const logs: string[] = [],
+    errors: string[] = []
+  const requests: { method: string; params: unknown }[] = []
+  const frame = computerPreviewFrame()
+  let server: ServerProcess | undefined
+  page.on("pageerror", (error) => errors.push(error.message))
+  // Renderer-only verification: the owned native bridge is covered by the
+  // separate process/native tests. All other application RPC remains real.
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const peer = socket.connectToServer()
+    peer.onMessage((message) => socket.send(message))
+    socket.onMessage((message) => {
+      if (typeof message !== "string") {
+        peer.send(message)
+        return
+      }
+      const sent = JSON.parse(message) as {
+        id?: number
+        method?: string
+        params?: unknown
+      }
+      let result: unknown
+      if (sent.method === "computer/status")
+        result = {
+          available: true,
+          connected: true,
+          backend: "yakitori-native",
+          serverName: "computer",
+          tools: ["control"],
+          permissions: { accessibility: true, screenRecording: true },
+        }
+      else if (sent.method === "computer/preview/catalog")
+        result = computerPreviewCatalog
+      else if (sent.method === "computer/preview/capture") result = frame
+      else if (sent.method === "computer/preview/stop") result = {}
+      else {
+        peer.send(message)
+        return
+      }
+      if (sent.method)
+        requests.push({ method: sent.method, params: sent.params })
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: sent.id, result }))
+    })
+  })
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+      onStdout: (line) => logs.push(line),
+      onStderr: (line) => logs.push(line),
+    })
+    await page.goto(server.url)
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+    const preview = page.getByRole("region", { name: "Live computer preview" })
+    await expect(
+      preview.getByRole("combobox", { name: "Preview target", exact: true }),
+    ).toHaveText("Owned fixture window")
+    expect(
+      requests.filter((entry) => entry.method === "computer/preview/capture"),
+    ).toHaveLength(0)
+    await preview
+      .getByRole("button", { name: "Start preview", exact: true })
+      .click()
+    const image = preview.getByRole("img", {
+      name: "Live computer preview",
+      exact: true,
+    })
+    await expect
+      .poll(() =>
+        image.evaluate((node) => {
+          const image = node as HTMLImageElement
+          return (
+            image.complete &&
+            image.naturalWidth === 200 &&
+            image.naturalHeight === 100
+          )
+        }),
+      )
+      .toBe(true)
+    await image.scrollIntoViewIfNeeded()
+    const imageBounds = await image.boundingBox(),
+      pointerBounds = await preview
+        .getByRole("img", { name: "Pointer position" })
+        .boundingBox()
+    expect(imageBounds).not.toBeNull()
+    expect(pointerBounds).not.toBeNull()
+    if (!imageBounds || !pointerBounds)
+      throw new Error("Preview geometry is unavailable")
+    expect(
+      Math.abs(
+        pointerBounds.x +
+          pointerBounds.width / 2 -
+          (imageBounds.x + imageBounds.width * 0.2),
+      ),
+    ).toBeLessThan(2)
+    expect(
+      Math.abs(
+        pointerBounds.y +
+          pointerBounds.height / 2 -
+          (imageBounds.y + imageBounds.height * 0.3),
+      ),
+    ).toBeLessThan(2)
+    await page.screenshot({ path: testInfo.outputPath("live-preview.png") })
+    await preview
+      .getByRole("button", { name: "Enlarge live computer preview" })
+      .click()
+    await expect(
+      page.getByRole("dialog", { name: "Preview Live computer preview" }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Close preview", exact: true })
+      .click()
+    await preview
+      .getByRole("button", { name: "Stop preview", exact: true })
+      .click()
+    await expect(preview.getByRole("status")).toHaveText("Paused")
+    await expect
+      .poll(
+        () =>
+          requests.filter((entry) => entry.method === "computer/preview/stop")
+            .length,
+      )
+      .toBeGreaterThan(0)
+    expect(
+      requests.find((entry) => entry.method === "computer/preview/capture")
+        ?.params,
+    ).toMatchObject({ target: computerPreviewCatalog.targets[0]?.target })
+    expect(errors).toEqual([])
+  } catch (cause) {
+    await testInfo.attach("server.log", {
+      body: logs.join("\n"),
+      contentType: "text/plain",
+    })
+    throw cause
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
 
 test("new Kimi, OpenAI and xAI accounts default to Responses and persist Kimi K3", async ({
   page,
