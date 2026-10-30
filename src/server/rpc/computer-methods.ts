@@ -39,9 +39,8 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
         ...(owner
           ? { inputOwner: { sessionId: owner.sessionId, turnId: owner.turnId } }
           : {}),
-        ...(control?.takenOver
-          ? { connected: false, tools: [], takenOver: true }
-          : {}),
+        ...(control?.admissionPaused ? { connected: false, tools: [] } : {}),
+        ...(control?.takenOver ? { takenOver: true } : {}),
       }
     }
     if (
@@ -81,6 +80,8 @@ const connectionMethods: readonly RpcMethodDefinition[] = (
         method === "computer/connect"
           ? context.computerControl?.prepareResume()
           : undefined
+      if (method === "computer/disconnect")
+        context.computerControl?.disconnect()
       const result = await operation(config)
       if (method === "computer/disconnect")
         await context.computerPreview?.stopAll()

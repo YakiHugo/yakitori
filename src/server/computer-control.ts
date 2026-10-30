@@ -12,11 +12,21 @@ export class ComputerControlError extends Error {}
 export class ComputerControl {
   #owner: ComputerUseOwner | undefined
   #takenOver = false
+  #disconnected = false
   #stopping: Promise<void> | undefined
   #epoch = 0
 
   get takenOver(): boolean {
     return this.#takenOver
+  }
+
+  get admissionPaused(): boolean {
+    return this.#takenOver || this.#disconnected
+  }
+
+  disconnect(): void {
+    this.#disconnected = true
+    this.#epoch++
   }
 
   get owner(): ComputerUseOwner | undefined {
@@ -25,8 +35,13 @@ export class ComputerControl {
 
   acquire(
     owner: ComputerUseOwner,
-  ): "computer_busy" | "computer_taken_over" | undefined {
+  ):
+    | "computer_busy"
+    | "computer_taken_over"
+    | "computer_disconnected"
+    | undefined {
     if (this.#takenOver) return "computer_taken_over"
+    if (this.#disconnected) return "computer_disconnected"
     if (this.#owner && this.#owner !== owner) return "computer_busy"
     this.#owner = owner
     return undefined
@@ -85,5 +100,6 @@ export class ComputerControl {
         "The user took over while computer use was connecting. Reconnect again to allow input.",
       )
     this.#takenOver = false
+    this.#disconnected = false
   }
 }
