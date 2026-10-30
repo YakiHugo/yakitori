@@ -5,11 +5,14 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
 import { prepareComputerFixture } from "./computer-fixture.ts"
@@ -67,6 +70,7 @@ const client = new McpClient(
 )
 let helperPid: number | undefined
 let fixturePid: number | undefined
+const extraFixturePids = new Set<number>()
 const fixtureRoot = await mkdtemp(join(tmpdir(), "yakitori-launch-mcp-"))
 try {
   const tools = await client.start()
@@ -101,6 +105,7 @@ try {
 <key>CFBundleName</key><string>Yakitori Launch Fixture</string>
 <key>CFBundleExecutable</key><string>fixture</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeExtensions</key><array><string>yakitori</string></array><key>CFBundleTypeRole</key><string>Editor</string></dict></array>
 </dict></plist>`,
   )
   const launched = await call({ action: "launch", app_path: app })
@@ -125,15 +130,97 @@ try {
     bundle_id: bundleID,
   })
   assert.equal(invalid.structuredContent?.code, "invalid_arguments")
+  const ignoredArguments = await call({
+    action: "launch",
+    app_path: app,
+    arguments: ["--ignored"],
+  })
+  assert.equal(
+    ignoredArguments.structuredContent?.code,
+    "arguments_require_new_instance",
+  )
+  const nextStatePath = join(fixtureRoot, "new-instance-state.json")
+  const literal = "literal $(not-a-shell) with spaces"
+  const distinct = await call({
+    action: "launch",
+    app_path: app,
+    arguments: [nextStatePath, literal],
+    new_instance: true,
+  })
+  assert(!distinct.isError, JSON.stringify(distinct))
+  const distinctPid = distinct.structuredContent?.pid
+  assert.equal(typeof distinctPid, "number")
+  extraFixturePids.add(distinctPid as number)
+  assert.notEqual(distinctPid, fixturePid)
+  const document = join(fixtureRoot, "document.yakitori")
+  await writeFile(document, "owned launch acceptance fixture")
+  const documentUrl = pathToFileURL(await realpath(document)).href
+  // New-instance argv has its own output file; URL delivery is verified from
+  // actual NSApplication delegate state rather than LaunchServices' callback.
+  const openedState = join(fixtureRoot, "opened-state.json")
+  const opened = await call({
+    action: "launch",
+    app_path: app,
+    new_instance: true,
+    arguments: [openedState, literal],
+    open_urls: [documentUrl],
+  })
+  assert(!opened.isError, JSON.stringify(opened))
+  assert.equal(typeof opened.structuredContent?.pid, "number")
+  extraFixturePids.add(opened.structuredContent?.pid as number)
+  const ambiguous = await call({
+    action: "launch",
+    app_path: app,
+    open_urls: [documentUrl],
+  })
+  assert.equal(ambiguous.structuredContent?.code, "app_ambiguous")
+  for (const [path, expectedPid, expectedUrls] of [
+    [nextStatePath, distinctPid, []],
+    [openedState, opened.structuredContent?.pid, [documentUrl]],
+  ] as const) {
+    const deadline = Date.now() + 3_000
+    for (;;) {
+      let state:
+        | { pid: number; arguments: string[]; opened_urls: string[] }
+        | undefined
+      try {
+        state = JSON.parse(await readFile(path, "utf8"))
+      } catch (error) {
+        if (
+          !(
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )
+        )
+          throw error
+      }
+      if (state && state.opened_urls.length === expectedUrls.length) {
+        assert.equal(state.pid, expectedPid)
+        assert.deepEqual(state.arguments, [path, literal])
+        assert.deepEqual(state.opened_urls, expectedUrls)
+        break
+      }
+      assert(
+        Date.now() < deadline,
+        "Launch arguments/documents did not reach the real fixture",
+      )
+      await new Promise((done) => setTimeout(done, 20))
+    }
+  }
   const listed = await call({ action: "list" })
   assert(Array.isArray(listed.structuredContent?.displays))
   console.log(
     "MCP launches by path, bundle ID and exact name resolve the same real application.",
   )
+  console.log(
+    "LaunchServices passes literal argv, creates distinct processes and delivers documents to the explicit application.",
+  )
   const released = await client.bindTool(cleanup)({})
   if (released.isError) throw new Error("Native turn cleanup failed.")
 } finally {
   if (fixturePid !== undefined) process.kill(fixturePid, "SIGTERM")
+  for (const pid of extraFixturePids) process.kill(pid, "SIGTERM")
   await client.close()
   await rm(fixtureRoot, { recursive: true, force: true })
 }

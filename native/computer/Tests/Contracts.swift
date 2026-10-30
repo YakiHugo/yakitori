@@ -214,6 +214,16 @@ import Foundation
     }
 
     static func applicationContracts() throws {
+        let options = try ApplicationLaunchOptions(["arguments": ["literal $(not-a-shell)", "--flag"], "new_instance": true,
+            "delivery": "foreground", "open_urls": ["file:///tmp/document.yakitori", "https://example.test/path"]])
+        precondition(options.newInstance && options.foreground && options.arguments == ["literal $(not-a-shell)", "--flag"])
+        precondition(options.urls.map(\.scheme) == ["file", "https"])
+        rejects { _ = try ApplicationLaunchOptions(["arguments": "--flag"]) }
+        rejects { _ = try ApplicationLaunchOptions(["arguments": ["bad\0argument"]]) }
+        rejects { _ = try ApplicationLaunchOptions(["new_instance": 1]) }
+        rejects { _ = try ApplicationLaunchOptions(["open_urls": ["relative/path"]]) }
+        rejects { _ = try ApplicationLaunchOptions(["open_urls": ["https://example.test/\npath"]]) }
+        rejects { _ = try ApplicationLaunchOptions(["delivery": "auto"]) }
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("yakitori-launch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

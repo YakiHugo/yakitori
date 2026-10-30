@@ -93,7 +93,7 @@ final class HoverTarget: NSView {
     }
 }
 
-final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
+final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicationDelegate {
     let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 500, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let first = NSTextField(frame: NSRect(x: 30, y: 230, width: 420, height: 28))
     let second = NSTextField(frame: NSRect(x: 30, y: 185, width: 420, height: 28))
@@ -113,6 +113,11 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
     var menuCount = 0
     var menusOpen = 0
     var events: [[String: Any]] = []
+    var openedURLs: [String] = []
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        openedURLs.append(contentsOf: urls.map(\.absoluteString)); save()
+    }
 
     func record(_ event: NSEvent) {
         guard [.leftMouseDown, .leftMouseUp, .mouseMoved, .keyDown, .flagsChanged, .appKitDefined].contains(event.type) else { return }
@@ -217,6 +222,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
                 }
             let bytes = try JSONSerialization.data(withJSONObject: [
                 "pid": getpid(), "count": count, "first": first.stringValue, "second": second.stringValue,
+                "arguments": Array(CommandLine.arguments.dropFirst()), "opened_urls": openedURLs,
                 "moves": moves, "visible": window.isVisible, "height": window.frame.height,
                 "dragging": canvas.dragging, "mouse_down": canvas.downCount, "mouse_up": canvas.upCount,
                 "window_id": window.windowNumber, "secondary_window_id": secondary?.windowNumber ?? 0,
@@ -256,6 +262,7 @@ app.mainMenu = menu
 let statePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1]
     : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("fixture-state.json").path
 let fixture = Fixture(output: URL(fileURLWithPath: statePath))
+app.delegate = fixture
 let delayedMenuItem = editMenu.submenu!.addItem(withTitle: "Delayed menu update", action: #selector(Fixture.changeLater), keyEquivalent: "")
 delayedMenuItem.target = fixture
 if CommandLine.arguments.contains("--interaction-fixture") {
