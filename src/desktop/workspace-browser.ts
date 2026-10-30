@@ -58,8 +58,13 @@ export function registerWorkspaceBrowser(
     const key = ownerKey(owner),
       entry = connections.get(key)
     if (!entry) return
-    entry.connection.close()
-    connections.delete(key)
+    entry.busy = true
+    try {
+      await entry.connection.close()
+      connections.delete(key)
+    } finally {
+      entry.busy = false
+    }
   }
 
   // A dedicated profile never shares the trusted renderer's cookies or access.
@@ -620,11 +625,16 @@ export function registerWorkspaceBrowser(
         entry &&
         (entry.targetId !== target.instanceId || entry.connection.closed)
       ) {
-        entry.connection.close()
-        connections.delete(key)
+        entry.busy = true
+        try {
+          await entry.connection.close()
+          connections.delete(key)
+        } finally {
+          entry.busy = false
+        }
         entry = undefined
       }
-      if (!entry && input.action === "type")
+      if (!entry && (input.action === "type" || input.action === "fill"))
         throw new BrowserControlError(
           "browser_reference_stale",
           "Observe this target in the current turn before typing.",
@@ -642,8 +652,8 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         observation =
-          input.action === "type"
-            ? await entry.connection.typeText(input, signal)
+          input.action === "type" || input.action === "fill"
+            ? await entry.connection.inputText(input, signal)
             : await entry.connection.observe(signal)
       } finally {
         entry.busy = false

@@ -13,6 +13,7 @@ export class ComputerControl {
   #owner: ComputerUseOwner | undefined
   #takenOver = false
   #disconnected = false
+  #cleanupPending = false
   #stopping: Promise<void> | undefined
   #epoch = 0
 
@@ -39,20 +40,29 @@ export class ComputerControl {
     | "computer_busy"
     | "computer_taken_over"
     | "computer_disconnected"
+    | "computer_cleanup_pending"
     | undefined {
     if (this.#takenOver) return "computer_taken_over"
     if (this.#disconnected) return "computer_disconnected"
+    if (this.#cleanupPending) return "computer_cleanup_pending"
     if (this.#owner && this.#owner !== owner) return "computer_busy"
     this.#owner = owner
     return undefined
   }
 
+  markCleanupPending(owner: ComputerUseOwner): void {
+    if (this.#owner === owner) this.#cleanupPending = true
+  }
+
   release(owner: ComputerUseOwner): void {
-    if (this.#owner === owner) this.#owner = undefined
+    if (this.#owner === owner) {
+      this.#owner = undefined
+      this.#cleanupPending = false
+    }
   }
 
   releaseSession(sessionId: string): void {
-    if (this.#owner?.sessionId === sessionId) this.#owner = undefined
+    if (this.#owner?.sessionId === sessionId) this.release(this.#owner)
   }
 
   takeOver(disconnect: () => Promise<void> = async () => {}): Promise<void> {

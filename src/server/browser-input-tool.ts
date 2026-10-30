@@ -13,17 +13,18 @@ import type {
 export function createBrowserInputTool(
   browser: DesktopBrowser,
   admit: (context: ToolExecutionContext) => Promise<ToolFailure | undefined>,
+  markCleanupPending: (context: ToolExecutionContext) => void,
 ): RuntimeTool {
   return {
     toolName: plainToolName("browser_input"),
     description:
-      "Type text into an exact text input or textarea observed by the browser tool in this turn. Use its inputReference and exact target. This inserts at the control's current selection; it does not clear the field. Each attempt consumes all references from that observation. The document and focused control are checked before dispatch and the resulting value is checked afterward. On browser_input_unconfirmed, observe again and never automatically replay text. No physical keyboard, clipboard, arbitrary page code or remote debugging port is used. Computer use must be connected; normal permission and shared turn ownership apply. Nonempty text, with a 64KiB per-event implementation safety bound.",
+      "Type text into an exact text input or textarea observed by the browser tool in this turn. Use its inputReference and exact target. type inserts at the current selection; fill selects and replaces the entire field, including an empty string to clear it. Each attempt consumes all references from that observation. The document and focused control are checked before dispatch and the resulting value is checked afterward. On browser_input_unconfirmed, observe again and never automatically replay text. No physical keyboard, clipboard, arbitrary page code or remote debugging port is used. Computer use must be connected; normal permission and shared turn ownership apply. type requires nonempty text; fill permits empty text. A 64KiB per-event implementation safety bound applies.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["action", "target", "reference", "text"],
       properties: {
-        action: { type: "string", enum: ["type"] },
+        action: { type: "string", enum: ["type", "fill"] },
         target: {
           type: "object",
           additionalProperties: false,
@@ -35,7 +36,7 @@ export function createBrowserInputTool(
           },
         },
         reference: { type: "string" },
-        text: { type: "string", minLength: 1 },
+        text: { type: "string" },
       },
     },
     effect: "mutate",
@@ -63,6 +64,7 @@ export function createBrowserInputTool(
         return { ok: true, output: result, content: JSON.stringify(result) }
       } catch (cause) {
         if (!(cause instanceof BrowserControlError)) throw cause
+        if (cause.code === "browser_cleanup_failed") markCleanupPending(context)
         return {
           ok: false,
           code: cause.code,

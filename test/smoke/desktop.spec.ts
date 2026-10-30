@@ -500,16 +500,25 @@ test("agent browser observations and actions use the exact owned tab through rea
     releaseCompletion = Promise.withResolvers<void>(),
     failed = Promise.withResolvers<Error>()
   let modelCalls = 0,
-    thirdRequests = 0
+    thirdRequests = 0,
+    clearKeyUps = 0
   let wantedUrl = "",
     destinationUrl = "",
     navigationUrl = ""
   let observation: Record<string, unknown> | undefined,
     receipt: Record<string, unknown> | undefined,
+    filledObservation: Record<string, unknown> | undefined,
+    clearedObservation: Record<string, unknown> | undefined,
+    clearReceipt: Record<string, unknown> | undefined,
     navigationReceipt: Record<string, unknown> | undefined,
     navigatedObservation: Record<string, unknown> | undefined,
     insertion:
-      | { action: "type"; target: unknown; reference: string; text: string }
+      | {
+          action: "type" | "fill"
+          target: unknown
+          reference: string
+          text: string
+        }
       | undefined
   const errors: string[] = []
   const toolResult = (
@@ -536,7 +545,34 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
     throw new Error(`Missing browser tool result ${key}`)
   }
+  const textRequest = (
+    observed: Record<string, unknown>,
+    action: "type" | "fill",
+    text: string,
+  ) => {
+    const field = (
+      observed.nodes as {
+        name: string
+        role: string
+        inputReference?: string
+      }[]
+    ).find((node) => node.name === "Target field" && node.role === "textbox")
+    if (!field?.inputReference)
+      throw new Error("Missing exact text control reference")
+    return {
+      action,
+      target: observed.target,
+      reference: field.inputReference,
+      text,
+    }
+  }
   const source = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/key-up") {
+      clearKeyUps++
+      response.writeHead(204)
+      response.end()
+      return
+    }
     if (request.method === "GET" && request.url?.startsWith("/first")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
@@ -547,7 +583,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        '<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)"></label><label><input type="checkbox" checked>Approved option</label>',
+        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label>`,
       )
       return
     }
@@ -616,23 +652,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             }
           } else if (step === 4) {
             const previous = toolResult(body.messages ?? [], "nodes")
-            const field = (
-              previous.nodes as {
-                name: string
-                role: string
-                inputReference?: string
-              }[]
-            ).find(
-              (node) => node.name === "Target field" && node.role === "textbox",
-            )
-            if (!field?.inputReference)
-              throw new Error("Missing exact text control reference")
-            insertion = {
-              action: "type",
-              target: previous.target,
-              reference: field.inputReference,
-              text: "你好 🌍",
-            }
+            insertion = textRequest(previous, "type", "你好 🌍")
             tool = {
               name: "browser_input",
               input: insertion,
@@ -662,16 +682,47 @@ test("agent browser observations and actions use the exact owned tab through rea
           } else if (step === 7) {
             observation = toolResult(body.messages ?? [], "nodes")
             tool = {
+              name: "browser_input",
+              input: textRequest(observation, "fill", "filled 内容"),
+              id: "fill_browser",
+            }
+          } else if (step === 8) {
+            if (!observation) throw new Error("Missing pre-fill observation")
+            toolResult(body.messages ?? [], "textVerified")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: observation.target },
+              id: "observe_fill",
+            }
+          } else if (step === 9) {
+            filledObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_input",
+              input: textRequest(filledObservation, "fill", ""),
+              id: "clear_browser",
+            }
+          } else if (step === 10) {
+            if (!filledObservation)
+              throw new Error("Missing filled observation")
+            clearReceipt = toolResult(body.messages ?? [], "textVerified")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: filledObservation.target },
+              id: "observe_clear",
+            }
+          } else if (step === 11) {
+            clearedObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
               name: "browser_navigate",
               input: {
                 action: "navigate",
-                target: observation.target,
+                target: clearedObservation.target,
                 fromUrl: wantedUrl,
                 url: navigationUrl,
               },
               id: "navigate_browser",
             }
-          } else if (step === 8) {
+          } else if (step === 12) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -793,7 +844,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 8; approval++)
+    for (let approval = 0; approval < 12; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -837,6 +888,28 @@ test("agent browser observations and actions use the exact owned tab through rea
     await expect.poll(attached).toBe(false)
     expect(errors).toEqual([])
     expect(receipt).toMatchObject({ delivered: true, textVerified: true })
+    expect(filledObservation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "textbox",
+          name: "Target field",
+          value: "filled 内容",
+        }),
+      ]),
+    )
+    // Chromium omits AX.value for an empty field. The input receipt verifies
+    // its exact DOM value; the subsequent AX read independently locates it.
+    expect(clearReceipt).toMatchObject({
+      textVerified: true,
+      bytes: 0,
+      valueLength: 0,
+    })
+    expect(clearedObservation?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "textbox", name: "Target field" }),
+      ]),
+    )
+    await expect.poll(() => clearKeyUps).toBe(1)
     expect(navigationReceipt).toMatchObject({
       loaded: true,
       url: destinationUrl,

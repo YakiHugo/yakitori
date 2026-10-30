@@ -122,4 +122,20 @@ describe("computer input ownership", () => {
     control.resume(control.prepareResume())
     expect(control.acquire(other.owner)).toBeUndefined()
   })
+
+  it("blocks further input after uncertain cleanup until the owning resource is released", () => {
+    const control = new ComputerControl(),
+      first = lease("first"),
+      other = lease("other")
+    control.acquire(first.owner)
+    control.markCleanupPending(other.owner)
+    expect(control.acquire(first.owner)).toBeUndefined()
+    control.markCleanupPending(first.owner)
+    expect(control.acquire(first.owner)).toBe("computer_cleanup_pending")
+    expect(control.acquire(other.owner)).toBe("computer_cleanup_pending")
+    control.releaseSession("other")
+    expect(control.acquire(first.owner)).toBe("computer_cleanup_pending")
+    control.release(first.owner)
+    expect(control.acquire(other.owner)).toBeUndefined()
+  })
 })

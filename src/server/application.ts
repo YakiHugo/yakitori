@@ -1023,7 +1023,9 @@ export async function createYakitoriApplication(
             ? "The user took over the computer. Do not retry input until computer use is reconnected."
             : refusal === "computer_disconnected"
               ? "Computer use is disconnected. Reconnect computer use before sending another action."
-              : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
+              : refusal === "computer_cleanup_pending"
+                ? "Computer input cleanup is unconfirmed. Do not send more input until the owning turn confirms cleanup."
+                : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
         return { ok: false, code: refusal, message, content: message }
       }
       async function admitBrowser(
@@ -1062,7 +1064,18 @@ export async function createYakitoriApplication(
                 options.desktopBrowser,
                 admitBrowser,
               ),
-              createBrowserInputTool(options.desktopBrowser, admitBrowser),
+              createBrowserInputTool(
+                options.desktopBrowser,
+                admitBrowser,
+                (context) => {
+                  const owner = computerControl.owner
+                  if (
+                    owner?.sessionId === stored.metadata.id &&
+                    owner.turnId === context.turnId
+                  )
+                    computerControl.markCleanupPending(owner)
+                },
+              ),
               createBrowserNavigationTool(options.desktopBrowser, admitBrowser),
             ]
           : []),
