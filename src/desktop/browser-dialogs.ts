@@ -154,7 +154,12 @@ export class BrowserDialogs {
 
   async settle(): Promise<void> {
     await this.#reply
-    if (this.#failure) throw this.#failure
+    if (this.#failure)
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "JavaScript dialog response completion could not be confirmed. Computer input remains quarantined until cleanup succeeds.",
+        { cause: this.#failure },
+      )
   }
 
   inspect(): JsonObject {

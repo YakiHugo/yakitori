@@ -162,7 +162,7 @@ it("retains an unconfirmed response failure for input and turn cleanup", async (
     await f.dialogs.arm(f.scope, { type: "confirm", accept: true }, f.command)
     f.emit(f.dialog)
     f.response.reject(
-      new BrowserControlError("browser_cleanup_failed", "Unknown response"),
+      new BrowserControlError("browser_input_unconfirmed", "Unknown response"),
     )
     await expect(f.dialogs.settle()).rejects.toMatchObject({
       code: "browser_cleanup_failed",
