@@ -1,16 +1,28 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
+import { prepareComputerFixture } from "./computer-fixture.ts"
 
 const run = promisify(execFile)
 const core = "native/computer/Sources/ComputerCore"
 const executable = resolve("build/computer-contracts")
 await run("swiftc", [
   "-parse-as-library",
+  "-framework",
+  "AppKit",
+  "-framework",
+  "CoreGraphics",
   ...(await readdir(core))
     .filter((name) => name.endsWith(".swift"))
     .map((name) => join(core, name)),
@@ -61,11 +73,10 @@ try {
   const app = join(fixtureRoot, "Yakitori Launch Fixture.app")
   const contents = join(app, "Contents")
   await mkdir(join(contents, "MacOS"), { recursive: true })
-  await run("swiftc", [
-    "native/computer/Tests/Fixture.swift",
-    "-o",
+  await copyFile(
+    await prepareComputerFixture(),
     join(contents, "MacOS/fixture"),
-  ])
+  )
   const bundleID = `com.yakitori.launch-fixture.${process.pid}`
   await writeFile(
     join(contents, "Info.plist"),

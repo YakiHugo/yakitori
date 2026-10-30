@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
-import { type ChildProcess, execFile, spawn } from "node:child_process"
+import { type ChildProcess, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { once } from "node:events"
 import {
   access,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -12,17 +13,29 @@ import {
 } from "node:fs/promises"
 import { release, tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
-import { parseArgs, promisify } from "node:util"
+import { parseArgs } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
+import { verifyComputerCapabilities } from "./computer-capabilities.ts"
+import { prepareComputerFixture } from "./computer-fixture.ts"
 
 const { values } = parseArgs({
   options: {
     repeat: { type: "string", default: "1" },
     report: { type: "string", default: "test-results/computer-live.json" },
-    direct: { type: "boolean", default: false },
+    group: { type: "string", default: "all" },
+    case: { type: "string" },
   },
 })
 const repeats = Number(values.repeat)
+const group = values.group
+assert(
+  ["all", "base", "capabilities"].includes(group),
+  "group must be all, base, or capabilities",
+)
+assert(
+  !values.case || group === "capabilities",
+  "--case requires --group capabilities; base cases share a sequential state contract",
+)
 // A safety boundary for this interactive local test runner, not a product quota.
 // Twenty repetitions already exercise hundreds of GUI effects on the host Mac.
 assert(
@@ -33,10 +46,10 @@ const reportPath = resolve(values.report)
 const executable =
   process.env.YAKITORI_COMPUTER_EXECUTABLE ??
   resolve("dist/native/Yakitori Computer.app/Contents/MacOS/yakitori-computer")
-const run = promisify(execFile)
 const root = await mkdtemp(join(tmpdir(), "yakitori-native-live-"))
 type Row = {
   case: string
+  group: string
   iteration: number
   status: "passed" | "failed"
   durationMs: number
@@ -51,11 +64,12 @@ const report = {
   startedAt: new Date().toISOString(),
   platform: `${process.platform} ${process.arch} ${release()}`,
   executable,
-  transport: values.direct ? "inherited-host" : "launch-services",
   driverSha256: createHash("sha256")
     .update(await readFile(executable))
     .digest("hex"),
   repetitions: repeats,
+  group,
+  caseFilter: values.case,
   status: "running",
   rows,
   permissions: {} as Record<string, unknown>,
@@ -63,12 +77,13 @@ const report = {
 }
 const client = new McpClient(
   "computer",
-  { command: executable, args: values.direct ? [] : ["--mcp"] },
+  { command: executable, args: ["--mcp"] },
   () => {},
   () => {},
   () => {},
 )
 let fixture: ChildProcess | undefined
+let fixturePid: number | undefined
 let failure: unknown
 try {
   const tools = await client.start()
@@ -87,854 +102,651 @@ try {
       "macOS permission required: enable Accessibility and Screen Recording for Yakitori Computer. No GUI cases executed.",
     )
   }
-  const fixtureExecutable = join(root, "fixture")
-  await run("swiftc", [
-    "native/computer/Tests/Fixture.swift",
-    "-o",
-    fixtureExecutable,
-  ])
+  const fixtureApp = join(root, "Yakitori Live Fixture.app")
+  const contents = join(fixtureApp, "Contents")
+  await mkdir(join(contents, "MacOS"), { recursive: true })
+  const fixtureExecutable = join(contents, "MacOS/fixture")
+  await copyFile(await prepareComputerFixture(), fixtureExecutable)
+  await writeFile(
+    join(contents, "Info.plist"),
+    `<?xml version="1.0"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.yakitori.live-fixture.${process.pid}</string>
+<key>CFBundleName</key><string>Yakitori Live Fixture</string>
+<key>CFBundleExecutable</key><string>fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+</dict></plist>`,
+  )
   for (let iteration = 1; iteration <= repeats; iteration++) {
-    const stateFile = join(root, `state-${iteration}.json`)
-    fixture = spawn(fixtureExecutable, [stateFile, "--multi-window"], {
-      stdio: "ignore",
-    })
-    await once(fixture, "spawn")
-    const pid = fixture.pid
-    assert(pid !== undefined, "The native fixture did not start")
-    type State = {
-      count: number
-      first: string
-      second: string
-      height: number
-      moves: number
-      visible: boolean
-      dragging: boolean
-      mouse_down: number
-      mouse_up: number
-      window_id: number
-      secondary_window_id: number
-      active: boolean
-      foreground_pid: number
-      selection_location: number
-      scheduled_changes: number
-      completed_changes: number
-      ax_reads: number
-      selection_length: number
-    }
-    const state = async (): Promise<State> =>
-      JSON.parse(await readFile(stateFile, "utf8"))
-    const waitFor = async (check: () => Promise<boolean>) => {
-      const deadline = Date.now() + 5_000
-      while (!(await check())) {
-        if (fixture?.exitCode !== null)
-          throw new Error(
-            "The fixture exited before the expected application state",
-          )
-        if (Date.now() >= deadline)
-          throw new Error(
-            `The fixture did not reach its expected application state: ${JSON.stringify(await state())}`,
-          )
-        await new Promise((done) => setTimeout(done, 10))
-      }
-    }
-    let windowID: number | undefined
-    await waitFor(async () => {
-      try {
-        await access(stateFile)
-        return true
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "ENOENT"
-        )
-          return false
-        throw error
-      }
-    })
-    await waitFor(async () => {
-      const listed = await call({ action: "list" })
-      const windows = listed.structuredContent?.windows as {
-        pid: number
-        window_id: number
-      }[]
-      const primary = (await state()).window_id
-      windowID = windows.find(
-        (window) => window.pid === pid && window.window_id === primary,
-      )?.window_id
-      return windowID !== undefined
-    })
-    const observe = async () => {
-      let result: Awaited<ReturnType<typeof call>> | undefined
-      // A read may race WindowServer publication/animation. Retry only that
-      // explicit stale-read outcome, within the existing fixture wait boundary.
-      // Inputs below are always issued once, including failed deliveries.
-      await waitFor(async () => {
-        const next = await call({ action: "observe", pid, window_id: windowID })
-        if (next.isError && next.structuredContent?.code === "stale_snapshot")
-          return false
-        assert(!next.isError, JSON.stringify(next.structuredContent))
-        result = next
-        return true
-      })
-      assert(result)
-      return result
-    }
-    type Observation = Awaited<ReturnType<typeof observe>>
-    const element = (observation: Observation, label: string) => {
-      const elements = observation.structuredContent?.elements as {
-        element: number
-        title?: string
-        description?: string
-      }[]
-      const found = elements.find(
-        (entry) => entry.title === label || entry.description === label,
-      )
-      assert(found, `Missing accessibility control: ${label}`)
-      return found.element
-    }
-    const input = async (
-      action: string,
-      observation: Observation,
-      args: Record<string, unknown> = {},
-    ) => {
-      const result = await call({
-        action,
-        snapshot_id: observation.structuredContent?.snapshot_id,
-        ...args,
-      })
-      assert(!result.isError, JSON.stringify(result.structuredContent))
-      return result
-    }
-    const check = async (name: string, execute: () => Promise<void>) => {
-      const started = performance.now()
-      try {
-        await execute()
-        rows.push({
-          case: name,
-          iteration,
-          status: "passed",
-          durationMs: performance.now() - started,
-        })
-        console.log(`PASS ${iteration}/${repeats} ${name}`)
-      } catch (error) {
-        rows.push({
-          case: name,
-          iteration,
-          status: "failed",
-          durationMs: performance.now() - started,
-          error: `${String(error)}; fixture=${JSON.stringify(await state())}`,
-        })
-        throw error
-      }
-    }
-    // WindowServer publishes a new window before ScreenCaptureKit necessarily
-    // exposes its content or finishes the launch animation. Require the owned
-    // fixture's actual AppKit geometry to stay stable before measuring it.
-    let stableSince: number | undefined
-    await waitFor(async () => {
-      const ready = await call({
-        action: "observe",
-        pid,
-        window_id: windowID,
-        mode: "vision",
-      })
-      if (
-        ready.isError &&
-        ["window_not_found", "stale_snapshot"].includes(
-          String(ready.structuredContent?.code),
-        )
-      ) {
-        stableSince = undefined
-        return false
-      }
-      assert(!ready.isError, JSON.stringify(ready.structuredContent))
-      const frame = ready.structuredContent?.frame as {
-        width: number
-        height: number
-      }
-      if (frame.width !== 500 || frame.height !== (await state()).height) {
-        stableSince = undefined
-        return false
-      }
-      stableSince ??= performance.now()
-      return performance.now() - stableSince >= 250
-    })
-    await check("window screenshot and actual PNG geometry", async () => {
-      const observed = await observe()
-      const image = observed.content.find((content) => content.type === "image")
-      assert(image?.type === "image")
-      const png = Buffer.from(image.data, "base64")
-      assert.equal(
-        png.readUInt32BE(16),
-        observed.structuredContent?.image_width,
-      )
-      assert.equal(
-        png.readUInt32BE(20),
-        observed.structuredContent?.image_height,
-      )
-      assert.equal(png.readUInt32BE(16), 500)
-      assert.equal(png.readUInt32BE(20), (await state()).height)
-    })
-    await check(
-      "observation modes separate AX text from screenshot pixels",
-      async () => {
-        const ax = await call({
-          action: "observe",
-          pid,
-          window_id: windowID,
-          mode: "ax",
-        })
-        assert(!ax.isError, JSON.stringify(ax.structuredContent))
-        assert(!ax.content.some((part) => part.type === "image"))
-        assert.equal(ax.structuredContent?.image_width, undefined)
-        element(ax, "First input")
-        const refused = await call({
-          action: "click",
-          snapshot_id: ax.structuredContent?.snapshot_id,
-          x: 10,
-          y: 10,
-        })
-        assert.equal(refused.structuredContent?.code, "coordinates_unavailable")
-        const replacement = await call({
-          action: "type",
-          snapshot_id: ax.structuredContent?.snapshot_id,
-          text: "must not arrive",
-          replace: true,
-          delivery: "foreground",
-        })
-        assert.equal(replacement.structuredContent?.code, "invalid_arguments")
-        assert.equal((await state()).first, "")
-        assert.equal((await state()).second, "")
-        const vision = await call({
-          action: "observe",
-          pid,
-          window_id: windowID,
-          mode: "vision",
-        })
-        assert(!vision.isError, JSON.stringify(vision.structuredContent))
-        assert(vision.content.some((part) => part.type === "image"))
-        assert.deepEqual(vision.structuredContent?.elements, [])
-        const unavailable = await call({
-          action: "query_snapshot",
-          snapshot_id: vision.structuredContent?.snapshot_id,
-        })
-        assert.equal(
-          unavailable.structuredContent?.code,
-          "accessibility_unavailable",
-        )
-      },
-    )
-    await check(
-      "cached query pages preserve original element IDs",
-      async () => {
-        const observed = await observe()
-        const snapshotID = observed.structuredContent?.snapshot_id
-        const all = observed.structuredContent?.elements as Record<
-          string,
-          unknown
-        >[]
-        const pages: Record<string, unknown>[] = []
-        let offset = 0
-        while (true) {
-          const page = await call({
-            action: "query_snapshot",
-            snapshot_id: snapshotID,
-            offset,
-            limit: 2,
-          })
-          assert(!page.isError, JSON.stringify(page.structuredContent))
-          assert.equal(page.structuredContent?.cached, true)
-          assert.equal(page.structuredContent?.snapshot_id, snapshotID)
-          pages.push(
-            ...(page.structuredContent?.elements as Record<string, unknown>[]),
-          )
-          if (page.structuredContent?.next_offset === undefined) break
-          offset = page.structuredContent.next_offset as number
-        }
-        assert.deepEqual(pages, all)
-        const filtered = await call({
-          action: "query_snapshot",
-          snapshot_id: snapshotID,
-          query: "INPUT",
-        })
-        const matches = filtered.structuredContent?.elements as {
-          element: number
-        }[]
-        assert.deepEqual(
-          matches.map((row) => row.element),
-          [element(observed, "First input"), element(observed, "Second input")],
-        )
-        const refused = await call({
-          action: "query_snapshot",
-          snapshot_id: snapshotID,
-          limit: 0,
-        })
-        assert.equal(refused.structuredContent?.code, "invalid_arguments")
-        await observe()
-        const stale = await call({
-          action: "query_snapshot",
-          snapshot_id: snapshotID,
-        })
-        assert.equal(stale.structuredContent?.code, "stale_snapshot")
-      },
-    )
-    await check(
-      "condition waits observe delayed real UI changes and publish a fresh ticket",
-      async () => {
-        const observed = await observe()
-        process.kill(pid, "SIGWINCH")
-        await waitFor(async () => (await state()).scheduled_changes === 1)
-        const ready = await call({
-          action: "wait_for",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          condition: { role: "AXStaticText", value: "Wait ready 1" },
-          timeout_seconds: 3,
-        })
-        assert(!ready.isError, JSON.stringify(ready.structuredContent))
-        assert.equal(ready.structuredContent?.wait_status, "matched")
-        assert.equal((await state()).completed_changes, 1)
-        assert.notEqual(
-          ready.structuredContent?.snapshot_id,
-          observed.structuredContent?.snapshot_id,
-        )
-        assert(!ready.content.some((part) => part.type === "image"))
-        const page = await call({
-          action: "query_snapshot",
-          snapshot_id: ready.structuredContent?.snapshot_id,
-          query: "Wait ready",
-        })
-        assert.equal(page.structuredContent?.total, 1)
-        const stale = await call({
-          action: "query_snapshot",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-        })
-        assert.equal(stale.structuredContent?.code, "stale_snapshot")
-      },
-    )
-    await check(
-      "change wait compares against cached UI rather than refreshing its baseline",
-      async () => {
-        const observed = await observe()
-        process.kill(pid, "SIGWINCH")
-        await waitFor(async () => (await state()).completed_changes === 2)
-        const cached = await call({
-          action: "query_snapshot",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          query: "Wait ready 2",
-        })
-        assert.equal(cached.structuredContent?.total, 0)
-        const changed = await call({
-          action: "wait_for_change",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          timeout_seconds: 1,
-        })
-        assert(!changed.isError, JSON.stringify(changed.structuredContent))
-        assert.equal(changed.structuredContent?.wait_status, "changed")
-        const page = await call({
-          action: "query_snapshot",
-          snapshot_id: changed.structuredContent?.snapshot_id,
-          query: "Wait ready 2",
-        })
-        assert.equal(page.structuredContent?.total, 1)
-        const unchanged = await call({
-          action: "wait_for_change",
-          snapshot_id: changed.structuredContent?.snapshot_id,
-          timeout_seconds: 0.05,
-        })
-        assert.equal(unchanged.structuredContent?.wait_status, "timed_out")
-      },
-    )
-    await check(
-      "wait timeout and absence remain distinct outcomes",
-      async () => {
-        const observed = await observe()
-        const ambiguous = await call({
-          action: "wait_for",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          condition: { role: "AXTextField" },
-          timeout_seconds: 0,
-        })
-        assert.equal(ambiguous.structuredContent?.wait_status, "ambiguous")
-        const timeout = await call({
-          action: "wait_for",
-          snapshot_id: ambiguous.structuredContent?.snapshot_id,
-          condition: { title: "Never present" },
-          timeout_seconds: 0.05,
-        })
-        assert(!timeout.isError, JSON.stringify(timeout.structuredContent))
-        assert.equal(timeout.structuredContent?.wait_status, "timed_out")
-        const absent = await call({
-          action: "wait_for",
-          snapshot_id: timeout.structuredContent?.snapshot_id,
-          condition: { title: "Never present", exists: false },
-          timeout_seconds: 0,
-        })
-        assert.equal(absent.structuredContent?.wait_status, "matched")
-      },
-    )
-    await check(
-      "cancelled active wait discards unpublished snapshots and releases the queue",
-      async () => {
-        const observed = await observe()
-        const reads = (await state()).ax_reads
-        const controller = new AbortController()
-        const waiting = call(
-          {
-            action: "wait_for",
-            snapshot_id: observed.structuredContent?.snapshot_id,
-            condition: { title: "Never present" },
-            timeout_seconds: 5,
-          },
-          controller.signal,
-        )
-        const outcome = waiting.then(
-          () => "completed",
-          () => "cancelled",
-        )
-        // Independent application-side AX reads prove the wait has begun polling.
-        await waitFor(async () => (await state()).ax_reads > reads)
-        controller.abort()
-        assert.equal(await outcome, "cancelled")
-        const refused = await call({
-          action: "query_snapshot",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-        })
-        assert.equal(refused.structuredContent?.code, "stale_snapshot")
-        assert(!(await observe()).isError)
-      },
-    )
-    await check(
-      "application scope includes both windows in one image and AX index",
-      async () => {
-        const app = await call({
-          action: "observe",
-          scope: "app",
-          mode: "both",
-          pid,
-        })
-        assert(!app.isError, JSON.stringify(app.structuredContent))
-        const image = app.content.find((part) => part.type === "image")
-        assert(image?.type === "image")
-        assert.equal(Buffer.from(image.data, "base64").readUInt32BE(16), 800)
-        const rows = app.structuredContent?.elements as {
-          element: number
-          window_id: number
-        }[]
-        const secondary = element(app, "Secondary increment")
-        assert.equal(
-          rows.find((row) => row.element === secondary)?.window_id,
-          (await state()).secondary_window_id,
-        )
-        element(app, "First input")
-        const before = (await state()).count
-        const ready = await call({
-          action: "wait_for",
-          snapshot_id: app.structuredContent?.snapshot_id,
-          condition: { title: "Secondary increment" },
-          timeout_seconds: 0,
-        })
-        assert.equal(ready.structuredContent?.wait_status, "matched")
-        assert.equal(ready.structuredContent?.scope, "app")
-        await input("press", ready, {
-          element: element(ready, "Secondary increment"),
-        })
-        await waitFor(async () => (await state()).count === before + 1)
-      },
-    )
-    await check(
-      "failed observation discards the previous input ticket",
-      async () => {
-        const observed = await observe()
-        const invalid = await call({ action: "observe", scope: "app" })
-        assert.equal(invalid.structuredContent?.code, "invalid_arguments")
-        const before = (await state()).count
-        const refused = await call({
-          action: "press",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          element: element(observed, "Increment"),
-        })
-        assert.equal(refused.structuredContent?.code, "stale_snapshot")
-        assert.equal((await state()).count, before)
-      },
-    )
-    await check(
-      "screen observation names an active display and keeps modes distinct",
-      async () => {
-        const listed = await call({ action: "list" })
-        const displays = listed.structuredContent?.displays as {
-          display_id: number
-          main: boolean
-        }[]
-        const main = displays.find((display) => display.main)
-        assert(main)
-        for (const mode of ["ax", "vision", "both"]) {
-          const screen = await call({
-            action: "observe",
-            scope: "screen",
-            mode,
-            display_id: main.display_id,
-          })
-          assert(!screen.isError, JSON.stringify(screen.structuredContent))
-          assert.equal(screen.structuredContent?.display_id, main.display_id)
-          assert.equal(
-            screen.content.some((part) => part.type === "image"),
-            mode !== "ax",
-          )
-          if (mode === "vision")
-            assert.deepEqual(screen.structuredContent?.elements, [])
-          if (mode === "ax") {
-            const ready = await call({
-              action: "wait_for",
-              snapshot_id: screen.structuredContent?.snapshot_id,
-              condition: { title: "Secondary increment" },
-              timeout_seconds: 0,
-            })
-            assert(!ready.isError, JSON.stringify(ready.structuredContent))
-            assert.equal(ready.structuredContent?.scope, "screen")
-            assert.equal(ready.structuredContent?.display_id, main.display_id)
-          }
-        }
-      },
-    )
-    await check("AX press changes the application's own state", async () => {
-      const observed = await observe()
-      await input("press", observed, {
-        element: element(observed, "Increment"),
-      })
-      await waitFor(async () => (await state()).count === 2)
-    })
-    await check(
-      "consumed observation cannot repeat a side effect",
-      async () => {
-        const observed = await observe()
-        const button = element(observed, "Increment")
-        await input("press", observed, { element: button })
-        await waitFor(async () => (await state()).count === 3)
-        const result = await call({
-          action: "press",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          element: button,
-        })
-        assert.equal(result.isError, true)
-        assert.equal(result.structuredContent?.code, "stale_snapshot")
-        assert.equal((await state()).count, 3)
-      },
-    )
-    await check("Unicode input switches to the addressed field", async () => {
-      let observed = await observe()
-      await input("type", observed, {
-        element: element(observed, "First input"),
-        text: "Keep this unchanged",
-      })
-      await waitFor(async () => (await state()).first === "Keep this unchanged")
-      observed = await observe()
-      await input("type", observed, {
-        element: element(observed, "Second input"),
-        text: "Yakitori 验证 😀",
-      })
-      await waitFor(async () => (await state()).second === "Yakitori 验证 😀")
-      assert.equal((await state()).first, "Keep this unchanged")
-    })
-    await check(
-      "replacement confirms the complete selection before real text events",
-      async () => {
-        const observed = await observe()
-        await input("type", observed, {
-          element: element(observed, "Second input"),
-          text: "Replaced 中文",
-          replace: true,
-        })
-        await waitFor(async () => (await state()).second === "Replaced 中文")
-        assert.equal((await state()).first, "Keep this unchanged")
-      },
-    )
-    await check(
-      "per-process pixel click reaches the addressed window",
-      async () => {
-        const observed = await observe()
-        const foregroundPID = (await state()).foreground_pid
-        await input("click", observed, {
-          x: 100,
-          y: (await state()).height - 118,
-        })
-        await waitFor(async () => (await state()).count === 4)
-        assert.equal(
-          (await state()).foreground_pid,
-          foregroundPID,
-          "Background input must preserve the system's foreground application",
-        )
-      },
-    )
-    await check(
-      "explicit foreground pixel click reaches the button",
-      async () => {
-        const observed = await observe()
-        // Fixture's button centre is (100,118) AppKit points from the bottom.
-        await input("click", observed, {
-          x: 100,
-          y: (await state()).height - 118,
-          delivery: "foreground",
-        })
-        await waitFor(async () => (await state()).count === 5)
-      },
-    )
-    await check(
-      "foreground shortcut selects text and releases modifiers",
-      async () => {
-        let observed = await observe()
-        await input("key", observed, {
-          element: element(observed, "Second input"),
-          key: "CMD+A",
-          delivery: "foreground",
-        })
-        observed = await observe()
-        await input("type", observed, {
-          element: element(observed, "Second input"),
-          text: "Shortcut 中文",
-          delivery: "foreground",
-        })
-        await waitFor(async () => (await state()).second === "Shortcut 中文")
-      },
-    )
-    await check(
-      "AX value writes change the application's own text",
-      async () => {
-        const observed = await observe()
-        const result = await input("set_value", observed, {
-          element: element(observed, "Second input"),
-          text: "alpha 😀 alpha",
-        })
-        assert.equal(result.structuredContent?.effect, "confirmed")
-        await waitFor(async () => (await state()).second === "alpha 😀 alpha")
-      },
-    )
-    await check(
-      "ambiguous selection refuses and contextual Unicode selection replaces only its match",
-      async () => {
-        let observed = await observe()
-        const refused = await call({
-          action: "select_text",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          element: element(observed, "Second input"),
-          text: "alpha",
-        })
-        assert.equal(refused.structuredContent?.code, "selection_ambiguous")
-        observed = await observe()
-        await input("select_text", observed, {
-          element: element(observed, "Second input"),
-          text: "alpha",
-          prefix: "😀 ",
-        })
-        await waitFor(
-          async () =>
-            (await state()).selection_location === 9 &&
-            (await state()).selection_length === 5,
-        )
-        observed = await observe()
-        await input("type", observed, {
-          element: element(observed, "Second input"),
-          text: "omega",
-        })
-        await waitFor(async () => (await state()).second === "alpha 😀 omega")
-        observed = await observe()
-        await input("select_text", observed, {
-          element: element(observed, "Second input"),
-          text: "alpha",
-          selection_type: "cursor_after",
-        })
-        observed = await observe()
-        await input("type", observed, {
-          element: element(observed, "Second input"),
-          text: "-",
-        })
-        await waitFor(async () => (await state()).second === "alpha- 😀 omega")
-      },
-    )
-    await check(
-      "advertised AX actions execute and unavailable actions refuse",
-      async () => {
-        let observed = await observe()
-        const refused = await call({
-          action: "perform_action",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          element: element(observed, "Increment"),
-          action_name: "AXNotAnAction",
-        })
-        assert.equal(refused.structuredContent?.code, "action_unavailable")
-        observed = await observe()
-        await input("perform_action", observed, {
-          element: element(observed, "Increment"),
-          action_name: "AXPress",
-        })
-        await waitFor(async () => (await state()).count === 6)
-      },
-    )
-    await check(
-      "truncated AX values never prove condition absence",
-      async () => {
-        let observed = await observe()
-        const text = (await state()).second
-        await input("set_value", observed, {
-          element: element(observed, "Second input"),
-          text: "long".repeat(300),
-        })
-        observed = await observe()
-        assert.equal(observed.structuredContent?.tree_truncated, true)
-        const result = await call({
-          action: "wait_for",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          condition: { title: "Never present", exists: false },
-          timeout_seconds: 0,
-        })
-        assert(!result.isError, JSON.stringify(result.structuredContent))
-        assert.equal(result.structuredContent?.wait_status, "unavailable")
-        await input("set_value", result, {
-          element: element(result, "Second input"),
-          text,
-        })
-        await waitFor(async () => (await state()).second === text)
-      },
-    )
-    await check("cancelled drag releases its held mouse button", async () => {
-      const observed = await observe()
-      const controller = new AbortController()
-      const dragging = call(
+    for (const runGroup of group === "all"
+      ? ["base", "capabilities"]
+      : [group]) {
+      const stateFile = join(root, `state-${iteration}-${runGroup}.json`)
+      fixture = spawn(
+        "/usr/bin/open",
+        ["-W", "-n", "-g", fixtureApp, "--args", stateFile, "--multi-window"],
         {
-          action: "drag",
-          snapshot_id: observed.structuredContent?.snapshot_id,
-          x: 280,
-          y: (await state()).height - 70,
-          to_x: 420,
-          to_y: (await state()).height - 70,
-          delivery: "foreground",
+          stdio: "ignore",
         },
-        controller.signal,
       )
-      // Attach the rejection handler before observing the cross-process barrier.
-      const outcome = dragging.then(
-        () => "completed",
-        () => "cancelled",
-      )
-      await waitFor(async () => (await state()).mouse_down === 1)
-      controller.abort()
-      assert.equal(await outcome, "cancelled")
-      assert(!(await client.bindTool(cleanup)({})).isError)
-      await waitFor(
-        async () => !(await state()).dragging && (await state()).mouse_up === 1,
-      )
-    })
-    await check(
-      "cancelled typing stops and permits the next native action",
-      async () => {
-        const observed = await observe()
-        const controller = new AbortController()
-        const typing = call(
-          {
-            action: "type",
-            snapshot_id: observed.structuredContent?.snapshot_id,
-            element: element(observed, "Second input"),
-            text: "x".repeat(100_000),
-            replace: true,
-          },
-          controller.signal,
-        )
-        const outcome = typing.then(
-          () => "completed",
-          () => "cancelled",
-        )
-        await waitFor(async () => (await state()).second.startsWith("xxx"))
-        controller.abort()
-        assert.equal(await outcome, "cancelled")
-        assert(!(await client.bindTool(cleanup)({})).isError)
-        const next = await observe()
-        assert((await state()).second.length < 100_000)
-        await input("press", next, { element: element(next, "Increment") })
-        await waitFor(async () => (await state()).count === 7)
-      },
-    )
-    await check("moved window rejects the previous observation", async () => {
-      const observed = await observe()
-      process.kill(pid, "SIGUSR1")
-      await waitFor(async () => (await state()).moves === 1)
-      const result = await call({
-        action: "press",
-        snapshot_id: observed.structuredContent?.snapshot_id,
-        element: element(observed, "Increment"),
-      })
-      assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 7)
-    })
-    await check("closed window rejects the previous observation", async () => {
-      const observed = await observe()
-      process.kill(pid, "SIGUSR2")
-      await waitFor(async () => !(await state()).visible)
-      const result = await call({
-        action: "press",
-        snapshot_id: observed.structuredContent?.snapshot_id,
-        element: element(observed, "Increment"),
-      })
-      assert.equal(result.structuredContent?.code, "stale_snapshot")
-      assert.equal((await state()).count, 7)
-      // The next case captures the whole display. Let WindowServer publish the
-      // completed close rather than including its disappearing surface.
+      await once(fixture, "spawn")
+      type State = {
+        pid: number
+        count: number
+        first: string
+        second: string
+        height: number
+        moves: number
+        visible: boolean
+        dragging: boolean
+        mouse_down: number
+        mouse_up: number
+        window_id: number
+        secondary_window_id: number
+        active: boolean
+        rich: string
+        rich_bold: boolean
+        changes: number
+        hidden: boolean
+        secondary_minimized: boolean
+        pointer_down: number
+        pointer_up: number
+        rich_selection: { location: number; length: number }
+        events: { type: number; flags: number }[]
+        secondary_frame: { x: number; y: number; width: number; height: number }
+        window_server: {
+          id: number
+          frame: { X: number; Y: number }
+          onscreen: boolean
+        }[]
+        window_spaces: {
+          id: number
+          visible: boolean
+          active_space: boolean
+          spaces: number[]
+        }[]
+      }
+      const state = async (): Promise<State> =>
+        JSON.parse(await readFile(stateFile, "utf8"))
+      const waitFor = async (
+        check: () => Promise<boolean>,
+        timeoutMs = 5_000,
+      ) => {
+        const deadline = Date.now() + timeoutMs
+        while (!(await check())) {
+          if (fixture?.exitCode !== null)
+            throw new Error(
+              "The fixture exited before the expected application state",
+            )
+          if (Date.now() >= deadline)
+            throw new Error(
+              "The fixture did not reach its expected application state",
+            )
+          await new Promise((done) => setTimeout(done, 10))
+        }
+      }
+      let windowID: number | undefined
       await waitFor(async () => {
-        const listed = await call({ action: "list" })
-        return !(
-          listed.structuredContent?.windows as { window_id: number }[]
-        ).some((window) => window.window_id === windowID)
+        try {
+          await access(stateFile)
+          return true
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )
+            return false
+          throw error
+        }
       })
-    })
-    await check(
-      "screen pixels require foreground and reach the selected display target",
-      async () => {
+      const pid = (await state()).pid
+      fixturePid = pid
+      await waitFor(async () => {
         const listed = await call({ action: "list" })
         const windows = listed.structuredContent?.windows as {
+          pid: number
           window_id: number
-          frame: { x: number; y: number; width: number; height: number }
         }[]
-        const secondaryID = (await state()).secondary_window_id
-        const secondary = windows.find(
-          (window) => window.window_id === secondaryID,
+        const primary = (await state()).window_id
+        windowID = windows.find(
+          (window) => window.pid === pid && window.window_id === primary,
+        )?.window_id
+        return windowID !== undefined
+      })
+      const observe = async () => {
+        let result: Awaited<ReturnType<typeof call>> | undefined
+        // A read may race WindowServer publication/animation. Retry only that
+        // explicit stale-read outcome, within the existing fixture wait boundary.
+        // Inputs below are always issued once, including failed deliveries.
+        await waitFor(async () => {
+          const next = await call({
+            action: "observe",
+            pid,
+            window_id: windowID,
+          })
+          if (next.isError && next.structuredContent?.code === "stale_snapshot")
+            return false
+          assert(!next.isError, JSON.stringify(next.structuredContent))
+          result = next
+          return true
+        })
+        assert(result)
+        return result
+      }
+      type Observation = Awaited<ReturnType<typeof observe>>
+      const element = (observation: Observation, label: string) => {
+        const elements = observation.structuredContent?.elements as {
+          element: number
+          title?: string
+          description?: string
+        }[]
+        const found = elements.find(
+          (entry) => entry.title === label || entry.description === label,
         )
-        assert(secondary)
-        const screen = await call({
+        assert(found, `Missing accessibility control: ${label}`)
+        return found.element
+      }
+      const input = async (
+        action: string,
+        observation: Observation,
+        args: Record<string, unknown> = {},
+      ) => {
+        const result = await call({
+          action,
+          snapshot_id: observation.structuredContent?.snapshot_id,
+          ...args,
+        })
+        assert(!result.isError, JSON.stringify(result.structuredContent))
+        return result
+      }
+      const check = async (name: string, execute: () => Promise<void>) => {
+        if (values.case && !name.includes(values.case)) return
+        const started = performance.now()
+        try {
+          await execute()
+          rows.push({
+            case: name,
+            group: runGroup,
+            iteration,
+            status: "passed",
+            durationMs: performance.now() - started,
+          })
+          console.log(`PASS ${iteration}/${repeats} ${name}`)
+        } catch (error) {
+          rows.push({
+            case: name,
+            group: runGroup,
+            iteration,
+            status: "failed",
+            durationMs: performance.now() - started,
+            error: `${String(error)}; fixture=${JSON.stringify(await state())}`,
+          })
+          throw error
+        }
+      }
+      // WindowServer publishes a new window before ScreenCaptureKit necessarily
+      // exposes its content or finishes the launch animation. Require the owned
+      // fixture's actual AppKit geometry to stay stable before measuring it.
+      let stableSince: number | undefined
+      await waitFor(async () => {
+        const ready = await call({
           action: "observe",
-          scope: "screen",
+          pid,
+          window_id: windowID,
           mode: "vision",
         })
-        assert(!screen.isError, JSON.stringify(screen.structuredContent))
-        const frame = screen.structuredContent?.frame as {
-          x: number
-          y: number
+        if (
+          ready.isError &&
+          ["window_not_found", "stale_snapshot"].includes(
+            String(ready.structuredContent?.code),
+          )
+        ) {
+          stableSince = undefined
+          return false
+        }
+        assert(!ready.isError, JSON.stringify(ready.structuredContent))
+        const frame = ready.structuredContent?.frame as {
           width: number
           height: number
         }
-        const width = screen.structuredContent?.image_width as number
-        const height = screen.structuredContent?.image_height as number
-        // Secondary button centre: (110, 78) AppKit points from window bottom.
-        const x = ((secondary.frame.x + 110 - frame.x) * width) / frame.width
-        const y =
-          ((secondary.frame.y + secondary.frame.height - 78 - frame.y) *
-            height) /
-          frame.height
-        const refused = await call({
-          action: "click",
-          snapshot_id: screen.structuredContent?.snapshot_id,
-          x,
-          y,
+        if (frame.width !== 500 || frame.height !== (await state()).height) {
+          stableSince = undefined
+          return false
+        }
+        stableSince ??= performance.now()
+        return performance.now() - stableSince >= 250
+      })
+      if (runGroup === "base") {
+        await check("window screenshot and actual PNG geometry", async () => {
+          const observed = await observe()
+          const image = observed.content.find(
+            (content) => content.type === "image",
+          )
+          assert(image?.type === "image")
+          const png = Buffer.from(image.data, "base64")
+          assert.equal(
+            png.readUInt32BE(16),
+            observed.structuredContent?.image_width,
+          )
+          assert.equal(
+            png.readUInt32BE(20),
+            observed.structuredContent?.image_height,
+          )
+          assert.equal(png.readUInt32BE(16), 500)
+          assert.equal(png.readUInt32BE(20), (await state()).height)
         })
-        assert.equal(refused.structuredContent?.code, "foreground_required")
-        assert.equal((await state()).count, 7)
-        await input("click", screen, { x, y, delivery: "foreground" })
-        await waitFor(async () => (await state()).count === 8)
-      },
-    )
-    const exited = once(fixture, "exit")
-    fixture.kill("SIGTERM")
-    await exited
-    fixture = undefined
+        await check(
+          "observation modes separate AX text from screenshot pixels",
+          async () => {
+            const ax = await call({
+              action: "observe",
+              pid,
+              window_id: windowID,
+              mode: "ax",
+            })
+            assert(!ax.isError, JSON.stringify(ax.structuredContent))
+            assert(!ax.content.some((part) => part.type === "image"))
+            assert.equal(ax.structuredContent?.image_width, undefined)
+            element(ax, "First input")
+            const refused = await call({
+              action: "click",
+              snapshot_id: ax.structuredContent?.snapshot_id,
+              x: 10,
+              y: 10,
+            })
+            assert.equal(
+              refused.structuredContent?.code,
+              "coordinates_unavailable",
+            )
+            const replacement = await call({
+              action: "type",
+              snapshot_id: ax.structuredContent?.snapshot_id,
+              text: "must not arrive",
+              replace: true,
+              delivery: "foreground",
+            })
+            assert.equal(
+              replacement.structuredContent?.code,
+              "invalid_arguments",
+            )
+            assert.equal((await state()).first, "")
+            assert.equal((await state()).second, "")
+            const vision = await call({
+              action: "observe",
+              pid,
+              window_id: windowID,
+              mode: "vision",
+            })
+            assert(!vision.isError, JSON.stringify(vision.structuredContent))
+            assert(vision.content.some((part) => part.type === "image"))
+            assert.deepEqual(vision.structuredContent?.elements, [])
+          },
+        )
+        await check(
+          "application scope includes both windows in one image and AX index",
+          async () => {
+            const app = await call({
+              action: "observe",
+              scope: "app",
+              mode: "both",
+              pid,
+            })
+            assert(!app.isError, JSON.stringify(app.structuredContent))
+            const image = app.content.find((part) => part.type === "image")
+            assert(image?.type === "image")
+            assert.equal(
+              Buffer.from(image.data, "base64").readUInt32BE(16),
+              800,
+            )
+            const rows = app.structuredContent?.elements as {
+              element: number
+              window_id: number
+            }[]
+            const secondary = element(app, "Secondary increment")
+            assert.equal(
+              rows.find((row) => row.element === secondary)?.window_id,
+              (await state()).secondary_window_id,
+            )
+            element(app, "First input")
+            const before = (await state()).count
+            await input("press", app, { element: secondary })
+            await waitFor(async () => (await state()).count === before + 1)
+          },
+        )
+        await check(
+          "failed observation discards the previous input ticket",
+          async () => {
+            const observed = await observe()
+            const invalid = await call({ action: "observe", scope: "app" })
+            assert.equal(invalid.structuredContent?.code, "invalid_arguments")
+            const before = (await state()).count
+            const refused = await call({
+              action: "press",
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: element(observed, "Increment"),
+            })
+            assert.equal(refused.structuredContent?.code, "stale_snapshot")
+            assert.equal((await state()).count, before)
+          },
+        )
+        await check(
+          "screen observation names an active display and keeps modes distinct",
+          async () => {
+            const listed = await call({ action: "list" })
+            const displays = listed.structuredContent?.displays as {
+              display_id: number
+              main: boolean
+            }[]
+            const main = displays.find((display) => display.main)
+            assert(main)
+            for (const mode of ["ax", "vision", "both"]) {
+              const screen = await call({
+                action: "observe",
+                scope: "screen",
+                mode,
+                display_id: main.display_id,
+              })
+              assert(!screen.isError, JSON.stringify(screen.structuredContent))
+              assert.equal(
+                screen.structuredContent?.display_id,
+                main.display_id,
+              )
+              assert.equal(
+                screen.content.some((part) => part.type === "image"),
+                mode !== "ax",
+              )
+              if (mode === "vision")
+                assert.deepEqual(screen.structuredContent?.elements, [])
+            }
+          },
+        )
+        await check(
+          "AX press changes the application's own state",
+          async () => {
+            const observed = await observe()
+            await input("press", observed, {
+              element: element(observed, "Increment"),
+            })
+            await waitFor(async () => (await state()).count === 2)
+          },
+        )
+        await check(
+          "consumed observation cannot repeat a side effect",
+          async () => {
+            const observed = await observe()
+            const button = element(observed, "Increment")
+            await input("press", observed, { element: button })
+            await waitFor(async () => (await state()).count === 3)
+            const result = await call({
+              action: "press",
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: button,
+            })
+            assert.equal(result.isError, true)
+            assert.equal(result.structuredContent?.code, "stale_snapshot")
+            assert.equal((await state()).count, 3)
+          },
+        )
+        await check(
+          "Unicode input switches to the addressed field",
+          async () => {
+            let observed = await observe()
+            await input("type", observed, {
+              element: element(observed, "First input"),
+              text: "Keep this unchanged",
+            })
+            await waitFor(
+              async () => (await state()).first === "Keep this unchanged",
+            )
+            observed = await observe()
+            await input("type", observed, {
+              element: element(observed, "Second input"),
+              text: "Yakitori 验证 😀",
+            })
+            await waitFor(
+              async () => (await state()).second === "Yakitori 验证 😀",
+            )
+            assert.equal((await state()).first, "Keep this unchanged")
+          },
+        )
+        await check(
+          "replacement confirms the complete selection before real text events",
+          async () => {
+            const observed = await observe()
+            await input("type", observed, {
+              element: element(observed, "Second input"),
+              text: "Replaced 中文",
+              replace: true,
+            })
+            await waitFor(
+              async () => (await state()).second === "Replaced 中文",
+            )
+            assert.equal((await state()).first, "Keep this unchanged")
+          },
+        )
+        await check(
+          "per-process pixel click reaches the addressed window",
+          async () => {
+            const active = (await state()).active
+            const before = await call({ action: "status" })
+            const observed = await observe()
+            await input("click", observed, {
+              x: 100,
+              y: (await state()).height - 118,
+            })
+            await waitFor(async () => {
+              const current = await state()
+              return current.count === 4 && current.active === active
+            })
+            const after = await call({ action: "status" })
+            assert.equal(
+              after.structuredContent?.frontmost_pid,
+              before.structuredContent?.frontmost_pid,
+            )
+            assert.deepEqual(
+              after.structuredContent?.pointer,
+              before.structuredContent?.pointer,
+            )
+          },
+        )
+        await check(
+          "explicit foreground pixel click reaches the button",
+          async () => {
+            const observed = await observe()
+            // Fixture's button centre is (100,118) AppKit points from the bottom.
+            await input("click", observed, {
+              x: 100,
+              y: (await state()).height - 118,
+              delivery: "foreground",
+            })
+            await waitFor(async () => (await state()).count === 5)
+          },
+        )
+        await check(
+          "foreground shortcut selects text and releases modifiers",
+          async () => {
+            let observed = await observe()
+            await input("key", observed, {
+              element: element(observed, "Second input"),
+              key: "CMD+A",
+              delivery: "foreground",
+            })
+            observed = await observe()
+            await input("type", observed, {
+              element: element(observed, "Second input"),
+              text: "Shortcut 中文",
+              delivery: "foreground",
+            })
+            await waitFor(
+              async () => (await state()).second === "Shortcut 中文",
+            )
+          },
+        )
+        await check(
+          "cancelled drag releases its held mouse button",
+          async () => {
+            const observed = await observe()
+            const controller = new AbortController()
+            const dragging = call(
+              {
+                action: "drag",
+                snapshot_id: observed.structuredContent?.snapshot_id,
+                x: 280,
+                y: (await state()).height - 70,
+                to_x: 420,
+                to_y: (await state()).height - 70,
+                delivery: "foreground",
+              },
+              controller.signal,
+            )
+            // Attach the rejection handler before observing the cross-process barrier.
+            const outcome = dragging.then(
+              () => "completed",
+              () => "cancelled",
+            )
+            await waitFor(async () => (await state()).mouse_down === 1)
+            controller.abort()
+            assert.equal(await outcome, "cancelled")
+            assert(!(await client.bindTool(cleanup)({})).isError)
+            await waitFor(
+              async () =>
+                !(await state()).dragging && (await state()).mouse_up === 1,
+            )
+          },
+        )
+        await check(
+          "cancelled typing stops and permits the next native action",
+          async () => {
+            const observed = await observe()
+            const controller = new AbortController()
+            const typing = call(
+              {
+                action: "type",
+                snapshot_id: observed.structuredContent?.snapshot_id,
+                element: element(observed, "Second input"),
+                text: "x".repeat(100_000),
+                replace: true,
+              },
+              controller.signal,
+            )
+            const outcome = typing.then(
+              () => "completed",
+              () => "cancelled",
+            )
+            await waitFor(async () => (await state()).second.startsWith("xxx"))
+            controller.abort()
+            assert.equal(await outcome, "cancelled")
+            assert(!(await client.bindTool(cleanup)({})).isError)
+            const next = await observe()
+            assert((await state()).second.length < 100_000)
+            await input("press", next, { element: element(next, "Increment") })
+            await waitFor(async () => (await state()).count === 6)
+          },
+        )
+        await check(
+          "moved window rejects the previous observation",
+          async () => {
+            const observed = await observe()
+            process.kill(pid, "SIGUSR1")
+            await waitFor(async () => (await state()).moves === 1)
+            const result = await call({
+              action: "press",
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: element(observed, "Increment"),
+            })
+            assert.equal(result.structuredContent?.code, "stale_snapshot")
+            assert.equal((await state()).count, 6)
+          },
+        )
+        await check(
+          "closed window rejects the previous observation",
+          async () => {
+            const observed = await observe()
+            process.kill(pid, "SIGUSR2")
+            await waitFor(async () => !(await state()).visible)
+            const result = await call({
+              action: "press",
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: element(observed, "Increment"),
+            })
+            assert.equal(result.structuredContent?.code, "stale_snapshot")
+            assert.equal((await state()).count, 6)
+            // The next case captures the whole display. Let WindowServer publish the
+            // completed close rather than including its disappearing surface.
+            await waitFor(async () => {
+              const listed = await call({ action: "list" })
+              return !(
+                listed.structuredContent?.windows as { window_id: number }[]
+              ).some((window) => window.window_id === windowID)
+            })
+          },
+        )
+        await check(
+          "screen pixels require foreground and reach the selected display target",
+          async () => {
+            const listed = await call({ action: "list" })
+            const windows = listed.structuredContent?.windows as {
+              window_id: number
+              frame: { x: number; y: number; width: number; height: number }
+            }[]
+            const secondaryID = (await state()).secondary_window_id
+            const secondary = windows.find(
+              (window) => window.window_id === secondaryID,
+            )
+            assert(secondary)
+            const screen = await call({
+              action: "observe",
+              scope: "screen",
+              mode: "vision",
+            })
+            assert(!screen.isError, JSON.stringify(screen.structuredContent))
+            const frame = screen.structuredContent?.frame as {
+              x: number
+              y: number
+              width: number
+              height: number
+            }
+            const width = screen.structuredContent?.image_width as number
+            const height = screen.structuredContent?.image_height as number
+            // Secondary button centre: (110, 78) AppKit points from window bottom.
+            const x =
+              ((secondary.frame.x + 110 - frame.x) * width) / frame.width
+            const y =
+              ((secondary.frame.y + secondary.frame.height - 78 - frame.y) *
+                height) /
+              frame.height
+            const refused = await call({
+              action: "click",
+              snapshot_id: screen.structuredContent?.snapshot_id,
+              x,
+              y,
+            })
+            assert.equal(refused.structuredContent?.code, "foreground_required")
+            assert.equal((await state()).count, 6)
+            await input("click", screen, { x, y, delivery: "foreground" })
+            await waitFor(async () => (await state()).count === 7)
+          },
+        )
+      }
+      if (runGroup === "capabilities")
+        await verifyComputerCapabilities({
+          call,
+          pid,
+          windowID: (await state()).secondary_window_id,
+          state,
+          waitFor,
+          check,
+          cleanup: () => client.bindTool(cleanup)({}),
+        })
+      const exited = once(fixture, "exit")
+      process.kill(pid, "SIGTERM")
+      await exited
+      fixture = undefined
+      fixturePid = undefined
+    }
   }
+  assert(rows.length > 0, "No case matched the requested group/filter")
   report.status = "passed"
 } catch (error) {
   failure = error
@@ -943,7 +755,8 @@ try {
 } finally {
   if (fixture !== undefined && fixture.exitCode === null) {
     const exited = once(fixture, "exit")
-    fixture.kill("SIGTERM")
+    if (fixturePid !== undefined) process.kill(fixturePid, "SIGTERM")
+    else fixture.kill("SIGTERM")
     await exited
   }
   await client.close()

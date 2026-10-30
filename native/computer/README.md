@@ -13,8 +13,8 @@ There is no automatic foreground retry. Observation targets the current desktop'
 visible windows or an explicitly selected display. Screen pixel input requires
 foreground delivery; window/app inputs keep an exact owning window even when
 their observation combines several windows. Background typing requires confirmed
-AX focus. This does not yet establish support for every macOS application, other
-Spaces, minimized windows, locked desktops, or arbitrary canvas keyboard input.
+AX focus. This does not establish support for every macOS application, other
+Spaces, capture of minimized windows, locked desktops, or arbitrary canvas keyboard input.
 
 The Wuu reference was inspected at
 `2903ea990580a92e53215781cd99a821c5df80f3` (2026-10-17), including its native
@@ -31,6 +31,19 @@ foreground delivery must be explicitly requested. Directed AppKit activation is
 scoped to one action and restored on completion/cancellation, without suppressing
 user activation events or bringing the application onto the shared foreground.
 
+Stored AX trees and input tickets have separate lifetimes: querying cached evidence
+does not renew permission to act on it. Cross-process application revisions invalidate
+older observations after another helper mutates the same app. Native resource locks
+serialize application mutations, the shared foreground, and clipboard ownership across
+MCP connections. Exact selectors refuse clipped attributes or incomplete trees when
+uniqueness cannot be established. App menus carry an anchor window identity rather
+than falsely claiming to be descendants of that window.
+
+The native sequence is a bounded, caller-fixed batch of AX/keyboard operations in
+one process incarnation. It has no branches, planning, input retries, or target
+switching. Each step resolves fresh AX state; cancellation drains held input and
+reports completed steps. Task orchestration remains in the harness.
+
 `pnpm test:computer` checks native coordinate/identity/cancellation contracts and
 the real signed app's LaunchServices/MCP lifecycle without requesting access.
 `pnpm test:computer:live` runs an owned AppKit fixture. The cases verify actual
@@ -39,6 +52,24 @@ Unicode input into two fields, replacement, foreground pixel input, and native
 cancellation of drag and typing. Assertions read the fixture's application state,
 not the driver's delivery claim. No existing user document is operated.
 
+During development, run only the affected group or independently prepared case:
+
+```sh
+pnpm build:computer
+pnpm test:computer:live --group capabilities --case 'window management'
+```
+
+Groups are `base` and `capabilities`; the default `all` is the final
+acceptance run. Base cases intentionally share a sequential state contract and do
+not accept a case filter. Other cases prepare their own prerequisites. Unmatched
+filters fail, and reports identify the group/filter and actually executed cases.
+Even an `all` run creates a fresh fixture for each group, so focused and complete
+runs have the same starting state. Groups run serially because native foreground
+input and display configuration are shared host resources.
+The fixture is launched as an owned app through LaunchServices so process launch
+identity is real. Its executable is reused only when source, compiler, SDK, and
+architecture match. A live run uses the already-built helper and never rebuilds it.
+
 `pnpm bench:computer` repeats those cases five times and writes raw case durations,
 median/p95 summaries, OS/build identity and permission status to
 `test-results/computer-bench.json`. This is a scripted driver microbenchmark,
@@ -46,8 +77,3 @@ not an agent/model benchmark or a score comparable with OSWorld. Missing macOS
 permissions produce a blocked report with zero executed cases and a failing exit
 status; they are never counted as passed cases. Both commands require enabling
 Accessibility and Screen Recording for **Yakitori Computer** in System Settings.
-
-For an isolated checkout, `pnpm test:computer:live --direct` exercises native
-actions under the invoking host's existing macOS grants. Its report identifies
-that transport as `inherited-host`; it does not verify LaunchServices permission
-attribution, which is covered separately by `pnpm test:computer`.

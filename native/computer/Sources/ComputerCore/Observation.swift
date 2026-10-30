@@ -84,8 +84,19 @@ final class ObservationCanvas {
 extension Computer {
     func observe(_ args: [String: Any]) async throws -> [String: Any] {
         // A failed replacement observation must not leave an older input ticket usable.
+        let previous = lastObservation
         snapshot = nil
+        lastObservation = nil
         let request = try ObservationRequest(args)
+        var subtree: ObservedElement?
+        if args["root_element"] != nil {
+            guard let previous, previous.id == args["snapshot_id"] as? String,
+                  let index = args["root_element"] as? Int, previous.elements.indices.contains(index) else {
+                throw ComputerFailure("stale_snapshot", "Subtree observation requires root_element from the previous snapshot_id.")
+            }
+            try previous.validate(id: previous.id, windows: windows(), displays: displays())
+            subtree = previous.elements[index]
+        }
         if request.mode == .ax && !AXIsProcessTrusted() {
             throw ComputerFailure("permission_required", "Enable Accessibility for AX observations. Screen Recording is not required for mode=ax.")
         }
@@ -112,6 +123,7 @@ extension Computer {
             // must not invalidate every display capture as they appear/disappear.
             selected = currentWindows.filter { $0.layer == 0 && $0.frame.intersects(frame) }
         }
+        let revisions = try Dictionary(uniqueKeysWithValues: Set(selected.map(\.pid)).map { ($0, try NativeResources.revision($0)) })
         var image: CGImage?
         if request.mode != .ax {
             let shareable: SCShareableContent = try await nativeRequest { done in
@@ -154,19 +166,31 @@ extension Computer {
         // resolution and traversal, rather than multiplying it per window.
         let axDeadline = Date().addingTimeInterval(1)
         var roots: [(WindowIdentity, AXUIElement)] = []
+        var applicationRoots: [(WindowIdentity, AXUIElement)] = []
         var rootsTruncated = false
         if request.mode != .vision && AXIsProcessTrusted() {
-            for window in selected {
-                if Date() >= axDeadline { rootsTruncated = true; break }
-                if let root = windowElement(window, deadline: axDeadline) { roots.append((window, root)) }
-                else { rootsTruncated = true }
+            if let subtree {
+                guard selected.contains(subtree.window) else { throw ComputerFailure("invalid_arguments", "The subtree must belong to the observation target.") }
+                if subtree.applicationUI { applicationRoots = [(subtree.window, subtree.value)] }
+                else { roots = [(subtree.window, subtree.value)] }
+            } else {
+                for window in selected {
+                    if Date() >= axDeadline { rootsTruncated = true; break }
+                    if let root = windowElement(window, deadline: axDeadline) { roots.append((window, root)) }
+                    else { rootsTruncated = true }
+                }
             }
         }
-        let tree = accessibilityTree(roots, deadline: axDeadline)
+        if request.scope == .app, request.mode != .vision, subtree == nil, AXIsProcessTrusted(), let anchor = selected.first(where: { $0.layer == 0 }) ?? selected.first {
+            let app = AXUIElementCreateApplication(anchor.pid)
+            for name in [kAXMenuBarAttribute, kAXExtrasMenuBarAttribute] {
+                if let root = attribute(app, name), CFGetTypeID(root) == AXUIElementGetTypeID() { applicationRoots.append((anchor, root as! AXUIElement)) }
+            }
+        }
+        let tree = accessibilityTree(roots, applicationRoots: applicationRoots, deadline: axDeadline)
         let next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
             imageWidth: image?.width, imageHeight: image?.height, elements: tree.elements,
-            tree: request.mode != .vision && AXIsProcessTrusted()
-                ? AccessibilitySnapshot(rows: tree.rows, truncated: tree.truncated || rootsTruncated) : nil)
+            rows: tree.rows, truncated: tree.truncated || rootsTruncated, mode: request.mode, revisions: revisions)
         try next.validate(id: next.id, windows: windows(), displays: displays())
         var png: Data?
         if let image {
@@ -182,7 +206,14 @@ extension Computer {
         if let windowID = request.windowID { data["window_id"] = windowID }
         if let display { data["display_id"] = display.id }
         if let image { data["image_width"] = image.width; data["image_height"] = image.height }
+        if args["disable_diff"] as? Bool != true, let previous,
+           request.mode != .vision, previous.mode != .vision, AXIsProcessTrusted(),
+           previous.scope == next.scope, previous.windows.map(\.windowID) == next.windows.map(\.windowID),
+           previous.display == next.display {
+            data["diff"] = next.difference(from: previous)
+        }
         snapshot = next
+        lastObservation = next
         return try result(data, image: png)
     }
 
