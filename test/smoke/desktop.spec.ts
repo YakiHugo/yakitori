@@ -503,6 +503,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     thirdRequests = 0,
     clearKeyUps = 0,
     frameAfterReady = 0
+  const framePointerEvents: { kind: string; trusted: boolean }[] = []
   const frameSubmittedValues: (string | null)[] = []
   let frameAfterObservation: Record<string, unknown> | undefined
   const frameObservations: Record<string, unknown>[] = []
@@ -567,7 +568,10 @@ test("agent browser observations and actions use the exact owned tab through rea
         // Chat appends image provenance markers after this tool's JSON text.
         data = JSON.parse(message.content.split("\n", 1)[0] ?? "")
       } catch (cause) {
-        if (cause instanceof SyntaxError) continue
+        if (cause instanceof SyntaxError) {
+          if (key === "delivered") break
+          continue
+        }
         throw cause
       }
       if (
@@ -577,6 +581,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         key in data
       )
         return data as Record<string, unknown>
+      if (key === "delivered") break
     }
     const last = messages.findLast((message) => message.role === "tool")
     throw new Error(
@@ -647,6 +652,19 @@ test("agent browser observations and actions use the exact owned tab through rea
     }
   }
   const source = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/frame-pointer") {
+      let body = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
+      request.on("end", () => {
+        framePointerEvents.push(JSON.parse(body))
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.method === "POST" && request.url === "/frame-ready") {
       frameAfterReady++
       response.writeHead(204)
@@ -704,7 +722,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             ? "Remote"
             : "Nested"
       response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form>${kind === "Remote" ? `<iframe title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
       )
       return
     }
@@ -718,7 +736,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form><iframe title="Local scope" src="/frame-local" style="display:block;width:280px;height:100px"></iframe><iframe title="Remote scope" src="${new URL(wantedUrl).origin.replace("127.0.0.1", "localhost")}/frame-remote" style="display:block;width:280px;height:100px"></iframe>`,
+        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form><iframe title="Local scope" src="/frame-local" style="display:block;width:400px;height:180px;border:5px solid red;padding:6px;transform:rotate(3deg) scale(.8);transform-origin:0 0"></iframe><iframe title="Remote scope" src="${new URL(wantedUrl).origin.replace("127.0.0.1", "localhost")}/frame-remote" style="display:block;width:500px;height:350px;border:5px solid red;padding:6px;transform:perspective(600px) rotateY(10deg);transform-origin:0 0"></iframe>`,
       )
       return
     }
@@ -1013,7 +1031,7 @@ test("agent browser observations and actions use the exact owned tab through rea
                 .getAllWebContents()
                 .find((contents) => contents.getURL() === url)
               if (!contents) throw new Error("Missing capture target")
-              contents.setZoomFactor(1)
+              contents.setZoomFactor(1.5)
             }, wantedUrl)
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
@@ -1079,8 +1097,38 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: framePress(current, "Nested", "a", ["Meta"]),
               id: "select_nested_text",
             }
-          } else if (step === 52) {
-            frameObservations.push(toolResult(body.messages ?? [], "nodes"))
+          } else if (step >= 52 && step <= 57) {
+            const kind = step <= 53 ? "Local" : step <= 55 ? "Remote" : "Nested"
+            if (step === 52)
+              frameObservations.push(toolResult(body.messages ?? [], "nodes"))
+            if (step % 2 === 0) {
+              if (step > 52) toolResult(body.messages ?? [], "delivered")
+              const selected = frameCatalog.find(
+                (frame) =>
+                  new URL(frame.url).pathname ===
+                  `/frame-${kind.toLowerCase()}`,
+              )
+              if (!selected) throw new Error("Missing pointer frame")
+              const current = toolResult(body.messages ?? [], "nodes")
+              tool = {
+                name: "browser",
+                input: {
+                  action: "observe",
+                  target: current.target,
+                  frameReference: selected.frameReference,
+                },
+                id: `observe_pointer_${kind}`,
+              }
+            } else {
+              const current = toolResult(body.messages ?? [], "nodes")
+              tool = {
+                name: "browser_input",
+                input: pointerRequest(current, `${kind} pointer`),
+                id: `click_pointer_${kind}`,
+              }
+            }
+          } else if (step === 58) {
+            toolResult(body.messages ?? [], "delivered")
             const selected = frameCatalog.find(
               (frame) => new URL(frame.url).pathname === "/frame-remote",
             )
@@ -1095,14 +1143,14 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_remote_form",
             }
-          } else if (step === 53) {
+          } else if (step === 59) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 54) {
+          } else if (step === 60) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1112,7 +1160,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 55) {
+          } else if (step === 61) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1127,7 +1175,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 56) {
+          } else if (step === 62) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
@@ -1140,7 +1188,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 57) {
+          } else if (step === 63) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1286,12 +1334,24 @@ test("agent browser observations and actions use the exact owned tab through rea
             sessionId,
             type: params?.type,
             key: params?.key,
+            x: params?.x,
+            y: params?.y,
             state: "pending",
             error: "",
+            geometry: undefined as unknown,
           }
           append(entry)
           try {
             const result = await send(method, params, sessionId)
+            if (method === "DOM.getBoxModel")
+              entry.geometry = result.model?.content
+            if (
+              method === "Runtime.callFunctionOn" &&
+              String(params?.functionDeclaration).startsWith(
+                "function(scroll, point)",
+              )
+            )
+              entry.geometry = result.result?.value
             entry.state = "done"
             return result
           } catch (cause) {
@@ -1311,7 +1371,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 57; approval++)
+    for (let approval = 0; approval < 63; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1500,6 +1560,10 @@ test("agent browser observations and actions use the exact owned tab through rea
         ]),
       )
     }
+    await expect.poll(() => framePointerEvents.length).toBe(3)
+    expect(framePointerEvents).toEqual(
+      ["Local", "Remote", "Nested"].map((kind) => ({ kind, trusted: true })),
+    )
     expect(frameSubmittedValues).toEqual(["filled_Remote你好"])
     expect(frameAfterObservation?.nodes).toEqual(
       expect.arrayContaining([
@@ -1620,6 +1684,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         navigatedObservation,
         frameSubmittedValues,
         frameAfterReady,
+        framePointerEvents,
         protocol,
       }),
       contentType: "application/json",

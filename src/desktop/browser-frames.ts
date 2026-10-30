@@ -124,13 +124,12 @@ export class BrowserFrames {
     this.#debug.off("message", this.#message)
   }
 
-  ownsSession(sessionId: string): boolean {
-    return this.#sessions.has(sessionId)
-  }
-
-  async #querySession(
+  async #sessionCommand(
     command: BrowserReadCommand,
-    method: "Page.getFrameTree" | "Target.setAutoAttach",
+    method:
+      | "Page.getFrameTree"
+      | "Target.setAutoAttach"
+      | "Runtime.releaseObjectGroup",
     params: Record<string, unknown>,
     sessionId: string,
   ): Promise<unknown> {
@@ -149,7 +148,7 @@ export class BrowserFrames {
     signal.addEventListener("abort", abort, { once: true })
     try {
       // Electron may never settle a child command after that session detaches.
-      // Only this session's fixed queries/configuration can be abandoned here;
+      // Only this session's fixed queries/configuration and object cleanup can end here;
       // root-owned input must still await its acknowledgement and key release.
       const pending = Promise.resolve().then(() => {
         signal.throwIfAborted()
@@ -158,6 +157,35 @@ export class BrowserFrames {
       return await Promise.race([pending, closed])
     } finally {
       signal.removeEventListener("abort", abort)
+    }
+  }
+
+  async releaseObjects(
+    group: string,
+    command: BrowserReadCommand,
+    sessionId?: string,
+  ): Promise<void> {
+    if (sessionId === undefined) {
+      await command("Runtime.releaseObjectGroup", { objectGroup: group })
+      return
+    }
+    if (!this.#sessions.has(sessionId)) return
+    try {
+      await this.#sessionCommand(
+        command,
+        "Runtime.releaseObjectGroup",
+        { objectGroup: group },
+        sessionId,
+      )
+    } catch (cause) {
+      // Remote objects cease to exist with their original session. This does
+      // not confirm any root-owned held input; its release is independent.
+      if (
+        !(cause instanceof BrowserControlError) ||
+        !["browser_frame_stale", "browser_unavailable"].includes(cause.code) ||
+        this.#sessions.has(sessionId)
+      )
+        throw cause
     }
   }
 
@@ -181,7 +209,7 @@ export class BrowserFrames {
     for (const [sessionId] of this.#sessions) {
       if (this.#overflow) break
       if (!this.#configured.has(sessionId)) {
-        await this.#querySession(
+        await this.#sessionCommand(
           command,
           "Target.setAutoAttach",
           autoAttach,
@@ -250,7 +278,7 @@ export class BrowserFrames {
     add(rootTree)
     for (const [sessionId, parent] of this.#sessions)
       add(
-        await this.#querySession(command, "Page.getFrameTree", {}, sessionId),
+        await this.#sessionCommand(command, "Page.getFrameTree", {}, sessionId),
         sessionId,
         parent.parentFrameId,
       )
@@ -308,7 +336,7 @@ export class BrowserFrames {
   async resolve(
     token: string,
     command: BrowserReadCommand,
-  ): Promise<FrameTicket> {
+  ): Promise<FrameTicket & { path: BrowserFrameBinding[] }> {
     const ticket = this.#references.get(token)
     if (!ticket)
       throw new BrowserControlError(
@@ -328,6 +356,23 @@ export class BrowserFrames {
         "browser_frame_stale",
         "The observed frame document, renderer or parent changed. List frames again.",
       )
-    return ticket
+    const path: BrowserFrameBinding[] = [frame]
+    const visited = new Set([frame.document.frameId])
+    while (path[0]?.parentId) {
+      const parent = current.frames.get(path[0].parentId)
+      if (!parent || visited.has(parent.document.frameId))
+        throw new BrowserControlError(
+          "browser_frame_stale",
+          "The frame ancestry is incomplete. List frames again.",
+        )
+      visited.add(parent.document.frameId)
+      path.unshift(parent)
+    }
+    if (path[0]?.document.frameId !== current.root.frameId)
+      throw new BrowserControlError(
+        "browser_frame_stale",
+        "The frame no longer belongs to the observed main document.",
+      )
+    return { ...ticket, path }
   }
 }
