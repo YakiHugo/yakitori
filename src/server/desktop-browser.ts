@@ -44,7 +44,11 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
     if (!request) return
     pending.delete(message.requestId)
     request.dispose()
-    if (request.signal?.aborted)
+    // Parent cleanup failures remain authoritative even after local abort.
+    // Replacing them with cancellation would reopen the shared input gate.
+    if (!message.ok && message.code === "browser_cleanup_failed")
+      request.reject(new BrowserControlError(message.code, message.error))
+    else if (request.signal?.aborted)
       request.reject(
         new BrowserControlError(
           "browser_cancelled",
