@@ -39,6 +39,7 @@ application.run()
     var pending: [[String: Any]] = []
     var active: (id: String, task: Task<Void, Never>)?
     var closing = false
+    var finishingShutdown = false
 
     func receive(_ line: String) {
         do {
@@ -82,7 +83,7 @@ application.run()
         active = (requestID(id), Task { @MainActor in
             defer {
                 active = nil
-                if closing { exit(0) }
+                if closing { finishShutdown() }
                 drain()
             }
             do {
@@ -90,7 +91,7 @@ application.run()
                 let name = params["name"] as? String
                 let result: [String: Any]
                 if name == "turn_ended" {
-                    computer.reset()
+                    try await computer.reset()
                     result = ["content": [["type": "text", "text": "Computer state released."]]]
                 } else if name == "control" {
                     result = try await computer.execute(params["arguments"] as? [String: Any] ?? [:])
@@ -102,7 +103,8 @@ application.run()
                 let failure = error as? ComputerFailure
                 let code = error is CancellationError ? "cancelled" : failure?.code ?? "native_error"
                 let message = error is CancellationError ? "Computer operation stopped. An input may have partly completed; observe before continuing." : failure?.message ?? error.localizedDescription
-                reply(["id": id, "result": ["isError": true, "content": [["type": "text", "text": "\(code): \(message)"]], "structuredContent": ["code": code, "message": message]]])
+                let evidence = (failure?.evidence ?? [:]).merging(["code": code, "message": message]) { _, value in value }
+                reply(["id": id, "result": ["isError": true, "content": [["type": "text", "text": "\(code): \(message)"]], "structuredContent": evidence]])
             }
         })
     }
@@ -110,9 +112,17 @@ application.run()
     func shutdown() {
         closing = true
         pending.removeAll()
-        computer.reset()
-        guard let active else { exit(0) }
+        guard let active else { finishShutdown(); return }
         active.task.cancel()
+    }
+
+    func finishShutdown() {
+        guard !finishingShutdown else { return }
+        finishingShutdown = true
+        Task { @MainActor in
+            do { try await computer.reset(); exit(0) }
+            catch { FileHandle.standardError.write(Data("Native cleanup failed; display service retains recovery: \(error)\n".utf8)); exit(1) }
+        }
     }
 
     func reply(_ body: [String: Any]) {

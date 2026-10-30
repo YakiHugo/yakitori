@@ -4,10 +4,13 @@ import Darwin
 
 @MainActor public final class Computer {
     var snapshot: Snapshot?
+    var lastObservation: Snapshot?
 
     public init() {}
 
-    public func reset() { snapshot = nil }
+    public func reset() async throws {
+        snapshot = nil; lastObservation = nil
+    }
 
     public func execute(_ args: [String: Any]) async throws -> [String: Any] {
         try Task.checkCancellation()
@@ -20,22 +23,30 @@ import Darwin
                 AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
                 CGRequestScreenCaptureAccess()
             }
-            return try result(["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "process_id": getpid()])
+            let point = CGEvent(source: nil)?.location
+            return try result(["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "process_id": getpid(),
+                "frontmost_pid": NSWorkspace.shared.frontmostApplication.map { $0.processIdentifier as Any } ?? NSNull(),
+                "pointer": point.map { ["x": $0.x, "y": $0.y] as Any } ?? NSNull()])
         case "list":
             return try result(["apps": NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map {
-                ["pid": $0.processIdentifier, "name": $0.localizedName ?? "", "bundle_id": $0.bundleIdentifier ?? "", "app_path": $0.bundleURL?.path ?? ""] as [String: Any]
-            }, "windows": try windows().map { window in
-                ["pid": window.pid, "window_id": window.windowID, "frame": frameData(window.frame)]
+                ["pid": $0.processIdentifier, "name": $0.localizedName ?? "", "bundle_id": $0.bundleIdentifier ?? "", "app_path": $0.bundleURL?.path ?? "",
+                    "launch_time": $0.launchDate.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "hidden": $0.isHidden, "active": $0.isActive] as [String: Any]
+            }, "windows": try windows(includeHidden: args["include_hidden"] as? Bool == true).map { window in
+                ["pid": window.pid, "window_id": window.windowID, "frame": frameData(window.frame), "launch_time": window.launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull()] as [String: Any]
             }, "displays": try displays().map { ["display_id": $0.id, "frame": frameData($0.frame), "main": $0.id == CGMainDisplayID()] as [String: Any] }])
         case "launch":
             return try await launch(args)
         case "observe":
             return try await observe(args)
-        case "query_snapshot":
-            return try querySnapshot(args)
-        case "wait_for", "wait_for_change":
-            return try await waitForObservation(action, args)
-        case "click", "press", "type", "key", "scroll", "drag", "set_value", "select_text", "perform_action":
+        case "query": return try query(args)
+        case "window": return try await manageWindow(args)
+        case "sequence": return try await sequence(args)
+        case "wait_for", "wait_for_change": return try await wait(args, change: action == "wait_for_change")
+        case "click", "press", "type", "key", "keys", "scroll", "drag", "paste", "set_value", "select_text", "perform_action":
+            if args["after"] != nil, ObservationMode(rawValue: args["after"] as? String ?? "") == nil {
+                throw ComputerFailure("invalid_arguments", "after must be ax, vision, or both.")
+            }
+            if args["expect"] != nil { _ = try AXExpectation(args["expect"]); _ = try waitTimeout(args) }
             return try await input(action, args)
         default:
             throw ComputerFailure("invalid_arguments", "Unknown computer action: \(action).")
@@ -49,8 +60,8 @@ import Darwin
         return ["content": content, "structuredContent": data]
     }
 
-    func windows() throws -> [WindowIdentity] {
-        guard let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+    func windows(includeHidden: Bool = false) throws -> [WindowIdentity] {
+        guard let rows = CGWindowListCopyWindowInfo(includeHidden ? .optionAll : .optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
             throw ComputerFailure("window_list_failed", "macOS could not list windows.")
         }
         return rows.compactMap { row in

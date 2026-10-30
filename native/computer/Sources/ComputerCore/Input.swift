@@ -3,6 +3,7 @@ import ApplicationServices
 
 extension Computer {
     func input(_ action: String, _ args: [String: Any]) async throws -> [String: Any] {
+        try validateInput(action, args)
         guard AXIsProcessTrusted() else {
             throw ComputerFailure("permission_required", "Enable Accessibility for Yakitori Computer in System Settings.")
         }
@@ -12,27 +13,37 @@ extension Computer {
         try ticket.validate(id: args["snapshot_id"] as? String, windows: windows(), displays: displays())
         let target = try ticket.target(args)
         let window = target.window, element = target.element, point = target.point
-        let accessibilityAction = ["press", "set_value", "select_text", "perform_action"].contains(action)
         // WindowServer can briefly retain a closed window while AppKit still
         // accepts AXPress on its retained controls. Confirm it is still exposed
         // by the application's current AX window list before using an element.
-        if element != nil, let window, windowElement(window) == nil {
+        if element != nil, !target.applicationUI, let window, windowElement(window) == nil {
             throw ComputerFailure("stale_snapshot", "The element's window is no longer accessible; observe again.")
         }
         let foreground = args["delivery"] as? String == "foreground"
         if let delivery = args["delivery"], !["foreground", "background"].contains(delivery as? String ?? "") {
             throw ComputerFailure("invalid_arguments", "delivery must be background or foreground.")
         }
-        if ticket.scope == .screen && !foreground && !accessibilityAction {
+        if ticket.scope == .screen && !foreground && !["press", "perform_action", "set_value", "select_text"].contains(action) {
             throw ComputerFailure("foreground_required", "Screen input requires delivery=foreground; use window/app scope for background input.")
         }
-        let chord = action == "key" ? try keyChord(args["key"] as? String) : nil
+        let duration = try inputDuration(args)
+        let modifiers = try inputModifiers(args["modifiers"])
+        let chord = action == "key" || (["click", "drag"].contains(action) && args["key"] != nil) ? try keyChord(args["key"] as? String) : nil
+        var chords: [(CGKeyCode?, CGEventFlags)] = []
+        if action == "keys" {
+            guard let keys = args["keys"] as? [String], !keys.isEmpty, keys.count <= 64 else {
+                throw ComputerFailure("invalid_arguments", "keys requires 1...64 chords within the native sequence safety boundary.")
+            }
+            chords = try keys.map { try keyChord($0) }
+        }
+        let paste = action == "paste" ? try pasteboardItem(args) : nil
         let text = args["text"] as? String
         if action == "type", text == nil { throw ComputerFailure("invalid_arguments", "type requires text.") }
         if action == "type", args["replace"] as? Bool == true, element == nil {
             throw ComputerFailure("invalid_arguments", "Replacement requires a target element so its complete selection can be confirmed before typing.")
         }
-        if accessibilityAction, element == nil { throw ComputerFailure("invalid_arguments", "Accessibility actions require an element.") }
+        let axAction = ["press", "perform_action", "set_value", "select_text"].contains(action)
+        if axAction, element == nil { throw ComputerFailure("invalid_arguments", "This AX action requires an element.") }
         let buttonName = args["button"] as? String ?? "left"
         guard ["left", "right", "middle"].contains(buttonName) else { throw ComputerFailure("invalid_arguments", "Unknown mouse button.") }
         let button: CGMouseButton = buttonName == "right" ? .right : buttonName == "middle" ? .center : .left
@@ -44,12 +55,24 @@ extension Computer {
         if ["click", "scroll", "drag"].contains(action), point == nil {
             throw ComputerFailure("invalid_arguments", "This action requires screenshot coordinates x and y.")
         }
-        let end = action == "drag" ? try ticket.point(x: args["to_x"] as? Double ?? -1, y: args["to_y"] as? Double ?? -1) : nil
+        let end = action == "drag" ? try ticket.point(x: args["to_x"] as? Double ?? -1, y: args["to_y"] as? Double ?? -1, space: args["coordinate_space"] as? String ?? "screenshot") : nil
         let dx = args["dx"] as? Int32 ?? 0
         let dy = args["dy"] as? Int32 ?? 0
         if action == "scroll", abs(Int64(dx)) > 2000 || abs(Int64(dy)) > 2000 {
             throw ComputerFailure("invalid_arguments", "Scroll deltas must be within 2000 pixels per action; observe between larger movements.")
         }
+        let keyboard = ["type", "key", "keys", "paste"].contains(action)
+        let screenKeyboardPID = foreground && ticket.scope == .screen && element == nil && keyboard
+            ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
+        let resourcePID = window?.pid ?? screenKeyboardPID
+        let appResources = resourcePID.map { ["app-\($0)"] } ?? []
+        let resources = try await NativeResources.acquire(appResources + (foreground ? ["foreground"] : []))
+        defer { withExtendedLifetime(resources) {} }
+        try ticket.validate(id: ticket.id, windows: windows(), displays: displays())
+        if let screenKeyboardPID, NSWorkspace.shared.frontmostApplication?.processIdentifier != screenKeyboardPID {
+            throw ComputerFailure("focus_changed", "The screen keyboard target changed while waiting for input ownership.")
+        }
+        if let resourcePID { try resources.advanceRevision(resourcePID) }
         // Consume before any action, including focus. A failed delivery must
         // never invite replay against the same stale element or screenshot.
         snapshot = nil
@@ -61,7 +84,7 @@ extension Computer {
                 backgroundRelease.postToPid(window.pid)
             }
         }
-        if !foreground, !accessibilityAction, let window,
+        if !foreground, !axAction, let window,
            NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid {
             // Directed CGEvents bypass WindowServer activation. AppKit otherwise
             // treats a background click as an inactive-window first click. Scope
@@ -109,13 +132,11 @@ extension Computer {
         let foregroundWindowID = ticket.scope != .screen || element != nil
             ? window?.windowID : try windows().first(where: { $0.pid == foregroundPID })?.windowID
         var screenTargetFocused = false
-        if accessibilityAction, action != "press", let element {
-            return try accessibilityInput(action, args, element: element)
-        } else if action == "press", let element {
-            let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
-            guard error == .success else { throw ComputerFailure("action_refused", "AXPress failed (\(error.rawValue)); observe before choosing another input method.") }
+        var evidence: [String: Any] = [:]
+        if axAction, let element {
+            evidence = try accessibilityInput(action, args: args, element: element)
         } else {
-            if action == "type" || action == "key" {
+            if ["type", "key", "keys", "paste"].contains(action) {
                 if let element {
                     AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
                     guard let window else { throw ComputerFailure("invalid_element", "The element has no target window.") }
@@ -128,7 +149,8 @@ extension Computer {
                 }
             }
             let source = CGEventSource(stateID: .privateState)
-            func post(_ event: CGEvent) throws {
+            source?.localEventsSuppressionInterval = 0
+            func checkpoint() throws {
                 try Task.checkCancellation()
                 let currentWindows = try windows()
                 if let window, !currentWindows.contains(window) {
@@ -147,10 +169,20 @@ extension Computer {
                     guard currentPID == expectedPID || (ticket.scope == .screen && !screenTargetFocused && currentPID == foregroundPID) else {
                         throw ComputerFailure("focus_changed", "Foreground input stopped because another app became active.")
                     }
-                    if ticket.scope != .screen || action == "type" || action == "key" {
+                    if ticket.scope != .screen || ["type", "key", "keys", "paste"].contains(action) {
                         guard currentWindows.first(where: { $0.pid == foregroundPID })?.windowID == foregroundWindowID else {
                             throw ComputerFailure("focus_changed", "Foreground input stopped because another window became active.")
                         }
+                    }
+                }
+
+            }
+            func post(_ event: CGEvent) throws {
+                try checkpoint()
+                if ["type", "key", "keys", "paste"].contains(action), let element, let window {
+                    let app = AXUIElementCreateApplication(window.pid)
+                    guard let focused = attribute(app, kAXFocusedUIElementAttribute), CFEqual(focused, element) else {
+                        throw ComputerFailure("focus_changed", "Keyboard input stopped because the addressed element lost focus.")
                     }
                 }
                 deliver(event, window: window, foreground: foreground)
@@ -159,119 +191,96 @@ extension Computer {
                 guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
                     throw ComputerFailure("input_failed", "macOS could not create a mouse event.")
                 }
+                event.flags = modifiers.union(chord?.1 ?? [])
                 if foreground { return event }
                 guard let window else { throw ComputerFailure("window_not_found", "Background input needs an observed window.") }
                 return try windowPointerEvent(event, window: window)
             }
-            func sendKey(_ code: CGKeyCode, flags: CGEventFlags) async throws {
-                var releases: [CGEvent] = []
-                defer {
-                    // Release every key actually pressed, even if cancellation
-                    // or a focus change stops the chord halfway through.
-                    for event in releases.reversed() {
-                        event.timestamp = DispatchTime.now().uptimeNanoseconds
-                        deliver(event, window: window, foreground: foreground)
-                    }
-                }
-                let modifiers: [(CGKeyCode, CGEventFlags)] = [(55, .maskCommand), (56, .maskShift), (58, .maskAlternate), (59, .maskControl)]
-                var held: CGEventFlags = []
-                for (key, modifier) in modifiers.filter({ flags.contains($0.1) }) + [(code, CGEventFlags(rawValue: 0))] {
-                    guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
-                          let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else {
-                        throw ComputerFailure("input_failed", "macOS could not create a keyboard event.")
-                    }
-                    let previous = held
-                    held.formUnion(modifier)
-                    down.flags = held
-                    up.flags = modifier.isEmpty ? held : previous
-                    if !modifier.isEmpty { down.type = .flagsChanged; up.type = .flagsChanged }
-                    try post(down)
-                    releases.append(up)
-                    // Keep modifier and key-down delivery distinct while the
-                    // same release path handles completion and interruption.
-                    try await Task.sleep(nanoseconds: 10_000_000)
-                }
+            func sendKey(_ code: CGKeyCode?, flags: CGEventFlags) async throws {
+                try await withHeldChord(code, flags: flags.union(modifiers), duration: duration, source: source, post: post,
+                    release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {}
             }
-            if let point, action == "click" {
-                for count in 1...clickCount {
-                    let down = try mouse(downType, point)
-                    let up = try mouse(upType, point)
-                    down.setIntegerValueField(.mouseEventClickState, value: Int64(count))
-                    up.setIntegerValueField(.mouseEventClickState, value: Int64(count))
-                    try post(down)
-                    deliver(up, window: window, foreground: foreground)
-                }
-            } else if let point, let end {
-                var up = try mouse(upType, point)
-                try post(mouse(downType, point))
-                // Always release the button, including cancellation and failure.
-                defer { deliver(up, window: window, foreground: foreground) }
-                for step in 1...20 {
-                    let progress = Double(step) / 20
-                    let next = CGPoint(x: point.x + (end.x - point.x) * progress, y: point.y + (end.y - point.y) * progress)
-                    let release = try mouse(upType, next)
-                    try post(mouse(draggedType, next))
-                    up = release
-                    try await Task.sleep(nanoseconds: 10_000_000)
-                }
-            } else if action == "scroll", let point {
-                guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
-                    throw ComputerFailure("input_failed", "macOS could not create a scroll event.")
-                }
-                event.location = point
-                if foreground { try post(event) }
-                else if let window { try post(windowPointerEvent(event, window: window)) }
-            } else if let chord {
-                try await sendKey(chord.0, flags: chord.1)
-            } else if let text {
-                if args["replace"] as? Bool == true, let element {
-                    // Background apps can ignore CMD+A while accepting text.
-                    // Confirm selection directly instead of silently appending
-                    // replacement text when a shortcut was not handled.
-                    guard let value = attribute(element, kAXValueAttribute) as? String else {
-                        throw ComputerFailure("selection_unconfirmed", "The target does not expose text for a confirmed replacement; no replacement text was sent.")
-                    }
-                    var range = CFRange(location: 0, length: value.utf16.count)
-                    guard let selection = AXValueCreate(.cfRange, &range),
-                          AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, selection) == .success,
-                          let readback = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(readback) == AXValueGetTypeID() else {
-                        throw ComputerFailure("selection_unconfirmed", "The target did not confirm a complete text selection; no replacement text was sent.")
-                    }
-                    var confirmed = CFRange()
-                    guard AXValueGetValue(readback as! AXValue, .cfRange, &confirmed), confirmed.location == 0, confirmed.length == range.length else {
-                        throw ComputerFailure("selection_unconfirmed", "The target did not select all text; no replacement text was sent.")
-                    }
-                }
-                for scalar in text.unicodeScalars {
-                    try Task.checkCancellation()
-                    let units = Array(String(scalar).utf16)
-                    guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                          let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-                        throw ComputerFailure("input_failed", "macOS could not create a text event.")
-                    }
-                    down.flags = []
-                    up.flags = []
-                    units.withUnsafeBufferPointer { buffer in
-                        down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                        up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                    }
-                    // A user/app can move focus while a long string is sent.
-                    if let element {
-                        guard let window else { throw ComputerFailure("invalid_element", "The element has no target window.") }
-                        let app = AXUIElementCreateApplication(window.pid)
-                        guard let focused = attribute(app, kAXFocusedUIElementAttribute), CFEqual(focused, element) else {
-                            throw ComputerFailure("focus_changed", "Typing stopped because the target element lost focus. Some text may already have arrived; observe before continuing.")
+            try await withHeldChord(["click", "drag"].contains(action) ? chord?.0 : nil,
+                flags: ["click", "scroll", "drag"].contains(action) ? modifiers.union(chord?.1 ?? []) : [],
+                source: source, post: post, release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {
+                if let point, action == "click" {
+                    for count in 1...clickCount {
+                        let down = try mouse(downType, point)
+                        let up = try mouse(upType, point)
+                        down.setIntegerValueField(.mouseEventClickState, value: Int64(count))
+                        up.setIntegerValueField(.mouseEventClickState, value: Int64(count))
+                        try post(down)
+                        do {
+                            try await holdInput(duration, checkpoint: checkpoint)
+                        } catch {
+                            deliver(up, window: window, foreground: foreground)
+                            throw error
                         }
+                        deliver(up, window: window, foreground: foreground)
+                        if count < clickCount { try await Task.sleep(nanoseconds: 30_000_000) }
                     }
-                    try post(down)
-                    deliver(up, window: window, foreground: foreground)
-                    try await Task.sleep(nanoseconds: 2_000_000)
+                } else if let point, let end {
+                    var up = try mouse(upType, point)
+                    try post(mouse(downType, point))
+                    // Always release the button, including cancellation and failure.
+                    defer { deliver(up, window: window, foreground: foreground) }
+                    for step in 1...20 {
+                        let progress = Double(step) / 20
+                        let next = CGPoint(x: point.x + (end.x - point.x) * progress, y: point.y + (end.y - point.y) * progress)
+                        let release = try mouse(upType, next)
+                        try post(mouse(draggedType, next))
+                        up = release
+                        try await Task.sleep(nanoseconds: UInt64(max(0.2, duration) * 1_000_000_000 / 20))
+                    }
+                } else if action == "scroll", let point {
+                    guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
+                        throw ComputerFailure("input_failed", "macOS could not create a scroll event.")
+                    }
+                    event.location = point
+                    event.flags = modifiers
+                    if foreground { try post(event) }
+                    else if let window { try post(windowPointerEvent(event, window: window)) }
+                } else if let paste {
+                    try await withPasteContent(paste) { try await sendKey(9, flags: .maskCommand) }
+                } else if let chord {
+                    try await sendKey(chord.0, flags: chord.1)
+                } else if action == "keys" {
+                    for chord in chords { try await sendKey(chord.0, flags: chord.1) }
+                } else if let text {
+                    if args["replace"] as? Bool == true, let element {
+                        // Background apps can ignore CMD+A while accepting text.
+                        // Confirm selection directly instead of silently appending
+                        // replacement text when a shortcut was not handled.
+                        guard let value = attribute(element, kAXValueAttribute) as? String else {
+                            throw ComputerFailure("selection_unconfirmed", "The target does not expose text for a confirmed replacement; no replacement text was sent.")
+                        }
+                        try confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element)
+                    }
+                    for scalar in text.unicodeScalars {
+                        try Task.checkCancellation()
+                        let units = Array(String(scalar).utf16)
+                        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                            throw ComputerFailure("input_failed", "macOS could not create a text event.")
+                        }
+                        down.flags = []
+                        up.flags = []
+                        units.withUnsafeBufferPointer { buffer in
+                            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+                            up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+                        }
+                        try post(down)
+                        deliver(up, window: window, foreground: foreground)
+                        try await Task.sleep(nanoseconds: 2_000_000)
+                    }
                 }
             }
         }
         // Delivery/AX readback is not proof that the application committed a
         // business operation. Return that uncertainty rather than a fake success.
-        return try result(["effect": "unverified", "delivery": action == "press" ? "accessibility" : foreground ? "foreground" : "background", "message": "Observe the window to verify the application result before continuing or retrying."])
+        evidence.merge(["effect": "unverified", "delivery": axAction ? "accessibility" : foreground ? "foreground" : "background",
+            "message": "Observe the application result before continuing or retrying."]) { _, value in value }
+        return try await completeInput(evidence, args: args, ticket: ticket)
     }
 }
 
@@ -283,22 +292,4 @@ private func deliver(_ event: CGEvent, window: WindowIdentity?, foreground: Bool
     }
     if foreground { event.post(tap: .cghidEventTap) }
     else if let window { event.postToPid(window.pid) }
-}
-
-func keyChord(_ value: String?) throws -> (CGKeyCode, CGEventFlags) {
-    guard let value else { throw ComputerFailure("invalid_arguments", "key requires a chord such as CMD+A or ENTER.") }
-    var parts = value.uppercased().split(separator: "+").map(String.init)
-    let keys: [String: CGKeyCode] = ["A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5, "Z": 6, "X": 7, "C": 8, "V": 9, "B": 11, "Q": 12, "W": 13, "E": 14, "R": 15, "Y": 16, "T": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "O": 31, "U": 32, "I": 34, "P": 35, "ENTER": 36, "L": 37, "J": 38, "K": 40, "N": 45, "M": 46, "TAB": 48, "SPACE": 49, "BACKSPACE": 51, "ESC": 53, "HOME": 115, "PAGEUP": 116, "DELETE": 117, "END": 119, "PAGEDOWN": 121, "LEFT": 123, "RIGHT": 124, "DOWN": 125, "UP": 126]
-    guard let key = parts.popLast(), let code = keys[key] else { throw ComputerFailure("invalid_arguments", "Unsupported key chord.") }
-    var flags: CGEventFlags = []
-    for part in parts {
-        switch part {
-        case "CMD": flags.insert(.maskCommand)
-        case "CTRL": flags.insert(.maskControl)
-        case "ALT": flags.insert(.maskAlternate)
-        case "SHIFT": flags.insert(.maskShift)
-        default: throw ComputerFailure("invalid_arguments", "Unsupported key modifier: \(part).")
-        }
-    }
-    return (code, flags)
 }

@@ -5,8 +5,8 @@ import Foundation
 // The macOS Command Line Tools ship no XCTest/Testing runtime. Compile these
 // process-failing contracts with the core sources so CI needs no full Xcode.
 @main struct Contracts {
-    static func rejects(code: String? = nil, _ operation: () throws -> Void) {
-        do { try operation(); fatalError("Expected a ComputerFailure") }
+    static func rejects(code: String? = nil, file: StaticString = #fileID, line: UInt = #line, _ operation: () throws -> Void) {
+        do { try operation(); fatalError("Expected a ComputerFailure", file: file, line: line) }
         catch let failure as ComputerFailure { if let code { precondition(failure.code == code, "Expected \(code), received \(failure.code)") } }
         catch { fatalError("Unexpected error: \(error)") }
     }
@@ -58,8 +58,7 @@ import Foundation
         rejects { _ = try textOnly.point(x: 0, y: 0) }
         try observationContracts()
         try applicationContracts()
-        try textContracts()
-        try conditionContracts()
+        try await advancedContracts()
         let chord = try keyChord("CMD+SHIFT+A")
         precondition(chord.0 == 0 && chord.1 == [.maskCommand, .maskShift])
         rejects { _ = try keyChord("TYPO+A") }
@@ -96,6 +95,66 @@ import Foundation
             fatalError("A stuck native request must time out")
         } catch let failure as ComputerFailure { precondition(failure.code == "native_timeout") }
         print("Native launch resolution, observation modes/scopes/composition, input identity and cancellation contracts passed.")
+    }
+
+    @MainActor static func advancedContracts() async throws {
+        let range = try selectedRange(in: "a😀猫猫b", text: "猫", prefix: nil, suffix: "b", kind: .text)
+        precondition(range.location == 4 && range.length == 1)
+        let cursor = try selectedRange(in: "a😀猫猫b", text: "猫", prefix: "a😀", suffix: nil, kind: .cursorAfter)
+        precondition(cursor.location == 4 && cursor.length == 0)
+        rejects(code: "ambiguous_text") { _ = try selectedRange(in: "aaaa", text: "aa", prefix: nil, suffix: nil, kind: .text) }
+        rejects { _ = try selectedRange(in: "abc", text: "", prefix: nil, suffix: nil, kind: .text) }
+        rejects { _ = try AXExpectation(["exists": false]) }
+        let clipped = try AXExpectation(["value": "prefix"])
+        precondition(!clipped.matches(["value": "prefix", "truncated_attributes": ["value"]]))
+        rejects { _ = try inputDuration(["duration": -1]) }
+        rejects { _ = try inputModifiers(["unknown"]) }
+        rejects { _ = try waitTimeout(["timeout": Double.infinity]) }
+        let window = WindowIdentity(pid: 42, launched: nil, windowID: 9, frame: CGRect(x: -300, y: 50, width: 400, height: 200), layer: 0)
+        let node = ObservedElement(value: AXUIElementCreateApplication(42), window: window)
+        let before = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: nil, imageHeight: nil,
+            elements: [node], rows: [["element": 0, "role": "AXTextField", "value": "before"]])
+        let point = try before.point(x: 500, y: 500, space: "normalized")
+        precondition(point == CGPoint(x: -100, y: 150))
+        let global = try before.point(x: -200, y: 100, space: "screen")
+        precondition(global == CGPoint(x: -200, y: 100))
+        rejects { _ = try before.point(x: 1000, y: 0, space: "normalized") }
+        rejects { _ = try before.point(x: 1000, y: 0, space: "screen") }
+        let after = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: nil, imageHeight: nil,
+            elements: [node], rows: [["element": 0, "role": "AXTextField", "value": "after"]])
+        let diff = after.difference(from: before)
+        precondition((diff["updated"] as! [[String: Any]]).count == 1 && (diff["added"] as! [[String: Any]]).isEmpty)
+        let absent = try AXExpectation(["title": "missing", "exists": false])
+        precondition(absent.satisfied(by: before))
+        var partial = before; partial.truncated = true
+        precondition(!absent.satisfied(by: partial))
+        let computer = Computer()
+        computer.lastObservation = after
+        let queried = try computer.query(["snapshot_id": after.id, "query": "AFTER", "limit": 1])["structuredContent"] as! [String: Any]
+        precondition((queried["elements"] as! [[String: Any]]).count == 1 && queried["input_available"] as? Bool == false)
+        rejects { _ = try computer.query(["snapshot_id": before.id]) }
+        let board = NSPasteboard(name: .init("yakitori-contract-" + UUID().uuidString))
+        defer { board.releaseGlobally() }
+        let original = NSPasteboardItem()
+        original.setString("original", forType: .string)
+        original.setData(Data([1, 2, 3]), forType: .rtf)
+        board.clearContents(); precondition(board.writeObjects([original]))
+        let item = try pasteboardItem(["text": "**bold**", "format": "markdown"])
+        precondition(item.string(forType: .string) == "bold" && item.data(forType: .rtf) != nil)
+        try await withPasteContent(item, board: board) { precondition(board.string(forType: .string) == "bold") }
+        precondition(board.string(forType: .string) == "original" && board.data(forType: .rtf) == Data([1, 2, 3]))
+        try await withPasteContent(try pasteboardItem(["text": "ours"]), board: board) {
+            board.clearContents(); board.setString("new writer", forType: .string)
+        }
+        precondition(board.string(forType: .string) == "new writer")
+        do {
+            try await withPasteContent(try pasteboardItem(["text": "temporary"]), board: board) { throw CancellationError() }
+            preconditionFailure("Cancellation must propagate")
+        } catch is CancellationError {}
+        precondition(board.string(forType: .string) == "new writer")
+        rejects { _ = try pasteboardItem(["text": "<b>hi</b>", "format": "html"]) }
+        let html = try pasteboardItem(["text": "<b>hi</b>", "format": "html", "plain_text": "hi"])
+        precondition(html.string(forType: .html) == "<b>hi</b>" && html.string(forType: .string) == "hi")
     }
 
     static func observationContracts() throws {
@@ -155,35 +214,5 @@ import Foundation
         rejects { _ = try ApplicationTarget(["bundle_id": "test.editor", "app_name": "Editor"]) }
         rejects { _ = try ApplicationTarget(["app_name": ""]) }
         rejects { _ = try ApplicationTarget(["app_name": "/Applications/Editor.app"]) }
-    }
-
-    static func textContracts() throws {
-        let selected = try textSelection(source: "alpha 😀 alpha", text: "alpha", prefix: "😀 ", suffix: nil, kind: "text")
-        precondition(selected.location == 9 && selected.length == 5)
-        let before = try textSelection(source: "alpha 😀 alpha", text: "😀", prefix: nil, suffix: nil, kind: "cursor_before")
-        precondition(before.location == 6 && before.length == 0)
-        let after = try textSelection(source: "alpha 😀 alpha", text: "😀", prefix: nil, suffix: nil, kind: "cursor_after")
-        precondition(after.location == 8 && after.length == 0)
-        rejects(code: "selection_ambiguous") { _ = try textSelection(source: "alpha alpha", text: "alpha", prefix: nil, suffix: nil, kind: "text") }
-        rejects(code: "selection_ambiguous") { _ = try textSelection(source: "aaa", text: "aa", prefix: nil, suffix: nil, kind: "text") }
-        rejects(code: "text_not_found") { _ = try textSelection(source: "alpha", text: "alpha", prefix: "wrong", suffix: nil, kind: "text") }
-        rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "", prefix: nil, suffix: nil, kind: "text") }
-        rejects(code: "invalid_arguments") { _ = try textSelection(source: "alpha", text: "alpha", prefix: nil, suffix: nil, kind: "typo") }
-    }
-
-    static func conditionContracts() throws {
-        let unique = try ObservationCondition(["role": "AXButton", "title": "Save"])
-        let row: [String: Any] = ["role": "AXButton", "title": "Save", "element": 7]
-        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row], truncated: false)) == "matched")
-        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row, row], truncated: false)) == "ambiguous")
-        precondition(unique.evaluate(AccessibilitySnapshot(rows: [["role": "AXButton", "title": "save"]], truncated: false)) == "pending")
-        let absent = try ObservationCondition(["title": "Save", "exists": false])
-        precondition(absent.evaluate(AccessibilitySnapshot(rows: [], truncated: false)) == "matched")
-        precondition(absent.evaluate(AccessibilitySnapshot(rows: [row], truncated: false)) == "pending")
-        precondition(absent.evaluate(AccessibilitySnapshot(rows: [], truncated: true)) == "unavailable")
-        precondition(unique.evaluate(AccessibilitySnapshot(rows: [row], truncated: true)) == "unavailable")
-        for invalid: [String: Any] in [[:], ["exists": false], ["title": 7], ["title": "Save", "unknown": "value"], ["role": "AXButton", "exists": "false"]] {
-            rejects(code: "invalid_arguments") { _ = try ObservationCondition(invalid) }
-        }
     }
 }
