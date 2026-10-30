@@ -233,8 +233,8 @@ function fixture(
     },
     async clickRequest(): Promise<BrowserPointerRequest> {
       const observed = await connection.observe(new AbortController().signal)
-      const reference = (observed.nodes as { clickReference: string }[])[0]
-        ?.clickReference
+      const reference = (observed.nodes as { elementReference: string }[])[0]
+        ?.elementReference
       if (!reference) throw new Error("Missing pointer reference")
       return { action: "click", target, reference }
     },
@@ -427,7 +427,7 @@ it("accepts a click only through an exact pointer reference without text or raw 
   const input = {
     action: "click",
     target,
-    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+    reference: "browser_element_00000000-0000-4000-8000-000000000001",
   }
   expect(parseBrowserInputRequest(input)).toEqual(input)
   for (const invalid of [
@@ -536,7 +536,7 @@ it("does not use a text reference as a pointer target", async () => {
 it("parses pointer variants without accepting cross-action fields or unbounded wheel jumps", () => {
   const shared = {
     target,
-    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+    reference: "browser_element_00000000-0000-4000-8000-000000000001",
   }
   for (const action of ["hover", "click"])
     expect(parseBrowserInputRequest({ action, ...shared })).toMatchObject({
@@ -690,7 +690,7 @@ it("accepts exact keyboard targets and rejects unvalidated keys, duplicate modif
   const input = {
     action: "press",
     target,
-    reference: "browser_click_00000000-0000-4000-8000-000000000001",
+    reference: "browser_element_00000000-0000-4000-8000-000000000001",
     key: "Enter",
   }
   expect(parseBrowserInputRequest(input)).toEqual(input)

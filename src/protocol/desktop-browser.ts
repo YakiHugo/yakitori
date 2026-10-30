@@ -81,7 +81,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
       ].includes(key),
     ) &&
     typeof value.reference === "string" &&
-    /^browser_click_[a-f0-9-]{36}$/.test(value.reference)
+    /^browser_element_[a-f0-9-]{36}$/.test(value.reference)
   ) {
     const observed = parseBrowserObservationRequest({
       action: "observe",
@@ -140,7 +140,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
       ["action", "target", "reference", "key", "modifiers"].includes(key),
     ) &&
     typeof value.reference === "string" &&
-    /^browser_click_[a-f0-9-]{36}$/.test(value.reference) &&
+    /^browser_element_[a-f0-9-]{36}$/.test(value.reference) &&
     typeof value.key === "string" &&
     (/^[!-~]$/.test(value.key) ||
       /^F([1-9]|1[0-9]|2[0-4])$/.test(value.key) ||
@@ -203,7 +203,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type/fill with an inputReference and text, or click/hover/scroll/press with a clickReference and exact target. Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
+    "Use type/fill with an inputReference and text, or click/hover/scroll/press with an elementReference and exact target. Press requires key (printable ASCII, F1–F24 or a documented named key), with optional distinct Alt/Control/Meta/Shift modifiers. Click accepts left/middle/right button and clickCount 1/2; scroll requires finite deltaX/deltaY, at least one nonzero (10000 CSS-pixel per-axis event safety bound). Only fill permits empty text (64KiB input-event safety bound).",
   )
 }
 

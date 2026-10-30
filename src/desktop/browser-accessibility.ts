@@ -32,7 +32,7 @@ export function documentIdentity(value: unknown): BrowserDocumentIdentity {
 }
 
 export type BrowserControlReference = Readonly<{
-  kind: "text" | "pointer"
+  kind: "text" | "element"
   backendNodeId: number
   document: BrowserDocumentIdentity
 }>
@@ -109,18 +109,18 @@ export function browserAccessibility(
       ["textbox", "searchbox"].includes(role)
         ? `browser_node_${randomUUID()}`
         : undefined
-    const pointerReference =
+    const elementReference =
       controls &&
       typeof backendNodeId === "number" &&
       Number.isSafeInteger(backendNodeId) &&
       backendNodeId > 0 &&
       !["RootWebArea", "StaticText", "InlineTextBox"].includes(role)
-        ? `browser_click_${randomUUID()}`
+        ? `browser_element_${randomUUID()}`
         : undefined
     const entry: JsonObject = {
       nodeId: node.nodeId,
       ...(reference ? { inputReference: reference } : {}),
-      ...(pointerReference ? { clickReference: pointerReference } : {}),
+      ...(elementReference ? { elementReference } : {}),
       role,
       name: String(primitive(node.name) ?? ""),
       ...(typeof node.backendDOMNodeId === "number"
@@ -142,9 +142,9 @@ export function browserAccessibility(
         backendNodeId,
         document,
       })
-    if (pointerReference && typeof backendNodeId === "number")
-      references.set(pointerReference, {
-        kind: "pointer",
+    if (elementReference && typeof backendNodeId === "number")
+      references.set(elementReference, {
+        kind: "element",
         backendNodeId,
         document,
       })

@@ -534,7 +534,7 @@ export class BrowserDocumentConnection {
     signal: AbortSignal,
   ): Promise<JsonObject> {
     signal.throwIfAborted()
-    const reference = this.#consumeReference(input.reference, "pointer"),
+    const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
     const modifiers = input.modifiers ?? []
     let dispatched = false,
@@ -651,7 +651,7 @@ export class BrowserDocumentConnection {
     signal: AbortSignal,
   ): Promise<JsonObject> {
     signal.throwIfAborted()
-    const reference = this.#consumeReference(input.reference, "pointer"),
+    const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
     const command = (method: string, params: Record<string, unknown> = {}) =>
       this.#inputCommand(method, params, signal)

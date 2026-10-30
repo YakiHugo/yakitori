@@ -240,7 +240,7 @@ it("routes same-process, cross-process and nested cross-process frame observatio
         expect.objectContaining({ name: `Field ${id}`, value: id }),
       ])
       expect(JSON.stringify(observed.nodes)).not.toMatch(
-        /inputReference|clickReference/,
+        /inputReference|elementReference/,
       )
     }
     const main = await f.connection.observe(signal())
@@ -248,7 +248,7 @@ it("routes same-process, cross-process and nested cross-process frame observatio
       expect.objectContaining({
         name: "Field main",
         inputReference: expect.any(String),
-        clickReference: expect.any(String),
+        elementReference: expect.any(String),
       }),
     ])
     const configurations = f.calls.filter(

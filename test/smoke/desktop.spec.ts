@@ -606,15 +606,15 @@ test("agent browser observations and actions use the exact owned tab through rea
       observed.nodes as {
         role: string
         name: string
-        clickReference?: string
+        elementReference?: string
       }[]
     ).find((node) => node.role === "button" && node.name === name)
-    if (!button?.clickReference)
+    if (!button?.elementReference)
       throw new Error(`Missing captured browser button ${name}`)
     return {
       action: "click",
       target: observed.target,
-      reference: button.clickReference,
+      reference: button.elementReference,
     }
   }
   const source = createServer((request, response) => {
@@ -916,21 +916,21 @@ test("agent browser observations and actions use the exact owned tab through rea
                 previous.nodes as {
                   name: string
                   role: string
-                  clickReference?: string
+                  elementReference?: string
                 }[]
               ).find(
                 (node) =>
                   node.name === plan?.name &&
                   ["textbox", "button"].includes(node.role),
               )
-              if (!plan || !node?.clickReference)
+              if (!plan || !node?.elementReference)
                 throw new Error("Missing exact keyboard control")
               tool = {
                 name: "browser_input",
                 input: {
                   action: "press",
                   target: previous.target,
-                  reference: node.clickReference,
+                  reference: node.elementReference,
                   key: plan.key,
                   ...(plan.modifiers ? { modifiers: plan.modifiers } : {}),
                 },
@@ -1323,7 +1323,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       )
       expect(observedFrame?.mainDocument).toMatchObject({ url: wantedUrl })
       expect(JSON.stringify(observedFrame?.nodes)).not.toMatch(
-        /inputReference|clickReference/,
+        /inputReference|elementReference/,
       )
     }
     const mainFrame = frameCatalog.find((frame) => frame.main)
