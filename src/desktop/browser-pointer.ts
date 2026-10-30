@@ -1,9 +1,9 @@
 import { BrowserControlError } from "../protocol/desktop-browser.ts"
+import type { BrowserFrameBinding } from "./browser-frames.ts"
 import type {
-  BrowserFrameBinding,
   BrowserFrameReadCommand,
   BrowserProtocolCommand,
-} from "./browser-frames.ts"
+} from "./browser-protocol.ts"
 
 export type BrowserPoint = Readonly<{ x: number; y: number }>
 type Matrix = [
