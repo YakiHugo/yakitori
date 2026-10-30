@@ -502,6 +502,15 @@ test("agent browser observations and actions use the exact owned tab through rea
   let modelCalls = 0,
     thirdRequests = 0,
     clearKeyUps = 0
+  const frameObservations: Record<string, unknown>[] = []
+  let frameCatalog: {
+    frameReference: string
+    frameId: string
+    url: string
+    main: boolean
+    remote: boolean
+    parentFrameId?: string
+  }[] = []
   const captureReceipts: Record<string, unknown>[] = []
   const modelImages = new Set<string>()
   const keyboardEvents: {
@@ -641,6 +650,19 @@ test("agent browser observations and actions use the exact owned tab through rea
       response.end()
       return
     }
+    if (request.method === "GET" && request.url?.startsWith("/frame-")) {
+      response.writeHead(200, { "content-type": "text/html" })
+      const kind =
+        request.url === "/frame-local"
+          ? "Local"
+          : request.url === "/frame-remote"
+            ? "Remote"
+            : "Nested"
+      response.end(
+        `<!doctype html><title>${kind} frame</title><label>${kind} frame field<input value="${kind.toLowerCase()}"></label>${kind === "Remote" ? `<iframe title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+      )
+      return
+    }
     if (request.method === "GET" && request.url?.startsWith("/first")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
@@ -651,7 +673,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form>`,
+        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form><iframe title="Local scope" src="/frame-local" style="display:block;width:280px;height:100px"></iframe><iframe title="Remote scope" src="${new URL(wantedUrl).origin.replace("127.0.0.1", "localhost")}/frame-remote" style="display:block;width:280px;height:100px"></iframe>`,
       )
       return
     }
@@ -950,6 +972,40 @@ test("agent browser observations and actions use the exact owned tab through rea
             }, wantedUrl)
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
+              name: "browser",
+              input: { action: "frames", target: current.target },
+              id: "catalog_frames",
+            }
+          } else if (step >= 41 && step <= 43) {
+            if (step === 41)
+              frameCatalog = toolResult(body.messages ?? [], "frames")
+                .frames as typeof frameCatalog
+            else
+              frameObservations.push(toolResult(body.messages ?? [], "nodes"))
+            const path =
+              step === 41
+                ? "/frame-local"
+                : step === 42
+                  ? "/frame-remote"
+                  : "/frame-nested"
+            const selected = frameCatalog.find(
+              (frame) => new URL(frame.url).pathname === path,
+            )
+            if (!selected) throw new Error(`Missing owned frame ${path}`)
+            const current = toolResult(body.messages ?? [], "capture")
+            tool = {
+              name: "browser",
+              input: {
+                action: "observe",
+                target: current.target,
+                frameReference: selected.frameReference,
+              },
+              id: `observe_frame_${step}`,
+            }
+          } else if (step === 44) {
+            frameObservations.push(toolResult(body.messages ?? [], "nodes"))
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
               name: "browser_navigate",
               input: {
                 action: "navigate",
@@ -959,7 +1015,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 41) {
+          } else if (step === 45) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1087,7 +1143,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 41; approval++)
+    for (let approval = 0; approval < 45; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1253,6 +1309,38 @@ test("agent browser observations and actions use the exact owned tab through rea
           .filter((contents) => contents.session === profile).length
       }),
     ).toBe(2)
+    expect(frameObservations).toHaveLength(3)
+    for (const [index, kind] of ["Local", "Remote", "Nested"].entries()) {
+      const observedFrame = frameObservations[index]
+      expect(observedFrame?.nodes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "textbox",
+            name: `${kind} frame field`,
+            value: kind.toLowerCase(),
+          }),
+        ]),
+      )
+      expect(observedFrame?.mainDocument).toMatchObject({ url: wantedUrl })
+      expect(JSON.stringify(observedFrame?.nodes)).not.toMatch(
+        /inputReference|clickReference/,
+      )
+    }
+    const mainFrame = frameCatalog.find((frame) => frame.main)
+    const remoteFrame = frameCatalog.find(
+      (frame) => new URL(frame.url).pathname === "/frame-remote",
+    )
+    const nestedFrame = frameCatalog.find(
+      (frame) => new URL(frame.url).pathname === "/frame-nested",
+    )
+    expect(remoteFrame).toMatchObject({
+      remote: true,
+      parentFrameId: mainFrame?.frameId,
+    })
+    expect(nestedFrame).toMatchObject({
+      remote: true,
+      parentFrameId: remoteFrame?.frameId,
+    })
     expect(
       captureReceipts.map(
         (receipt) => (receipt.capture as { mode: string }).mode,

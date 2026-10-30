@@ -8,7 +8,12 @@ export type BrowserTarget = Readonly<{
 }>
 export type BrowserObservationRequest =
   | Readonly<{ action: "list"; offset?: number }>
-  | Readonly<{ action: "observe"; target: BrowserTarget }>
+  | Readonly<{ action: "frames"; target: BrowserTarget; offset?: number }>
+  | Readonly<{
+      action: "observe"
+      target: BrowserTarget
+      frameReference?: string
+    }>
 
 export type BrowserTextInputRequest = Readonly<{
   action: "type" | "fill"
@@ -318,6 +323,24 @@ export type BrowserRequest =
   | BrowserNavigationRequest
   | BrowserCaptureRequest
 
+const requestMutates: Record<BrowserRequest["action"], boolean> = {
+  list: false,
+  observe: false,
+  frames: false,
+  capture: false,
+  type: true,
+  fill: true,
+  click: true,
+  hover: true,
+  scroll: true,
+  press: true,
+  navigate: true,
+}
+
+export function browserRequestMutates(input: BrowserRequest): boolean {
+  return requestMutates[input.action]
+}
+
 export function parseBrowserRequest(value: unknown): BrowserRequest {
   if (isJsonObject(value) && value.action === "capture")
     return parseBrowserCaptureRequest(value)
@@ -369,9 +392,37 @@ export function parseBrowserObservationRequest(
       ...(input.offset === undefined ? {} : { offset: input.offset }),
     }
   if (
+    input.action === "frames" &&
+    ["action", "target"].every((key) => Object.hasOwn(input, key)) &&
+    Object.keys(input).every((key) =>
+      ["action", "target", "offset"].includes(key),
+    ) &&
+    (input.offset === undefined ||
+      (typeof input.offset === "number" &&
+        Number.isSafeInteger(input.offset) &&
+        input.offset >= 0))
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: input.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    return {
+      action: "frames",
+      target: observed.target,
+      ...(input.offset === undefined ? {} : { offset: input.offset }),
+    }
+  }
+  if (
     input.action === "observe" &&
-    Object.keys(input).length === 2 &&
-    Object.keys(input).every((key) => key === "action" || key === "target") &&
+    ["action", "target"].every((key) => Object.hasOwn(input, key)) &&
+    Object.keys(input).every((key) =>
+      ["action", "target", "frameReference"].includes(key),
+    ) &&
+    (input.frameReference === undefined ||
+      (typeof input.frameReference === "string" &&
+        /^browser_frame_[a-f0-9-]{36}$/.test(input.frameReference))) &&
     typeof input.target === "object" &&
     input.target !== null &&
     !Array.isArray(input.target)
@@ -397,11 +448,14 @@ export function parseBrowserObservationRequest(
           webContentsId: target.webContentsId,
           instanceId: target.instanceId,
         },
+        ...(typeof input.frameReference === "string"
+          ? { frameReference: input.frameReference }
+          : {}),
       }
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use list, or observe with the exact tabId, webContentsId and instanceId target returned by list. Extra fields are not accepted.",
+    "Use list; frames with an exact listed target and optional offset; or observe with that target and an optional issued frameReference. Extra fields are not accepted.",
   )
 }
 

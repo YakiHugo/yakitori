@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import {
   BrowserControlError,
   type BrowserOperation,
+  browserRequestMutates,
   type DesktopBrowser,
   type DesktopBrowserCancellation,
   type DesktopBrowserRequest,
@@ -99,9 +100,7 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
         // has its own deadline and retains the lease if that acknowledgement is lost.
         if (
           operation.operation === "request" &&
-          operation.input.action !== "list" &&
-          operation.input.action !== "observe" &&
-          operation.input.action !== "capture"
+          browserRequestMutates(operation.input)
         )
           return
         pending.delete(requestId)

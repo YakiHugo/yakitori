@@ -654,7 +654,12 @@ export function registerWorkspaceBrowser(
         }
         entry = undefined
       }
-      if (!entry && input.action !== "observe" && input.action !== "capture")
+      if (
+        !entry &&
+        input.action !== "observe" &&
+        input.action !== "capture" &&
+        input.action !== "frames"
+      )
         throw new BrowserControlError(
           "browser_reference_stale",
           "Observe this target in the current turn before typing.",
@@ -675,18 +680,35 @@ export function registerWorkspaceBrowser(
       entry.busy = true
       let observation: JsonObject
       try {
-        observation =
-          input.action === "capture"
-            ? await entry.connection.capture(input, signal)
-            : input.action === "press"
-              ? await entry.connection.pressKey(input, signal)
-              : input.action === "click" ||
-                  input.action === "hover" ||
-                  input.action === "scroll"
-                ? await entry.connection.inputPointer(input, signal)
-                : input.action === "type" || input.action === "fill"
-                  ? await entry.connection.inputText(input, signal)
-                  : await entry.connection.observe(signal)
+        switch (input.action) {
+          case "frames":
+            observation = await entry.connection.frames(
+              input.offset ?? 0,
+              signal,
+            )
+            break
+          case "capture":
+            observation = await entry.connection.capture(input, signal)
+            break
+          case "observe":
+            observation = await entry.connection.observe(
+              signal,
+              input.frameReference,
+            )
+            break
+          case "press":
+            observation = await entry.connection.pressKey(input, signal)
+            break
+          case "click":
+          case "hover":
+          case "scroll":
+            observation = await entry.connection.inputPointer(input, signal)
+            break
+          case "type":
+          case "fill":
+            observation = await entry.connection.inputText(input, signal)
+            break
+        }
       } finally {
         entry.busy = false
       }

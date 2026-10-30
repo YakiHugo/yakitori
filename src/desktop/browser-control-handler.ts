@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process"
 import {
   BrowserControlError,
   type BrowserOwner,
+  browserRequestMutates,
   type DesktopBrowser,
   type DesktopBrowserResponse,
   parseBrowserOwner,
@@ -173,14 +174,10 @@ export function bindDesktopBrowserRequests(
             },
             cancellation.signal,
             () =>
-              attempted
+              attempted && browserRequestMutates(input)
                 ? input.action === "navigate"
                   ? "navigate"
-                  : input.action === "list" ||
-                      input.action === "observe" ||
-                      input.action === "capture"
-                    ? undefined
-                    : "input"
+                  : "input"
                 : undefined,
           ),
         )
