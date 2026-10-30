@@ -14,6 +14,10 @@ import {
 import { parse } from "smol-toml"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
+  computerPreviewCatalog,
+  computerPreviewFrame,
+} from "../fixtures/computer-preview.ts"
+import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runExternalEngineFlow,
@@ -2104,4 +2108,124 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
     source.closeAllConnections()
     await new Promise<void>((resolve) => source.close(() => resolve()))
   }
+})
+
+test("packaged preview recording decodes and saves WebM through Electron's download boundary", async ({
+  desktop,
+}) => {
+  const { page, application, userData, rendererErrors } = desktop
+  const frame = computerPreviewFrame()
+  let captures = 0
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const peer = socket.connectToServer()
+    peer.onMessage((message) => socket.send(message))
+    socket.onMessage((message) => {
+      if (typeof message !== "string") {
+        peer.send(message)
+        return
+      }
+      const request = JSON.parse(message) as { id?: number; method?: string }
+      let result: unknown
+      if (request.method === "computer/status")
+        result = {
+          available: true,
+          connected: true,
+          backend: "yakitori-native",
+          serverName: "computer",
+          tools: ["control"],
+          permissions: { accessibility: true, screenRecording: true },
+        }
+      else if (request.method === "computer/preview/catalog")
+        result = computerPreviewCatalog
+      else if (request.method === "computer/preview/capture") {
+        captures++
+        result = frame
+      } else if (request.method === "computer/preview/stop") result = {}
+      else {
+        peer.send(message)
+        return
+      }
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }))
+    })
+  })
+  // Only the native frame source is supplied. The packaged renderer, encoder,
+  // video decoder and Electron download all execute their real implementations.
+  await page.reload()
+  await page
+    .getByRole("button", { name: "Show workspace", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Add workspace tab", exact: true })
+    .click()
+  await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+  const preview = page.getByRole("region", { name: "Live computer preview" })
+  await preview
+    .getByRole("button", { name: "Start preview", exact: true })
+    .click()
+  await expect(
+    preview.getByRole("img", { name: "Live computer preview", exact: true }),
+  ).toBeVisible()
+  await preview
+    .getByRole("button", { name: "Record preview", exact: true })
+    .click()
+  const startedAt = captures
+  await expect.poll(() => captures).toBeGreaterThanOrEqual(startedAt + 2)
+  await preview
+    .getByRole("button", { name: "Stop preview", exact: true })
+    .click()
+  const video = preview.getByLabel("Recorded computer preview")
+  await expect
+    .poll(() =>
+      video.evaluate((node) => ({
+        width: (node as HTMLVideoElement).videoWidth,
+        height: (node as HTMLVideoElement).videoHeight,
+        ready: (node as HTMLVideoElement).readyState >= 2,
+      })),
+    )
+    .toEqual({ width: 200, height: 100, ready: true })
+  const destination = join(userData, "preview.webm")
+  await application.evaluate(({ BrowserWindow }, destination) => {
+    const renderer = BrowserWindow.getAllWindows()[0]?.webContents
+    if (!renderer) throw new Error("Missing recording renderer")
+    const completion = Promise.withResolvers<string>()
+    Reflect.set(globalThis, "yakitoriRecordingSaved", completion.promise)
+    // Choose this fixture's disposable destination in place of the OS save UI.
+    renderer.session.once("will-download", (_event, item, contents) => {
+      if (contents !== renderer) throw new Error("Unowned recording download")
+      item.setSavePath(destination)
+      item.once("done", (_event, state) => completion.resolve(state))
+    })
+  }, destination)
+  await preview
+    .getByRole("link", { name: "Save recording", exact: true })
+    .click()
+  const saved = await application.evaluate(async () => {
+    const pending = Reflect.get(
+      globalThis,
+      "yakitoriRecordingSaved",
+    ) as Promise<string>
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error("The owned recording did not finish downloading"),
+              ),
+            10_000,
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+      Reflect.deleteProperty(globalThis, "yakitoriRecordingSaved")
+    }
+  })
+  expect(saved).toBe("completed")
+  expect([...(await readFile(destination)).subarray(0, 4)]).toEqual([
+    26, 69, 223, 163,
+  ])
+  expect(rendererErrors).toEqual([])
 })

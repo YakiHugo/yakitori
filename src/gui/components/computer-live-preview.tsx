@@ -1,10 +1,11 @@
-import { Maximize2, Pause, Play, RefreshCw } from "lucide-react"
+import { Circle, Maximize2, Pause, Play, RefreshCw, Square } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
 import type {
   ComputerPreviewCatalog,
   ComputerPreviewFrame,
 } from "../../protocol/computer-preview.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { usePreviewRecording } from "../use-preview-recording.ts"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { Button } from "./ui/button.tsx"
 import { Field, FieldGroup, FieldLabel } from "./ui/field.tsx"
@@ -51,6 +52,11 @@ export function ComputerLivePreview({
     available && frame?.targetId === selectedId && frame.viewerId === viewerId
       ? frame.value
       : undefined
+  const recording = usePreviewRecording(
+    image,
+    available && running,
+    `${viewerId}/${selectedId}`,
+  )
 
   useEffect(() => {
     const update = () => setVisible(document.visibilityState === "visible")
@@ -288,6 +294,52 @@ export function ComputerLivePreview({
           onClose={() => setEnlarged(false)}
         />
       )}
+      <div className="space-y-3 border-t pt-3">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!recording.recording && (!image || !running || !available)}
+          onClick={recording.recording ? recording.stop : recording.start}
+        >
+          {recording.recording ? (
+            <Square data-icon="inline-start" />
+          ) : (
+            <Circle data-icon="inline-start" />
+          )}
+          {recording.recording ? "Stop recording" : "Record preview"}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          Record received preview frames and pointer positions without audio.
+          Recording stops when this preview stops, hides, or changes target.
+        </p>
+        {recording.error && (
+          <p role="alert" className="text-xs text-destructive">
+            {recording.error}
+          </p>
+        )}
+        {recording.notice && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {recording.notice}
+          </p>
+        )}
+        {recording.clip && (
+          <>
+            <video
+              aria-label="Recorded computer preview"
+              src={recording.clip.url}
+              controls
+              muted
+              preload="auto"
+              className="w-full rounded border"
+            />
+            <Button variant="outline" size="sm" asChild>
+              <a href={recording.clip.url} download={recording.clip.name}>
+                Save recording
+              </a>
+            </Button>
+          </>
+        )}
+      </div>
     </section>
   )
 }
