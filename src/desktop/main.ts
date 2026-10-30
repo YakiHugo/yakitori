@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
+import {
+  BrowserControlError,
+  type DesktopBrowser,
+} from "../protocol/desktop-browser.ts"
 import { loadLocalEnvFile, resolveYakitoriHome } from "../server/env-file.ts"
 import { registerAttachmentImporter } from "./attachment-importer.ts"
 import { registerClipboardWriter } from "./clipboard-writer.ts"
@@ -9,8 +13,8 @@ import { registerCompletionNotifications } from "./completion-notifications.ts"
 import { registerProjectPicker } from "./project-picker.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
-import { registerWorkspaceBrowser } from "./workspace-browser.ts"
 import { registerWindowFocus } from "./window-focus.ts"
+import { registerWorkspaceBrowser } from "./workspace-browser.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -24,6 +28,7 @@ const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
 
 let serverProcess: ServerProcess | undefined
+let browserController: DesktopBrowser | undefined
 let stopping = false
 let allowQuit = false
 let forcing = false
@@ -86,15 +91,29 @@ async function start(): Promise<void> {
   )
   const workspace = await resolveWorkspace()
   const storeDir = process.env.YAKITORI_STORE_DIR || yakitoriHome
+  const desktopBrowser: DesktopBrowser = {
+    request(input, signal) {
+      if (!browserController)
+        return Promise.reject(
+          new BrowserControlError(
+            "browser_unavailable",
+            "The desktop browser window is not ready.",
+          ),
+        )
+      return browserController.request(input, signal)
+    },
+  }
   console.log(`yakitori: store=${storeDir}`)
   const child = app.isPackaged
     ? await spawnServerProcess({
+        desktopBrowser,
         command: process.execPath,
         args: [packagedServerEntry()],
         cwd: yakitoriHome,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
+          YAKITORI_DESKTOP_BROWSER: "1",
           YAKITORI_COMPUTER_EXECUTABLE: path.join(
             process.resourcesPath,
             "computer",
@@ -109,6 +128,7 @@ async function start(): Promise<void> {
         },
       })
     : await spawnServerProcess({
+        desktopBrowser,
         command: "node",
         // Electron must directly own the process that implements shutdown and
         // control IPC. A Node watch supervisor would receive those messages
@@ -118,6 +138,7 @@ async function start(): Promise<void> {
         env: {
           ...process.env,
           PORT: process.env.PORT ?? "4142",
+          YAKITORI_DESKTOP_BROWSER: "1",
           YAKITORI_WORKSPACE: workspace,
           YAKITORI_STORE_DIR: storeDir,
         },
@@ -248,7 +269,7 @@ function openMainWindow(
   registerWindowFocus(window)
   registerCompletionNotifications(window)
   registerAttachmentImporter(server, window)
-  registerWorkspaceBrowser(window)
+  browserController = registerWorkspaceBrowser(window)
   window.once("ready-to-show", () => {
     window.show()
   })

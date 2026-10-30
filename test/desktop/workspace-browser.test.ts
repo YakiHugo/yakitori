@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events"
 import type { BrowserWindow } from "electron"
 import { beforeEach, expect, it, vi } from "vitest"
 import { registerWorkspaceBrowser } from "../../src/desktop/workspace-browser.ts"
+import type { BrowserTarget } from "../../src/protocol/desktop-browser.ts"
 
 type IpcEvent = { sender: unknown; senderFrame: unknown }
 type Handler = (event: IpcEvent, input: unknown) => unknown
@@ -10,6 +11,7 @@ const electron = vi.hoisted(() => ({
   views: [] as Array<{
     options: unknown
     webContents: EventEmitter & {
+      id: number
       url: string
       getURL(): string
       close: ReturnType<typeof vi.fn>
@@ -43,6 +45,7 @@ vi.mock("electron", async () => {
     },
     WebContentsView: class {
       webContents = Object.assign(new EventEmitter(), {
+        id: electron.views.length + 1,
         url: "",
         getURL() {
           return this.url
@@ -50,6 +53,7 @@ vi.mock("electron", async () => {
         getTitle: () => "Example",
         getZoomFactor: () => 1,
         isLoading: () => false,
+        isLoadingMainFrame: () => false,
         isDestroyed: () => false,
         isFocused: vi.fn(() => false),
         capturePage: vi.fn(async () => ({
@@ -95,15 +99,72 @@ function setup() {
     contentView: { addChildView: vi.fn(), removeChildView: vi.fn() },
     getContentBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
   })
-  registerWorkspaceBrowser(window as unknown as BrowserWindow)
+  const browser = registerWorkspaceBrowser(window as unknown as BrowserWindow)
   const event = { sender: webContents, senderFrame: mainFrame }
   function call(name: string, input: unknown, sender = event) {
     const handler = electron.handlers.get(`yakitori:browser-${name}`)
     if (!handler) throw new Error("Missing browser IPC handler")
     return handler(sender, input)
   }
-  return { call, window, sent, event }
+  return { call, window, sent, event, browser }
 }
+
+it("never observes another owned tab or a replacement under the same tab ID", async () => {
+  const { call, browser } = setup()
+  call("create", { tabId: "first", url: "https://first.test" })
+  call("create", { tabId: "second", url: "https://second.test" })
+  const listed = await browser.request({ action: "list" })
+  expect(listed).toMatchObject({
+    tabs: [
+      { target: { tabId: "first", webContentsId: 1 } },
+      { target: { tabId: "second", webContentsId: 2 } },
+    ],
+  })
+  const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  if (!target) throw new Error("Missing first owned target")
+  await expect(
+    browser.request({
+      action: "observe",
+      target: { ...target, webContentsId: 2 },
+    }),
+  ).rejects.toMatchObject({ code: "browser_target_changed" })
+  call("close", { tabId: "first" })
+  call("create", { tabId: "first", url: "https://replacement.test" })
+  // A new desktop process can reuse WebContents IDs. The lifetime nonce must
+  // still reject a previously listed target even when both correlated IDs match.
+  const replacement = electron.views.at(-1)
+  if (!replacement) throw new Error("Missing replacement view")
+  replacement.webContents.id = target.webContentsId
+  await expect(
+    browser.request({
+      action: "observe",
+      target,
+    }),
+  ).rejects.toMatchObject({ code: "browser_target_changed" })
+})
+
+it("bounds catalog replies without making later browser targets unreachable", async () => {
+  const { call, browser } = setup()
+  for (let i = 0; i < 40; i++)
+    call("create", {
+      tabId: `owned_${i}`,
+      url: `https://owned.test/${"x".repeat(8192)}`,
+    })
+  const first = await browser.request({ action: "list" })
+  expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(300 * 1024)
+  expect(typeof first.nextOffset).toBe("number")
+  if (typeof first.nextOffset !== "number")
+    throw new Error("Missing continuation offset")
+  const second = await browser.request({
+    action: "list",
+    offset: first.nextOffset,
+  })
+  const entries = [
+    ...(first.tabs as { target: { tabId: string } }[]),
+    ...(second.tabs as { target: { tabId: string } }[]),
+  ]
+  expect(new Set(entries.map((entry) => entry.target.tabId)).size).toBe(40)
+})
 
 it("rejects remote frames and non-web URLs before navigation", () => {
   const { call, event } = setup()

@@ -32,6 +32,7 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import { computerUseServerName } from "../protocol/connections.ts"
+import type { DesktopBrowser } from "../protocol/desktop-browser.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
@@ -79,9 +80,14 @@ import {
 } from "../runtime/skills.ts"
 import { createThreadCollaboration } from "../runtime/thread-collaboration.ts"
 import { readPdf } from "../runtime/tools/read-pdf.ts"
+import type {
+  ToolExecutionContext,
+  ToolFailure,
+} from "../runtime/tools/types.ts"
 import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
+import { createBrowserObservationTool } from "./browser-observation-tool.ts"
 import {
   type ChatGPTConnections,
   createChatGPTConnections,
@@ -173,6 +179,7 @@ const MODELS_REFRESH_INTERVAL_MS = 300_000
 const serverUserAgent = `${packageJson.name}/${packageJson.version}`
 
 export type YakitoriApplicationOptions = Readonly<{
+  desktopBrowser?: DesktopBrowser
   acpEngines?: readonly AcpEngineConfiguration[]
   chatgpt?: Readonly<{
     fetchFn?: typeof fetch
@@ -998,14 +1005,60 @@ export async function createYakitoriApplication(
             ? {}
             : { shellEnvironmentPolicy }),
         })
-      const toolRegistry = createToolRegistry(
-        createTrustedTools(sessionShellEnv, !sideConversation).filter(
+      let activeComputerTurn: ComputerUseOwner | undefined
+      function claimComputer(
+        context: ToolExecutionContext,
+      ): ToolFailure | undefined {
+        context.signal?.throwIfAborted()
+        if (context.turnId === undefined)
+          throw new Error("Computer use requires an active turn.")
+        if (activeComputerTurn?.turnId !== context.turnId)
+          throw new Error("Computer tool has no owning task.")
+        const refusal = computerControl.acquire(activeComputerTurn)
+        if (!refusal) return
+        const message =
+          refusal === "computer_taken_over"
+            ? "The user took over the computer. Do not retry input until computer use is reconnected."
+            : refusal === "computer_disconnected"
+              ? "Computer use is disconnected. Reconnect computer use before sending another action."
+              : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
+        return { ok: false, code: refusal, message, content: message }
+      }
+      const toolRegistry = createToolRegistry([
+        ...createTrustedTools(sessionShellEnv, !sideConversation).filter(
           (tool) =>
             tool.toolName.name !== "request_user_input_async" ||
             (!sideConversation && !isSubagentThread(stored)),
         ),
-      )
-      let activeComputerTurn: ComputerUseOwner | undefined
+        ...(options.desktopBrowser
+          ? [
+              createBrowserObservationTool(
+                options.desktopBrowser,
+                async (context) => {
+                  const configured = (await userConfig.readConfiguration())
+                    .mcpServers?.[computerUseServerName]
+                  if (
+                    !configured ||
+                    configured.enabled === false ||
+                    configured.disabledTools?.includes("control") ||
+                    (configured.enabledTools !== undefined &&
+                      !configured.enabledTools.includes("control"))
+                  ) {
+                    const message =
+                      "Connect computer use before inspecting desktop browser tabs."
+                    return {
+                      ok: false,
+                      code: "computer_disconnected",
+                      message,
+                      content: message,
+                    }
+                  }
+                  return claimComputer(context)
+                },
+              ),
+            ]
+          : []),
+      ])
       const mcpExtension =
         options.mcp === false
           ? undefined
@@ -1041,29 +1094,8 @@ export async function createYakitoriApplication(
                   : tools.map((tool) => ({
                       ...tool,
                       async execute(input, context) {
-                        context.signal?.throwIfAborted()
-                        if (context.turnId === undefined)
-                          throw new Error(
-                            "Computer use requires an active turn.",
-                          )
-                        if (activeComputerTurn?.turnId !== context.turnId)
-                          throw new Error("Computer tool has no owning task.")
-                        const refusal =
-                          computerControl.acquire(activeComputerTurn)
-                        if (refusal) {
-                          const message =
-                            refusal === "computer_taken_over"
-                              ? "The user took over the computer. Do not retry input until computer use is reconnected."
-                              : refusal === "computer_disconnected"
-                                ? "Computer use is disconnected. Reconnect computer use before sending another action."
-                                : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
-                          return {
-                            ok: false,
-                            code: refusal,
-                            message,
-                            content: message,
-                          }
-                        }
+                        const refusal = claimComputer(context)
+                        if (refusal) return refusal
                         return tool.execute(input, context)
                       },
                     })),
