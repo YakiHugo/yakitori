@@ -36,6 +36,7 @@
     "build:computer": "node scripts/build-computer.ts",
     "test:computer": "pnpm build:computer && node scripts/test-computer.ts",
     "test:computer:live": "node scripts/test-computer-live.ts",
+    "test:computer:web": "node scripts/test-computer-web.ts",
     "bench:computer": "node scripts/test-computer-live.ts --repeat 5 --report test-results/computer-bench.json"
   },
   "devDependencies": {

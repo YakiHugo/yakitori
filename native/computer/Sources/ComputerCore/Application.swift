@@ -165,7 +165,7 @@ extension Computer {
             throw ComputerFailure("launch_identity_unconfirmed", "LaunchServices returned a different application or reused an existing process. Inspect list before any retry.")
         }
         return try result(["pid": app.processIdentifier, "app_path": url.path, "bundle_id": app.bundleIdentifier ?? "", "name": app.localizedName ?? "",
-            "launch_time": app.launchDate.map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "delivery": options.foreground ? "foreground" : "background",
+            "launch_time": processLaunchDate(app.processIdentifier).map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "delivery": options.foreground ? "foreground" : "background",
             "new_instance": options.newInstance, "opened_url_count": options.urls.count, "delivery_status": "unverified"])
     }
 }

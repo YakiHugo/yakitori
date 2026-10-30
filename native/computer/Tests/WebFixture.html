@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Yakitori Web Input Fixture</title>
+<div aria-hidden="true" style="position:absolute;left:580px;top:20px;width:20px;height:20px;background:rgb(12,34,56)"></div>
+<style>
+  body { margin: 20px; font: 18px system-ui; background: white; color: black; }
+  input, button { display: block; font: inherit; margin: 8px 0; padding: 6px; }
+  #scroll { height: 100px; width: 500px; overflow: auto; border: 2px solid black; }
+  #source, #drop { display: inline-block; padding: 15px; margin: 15px 20px 0 0; background: #ddd; }
+</style>
+<label>Web first<input id="first" aria-label="Web first"></label>
+<label>Web second<input id="second" aria-label="Web second"></label>
+<button type="button" id="increment">Web increment</button>
+<section id="scroll" aria-label="Web scroll"><div style="height:800px">Scrollable content</div></section>
+<button type="button" id="source" aria-label="Web drag source" draggable="true">Drag source</button>
+<button type="button" id="drop" aria-label="Web drop target">Drop target</button>
+<script>
+  const state = { ready: true, first: "", second: "", count: 0, scrollTop: 0, drops: 0, dragStarts: 0, events: [] }
+  const emit = () => {
+    state.first = document.querySelector("#first").value
+    state.second = document.querySelector("#second").value
+    state.scrollTop = document.querySelector("#scroll").scrollTop
+    state.geometry = Object.fromEntries(["source", "drop"].map(id => { const rect = document.getElementById(id).getBoundingClientRect(); return [id, {x: rect.x, y: rect.y, width: rect.width, height: rect.height}] }))
+    const value = JSON.stringify(state)
+    if (window.webkit?.messageHandlers.fixture) window.webkit.messageHandlers.fixture.postMessage(value)
+    else console.log(`yakitori-fixture ${value}`)
+  }
+  document.querySelector("#increment").addEventListener("click", () => { state.count++; emit() })
+  for (const type of ["input", "keydown", "pointerdown", "pointerup"]) {
+    document.addEventListener(type, event => { state.events.push(`${type}:${event.target.id}`); state.events = state.events.slice(-24); emit() })
+  }
+  document.querySelector("#scroll").addEventListener("scroll", emit)
+  document.querySelector("#source").addEventListener("dragstart", event => { event.dataTransfer.setData("text/plain", "owned-fixture"); state.dragStarts++; emit() })
+  document.querySelector("#drop").addEventListener("dragover", event => event.preventDefault())
+  document.querySelector("#drop").addEventListener("drop", event => { event.preventDefault(); if (event.dataTransfer.getData("text/plain") === "owned-fixture") state.drops++; emit() })
+  emit()
+</script>

@@ -34,7 +34,7 @@ extension Computer {
             node = elementAttribute(current, kAXParentAttribute)
         }
         if let hovered {
-            if NSRunningApplication(processIdentifier: hovered.window.pid)?.launchDate == hovered.window.launched {
+            if processLaunchDate(hovered.window.pid) == hovered.window.launched {
                 let error = AXUIElementPerformAction(hovered.element, kAXShowDefaultUIAction as CFString)
                 guard error == .success || error == .invalidUIElement else {
                     throw ComputerFailure("hover_cleanup_failed", "Restoring the previous control's default UI was refused (\(error.rawValue)).")

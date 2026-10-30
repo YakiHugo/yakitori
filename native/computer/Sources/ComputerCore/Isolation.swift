@@ -57,7 +57,7 @@ import DisplayBridge
         guard !owns(pid) else { throw ComputerFailure("already_concealed", "This helper already owns the app's isolation lease.") }
         let owner = try await NativeResources.acquire(["app-\(pid)"])
         let ready = try await display()
-        guard let app = NSRunningApplication(processIdentifier: pid), app.launchDate?.timeIntervalSince1970 == launch else {
+        guard let app = NSRunningApplication(processIdentifier: pid), processLaunchDate(app.processIdentifier)?.timeIntervalSince1970 == launch else {
             throw ComputerFailure("stale_snapshot", "The target process incarnation changed.")
         }
         let bounds = CGDisplayBounds(ready.displayID)
@@ -76,24 +76,26 @@ import DisplayBridge
             guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerFailure("isolation_failed", "The app's visible window identities did not settle after display creation; no windows were moved.") }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        let targets = try resolved.enumerated().map { index, target -> (WindowIdentity, AXUIElement, CGRect, UInt64) in
+        let targets = try resolved.enumerated().map { index, target -> (WindowIdentity, AXUIElement, CGRect, CGRect, UInt64) in
             let (window, element) = target
+            guard let original = elementFrame(element) else { throw ComputerFailure("isolation_failed", "The exact AX window has no readable geometry; no windows were moved.") }
             let originalSpace = YKWindowSpace(window.windowID)
             guard originalSpace != 0 else { throw ComputerFailure("isolation_unsupported", "Concealment requires an exact single desktop membership per window.") }
             guard window.frame.width <= bounds.width - 64, window.frame.height <= bounds.height - 64 else { throw ComputerFailure("isolation_failed", "Every target window must fit the isolated display.") }
             let offset = Double(index % 8) * 24
             let frame = CGRect(x: bounds.minX + 32 + min(offset, bounds.width - window.frame.width - 64),
                 y: bounds.minY + 32 + min(offset, bounds.height - window.frame.height - 64), width: window.frame.width, height: window.frame.height)
-            return (window, element, frame, originalSpace)
+            return (window, element, original, frame, originalSpace)
         }
-        guard !app.isTerminated, app.launchDate?.timeIntervalSince1970 == launch else {
+        guard !app.isTerminated, processLaunchDate(app.processIdentifier)?.timeIntervalSince1970 == launch else {
             throw ComputerFailure("stale_snapshot", "The target process exited during concealment preflight; no windows were moved.")
         }
         owners[pid] = owner
         try owner.advanceRevision(pid)
-        for (identity, element, parked, originalSpace) in targets {
+        for (identity, element, original, parked, originalSpace) in targets {
             try Task.checkCancellation()
-            let record = ParkedWindow(pid: pid, launchTime: launch, windowID: identity.windowID, original: identity.frame, parked: parked,
+            let serverOffset = CGPoint(x: identity.frame.minX - original.minX, y: identity.frame.minY - original.minY)
+            let record = ParkedWindow(pid: pid, launchTime: launch, windowID: identity.windowID, original: original, parked: parked, serverOriginOffset: serverOffset,
                 originalSpace: originalSpace, parkedDisplay: ready.displayID, displayServicePID: ready.servicePID)
             let next = records + [record]
             // Persist recovery intent before the first external window move.
@@ -107,7 +109,7 @@ import DisplayBridge
             }
             // WindowServer may adjust titlebar margins. Save its confirmed
             // position before accepting placement or attempting restoration.
-            records[records.count - 1] = ParkedWindow(pid: pid, launchTime: launch, windowID: identity.windowID, original: identity.frame, parked: actual,
+            records[records.count - 1] = ParkedWindow(pid: pid, launchTime: launch, windowID: identity.windowID, original: original, parked: actual, serverOriginOffset: serverOffset,
                 originalSpace: originalSpace, parkedDisplay: ready.displayID, displayServicePID: ready.servicePID)
             try IsolationFiles.persist(records, to: journal)
             guard bounds.contains(actual) else { throw ComputerFailure("isolation_failed", "WindowServer did not keep the whole window on the isolated display.") }
@@ -164,7 +166,7 @@ extension Computer {
                 "remaining_windows": (isolation?.records.count ?? 0) + recovered.pending])
         }
         guard let pid = args["pid"] as? Int32, let launch = args["launch_time"] as? Double,
-              NSRunningApplication(processIdentifier: pid)?.launchDate?.timeIntervalSince1970 == launch else {
+              processLaunchDate(pid)?.timeIntervalSince1970 == launch else {
             throw ComputerFailure("invalid_arguments", "Concealment requires pid and launch_time from list.")
         }
         let session = try isolation ?? IsolationSession()

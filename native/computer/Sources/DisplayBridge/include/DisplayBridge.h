@@ -11,3 +11,4 @@ bool YKWindowSpacesSupported(void);
 uint64_t YKWindowSpace(uint32_t window);
 uint64_t YKDisplaySpace(uint32_t display);
 bool YKRestoreWindowSpace(uint32_t window, uint64_t space);
+double YKProcessStartTime(int32_t pid);

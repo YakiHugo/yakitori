@@ -29,7 +29,7 @@ func inputDuration(_ args: [String: Any]) throws -> TimeInterval {
 }
 
 func withHeldChord<T>(_ code: CGKeyCode?, flags: CGEventFlags, duration: TimeInterval = 0,
-    source: CGEventSource?, post: (CGEvent) throws -> Void, release: (CGEvent) -> Void,
+    source: CGEventSource?, prepare: (CGEvent) throws -> CGEvent = { $0 }, post: (CGEvent) throws -> Void, release: (CGEvent) -> Void,
     checkpoint: () throws -> Void = { try Task.checkCancellation() },
     body: () async throws -> T) async throws -> T {
     var releases: [CGEvent] = []
@@ -50,8 +50,9 @@ func withHeldChord<T>(_ code: CGKeyCode?, flags: CGEventFlags, duration: TimeInt
         down.flags = held
         up.flags = modifier.isEmpty ? held : previous
         if !modifier.isEmpty { down.type = .flagsChanged; up.type = .flagsChanged }
-        try post(down)
-        releases.append(up)
+        let preparedDown = try prepare(down), preparedUp = try prepare(up)
+        try post(preparedDown)
+        releases.append(preparedUp)
         try await holdInput(0.01, checkpoint: checkpoint)
     }
     let value = try await body()

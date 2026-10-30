@@ -177,6 +177,7 @@ extension Computer {
             } else {
                 for window in selected {
                     if Date() >= axDeadline { rootsTruncated = true; break }
+                    try prepareAccessibility(window)
                     if let root = windowElement(window, deadline: axDeadline) { roots.append((window, root)) }
                     else { rootsTruncated = true }
                 }

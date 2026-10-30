@@ -6,8 +6,9 @@ import { promisify } from "node:util"
 
 const run = promisify(execFile)
 
-export async function prepareComputerFixture(): Promise<string> {
-  const source = resolve("native/computer/Tests/Fixture.swift")
+export async function prepareComputerFixture(
+  source = resolve("native/computer/Tests/Fixture.swift"),
+): Promise<string> {
   const [bytes, compiler, sdk] = await Promise.all([
     readFile(source),
     run("swiftc", ["--version"]),

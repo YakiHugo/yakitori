@@ -44,7 +44,7 @@ extension Computer {
                 executing = index
                 try Task.checkCancellation()
                 guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerFailure("native_timeout", "The batch exceeded its 30-second execution safety boundary.") }
-                guard NSRunningApplication(processIdentifier: pid)?.launchDate?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The sequence target process incarnation changed.") }
+                guard processLaunchDate(pid)?.timeIntervalSince1970 == launch else { throw ComputerFailure("stale_snapshot", "The sequence target process incarnation changed.") }
                 var target = args
                 target["mode"] = "ax"; target["disable_diff"] = true
                 target.removeValue(forKey: "steps"); target.removeValue(forKey: "root_element")
