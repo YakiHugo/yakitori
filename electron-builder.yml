@@ -1,6 +1,9 @@
 appId: com.yakitori.app
 productName: Yakitori
 asar: true
+# Use the version already installed and verified by pnpm; packaging must not
+# re-download Electron or its checksum manifest on every local/CI rebuild.
+electronDist: node_modules/electron/dist
 # Native dependencies are force-rebuilt before packaging by the package script.
 npmRebuild: false
 # The sidecar server entry runs under plain Node (ELECTRON_RUN_AS_NODE),
