@@ -18,14 +18,21 @@ it("requires OS access before presenting a connected computer as ready, and refr
     tools: ["control"],
     permissions: { accessibility: false, screenRecording: true },
   }
-  request.mockResolvedValue(status)
+  let current = status
+  request.mockImplementation(async (method: string) =>
+    method === "computer/preview/catalog"
+      ? { targets: [] }
+      : method === "computer/preview/stop"
+        ? {}
+        : current,
+  )
   render(<ComputerPanel apiBase="http://localhost:4100" />)
   await screen.findByText("Connected · macOS access required")
   expect(screen.queryByText("Ready for your next message")).toBeNull()
-  request.mockResolvedValue({
+  current = {
     ...status,
     permissions: { accessibility: true, screenRecording: true },
-  })
+  }
   fireEvent.click(
     screen.getByRole("button", { name: "Refresh computer connection" }),
   )

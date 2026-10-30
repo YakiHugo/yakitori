@@ -19,9 +19,9 @@ import {
   useRef,
   useState,
 } from "react"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useEngineStore } from "../store/engine-store.ts"
 import {
@@ -592,7 +592,10 @@ export function WorkspaceFrame({
                     }
                   />
                 ) : tab.kind === "computer" ? (
-                  <ComputerPanel apiBase={apiBase} />
+                  <ComputerPanel
+                    apiBase={apiBase}
+                    active={open && activeId === tab.id}
+                  />
                 ) : tab.kind === "chat" ? (
                   <SideChatPanel
                     tab={tab}
