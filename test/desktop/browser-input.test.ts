@@ -22,6 +22,9 @@ it("accepts bounded text input only with an exact observation reference", () => 
     text: "你好 🌍",
   }
   expect(parseBrowserInputRequest(valid)).toEqual(valid)
+  expect(
+    parseBrowserInputRequest({ ...valid, action: "fill", text: "" }),
+  ).toMatchObject({ action: "fill", text: "" })
   for (const input of [
     { ...valid, reference: "button" },
     { ...valid, method: "Input.insertText" },
@@ -38,18 +41,26 @@ function fixture(
     redirectFocus?: boolean
     blockInput?: boolean
     wrongReceipt?: boolean
+    blockKeyDown?: boolean
+    failKeyUp?: boolean
+    loseDebuggerOnKeyDown?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
     insertion = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>()
+  let destroyed = false,
+    keyDowns = 0,
+    keyUps = 0
   let attached = false,
     documentId = "original",
     value = "first",
     inputCalls = 0,
-    focused = false
+    focused = false,
+    start = 5,
+    end = 5
   const contents = {
-    isDestroyed: () => false,
+    isDestroyed: () => destroyed,
     isLoadingMainFrame: () => false,
     isDevToolsOpened: () => false,
     getURL: () => "https://owned.test/",
@@ -94,22 +105,51 @@ function fixture(
           focused = true
           return {}
         }
-        if (method === "Runtime.callFunctionOn")
+        if (method === "Runtime.callFunctionOn") {
+          const args = params.arguments as { value: boolean }[]
+          if (args[1]?.value) {
+            start = 0
+            end = value.length
+          }
           return {
             result: {
               value: {
                 ok: focused && !options.redirectFocus,
                 value,
-                start: value.length,
-                end: value.length,
+                start,
+                end,
               },
             },
           }
+        }
+        if (method === "Input.dispatchKeyEvent") {
+          if (params.type === "rawKeyDown") {
+            keyDowns++
+            value = value.slice(0, start) + value.slice(end)
+            end = start
+            insertion.resolve()
+            if (options.loseDebuggerOnKeyDown) {
+              events.emit("detach", {}, "replaced_with_devtools")
+              attached = true
+            }
+            if (options.blockKeyDown) await release.promise
+          } else {
+            if (options.failKeyUp)
+              throw new Error("Key-up acknowledgement lost")
+            keyUps++
+          }
+          return {}
+        }
         if (method === "Input.insertText") {
           inputCalls++
           insertion.resolve()
           if (options.blockInput) await release.promise
-          if (!options.wrongReceipt) value += params.text
+          if (!options.wrongReceipt) {
+            const text = String(params.text)
+            value = value.slice(0, start) + text + value.slice(end)
+            start += text.length
+            end = start
+          }
           return {}
         }
         if (method === "Runtime.releaseObjectGroup") return {}
@@ -126,6 +166,15 @@ function fixture(
     release,
     inputCalls: () => inputCalls,
     value: () => value,
+    keyDowns: () => keyDowns,
+    keyUps: () => keyUps,
+    attached: () => attached,
+    allowKeyUp: () => {
+      options.failKeyUp = false
+    },
+    destroy: () => {
+      destroyed = true
+    },
     navigate: () => {
       documentId = "replacement"
     },
@@ -144,15 +193,15 @@ it("consumes an observation once and verifies the exact text receipt", async () 
   try {
     const input = await f.request()
     expect(
-      await f.connection.typeText(input, new AbortController().signal),
+      await f.connection.inputText(input, new AbortController().signal),
     ).toMatchObject({ delivered: true, textVerified: true })
     expect(f.value()).toBe("first你好 🌍")
     await expect(
-      f.connection.typeText(input, new AbortController().signal),
+      f.connection.inputText(input, new AbortController().signal),
     ).rejects.toMatchObject({ code: "browser_reference_stale" })
     expect(f.inputCalls()).toBe(1)
   } finally {
-    f.connection.close()
+    await f.connection.close()
   }
 })
 
@@ -162,11 +211,11 @@ it("invalidates older references when a new observation is requested", async () 
     const old = await f.request()
     await f.request()
     await expect(
-      f.connection.typeText(old, new AbortController().signal),
+      f.connection.inputText(old, new AbortController().signal),
     ).rejects.toMatchObject({ code: "browser_reference_stale" })
     expect(f.inputCalls()).toBe(0)
   } finally {
-    f.connection.close()
+    await f.connection.close()
   }
 })
 
@@ -177,7 +226,7 @@ it("refuses replacement documents and redirected focus before inserting any text
       const input = await f.request()
       if (!redirected) f.navigate()
       await expect(
-        f.connection.typeText(input, new AbortController().signal),
+        f.connection.inputText(input, new AbortController().signal),
       ).rejects.toMatchObject({
         code: redirected
           ? "browser_input_unavailable"
@@ -185,7 +234,7 @@ it("refuses replacement documents and redirected focus before inserting any text
       })
       expect(f.inputCalls()).toBe(0)
     } finally {
-      f.connection.close()
+      await f.connection.close()
     }
   }
 })
@@ -195,11 +244,11 @@ it("reports an unconfirmed receipt without repeating a text insertion", async ()
   try {
     const input = await f.request()
     await expect(
-      f.connection.typeText(input, new AbortController().signal),
+      f.connection.inputText(input, new AbortController().signal),
     ).rejects.toMatchObject({ code: "browser_input_unconfirmed" })
     expect(f.inputCalls()).toBe(1)
   } finally {
-    f.connection.close()
+    await f.connection.close()
   }
 })
 
@@ -210,7 +259,7 @@ it("does not abandon an in-flight text dispatch when cancellation arrives", asyn
     const input = await f.request()
     let settled = false
     const pending = f.connection
-      .typeText(input, cancellation.signal)
+      .inputText(input, cancellation.signal)
       .finally(() => {
         settled = true
       })
@@ -223,6 +272,93 @@ it("does not abandon an in-flight text dispatch when cancellation arrives", asyn
     expect(f.inputCalls()).toBe(1)
   } finally {
     f.release.resolve()
-    f.connection.close()
+    await f.connection.close()
   }
+})
+
+it("fills and clears the exact control with acknowledged key release", async () => {
+  const f = fixture()
+  try {
+    const first = await f.request("replacement")
+    expect(
+      await f.connection.inputText(
+        { ...first, action: "fill" },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ textVerified: true })
+    expect(f.value()).toBe("replacement")
+    const clear = await f.request("")
+    expect(
+      await f.connection.inputText(
+        { ...clear, action: "fill" },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ textVerified: true })
+    expect(f.value()).toBe("")
+    expect(f.keyDowns()).toBe(1)
+    expect(f.keyUps()).toBe(1)
+  } finally {
+    await f.connection.close()
+  }
+})
+
+it("releases a clearing key after its dispatch acknowledges cancellation", async () => {
+  const f = fixture({ blockKeyDown: true }),
+    cancellation = new AbortController()
+  try {
+    const input = await f.request("")
+    const pending = f.connection.inputText(
+      { ...input, action: "fill" },
+      cancellation.signal,
+    )
+    await f.insertion
+    cancellation.abort()
+    expect(f.keyUps()).toBe(0)
+    f.release.resolve()
+    await expect(pending).rejects.toThrow()
+    expect(f.keyDowns()).toBe(1)
+    expect(f.keyUps()).toBe(1)
+  } finally {
+    f.release.resolve()
+    await f.connection.close()
+  }
+})
+
+it("keeps failed key cleanup visible until a later close confirms release", async () => {
+  const f = fixture({ failKeyUp: true })
+  const input = await f.request("")
+  await expect(
+    f.connection.inputText(
+      { ...input, action: "fill" },
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
+  await expect(f.connection.close()).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  expect(f.attached()).toBe(true)
+  expect(f.keyDowns()).toBe(1)
+  f.allowKeyUp()
+  await f.connection.close()
+  expect(f.keyUps()).toBe(1)
+  expect(f.attached()).toBe(false)
+})
+
+it("never takes a user debugger to release an uncertain key and accepts target destruction as cleanup", async () => {
+  const f = fixture({ loseDebuggerOnKeyDown: true })
+  const input = await f.request("")
+  await expect(
+    f.connection.inputText(
+      { ...input, action: "fill" },
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
+  await expect(f.connection.close()).rejects.toMatchObject({
+    code: "browser_cleanup_failed",
+  })
+  expect(f.keyUps()).toBe(0)
+  expect(f.attached()).toBe(true)
+  f.destroy()
+  await f.connection.close()
+  expect(f.keyDowns()).toBe(1)
 })

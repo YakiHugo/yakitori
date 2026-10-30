@@ -17,6 +17,7 @@ import packageJson from "../../package.json" with { type: "json" }
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
+import { BrowserControlError } from "../../src/protocol/desktop-browser.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
@@ -3413,6 +3414,143 @@ describe("application composition", () => {
         await new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         )
+        await application.close()
+      }
+    })
+  })
+
+  it("blocks native and browser input after browser key cleanup fails until release is confirmed", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const { release, called } = await writeComputerMcpFixture(rootDir)
+      await writeFile(release, "release")
+      const cleaning = Promise.withResolvers<void>(),
+        releaseCleanup = Promise.withResolvers<void>()
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "clear_browser",
+              name: "browser_input",
+              input: {
+                action: "fill",
+                target: {
+                  tabId: "owned",
+                  webContentsId: 17,
+                  instanceId:
+                    "browser_target_00000000-0000-4000-8000-000000000001",
+                },
+                reference: "browser_node_00000000-0000-4000-8000-000000000001",
+                text: "",
+              },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "try_native",
+              name: "computer__control",
+              input: { action: "test" },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "try_browser",
+              name: "browser",
+              input: { action: "list" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Waiting for input cleanup" }] },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "after_cleanup",
+              name: "browser",
+              input: { action: "list" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Input resumed" }] },
+      ])
+      let requests = 0,
+        cleaned = false
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: provider.stream,
+        desktopBrowser: {
+          async request() {
+            requests++
+            if (!cleaned)
+              throw new BrowserControlError(
+                "browser_cleanup_failed",
+                "Held key release is unconfirmed",
+              )
+            return { tabs: [] }
+          },
+          async finishTurn() {
+            cleaning.resolve()
+            await releaseCleanup.promise
+            cleaned = true
+          },
+          async closeSession() {},
+        },
+      })
+      try {
+        const created = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "uncertain_key",
+            content: inputFixture([
+              { type: "text", text: "Clear the exact field" },
+            ]),
+          }),
+        )
+        await cleaning.promise
+        expect(provider.callCount).toBe(4)
+        expect(JSON.stringify(provider.requests[2]?.messages)).toContain(
+          "Computer input cleanup is unconfirmed",
+        )
+        expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
+          "Computer input cleanup is unconfirmed",
+        )
+        expect(requests).toBe(1)
+        await expect(readFile(called, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        })
+        expect(application.threadManager.getThread(sessionId)?.status).toBe(
+          "active",
+        )
+        releaseCleanup.resolve()
+        await waitForThreadIdle(application, sessionId)
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "known_release",
+            content: inputFixture([
+              { type: "text", text: "Read the browser after cleanup" },
+            ]),
+          }),
+        )
+        await waitForThreadIdle(application, sessionId)
+        expect(requests).toBe(2)
+      } finally {
+        releaseCleanup.resolve()
         await application.close()
       }
     })

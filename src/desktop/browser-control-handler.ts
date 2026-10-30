@@ -66,7 +66,8 @@ export function bindDesktopBrowserRequests(
             ? "The browser operation may have taken effect before cancellation. Inspect the current target; never replay it automatically."
             : "Browser observation stopped.",
         })
-      else if (cause instanceof BrowserControlError)
+      else if (cause instanceof BrowserControlError) {
+        if (cause.code === "browser_cleanup_failed") report(cause)
         send({
           type: "desktop_browser/response",
           requestId,
@@ -74,7 +75,7 @@ export function bindDesktopBrowserRequests(
           code: cause.code,
           error: cause.message,
         })
-      else {
+      } else {
         report(cause)
         send({
           type: "desktop_browser/response",
@@ -164,8 +165,12 @@ export function bindDesktopBrowserRequests(
             cancellation.signal,
             () =>
               attempted &&
-              (input.action === "type" || input.action === "navigate")
-                ? input.action
+              (input.action === "type" ||
+                input.action === "fill" ||
+                input.action === "navigate")
+                ? input.action === "fill"
+                  ? "type"
+                  : input.action
                 : undefined,
           ),
         )

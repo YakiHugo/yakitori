@@ -11,7 +11,7 @@ async function observeBrowserDocument(
   try {
     return await connection.observe(signal)
   } finally {
-    connection.close()
+    await connection.close()
   }
 }
 
@@ -154,7 +154,7 @@ it("retains its debugger across observations and releases it explicitly", async 
     await connection.observe(new AbortController().signal)
     expect(f.attached()).toBe(true)
   } finally {
-    connection.close()
+    await connection.close()
   }
   expect(f.attached()).toBe(false)
   expect(f.detached()).toBe(1)
@@ -167,18 +167,18 @@ it("never detaches a debugger installed by the user after ownership was lost", a
   await expect(
     connection.observe(new AbortController().signal),
   ).rejects.toMatchObject({ code: "browser_unavailable" })
-  connection.close()
+  await connection.close()
   expect(f.attached()).toBe(true)
   expect(f.detached()).toBe(0)
 })
 
-it("reports failed cleanup and allows a later close to confirm release", () => {
+it("reports failed cleanup and allows a later close to confirm release", async () => {
   const f = fixture({ failDetach: true }),
     connection = new BrowserDocumentConnection(f.contents)
-  expect(() => connection.close()).toThrow("Detach failed")
+  await expect(connection.close()).rejects.toThrow("Detach failed")
   expect(f.attached()).toBe(true)
   f.allowDetach()
-  connection.close()
+  await connection.close()
   expect(f.attached()).toBe(false)
 })
 

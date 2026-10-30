@@ -32,11 +32,13 @@ function documentIdentity(value: unknown) {
 
 export class BrowserDocumentConnection {
   #closed = false
+  #backspaceHeld = false
   #references = new Map<
     string,
     { backendNodeId: number; document: ReturnType<typeof documentIdentity> }
   >()
   readonly #contents: WebContents
+  readonly #debug: WebContents["debugger"]
   readonly #detached = () => {
     this.#closed = true
     this.#references.clear()
@@ -45,6 +47,7 @@ export class BrowserDocumentConnection {
   constructor(contents: WebContents) {
     this.#contents = contents
     const debug = contents.debugger
+    this.#debug = debug
     if (
       contents.isDestroyed() ||
       !/^https?:\/\//.test(contents.getURL()) ||
@@ -74,20 +77,53 @@ export class BrowserDocumentConnection {
     return this.#closed || this.#contents.isDestroyed()
   }
 
-  close(): void {
+  async #releaseInput(): Promise<void> {
+    if (!this.#backspaceHeld) return
     const contents = this.#contents
-    if (!this.closed && contents.debugger.isAttached())
-      contents.debugger.detach()
+    if (contents.isDestroyed()) {
+      this.#backspaceHeld = false
+      return
+    }
+    if (this.closed || !this.#debug.isAttached())
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "The debugger disconnected with an unconfirmed held key. Close this browser target before resuming input.",
+      )
+    try {
+      await this.#debug.sendCommand("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Backspace",
+        code: "Backspace",
+        windowsVirtualKeyCode: 8,
+      })
+      this.#backspaceHeld = false
+    } catch (cause) {
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "The held Backspace key could not be released: " +
+          (cause instanceof Error ? cause.message : String(cause)),
+      )
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.#releaseInput()
+    if (!this.closed && this.#debug.isAttached()) this.#debug.detach()
     this.#closed = true
     this.#references.clear()
-    contents.debugger.off("detach", this.#detached)
+    this.#debug.off("detach", this.#detached)
   }
 
   async observe(signal: AbortSignal): Promise<JsonObject> {
     signal.throwIfAborted()
     this.#references.clear()
+    if (this.#backspaceHeld)
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Confirm held-key cleanup before observing again.",
+      )
     const contents = this.#contents,
-      debug = contents.debugger
+      debug = this.#debug
     if (this.closed || !debug.isAttached())
       throw new BrowserControlError(
         "browser_unavailable",
@@ -99,19 +135,17 @@ export class BrowserDocumentConnection {
       rejectAbort = reject
     })
     const abort = () => {
-      // Only read-only CDP commands are exposed here. Detaching stops this owned
-      // session and late protocol responses never become observation results.
-      try {
-        this.close()
-      } catch (cause) {
-        rejectAbort(cause)
-        return
-      }
-      rejectAbort(
-        new BrowserControlError(
-          "browser_cancelled",
-          "Browser observation stopped or exceeded its 10-second operation safety deadline.",
-        ),
+      // Read-only work can detach, but any outstanding input state must first
+      // release successfully. No cancellation path detaches a held key.
+      void this.close().then(
+        () =>
+          rejectAbort(
+            new BrowserControlError(
+              "browser_cancelled",
+              "Browser observation stopped or exceeded its 10-second operation safety deadline.",
+            ),
+          ),
+        rejectAbort,
       )
     }
     deadline.addEventListener("abort", abort, { once: true })
@@ -257,11 +291,16 @@ export class BrowserDocumentConnection {
     }
   }
 
-  async typeText(
+  async inputText(
     input: BrowserInputRequest,
     signal: AbortSignal,
   ): Promise<JsonObject> {
     signal.throwIfAborted()
+    if (this.#backspaceHeld)
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Confirm held-key cleanup before sending more input.",
+      )
     const reference = this.#references.get(input.reference)
     // A mutation consumes the observation, including sibling references. There
     // is no automatic retry after focus, dispatch or an uncertain text receipt.
@@ -272,9 +311,11 @@ export class BrowserDocumentConnection {
         "Observe this document again before typing.",
       )
     const contents = this.#contents,
-      debug = contents.debugger
+      debug = this.#debug
     const group = `yakitori_${randomUUID()}`
-    let dispatched = false
+    let dispatched = false,
+      result: JsonObject | undefined,
+      failure: unknown
     const command = async (
       method: string,
       params: Record<string, unknown> = {},
@@ -338,16 +379,20 @@ export class BrowserDocumentConnection {
       // This fixed function runs in an isolated world, with no page-controlled
       // prototype methods or caller-supplied code. It verifies the exact node,
       // including focus redirection and the current text selection.
-      const read = async (requireFocus: boolean) => {
+      const read = async (requireFocus: boolean, selectAll = false) => {
         const response = object(
           await command("Runtime.callFunctionOn", {
             objectId: resolved.objectId,
             returnByValue: true,
-            arguments: [{ value: requireFocus }],
-            functionDeclaration: `function(requireFocus) {
+            arguments: [{ value: requireFocus }, { value: selectAll }],
+            functionDeclaration: `function(requireFocus, selectAll) {
             if (!this.isConnected || (requireFocus && this.getRootNode().activeElement !== this) || this.disabled || this.readOnly) return {ok:false};
             if (!(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement)) return {ok:false};
             if (typeof this.selectionStart !== 'number' || typeof this.selectionEnd !== 'number' || this.value.length > 65536) return {ok:false};
+            if (selectAll) {
+              if (this instanceof HTMLInputElement) HTMLInputElement.prototype.select.call(this);
+              else HTMLTextAreaElement.prototype.select.call(this);
+            }
             return {ok:true,value:this.value,start:this.selectionStart,end:this.selectionEnd};
           }`,
           }),
@@ -365,11 +410,25 @@ export class BrowserDocumentConnection {
           )
         return { value: value.value, start: value.start, end: value.end }
       }
-      const before = await read(true)
+      const before = await read(true, input.action === "fill")
       await verifyDocument()
       signal.throwIfAborted()
       dispatched = true
-      await command("Input.insertText", { text: input.text })
+      if (input.action === "fill" && input.text === "") {
+        if (this.closed)
+          throw new BrowserControlError(
+            "browser_unavailable",
+            "The owned debugger disconnected.",
+          )
+        this.#backspaceHeld = true
+        await command("Input.dispatchKeyEvent", {
+          type: "rawKeyDown",
+          key: "Backspace",
+          code: "Backspace",
+          windowsVirtualKeyCode: 8,
+        })
+        await this.#releaseInput()
+      } else await command("Input.insertText", { text: input.text })
       await verifyDocument()
       const after = await read(false)
       const expected =
@@ -381,25 +440,58 @@ export class BrowserDocumentConnection {
           "browser_input_unconfirmed",
           "Text was dispatched but the exact control did not confirm the expected value. Do not replay it automatically.",
         )
-      return {
+      result = {
         delivered: true,
         textVerified: true,
         bytes: Buffer.byteLength(input.text),
+        valueLength: after.value.length,
       }
     } catch (cause) {
       if (dispatched && cause instanceof BrowserControlError)
-        throw new BrowserControlError(
+        failure = new BrowserControlError(
           "browser_input_unconfirmed",
           "Text dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
             cause.message,
         )
-      throw cause
-    } finally {
-      // Detach at finishTurn also releases this group if the target disappeared.
-      if (!this.closed)
-        await debug.sendCommand("Runtime.releaseObjectGroup", {
-          objectGroup: group,
-        })
+      else failure = cause
     }
+    // Release is independent of cancellation. A failed key-up is surfaced to
+    // the shared input gate and remains retryable by finishTurn/closeSession.
+    const [inputCleanup, groupCleanup] = await Promise.allSettled([
+      this.#releaseInput(),
+      this.closed
+        ? undefined
+        : debug.sendCommand("Runtime.releaseObjectGroup", {
+            objectGroup: group,
+          }),
+    ])
+    if (inputCleanup?.status === "rejected") {
+      const causes = [
+        inputCleanup.reason,
+        ...(failure === undefined ? [] : [failure]),
+        ...(groupCleanup?.status === "rejected" ? [groupCleanup.reason] : []),
+      ]
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Held-key cleanup could not be confirmed.",
+        {
+          cause: new AggregateError(
+            causes,
+            "Browser operation and cleanup failed.",
+          ),
+        },
+      )
+    }
+    if (groupCleanup?.status === "rejected") {
+      if (failure !== undefined)
+        throw new AggregateError(
+          [failure, groupCleanup.reason],
+          "Browser operation and object cleanup failed.",
+        )
+      throw groupCleanup.reason
+    }
+    if (failure !== undefined) throw failure
+    if (!result) throw new Error("Browser input produced no result.")
+    return result
   }
 }

@@ -11,7 +11,7 @@ export type BrowserObservationRequest =
   | Readonly<{ action: "observe"; target: BrowserTarget }>
 
 export type BrowserInputRequest = Readonly<{
-  action: "type"
+  action: "type" | "fill"
   target: BrowserTarget
   reference: string
   text: string
@@ -24,11 +24,11 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
     Object.keys(value).every((key) =>
       ["action", "target", "reference", "text"].includes(key),
     ) &&
-    value.action === "type" &&
+    (value.action === "type" || value.action === "fill") &&
     typeof value.reference === "string" &&
     /^browser_node_[a-f0-9-]{36}$/.test(value.reference) &&
     typeof value.text === "string" &&
-    value.text.length > 0 &&
+    (value.text.length > 0 || value.action === "fill") &&
     Buffer.byteLength(value.text) <= 64 * 1024
   ) {
     const observed = parseBrowserObservationRequest({
@@ -38,7 +38,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
     if (observed.action !== "observe")
       throw new Error("Invalid browser target parser result.")
     return {
-      action: "type",
+      action: value.action,
       target: observed.target,
       reference: value.reference,
       text: value.text,
@@ -46,7 +46,7 @@ export function parseBrowserInputRequest(value: unknown): BrowserInputRequest {
   }
   throw new BrowserControlError(
     "invalid_arguments",
-    "Use type with an exact target, a current inputReference and nonempty text (64KiB input-event safety bound).",
+    "Use type or fill with an exact target and a current inputReference; only fill accepts empty text (64KiB input-event safety bound).",
   )
 }
 
@@ -104,15 +104,16 @@ export function parseBrowserRequest(
 ): BrowserObservationRequest | BrowserInputRequest | BrowserNavigationRequest {
   if (isJsonObject(value) && value.action === "navigate")
     return parseBrowserNavigationRequest(value)
-  return isJsonObject(value) && value.action === "type"
+  return isJsonObject(value) &&
+    (value.action === "type" || value.action === "fill")
     ? parseBrowserInputRequest(value)
     : parseBrowserObservationRequest(value)
 }
 
 export class BrowserControlError extends Error {
   readonly code: string
-  constructor(code: string, message: string) {
-    super(message)
+  constructor(code: string, message: string, options?: ErrorOptions) {
+    super(message, options)
     this.code = code
   }
 }
