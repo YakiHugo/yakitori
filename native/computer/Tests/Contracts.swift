@@ -29,6 +29,11 @@ import Foundation
         rejects { try snapshot.validate(id: snapshot.id, windows: [relaunched], displays: []) }
         let moved = WindowIdentity(pid: 42, launched: window.launched, windowID: 7, frame: CGRect(x: 0, y: 0, width: 400, height: 200), layer: 0)
         rejects { try snapshot.validate(id: snapshot.id, windows: [moved], displays: []) }
+        let stablePreview = try snapshot.validatePreview(windows: [window], displays: [])
+        let movingPreview = try snapshot.validatePreview(windows: [moved], displays: [])
+        precondition(stablePreview && !movingPreview)
+        rejects(code: "stale_target") { _ = try snapshot.validatePreview(windows: [relaunched], displays: []) }
+        rejects(code: "window_not_found") { _ = try snapshot.validatePreview(windows: [], displays: []) }
         let other = WindowIdentity(pid: 42, launched: window.launched, windowID: 8, frame: CGRect(x: 100, y: 250, width: 200, height: 200), layer: 0)
         let appSnapshot = Snapshot(scope: .app, frame: CGRect(x: -300, y: 50, width: 600, height: 400), windows: [window, other], display: nil,
             imageWidth: 1200, imageHeight: 800, elements: [])
@@ -47,6 +52,8 @@ import Foundation
         rejects(code: "invalid_element") { _ = try owned.target(["element": "0"]) }
         rejects(code: "invalid_element") { _ = try owned.target(["element": 1]) }
         try appSnapshot.validate(id: appSnapshot.id, windows: [window, other], displays: [])
+        let closingAppWindow = try appSnapshot.validatePreview(windows: [window], displays: [])
+        precondition(!closingAppWindow)
         rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [window], displays: []) }
         rejects { try appSnapshot.validate(id: appSnapshot.id, windows: [other, window], displays: []) }
         let display = DisplayIdentity(id: 5, frame: CGRect(x: -1000, y: 0, width: 1600, height: 900))
@@ -57,6 +64,9 @@ import Foundation
         let desktopTarget = try screen.target(["x": 0.0, "y": 0.0])
         precondition(desktopTarget.window == nil && desktopTarget.point == CGPoint(x: -1000, y: 0))
         try screen.validate(id: screen.id, windows: [window, other], displays: [display])
+        let changingScreenContent = try screen.validatePreview(windows: [], displays: [display])
+        precondition(changingScreenContent)
+        rejects(code: "display_not_found") { _ = try screen.validatePreview(windows: [], displays: []) }
         rejects { try screen.validate(id: screen.id, windows: [window, other], displays: []) }
         let textOnly = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: nil, imageHeight: nil, elements: [])
         rejects { _ = try textOnly.point(x: 0, y: 0) }
@@ -170,6 +180,18 @@ import Foundation
         precondition(!absent.satisfied(by: partial))
         let computer = Computer()
         computer.lastObservation = after
+        computer.snapshot = before
+        let invalidPreviews: [[String: Any]] = [
+            ["action": "preview", "mode": "ax", "pid": 42, "window_id": 7, "launch_time": 100],
+            ["action": "preview", "pid": 42, "window_id": 7],
+            ["action": "preview", "pid": 42, "window_id": 7, "launch_time": true],
+            ["action": "preview", "pid": 42, "window_id": 7, "launch_time": 100, "root_element": 0]
+        ]
+        for args in invalidPreviews {
+            do { _ = try await computer.execute(args); preconditionFailure("Invalid preview target must be refused") }
+            catch let failure as ComputerFailure { precondition(failure.code == "invalid_arguments") }
+            precondition(computer.snapshot?.id == before.id && computer.lastObservation?.id == after.id)
+        }
         let queried = try computer.query(["snapshot_id": after.id, "query": "AFTER", "limit": 1])["structuredContent"] as! [String: Any]
         precondition((queried["elements"] as! [[String: Any]]).count == 1 && queried["input_available"] as? Bool == false)
         rejects { _ = try computer.query(["snapshot_id": before.id]) }

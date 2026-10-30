@@ -82,15 +82,22 @@ final class ObservationCanvas {
 }
 
 extension Computer {
-    func observe(_ args: [String: Any]) async throws -> [String: Any] {
+    func observe(_ input: [String: Any], readOnly: Bool = false) async throws -> [String: Any] {
+        var args = input
+        if readOnly {
+            let allowed: Set<String> = ["action", "mode", "scope", "pid", "window_id", "display_id", "launch_time"]
+            guard Set(args.keys).isSubset(of: allowed), args["mode"] == nil || args["mode"] as? String == "vision" else {
+                throw ComputerFailure("invalid_arguments", "Preview accepts only a pinned vision target, without input or AX options.")
+            }
+            args["mode"] = "vision"
+        }
         // A failed replacement observation must not leave an older input ticket usable.
         let previous = lastObservation
-        snapshot = nil
-        lastObservation = nil
+        if !readOnly { snapshot = nil; lastObservation = nil }
         let request = try ObservationRequest(args)
         let expectedLaunch = args["launch_time"] as? Double
-        if args["launch_time"] != nil {
-            guard request.scope != .screen, let expectedLaunch, expectedLaunch.isFinite, expectedLaunch > 0 else {
+        if args["launch_time"] != nil || (readOnly && request.scope != .screen) {
+            guard request.scope != .screen, !(args["launch_time"] is Bool), let expectedLaunch, expectedLaunch.isFinite, expectedLaunch > 0 else {
                 throw ComputerFailure("invalid_arguments", "Observation launch_time must pin a positive process incarnation in window/app scope.")
             }
         }
@@ -112,14 +119,14 @@ extension Computer {
         }
         let currentWindows = try windows()
         let display: DisplayIdentity?
-        let selected: [WindowIdentity]
-        let frame: CGRect
+        var selected: [WindowIdentity]
+        var frame: CGRect
         switch request.scope {
         case .window, .app:
             selected = currentWindows.filter { $0.pid == request.pid && (request.scope == .app || $0.windowID == request.windowID) }
             guard !selected.isEmpty else { throw ComputerFailure("window_not_found", "No matching visible windows exist on the current desktop.") }
             if let expectedLaunch, !selected.allSatisfy({ $0.launched?.timeIntervalSince1970 == expectedLaunch }) {
-                throw ComputerFailure("stale_snapshot", "The requested observation process incarnation changed; list targets again.")
+                throw ComputerFailure(readOnly ? "stale_target" : "stale_snapshot", "The requested observation process incarnation changed; list targets again.")
             }
             frame = selected.dropFirst().reduce(selected[0].frame) { $0.union($1.frame) }
             display = nil
@@ -133,7 +140,7 @@ extension Computer {
             // must not invalidate every display capture as they appear/disappear.
             selected = currentWindows.filter { $0.layer == 0 && $0.frame.intersects(frame) }
         }
-        let revisions = try Dictionary(uniqueKeysWithValues: Set(selected.map(\.pid)).map { ($0, try NativeResources.revision($0)) })
+        let revisions: [Int32: UInt64] = readOnly ? [:] : try Dictionary(uniqueKeysWithValues: Set(selected.map(\.pid)).map { ($0, try NativeResources.revision($0)) })
         var image: CGImage?
         if request.mode != .ax {
             let shareable: SCShareableContent = try await nativeRequest { done in
@@ -142,6 +149,17 @@ extension Computer {
                     else if let content { done(.success(content)) }
                     else { done(.failure(ComputerFailure("capture_failed", "macOS returned no window content."))) }
                 }
+            }
+            if readOnly && display == nil {
+                // Compose against the capture provider's geometry, which can be
+                // newer than WindowServer's initial catalog while a user drags.
+                selected = selected.compactMap { target in
+                    guard let source = shareable.windows.first(where: { $0.windowID == target.windowID && $0.owningApplication?.processID == target.pid }),
+                          source.frame.width > 1, source.frame.height > 1 else { return nil }
+                    return WindowIdentity(pid: target.pid, launched: target.launched, windowID: target.windowID, frame: source.frame, layer: target.layer)
+                }
+                guard let first = selected.first else { throw ComputerFailure("window_not_found", "The preview target is no longer capturable.") }
+                frame = selected.dropFirst().reduce(first.frame) { $0.union($1.frame) }
             }
             // Bound one complete reply (PNG plus base64 and AX) to the host's
             // 8 MiB framing boundary. This is an allocation boundary, not a quota.
@@ -209,7 +227,9 @@ extension Computer {
             recognitionTruncated = recognized.truncated
         }
         try Task.checkCancellation()
-        try next.validate(id: next.id, windows: windows(), displays: displays())
+        let geometryStable: Bool
+        if readOnly { geometryStable = try next.validatePreview(windows: windows(), displays: displays()) }
+        else { try next.validate(id: next.id, windows: windows(), displays: displays()); geometryStable = true }
         var png: Data?
         if let image {
             guard let encoded = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
@@ -231,8 +251,12 @@ extension Computer {
            previous.display == next.display {
             data["diff"] = next.difference(from: previous)
         }
-        snapshot = next
-        lastObservation = next
+        if readOnly {
+            data.removeValue(forKey: "snapshot_id")
+            data["preview_id"] = "preview_" + UUID().uuidString
+            data["input_available"] = false
+            data["geometry_stable"] = geometryStable
+        } else { snapshot = next; lastObservation = next }
         return try result(data, image: png)
     }
 
