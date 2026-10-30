@@ -150,8 +150,19 @@ export class BrowserDocumentConnection {
             "The debugger disconnected with an unconfirmed held input. Close this browser target before resuming input.",
           )
         try {
-          await this.#debug.sendCommand(held.method, held.params)
-          this.#heldInputs.pop()
+          await this.#mutations.run(
+            () =>
+              this.#debug.sendCommand(held.method, held.params).then(() => {
+                // A late positive release acknowledgement still retires this
+                // release. Retrying cleanup must never repeat an applied key-up.
+                if (this.#heldInputs.at(-1) === held) this.#heldInputs.pop()
+                else if (!contents.isDestroyed())
+                  throw new Error(
+                    "Held input changed before its release acknowledgement.",
+                  )
+              }),
+            this.#mutationDeadline(),
+          )
         } catch (cause) {
           throw new BrowserControlError(
             "browser_cleanup_failed",
@@ -170,8 +181,8 @@ export class BrowserDocumentConnection {
   }
 
   async close(): Promise<void> {
-    this.#mutations.assertCompleted()
     await this.#releaseInput()
+    this.#mutations.assertCompleted()
     if (!this.closed && this.#debug.isAttached()) {
       try {
         await this.#chooser.disarm((method, params, sessionId) =>
@@ -435,6 +446,16 @@ export class BrowserDocumentConnection {
         ])
   }
 
+  #mutationDeadline(sessionId?: string): AbortSignal {
+    // A modal dialog or stalled renderer can leave a native command unresolved.
+    // Bound the caller's wait, retaining unknown effects until ACK/target death.
+    // Ten seconds is a per-command safety boundary, not a product action quota.
+    return AbortSignal.any([
+      this.#mutationLifetime(sessionId),
+      AbortSignal.timeout(10_000),
+    ])
+  }
+
   async #inputCommand(
     method: string,
     params: Record<string, unknown>,
@@ -454,7 +475,7 @@ export class BrowserDocumentConnection {
       throw new Error("Browser input must use the owned root session.")
     // Ordinary cancellation still waits for acknowledgement. A lost original
     // session can report promptly, but unconfirmed mutations prevent cleanup.
-    const closed = this.#mutationLifetime(sessionId)
+    const closed = this.#mutationDeadline(sessionId)
     try {
       return await this.#mutations.run(
         () => this.#debug.sendCommand(method, params, sessionId),
@@ -480,10 +501,7 @@ export class BrowserDocumentConnection {
     try {
       return await this.#mutations.run(
         () => this.#debug.sendCommand(method, params, sessionId),
-        AbortSignal.any([
-          this.#mutationLifetime(sessionId),
-          AbortSignal.timeout(10_000),
-        ]),
+        this.#mutationDeadline(sessionId),
       )
     } catch (cause) {
       if (cause instanceof BrowserControlError) throw cause
@@ -1016,10 +1034,7 @@ export class BrowserDocumentConnection {
               input.directory,
               group,
             ),
-          AbortSignal.any([
-            this.#mutationLifetime(sessionId),
-            AbortSignal.timeout(10_000),
-          ]),
+          this.#mutationDeadline(sessionId),
           "effect",
         )
         if (applied === false) {
