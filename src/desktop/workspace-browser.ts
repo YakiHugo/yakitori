@@ -803,6 +803,11 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         switch (input.action) {
+          case "chooser_arm":
+          case "chooser_inspect":
+          case "chooser_disarm":
+            observation = await entry.connection.fileChooser(input, signal)
+            break
           case "frames":
             observation = await entry.connection.frames(
               input.offset ?? 0,

@@ -3280,6 +3280,7 @@ describe("application composition", () => {
     "browser_navigate",
     "browser_upload",
     "browser_view",
+    "browser_chooser",
   ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
     const browserInput =
       browserTool === "browser"
@@ -3310,9 +3311,10 @@ describe("application composition", () => {
                 fromUrl: "https://owned.test/",
                 paths: [],
               }
-            : browserTool === "browser_view"
+            : browserTool === "browser_view" ||
+                browserTool === "browser_chooser"
               ? {
-                  action: "show",
+                  action: browserTool === "browser_view" ? "show" : "arm",
                   target: {
                     tabId: "owned",
                     webContentsId: 17,
