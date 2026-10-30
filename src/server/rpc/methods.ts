@@ -11,6 +11,7 @@ import type {
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
+import type { ComputerControl } from "../computer-control.ts"
 import type { ComputerPreviewService } from "../computer-preview.ts"
 
 export type {
@@ -136,6 +137,7 @@ export type RpcMethodOutcome = Readonly<{
 }>
 
 export type RpcMethodContext = Readonly<{
+  computerControl?: ComputerControl
   computerPreview?: ComputerPreviewService
   mcp?: McpService
   providerConfiguration?: ProviderService

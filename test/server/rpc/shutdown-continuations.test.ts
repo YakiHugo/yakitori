@@ -33,11 +33,17 @@ describe("existing-work controls during process drain", () => {
   it("classifies only connection and existing-work continuations", () => {
     expect(
       rpcMethods
+        .find((entry) => entry.method === "computer/takeover")
+        ?.scope({}),
+    ).toBeUndefined()
+    expect(
+      rpcMethods
         .filter((entry) => entry.shutdownContinuation)
         .map((entry) => entry.method)
         .sort(),
     ).toEqual([
       "computer/preview/stop",
+      "computer/takeover",
       "engineSession/cancel",
       "engineSession/respondPermission",
       "server/ping",

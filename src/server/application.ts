@@ -90,6 +90,7 @@ import {
   ChatGPTModelCatalogError,
   createChatGPTModelConnections,
 } from "./chatgpt-model-connections.ts"
+import { ComputerControl, type ComputerUseOwner } from "./computer-control.ts"
 import { ComputerPreviewService } from "./computer-preview.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import {
@@ -432,7 +433,7 @@ export async function createYakitoriApplication(
     const mcpManagers = new Map<string, McpConnectionManager>()
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
-    let computerOwner: { sessionId: string; turnId: string } | undefined
+    const computerControl = new ComputerControl()
     const activeMate = await resolveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -1000,6 +1001,7 @@ export async function createYakitoriApplication(
             (!sideConversation && !isSubagentThread(stored)),
         ),
       )
+      let activeComputerTurn: ComputerUseOwner | undefined
       const mcpExtension =
         options.mcp === false
           ? undefined
@@ -1040,23 +1042,23 @@ export async function createYakitoriApplication(
                           throw new Error(
                             "Computer use requires an active turn.",
                           )
-                        if (
-                          computerOwner !== undefined &&
-                          (computerOwner.sessionId !== stored.metadata.id ||
-                            computerOwner.turnId !== context.turnId)
-                        )
+                        if (activeComputerTurn?.turnId !== context.turnId)
+                          throw new Error("Computer tool has no owning task.")
+                        const refusal =
+                          computerControl.acquire(activeComputerTurn)
+                        if (refusal)
                           return {
                             ok: false,
-                            code: "computer_busy",
+                            code: refusal,
                             message:
-                              "Computer use is busy in another conversation.",
+                              refusal === "computer_taken_over"
+                                ? "The user took over the computer. Reconnect computer use before sending input."
+                                : "Computer use is busy in another conversation.",
                             content:
-                              "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
+                              refusal === "computer_taken_over"
+                                ? "The user took over the computer. Do not retry input until computer use is reconnected."
+                                : "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
                           }
-                        computerOwner = {
-                          sessionId: stored.metadata.id,
-                          turnId: context.turnId,
-                        }
                         return tool.execute(input, context)
                       },
                     })),
@@ -1244,20 +1246,46 @@ export async function createYakitoriApplication(
           return {
             ...task,
             async run(session, execution) {
+              const released = Promise.withResolvers<void>()
+              // Cleanup failures also flow through task settlement; retain a
+              // rejection handler when no takeover caller is waiting on it.
+              void released.promise.catch(() => {})
+              const owner: ComputerUseOwner = {
+                sessionId: stored.metadata.id,
+                turnId: input.submissionId,
+                released: released.promise,
+                async interrupt() {
+                  goalRuntime.pauseForInterrupt(
+                    stored.metadata.id,
+                    input.submissionId,
+                  )
+                  await session.endpoints.send({
+                    type: "interrupt",
+                    expectedTurnId: input.submissionId,
+                    reason: "User took over the computer.",
+                  })
+                },
+              }
+              activeComputerTurn = owner
+              const releaseComputer = async () => {
+                try {
+                  if (computerControl.owner === owner) {
+                    await settleTaskResources(() => mcpManager?.finishTurn())
+                    computerControl.release(owner)
+                  }
+                  released.resolve()
+                } catch (cause) {
+                  released.reject(cause)
+                  throw cause
+                } finally {
+                  if (activeComputerTurn === owner)
+                    activeComputerTurn = undefined
+                }
+              }
               try {
                 return await task.run(session, execution)
               } finally {
-                if (
-                  computerOwner?.sessionId === stored.metadata.id &&
-                  computerOwner.turnId === input.submissionId
-                ) {
-                  await settleTaskResources(() => mcpManager?.finishTurn())
-                  if (
-                    computerOwner?.sessionId === stored.metadata.id &&
-                    computerOwner.turnId === input.submissionId
-                  )
-                    computerOwner = undefined
-                }
+                await releaseComputer()
               }
             },
           }
@@ -1277,11 +1305,8 @@ export async function createYakitoriApplication(
           ])
           // A failed turn cleanup keeps the computer occupied until its owning
           // Session confirms that the managed MCP connection/process is closed.
-          if (
-            mcpResult[0]?.status === "fulfilled" &&
-            computerOwner?.sessionId === stored.metadata.id
-          )
-            computerOwner = undefined
+          if (mcpResult[0]?.status === "fulfilled")
+            computerControl.releaseSession(stored.metadata.id)
           const results = [...mcpResult, ...processorResult, ...resourceResults]
           const errors = results.flatMap((result) =>
             result.status === "rejected" ? [result.reason] : [],
@@ -1573,6 +1598,7 @@ export async function createYakitoriApplication(
           chatgpt: chatGPTConnections,
           subscriptionUsage,
           userConfig: routedUserConfig,
+          computerControl,
           ...(computerPreview === undefined ? {} : { computerPreview }),
           availableProviders: modelRouter.namespaces,
           rolloutAssets,
