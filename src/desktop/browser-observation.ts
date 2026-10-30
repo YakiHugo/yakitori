@@ -7,6 +7,7 @@ import {
   type BrowserPointerRequest,
   type BrowserSelectRequest,
   type BrowserTextInputRequest,
+  type BrowserUploadRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 import {
@@ -15,6 +16,7 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
+import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import { BrowserFrames, type BrowserReadCommand } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import {
@@ -606,6 +608,151 @@ export class BrowserDocumentConnection {
     }
     await this.#finishInput(group, failure, reference.frame?.sessionId)
     if (!result) throw new Error("Browser input produced no result.")
+    return result
+  }
+
+  async uploadFiles(
+    input: BrowserUploadRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    const reference = this.#consumeReference(input.reference, "element"),
+      group = `yakitori_${randomUUID()}`
+    const command = (method: string, params: Record<string, unknown> = {}) =>
+      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
+    let attempted = false,
+      result: JsonObject | undefined,
+      failure: unknown
+    try {
+      if (reference.document.url !== input.fromUrl)
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The selected document URL does not match the upload approval. Observe again.",
+        )
+      const objectId = await this.#resolveReference(reference, group, signal)
+      const inspect = async (readFiles: boolean) => {
+        const reply = object(
+          await command("Runtime.callFunctionOn", {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: inspectBrowserFiles.toString(),
+            arguments: [{ value: readFiles }],
+          }),
+        )
+        const state = object(object(reply.result).value)
+        if (state.ok !== true)
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            typeof state.reason === "string"
+              ? state.reason
+              : "The exact file input is unavailable.",
+          )
+        return state
+      }
+      const before = await inspect(false)
+      if (
+        typeof before.multiple !== "boolean" ||
+        typeof before.directory !== "boolean"
+      )
+        throw new Error("Chromium returned invalid file input capabilities.")
+      if (input.files.length > 1 && before.multiple !== true)
+        throw new BrowserControlError(
+          "browser_input_unavailable",
+          "This file input does not accept multiple files.",
+        )
+      if (input.files.length && before.directory === true)
+        throw new BrowserControlError(
+          "browser_input_unavailable",
+          "This input requires a directory workflow, not individual file paths.",
+        )
+      await this.#verifyDocument(reference, signal)
+      attempted = true
+      if (input.files.length)
+        await command("DOM.setFileInputFiles", {
+          backendNodeId: reference.backendNodeId,
+          files: input.files.map((file) => file.path),
+        })
+      else {
+        // Electron 43's CDP files:[] acknowledges without clearing. This is
+        // an explicit clear operation, never a retry after uncertain upload.
+        const reply = object(
+          await command("Runtime.callFunctionOn", {
+            objectId,
+            returnByValue: true,
+            functionDeclaration: clearBrowserFiles.toString(),
+          }),
+        )
+        const cleared = object(object(reply.result).value)
+        if (cleared.applied === false) attempted = false
+        if (cleared.ok !== true)
+          throw new BrowserControlError(
+            attempted
+              ? "browser_input_unconfirmed"
+              : "browser_input_unavailable",
+            "The exact file input did not confirm clearing.",
+          )
+      }
+      await this.#verifyDocument(reference, signal)
+      const after = await inspect(true)
+      if (!Array.isArray(after.files))
+        throw new Error("Chromium returned invalid file metadata.")
+      const files = after.files.map((value) => {
+        const file = object(value)
+        if (
+          typeof file.name !== "string" ||
+          typeof file.size !== "number" ||
+          typeof file.lastModified !== "number" ||
+          typeof file.relativePath !== "string"
+        )
+          throw new Error("Chromium returned invalid file metadata fields.")
+        return {
+          name: file.name,
+          size: file.size,
+          lastModified: file.lastModified,
+          relativePath: file.relativePath,
+        }
+      })
+      if (
+        files.length !== input.files.length ||
+        files.some((file, index) => {
+          const expected = input.files[index]
+          return (
+            !expected ||
+            file.name !== expected.name ||
+            file.size !== expected.size ||
+            file.lastModified !== expected.lastModified ||
+            file.relativePath !== ""
+          )
+        })
+      )
+        throw new BrowserControlError(
+          "browser_input_unconfirmed",
+          "The file input did not confirm the selected file metadata. Observe again; do not replay automatically.",
+        )
+      result = {
+        delivered: true,
+        action: "upload",
+        filesVerified: true,
+        files: files.map(({ name, size, lastModified }) => ({
+          name,
+          size,
+          lastModified,
+        })),
+        cleared: input.files.length === 0,
+        events: input.files.length ? "chromium" : "synthetic",
+      }
+    } catch (cause) {
+      failure =
+        attempted && cause instanceof BrowserControlError
+          ? new BrowserControlError(
+              "browser_input_unconfirmed",
+              "File selection was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+                cause.message,
+            )
+          : cause
+    }
+    await this.#finishInput(group, failure, reference.frame?.sessionId)
+    if (!result) throw new Error("Browser file selection produced no result.")
     return result
   }
 
