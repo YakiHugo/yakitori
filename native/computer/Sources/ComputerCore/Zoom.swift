@@ -29,6 +29,7 @@ extension Computer {
             throw ComputerFailure("stale_snapshot", "zoom requires the last screenshot's snapshot_id.")
         }
         let region = try zoomRegion(args, snapshot: previous)
+        let recognize = try recognitionEnabled(args, mode: .vision)
         let dimension = args["max_dimension"] as? Int ?? 512
         // The same 1024-pixel reply allocation boundary as observe keeps a
         // worst-case RGBA PNG plus base64 inside the host's 8 MiB MCP frame.
@@ -94,6 +95,14 @@ extension Computer {
         var next = Snapshot(scope: previous.scope, frame: region, windows: selected, display: previous.display,
             imageWidth: image.width, imageHeight: image.height, elements: [])
         next.mode = .vision; next.revisions = previous.revisions
+        var recognitionTruncated = false
+        if recognize {
+            let recognized = try await recognizeText(image)
+            next.textRegions = recognized.regions
+            recognitionTruncated = recognized.truncated
+        }
+        try Task.checkCancellation()
+        try next.validate(id: next.id, windows: windows(), displays: displays())
         snapshot = next; lastObservation = next
         var data: [String: Any] = ["snapshot_id": next.id, "source_snapshot_id": previous.id, "scope": next.scope.rawValue,
             "mode": "vision", "frame": frameData(region), "image_width": image.width, "image_height": image.height,
@@ -102,6 +111,7 @@ extension Computer {
         if next.scope != .screen { data["pid"] = selected.first?.pid }
         if next.scope == .window { data["window_id"] = selected.first?.windowID }
         if let display = next.display { data["display_id"] = display.id }
+        if recognize { data["text_regions"] = next.textRegions.map(\.data); data["text_regions_truncated"] = recognitionTruncated }
         return try result(data, image: png)
     }
 }

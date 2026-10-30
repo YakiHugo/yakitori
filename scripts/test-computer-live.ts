@@ -19,6 +19,7 @@ import { verifyComputerCapabilities } from "./computer-capabilities.ts"
 import { prepareComputerFixture } from "./computer-fixture.ts"
 import { verifyComputerInteractions } from "./computer-interactions.ts"
 import { verifyComputerIsolation } from "./computer-isolation.ts"
+import { verifyComputerRecognition } from "./computer-recognition.ts"
 import { verifyComputerZoom } from "./computer-zoom.ts"
 
 const { values } = parseArgs({
@@ -786,6 +787,15 @@ try {
           waitFor,
           check,
           cleanup: () => client.bindTool(cleanup)({}),
+        })
+      if (runGroup === "interactions")
+        await verifyComputerRecognition({
+          call,
+          pid,
+          windowID: (await state()).interaction_window_id,
+          state,
+          waitFor,
+          check,
         })
       if (runGroup === "interactions")
         await verifyComputerZoom({

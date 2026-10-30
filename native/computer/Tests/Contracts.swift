@@ -68,6 +68,20 @@ import Foundation
         rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 801, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 1, "y1": 1, "x2": 1, "y2": 10], snapshot: snapshot) }
         rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 10, "y2": 10], snapshot: textOnly) }
+        precondition(textRegionFrame(CGRect(x: 0.25, y: 0.5, width: 0.5, height: 0.25), width: 800, height: 400)
+            == CGRect(x: 200, y: 100, width: 400, height: 100))
+        var recognized = snapshot
+        let region = TextRegion(text: "Canvas", confidence: 0.9, frame: CGRect(x: 100, y: 100, width: 200, height: 100))
+        recognized.textRegions = [region]
+        let regionTarget = try recognized.target(["region_id": region.id])
+        precondition(regionTarget.window == window && regionTarget.point == CGPoint(x: -200, y: 125))
+        rejects(code: "invalid_region") { _ = try snapshot.target(["region_id": region.id]) }
+        rejects(code: "invalid_arguments") { _ = try recognized.target(["region_id": region.id, "element": 0]) }
+        rejects(code: "invalid_arguments") { _ = try recognized.target(["region_id": region.id, "x": 0.0, "y": 0.0]) }
+        rejects { _ = try recognitionEnabled(["recognize_text": 1], mode: .vision) }
+        rejects { _ = try recognitionEnabled(["recognize_text": true], mode: .ax) }
+        let enabledRecognition = try recognitionEnabled(["recognize_text": true], mode: .both)
+        precondition(enabledRecognition)
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()
