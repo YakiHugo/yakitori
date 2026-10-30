@@ -46,6 +46,7 @@ await run("swiftc", [
     .filter((name) => name.endsWith(".swift"))
     .map((name) => join(core, name)),
   "native/computer/Tests/Contracts.swift",
+  "native/computer/Tests/ClipboardContracts.swift",
   "-o",
   executable,
 ])
@@ -90,6 +91,16 @@ try {
   helperPid = pid
   console.log("Native MCP app permission status:", result.structuredContent)
   const call = client.bindTool(control)
+  const invalidClipboardImage = await call({
+    action: "clipboard",
+    clipboard_action: "write",
+    format: "image",
+    png_base64: Buffer.from("invalid owned PNG fixture").toString("base64"),
+  })
+  assert.equal(
+    invalidClipboardImage.structuredContent?.code,
+    "clipboard_image_invalid",
+  )
   const app = join(fixtureRoot, "Yakitori Launch Fixture.app")
   const contents = join(app, "Contents")
   await mkdir(join(contents, "MacOS"), { recursive: true })

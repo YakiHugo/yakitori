@@ -52,6 +52,8 @@ import Darwin
             }, "displays": try displays().map { ["display_id": $0.id, "frame": frameData($0.frame), "main": $0.id == CGMainDisplayID()] as [String: Any] }])
         case "launch":
             return try await launch(args)
+        case "clipboard":
+            return try await clipboardAccess(args)
         case "observe":
             return try await observe(args)
         case "query": return try query(args)

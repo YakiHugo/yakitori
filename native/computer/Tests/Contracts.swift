@@ -12,6 +12,7 @@ import Foundation
     }
 
     static func main() async throws {
+        try await verifyClipboardAccess()
         let born = processLaunchDate(getpid())
         precondition(born != nil && born == processLaunchDate(getpid()))
         precondition(processLaunchDate(-1) == nil)
