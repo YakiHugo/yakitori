@@ -32,6 +32,7 @@ assert.equal(
   "Native web-input acceptance requires macOS",
 )
 const root = await mkdtemp(join(tmpdir(), "yakitori-web-input-"))
+const multipleWindows = values.case?.includes("two web windows") === true
 const client = new McpClient(
   "computer",
   {
@@ -82,6 +83,7 @@ try {
     ? ["webkit", "electron"]
     : [values.engine]) {
     const output = join(root, `${engine}.json`)
+    const secondOutput = join(root, `${engine}-second.json`)
     // Keep owned app resources in its disposable directory. LaunchServices
     // apps must not need a new Documents-folder privacy grant for test sources.
     const page = join(root, "web-fixture.html")
@@ -115,6 +117,7 @@ try {
       )
       args = [script, output, page]
     }
+    if (multipleWindows) args.push(secondOutput)
     let child: ReturnType<typeof spawn> | undefined
     let nativePID: number | undefined
     let errors = ""
@@ -254,13 +257,15 @@ try {
           listed.structuredContent?.windows as {
             pid: number
             window_id: number
+            title: string
           }[]
         ).filter((row) => row.pid === pid)
         assert(
-          windows.length <= 1,
-          "Owned fixture must have exactly one window",
+          windows.length <= (multipleWindows ? 2 : 1),
+          "Unexpected fixture window",
         )
-        windowID = windows[0]?.window_id
+        if (multipleWindows && windows.length !== 2) return false
+        windowID = windows.find((row) => !row.title.endsWith(" 2"))?.window_id
         return windowID !== undefined
       })
       type Row = {
@@ -286,6 +291,7 @@ try {
             return false
           assert(!next.isError, JSON.stringify(next.structuredContent))
           result = next
+          if (multipleWindows) lastAction = next.structuredContent
           return (next.structuredContent?.elements as Row[]).some(
             (row) =>
               row.title === "Web increment" ||
@@ -338,6 +344,82 @@ try {
           throw error
         }
       }
+      if (multipleWindows)
+        await check(
+          "two web windows keep addressed background input in the original window",
+          async () => {
+            const primaryWindow = windowID
+            const listed = await call({ action: "list" })
+            const secondWindow = (
+              listed.structuredContent?.windows as {
+                pid: number
+                window_id: number
+                title: string
+              }[]
+            ).find(
+              (row) => row.pid === pid && row.title.endsWith(" 2"),
+            )?.window_id
+            assert(
+              primaryWindow !== undefined &&
+                secondWindow !== undefined &&
+                primaryWindow !== secondWindow,
+            )
+            const readSecond = async () =>
+              JSON.parse(await readFile(secondOutput, "utf8")) as State
+            await waitFor(async () => {
+              try {
+                return (await readSecond()).ready
+              } catch (cause) {
+                if (
+                  cause instanceof Error &&
+                  "code" in cause &&
+                  cause.code === "ENOENT"
+                )
+                  return false
+                throw cause
+              }
+            })
+            assert.equal((await state())?.first, "")
+            assert.equal((await readSecond()).first, "")
+            assert(backgroundPID !== undefined)
+            try {
+              for (const [id, text] of [
+                [primaryWindow, "Primary 猫"],
+                [secondWindow, "Secondary 犬"],
+                [primaryWindow, " again"],
+              ] as const) {
+                windowID = id
+                const observed = await observe()
+                const typed = await call({
+                  action: "type",
+                  delivery: "background",
+                  snapshot_id: observed.structuredContent?.snapshot_id,
+                  element: target(observed, "Web first").element,
+                  text,
+                })
+                lastAction = typed.structuredContent
+                assert(!typed.isError, JSON.stringify(typed.structuredContent))
+                await waitFor(async () =>
+                  id === primaryWindow
+                    ? (await state())?.first ===
+                      (text === " again" ? "Primary 猫 again" : text)
+                    : (await readSecond()).first === text,
+                )
+                assert.equal(
+                  (await call({ action: "status" })).structuredContent
+                    ?.frontmost_pid,
+                  backgroundPID,
+                )
+              }
+              assert.equal((await state())?.first, "Primary 猫 again")
+              assert.equal((await readSecond()).first, "Secondary 犬")
+              assert.equal((await state())?.second, "")
+              assert.equal((await readSecond()).second, "")
+            } finally {
+              windowID = primaryWindow
+            }
+          },
+        )
       await check(
         "native screenshot captures the owned web page pixels",
         async () => {
