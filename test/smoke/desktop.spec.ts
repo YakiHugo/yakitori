@@ -522,6 +522,7 @@ test("agent browser observations and actions use the exact owned tab through rea
   const uploadedFiles: { name: string; text: string }[][] = []
   const chooserFiles: { name: string; text: string }[][] = []
   const dialogReplies: { value: boolean; trusted: boolean }[] = []
+  const promptReplies: { value: string | null; trusted: boolean }[] = []
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
     []
   const frameSelectEvents: {
@@ -686,6 +687,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         "/directory-bytes",
         "/chooser-bytes",
         "/dialog-reply",
+        "/prompt-reply",
       ].includes(request.url ?? "")
     ) {
       let body = ""
@@ -701,6 +703,8 @@ test("agent browser observations and actions use the exact owned tab through rea
           uploadedDirectoryFiles.push(JSON.parse(body))
         else if (request.url === "/dialog-reply")
           dialogReplies.push(JSON.parse(body))
+        else if (request.url === "/prompt-reply")
+          promptReplies.push(JSON.parse(body))
         else fileChoiceEvents.push(JSON.parse(body))
         response.writeHead(204)
         response.end()
@@ -817,7 +821,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       thirdRequests++
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        '<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label>',
+        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button>`,
       )
       return
     }
@@ -1540,6 +1544,66 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "observe", target: navigationReceipt.target },
               id: "observe_navigation",
             }
+          } else if (step === 83) {
+            navigatedObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_dialog",
+              input: {
+                action: "arm",
+                target: navigatedObservation.target,
+                fromUrl: destinationUrl,
+                response: {
+                  type: "prompt",
+                  accept: true,
+                  message: "Owned text?",
+                  promptText: "你好 猫 🌍",
+                },
+              },
+              id: "arm_native_prompt",
+            }
+          } else if (step === 84) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              button = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native prompt")
+            if (!button?.elementReference)
+              throw new Error("Missing native prompt button")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: button.elementReference,
+              },
+              id: "trigger_native_prompt",
+            }
+          } else if (step === 85) {
+            const current = toolResult(body.messages ?? [], "delivered")
+            await expect.poll(() => promptReplies.length).toBe(1)
+            tool = {
+              name: "browser_dialog",
+              input: { action: "inspect", target: current.target },
+              id: "inspect_native_prompt",
+            }
+          } else if (step === 86) {
+            const current = toolResult(body.messages ?? [], "state")
+            if (current.state !== "answered" || current.expired !== false)
+              throw new Error("Native prompt response was not acknowledged")
+            tool = {
+              name: "browser_dialog",
+              input: { action: "disarm", target: current.target },
+              id: "disarm_native_prompt",
+            }
+          } else if (step === 87) {
+            const current = toolResult(body.messages ?? [], "armed")
+            if (current.armed !== false)
+              throw new Error("Native prompt did not disarm")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_restored_prompt",
+            }
           } else {
             navigatedObservation = toolResult(body.messages ?? [], "nodes")
             observed.resolve()
@@ -1730,7 +1794,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 82; approval++)
+    for (let approval = 0; approval < 87; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1751,6 +1815,17 @@ test("agent browser observations and actions use the exact owned tab through rea
         if (!target) throw new Error("Owned browser target disappeared")
         return target.debugger.isAttached()
       }, destinationUrl)
+    expect(
+      await application.evaluate(async ({ webContents }, url) => {
+        const target = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+        if (!target) throw new Error("Missing native prompt target")
+        return target.executeJavaScript(
+          "({restored:window.prompt===window.originalPrompt,frames:document.querySelectorAll('iframe').length})",
+        )
+      }, destinationUrl),
+    ).toEqual({ restored: true, frames: 0 })
     expect(await attached()).toBe(true)
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
@@ -1932,6 +2007,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
     expect(dialogReplies).toEqual([{ value: false, trusted: true }])
+    expect(promptReplies).toEqual([{ value: "你好 猫 🌍", trusted: true }])
     expect(chooserFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
@@ -2075,6 +2151,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         uploadedDirectoryFiles,
         fileChoiceEvents,
         dialogReplies,
+        promptReplies,
         protocol,
       }),
       contentType: "application/json",
