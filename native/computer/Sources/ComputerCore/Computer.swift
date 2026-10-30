@@ -51,6 +51,7 @@ import Darwin
         case "observe":
             return try await observe(args)
         case "query": return try query(args)
+        case "zoom": return try await zoom(args)
         case "window": return try await manageWindow(args)
         case "isolation": return try await isolate(args)
         case "sequence": return try await sequence(args)

@@ -40,6 +40,16 @@ final class DragTarget: NSView {
     }
 }
 
+final class ZoomTarget: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        for (color, rect) in [(NSColor.red, NSRect(x: 0, y: 40, width: 40, height: 40)),
+            (.blue, NSRect(x: 40, y: 40, width: 40, height: 40)), (.green, NSRect(x: 0, y: 0, width: 40, height: 40)),
+            (.yellow, NSRect(x: 40, y: 0, width: 40, height: 40))] {
+            color.setFill(); rect.fill()
+        }
+    }
+}
+
 final class HoverTarget: NSView {
     var allowsAlternate = true
     var alternate = false
@@ -155,6 +165,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
             pointerHover.setAccessibilityLabel("Pointer hover")
             pointerHover.changed = { [weak self] in self?.save() }
             extra.contentView!.addSubview(pointerHover)
+            extra.contentView!.addSubview(ZoomTarget(frame: NSRect(x: 230, y: 200, width: 80, height: 80)))
             let exit = NSButton(title: "Hover exit", target: self, action: #selector(increment))
             exit.frame = NSRect(x: 230, y: 80, width: 140, height: 28)
             extra.contentView!.addSubview(exit)

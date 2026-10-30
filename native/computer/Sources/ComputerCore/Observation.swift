@@ -217,7 +217,7 @@ extension Computer {
         return try result(data, image: png)
     }
 
-    private func capture(_ filter: SCContentFilter, width: Int, height: Int) async throws -> CGImage {
+    func capture(_ filter: SCContentFilter, width: Int, height: Int) async throws -> CGImage {
         let configuration = SCStreamConfiguration()
         configuration.width = width
         configuration.height = height

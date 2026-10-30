@@ -62,6 +62,12 @@ import Foundation
         rejects { _ = try menuPath([" "]) }
         rejects { _ = try menuPath([1]) }
         rejects { _ = try menuPath(Array(repeating: "Item", count: 17)) }
+        let zoomBox = try zoomRegion(["x1": 100, "y1": 100, "x2": 300, "y2": 300], snapshot: snapshot)
+        precondition(zoomBox == CGRect(x: -250, y: 100, width: 100, height: 100))
+        rejects { _ = try zoomRegion(["x1": true, "y1": 0, "x2": 10, "y2": 10], snapshot: snapshot) }
+        rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 801, "y2": 10], snapshot: snapshot) }
+        rejects { _ = try zoomRegion(["x1": 1, "y1": 1, "x2": 1, "y2": 10], snapshot: snapshot) }
+        rejects { _ = try zoomRegion(["x1": 0, "y1": 0, "x2": 10, "y2": 10], snapshot: textOnly) }
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()
