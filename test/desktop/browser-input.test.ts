@@ -55,11 +55,17 @@ function fixture(
     blockPress?: boolean
     failMouseUp?: boolean
     navigateAfterRelease?: boolean
+    blockFocusReadAt?: number
+    blockKeyUp?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
     insertion = Promise.withResolvers<void>(),
-    release = Promise.withResolvers<void>()
+    release = Promise.withResolvers<void>(),
+    focusReadStarted = Promise.withResolvers<void>(),
+    focusReadReply = Promise.withResolvers<void>(),
+    keyUpStarted = Promise.withResolvers<void>(),
+    keyUpReply = Promise.withResolvers<void>()
   const mouseEvents: Record<string, unknown>[] = []
   const keyEvents: Record<string, unknown>[] = []
   let destroyed = false,
@@ -67,7 +73,8 @@ function fixture(
     keyUps = 0,
     presses = 0,
     releases = 0,
-    moves = 0
+    moves = 0,
+    focusReads = 0
   let attached = false,
     documentId = "original",
     value = "first",
@@ -122,8 +129,13 @@ function fixture(
           return {}
         }
         if (method === "Runtime.callFunctionOn") {
-          if (options.keys)
+          if (options.keys) {
+            if (++focusReads === options.blockFocusReadAt) {
+              focusReadStarted.resolve()
+              await focusReadReply.promise
+            }
             return { result: { value: focused && !options.redirectFocus } }
+          }
           if (options.pointer)
             return { result: { value: { ok: !options.covered, x: 20, y: 30 } } }
           const args = params.arguments as { value: boolean }[]
@@ -178,6 +190,8 @@ function fixture(
             )
               await release.promise
           } else {
+            keyUpStarted.resolve()
+            if (options.blockKeyUp) await keyUpReply.promise
             if (options.failKeyUp || options.failKeyUpKey === params.key)
               throw new Error("Key-up acknowledgement lost")
             keyUps++
@@ -208,6 +222,10 @@ function fixture(
     connection,
     insertion: insertion.promise,
     release,
+    focusReadStarted,
+    focusReadReply,
+    keyUpStarted,
+    keyUpReply,
     inputCalls: () => inputCalls,
     value: () => value,
     keyDowns: () => keyDowns,
@@ -436,6 +454,87 @@ it("accepts a click only through an exact pointer reference without text or raw 
     { ...input, action: "mousePressed" },
   ])
     expect(() => parseBrowserInputRequest(invalid)).toThrow()
+})
+
+it("shares one modifier release between read cancellation and concurrent close, waiting for its acknowledgement before detaching", async () => {
+  const f = fixture({
+      pointer: true,
+      keys: true,
+      blockFocusReadAt: 2,
+      blockKeyUp: true,
+    }),
+    abort = new AbortController()
+  let pending: Promise<unknown> | undefined
+  try {
+    const input = await f.clickRequest()
+    pending = f.connection.pressKey(
+      {
+        action: "press",
+        target,
+        reference: input.reference,
+        key: "r",
+        modifiers: ["Meta"],
+      },
+      abort.signal,
+    )
+    let settled = false
+    void pending.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await f.focusReadStarted.promise
+    abort.abort()
+    await f.keyUpStarted.promise
+    const closing = f.connection.close()
+    // A late successful read cannot overtake the in-progress cancellation.
+    f.focusReadReply.resolve()
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(settled).toBe(false)
+    expect(f.attached()).toBe(true)
+    expect(
+      f.keyEvents.map((event) => ({ type: event.type, key: event.key })),
+    ).toEqual([
+      { type: "rawKeyDown", key: "Meta" },
+      { type: "keyUp", key: "Meta" },
+    ])
+    f.keyUpReply.resolve()
+    await expect(pending).rejects.toMatchObject({
+      code: "browser_input_unconfirmed",
+    })
+    await closing
+    expect(f.attached()).toBe(false)
+    expect(f.keyUps()).toBe(1)
+  } finally {
+    f.focusReadReply.resolve()
+    f.keyUpReply.resolve()
+    await pending?.catch(() => {})
+    await f.connection.close()
+  }
+})
+
+it("ends a pending read when the owned root debugger closes even if the renderer never answers", async () => {
+  const f = fixture({ pointer: true, keys: true, blockFocusReadAt: 1 })
+  let pending: Promise<unknown> | undefined
+  try {
+    const input = await f.clickRequest()
+    pending = f.connection.pressKey(
+      { action: "press", target, reference: input.reference, key: "Enter" },
+      new AbortController().signal,
+    )
+    void pending.catch(() => {})
+    await f.focusReadStarted.promise
+    await f.connection.close()
+    await expect(pending).rejects.toMatchObject({ code: "browser_cancelled" })
+    expect(f.keyEvents).toEqual([])
+  } finally {
+    f.focusReadReply.resolve()
+    await pending?.catch(() => {})
+    await f.connection.close()
+  }
 })
 
 it("presses and releases once after hit testing the same captured control", async () => {

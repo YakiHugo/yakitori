@@ -1,5 +1,8 @@
 import { expect, it } from "vitest"
-import type { BrowserFrameBinding } from "../../src/desktop/browser-frames.ts"
+import type {
+  BrowserFrameBinding,
+  BrowserProtocolCommand,
+} from "../../src/desktop/browser-frames.ts"
 import { BrowserFramePointer } from "../../src/desktop/browser-pointer.ts"
 
 function frame(
@@ -30,50 +33,51 @@ function fixture(path: BrowserFrameBinding[], quads: Record<string, number[]>) {
     nodes = new Map<number, string>(),
     objects = new Map<string, string>()
   let covered = ""
-  const pointer = new BrowserFramePointer(
-    path,
-    async (method, params = {}, sessionId) => {
-      const call: (typeof calls)[number] = { method, sessionId }
-      calls.push(call)
-      if (method === "Page.createIsolatedWorld") {
-        const id = String(params.frameId),
-          context = worlds.size + 1
-        worlds.set(id, context)
-        return { executionContextId: context }
-      }
-      if (method === "DOM.getFrameOwner") {
-        const id = String(params.frameId),
-          node = nodes.size + 1
-        nodes.set(node, id)
-        call.frameId = id
-        return { backendNodeId: node }
-      }
-      if (method === "DOM.resolveNode") {
-        const id = nodes.get(Number(params.backendNodeId))
-        if (!id) throw new Error("Unknown frame owner")
-        objects.set(`owner_${id}`, id)
-        return { object: { objectId: `owner_${id}` } }
-      }
-      if (method === "DOM.getBoxModel") {
-        const id = nodes.get(Number(params.backendNodeId))
-        if (!id || !quads[id]) throw new Error("Unknown content quad")
-        call.frameId = id
-        return { model: { content: quads[id] } }
-      }
-      if (method === "Runtime.evaluate")
-        return { result: { value: { width: 100, height: 100 } } }
-      if (method === "Runtime.callFunctionOn") {
-        const id = objects.get(String(params.objectId))
-        if (!id) throw new Error("Unknown frame object")
-        call.frameId = id
-        const args = params.arguments as { value: unknown }[]
-        call.point = args[1]?.value
-        return { result: { value: { ok: covered !== id } } }
-      }
-      throw new Error(`Unexpected pointer command ${method}`)
-    },
-    "owned_group",
-  )
+  const command: BrowserProtocolCommand = async (
+    method,
+    params = {},
+    sessionId,
+  ) => {
+    const call: (typeof calls)[number] = { method, sessionId }
+    calls.push(call)
+    if (method === "Page.createIsolatedWorld") {
+      const id = String(params.frameId),
+        context = worlds.size + 1
+      worlds.set(id, context)
+      return { executionContextId: context }
+    }
+    if (method === "DOM.getFrameOwner") {
+      const id = String(params.frameId),
+        node = nodes.size + 1
+      nodes.set(node, id)
+      call.frameId = id
+      return { backendNodeId: node }
+    }
+    if (method === "DOM.resolveNode") {
+      const id = nodes.get(Number(params.backendNodeId))
+      if (!id) throw new Error("Unknown frame owner")
+      objects.set(`owner_${id}`, id)
+      return { object: { objectId: `owner_${id}` } }
+    }
+    if (method === "DOM.getBoxModel") {
+      const id = nodes.get(Number(params.backendNodeId))
+      if (!id || !quads[id]) throw new Error("Unknown content quad")
+      call.frameId = id
+      return { model: { content: quads[id] } }
+    }
+    if (method === "Runtime.evaluate")
+      return { result: { value: { width: 100, height: 100 } } }
+    if (method === "Runtime.callFunctionOn") {
+      const id = objects.get(String(params.objectId))
+      if (!id) throw new Error("Unknown frame object")
+      call.frameId = id
+      const args = params.arguments as { value: unknown }[]
+      call.point = args[1]?.value
+      return { result: { value: { ok: covered !== id } } }
+    }
+    throw new Error(`Unexpected pointer command ${method}`)
+  }
+  const pointer = new BrowserFramePointer(path, command, command, "owned_group")
   return {
     pointer,
     calls,
