@@ -502,6 +502,8 @@ test("agent browser observations and actions use the exact owned tab through rea
   let modelCalls = 0,
     thirdRequests = 0,
     clearKeyUps = 0
+  const captureReceipts: Record<string, unknown>[] = []
+  const modelImages = new Set<string>()
   const keyboardEvents: {
     type: string
     key?: string
@@ -550,7 +552,8 @@ test("agent browser observations and actions use the exact owned tab through rea
         continue
       let data: unknown
       try {
-        data = JSON.parse(message.content)
+        // Chat appends image provenance markers after this tool's JSON text.
+        data = JSON.parse(message.content.split("\n", 1)[0] ?? "")
       } catch (cause) {
         if (cause instanceof SyntaxError) continue
         throw cause
@@ -563,7 +566,10 @@ test("agent browser observations and actions use the exact owned tab through rea
       )
         return data as Record<string, unknown>
     }
-    throw new Error(`Missing browser tool result ${key}`)
+    const last = messages.findLast((message) => message.role === "tool")
+    throw new Error(
+      `Missing browser tool result ${key}: ${String(last?.content).slice(0, 512)}`,
+    )
   }
   const textRequest = (
     observed: Record<string, unknown>,
@@ -645,7 +651,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     if (request.method === "GET" && request.url?.startsWith("/second")) {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        `<!doctype html><title>Second owned source</title><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form>`,
+        `<!doctype html><title>Second owned source</title><body style="background:#113a66;min-height:1800px"><div style="position:absolute;left:400px;top:1000px;width:64px;height:64px;background:#12a05b"></div><label>Target field<input value="second" onfocus="this.setSelectionRange(this.value.length,this.value.length)" onkeyup="if(event.key==='Backspace')navigator.sendBeacon('/key-up','')"></label><label><input type="checkbox" checked>Approved option</label><button onclick="if(event.isTrusted)this.textContent='Clicked action'">Click action</button><div style="position:relative;width:160px;height:36px"><button style="width:100%;height:100%" onclick="this.textContent='Wrongly clicked'">Covered action</button><div style="position:absolute;inset:0;background:silver">Cover</div></div><div id="shadow"></div><script>const shadow=document.querySelector('#shadow').attachShadow({mode:'closed'});const button=document.createElement('button');button.textContent='Shadow action';button.addEventListener('click',event=>{if(event.isTrusted)button.textContent='Shadow clicked'});shadow.append(button);</script><div role="button" aria-label="Pointer surface" tabindex="0" id="pointer" style="width:240px;height:160px;overflow:auto"><div style="width:1200px;height:1200px">Scroll content</div></div><script>const surface=document.querySelector('#pointer');for(const type of ['mouseenter','wheel','contextmenu','dblclick','auxclick'])surface.addEventListener(type,event=>{if(type==='contextmenu')event.preventDefault();navigator.sendBeacon('/pointer-event',JSON.stringify({type,trusted:event.isTrusted,button:event.button??0,detail:event.detail??0,deltaX:event.deltaX??0,deltaY:event.deltaY??0,scrollTop:surface.scrollTop}));});surface.addEventListener('scroll',()=>navigator.sendBeacon('/pointer-event',JSON.stringify({type:'scroll',trusted:true,scrollTop:surface.scrollTop})));for(const type of ['keydown','keyup'])document.addEventListener(type,event=>navigator.sendBeacon('/keyboard-event',JSON.stringify({type,key:event.key,trusted:event.isTrusted,meta:event.metaKey,shift:event.shiftKey})));</script><form onsubmit="event.preventDefault();navigator.sendBeacon('/keyboard-event',JSON.stringify({type:'submit',value:this.elements.field.value}))"><label>Keyboard field<input name="field" value="draft"></label><button>Submit keys</button></form>`,
       )
       return
     }
@@ -677,6 +683,20 @@ test("agent browser observations and actions use the exact owned tab through rea
         const body = JSON.parse(raw) as {
           tools?: unknown[]
           messages?: { role?: string; content?: unknown }[]
+        }
+        for (const message of body.messages ?? []) {
+          if (!Array.isArray(message.content)) continue
+          for (const block of message.content) {
+            if (
+              typeof block !== "object" ||
+              block === null ||
+              block.type !== "image_url" ||
+              typeof block.image_url?.url !== "string"
+            )
+              continue
+            if (block.image_url.url.startsWith("data:image/jpeg;base64,"))
+              modelImages.add(block.image_url.url)
+          }
         }
         let tool: { name: string; input: unknown; id: string } | undefined
         let text = "Browser observation"
@@ -895,7 +915,39 @@ test("agent browser observations and actions use the exact owned tab through rea
                 id: `press_${step}`,
               }
             }
-          } else if (step === 37) {
+          } else if (step >= 37 && step <= 39) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            if (step > 37)
+              captureReceipts.push(toolResult(body.messages ?? [], "capture"))
+            if (step === 39)
+              await application.evaluate(({ webContents }, url) => {
+                const contents = webContents
+                  .getAllWebContents()
+                  .find((contents) => contents.getURL() === url)
+                if (!contents) throw new Error("Missing zoomed capture target")
+                contents.setZoomFactor(1.5)
+              }, wantedUrl)
+            tool = {
+              name: "browser_capture",
+              input: {
+                action: "capture",
+                target: current.target,
+                mode: step === 37 ? "viewport" : step === 38 ? "page" : "clip",
+                ...(step === 39
+                  ? { clip: { x: 400, y: 1000, width: 64, height: 64 } }
+                  : {}),
+              },
+              id: `capture_${step}`,
+            }
+          } else if (step === 40) {
+            captureReceipts.push(toolResult(body.messages ?? [], "capture"))
+            await application.evaluate(({ webContents }, url) => {
+              const contents = webContents
+                .getAllWebContents()
+                .find((contents) => contents.getURL() === url)
+              if (!contents) throw new Error("Missing capture target")
+              contents.setZoomFactor(1)
+            }, wantedUrl)
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_navigate",
@@ -907,7 +959,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 38) {
+          } else if (step === 41) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -984,7 +1036,13 @@ test("agent browser observations and actions use the exact owned tab through rea
         authentication: "none",
         baseURL: `${origin}/v1`,
         wireApi: "openai_chat_completions",
-        models: [{ id: "browser-model", displayName: "Browser Model" }],
+        models: [
+          {
+            id: "browser-model",
+            displayName: "Browser Model",
+            inputModalities: ["text", "image"],
+          },
+        ],
       },
     })
     await client.request("userPreference/write", {
@@ -1029,7 +1087,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       .fill("Inspect the owned browser tabs and read the second page.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 38; approval++)
+    for (let approval = 0; approval < 41; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1195,6 +1253,40 @@ test("agent browser observations and actions use the exact owned tab through rea
           .filter((contents) => contents.session === profile).length
       }),
     ).toBe(2)
+    expect(
+      captureReceipts.map(
+        (receipt) => (receipt.capture as { mode: string }).mode,
+      ),
+    ).toEqual(["viewport", "page", "clip"])
+    expect(modelImages.size).toBe(3)
+    const { default: sharp } = await import("sharp")
+    const imageBytes = [...modelImages].map((url) =>
+      Buffer.from(url.slice("data:image/jpeg;base64,".length), "base64"),
+    )
+    const clipped = imageBytes[2]
+    if (!clipped) throw new Error("Missing clipped model image")
+    const decoded = await sharp(clipped)
+      .raw()
+      .toBuffer({ resolveWithObject: true })
+    const offset =
+      (Math.floor(decoded.info.height / 2) * decoded.info.width +
+        Math.floor(decoded.info.width / 2)) *
+      decoded.info.channels
+    expect(Math.abs((decoded.data[offset] ?? 0) - 18)).toBeLessThan(10)
+    expect(Math.abs((decoded.data[offset + 1] ?? 0) - 160)).toBeLessThan(10)
+    expect(Math.abs((decoded.data[offset + 2] ?? 0) - 91)).toBeLessThan(10)
+    expect(captureReceipts[2]?.capture).toMatchObject({
+      source: { x: 400, y: 1000, width: 64, height: 64 },
+    })
+    for (const bytes of imageBytes) {
+      const metadata = await sharp(bytes).metadata()
+      expect(metadata.width).toBeLessThanOrEqual(1600)
+      expect(metadata.height).toBeLessThanOrEqual(1600)
+    }
+    await testInfo.attach("browser-capture-clip", {
+      body: clipped,
+      contentType: "image/jpeg",
+    })
     expect(navigationReceipt).toMatchObject({
       loaded: true,
       url: destinationUrl,

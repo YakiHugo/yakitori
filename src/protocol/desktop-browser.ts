@@ -251,9 +251,76 @@ export function parseBrowserNavigationRequest(
   )
 }
 
-export function parseBrowserRequest(
+export type BrowserCaptureRequest = Readonly<
+  { action: "capture"; target: BrowserTarget } & (
+    | { mode: "viewport" | "page" }
+    | {
+        mode: "clip"
+        clip: { x: number; y: number; width: number; height: number }
+      }
+  )
+>
+
+export function parseBrowserCaptureRequest(
   value: unknown,
-): BrowserObservationRequest | BrowserInputRequest | BrowserNavigationRequest {
+): BrowserCaptureRequest {
+  if (
+    isJsonObject(value) &&
+    value.action === "capture" &&
+    ["action", "target", "mode"].every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) =>
+      ["action", "target", "mode", "clip"].includes(key),
+    )
+  ) {
+    const observed = parseBrowserObservationRequest({
+      action: "observe",
+      target: value.target,
+    })
+    if (observed.action !== "observe")
+      throw new Error("Invalid browser target parser result.")
+    if (
+      (value.mode === "viewport" || value.mode === "page") &&
+      Object.keys(value).length === 3
+    )
+      return { action: "capture", target: observed.target, mode: value.mode }
+    const clip = value.clip
+    if (
+      value.mode === "clip" &&
+      isJsonObject(clip) &&
+      Object.keys(clip).length === 4 &&
+      ["x", "y", "width", "height"].every((key) => Object.hasOwn(clip, key)) &&
+      typeof clip.x === "number" &&
+      typeof clip.y === "number" &&
+      typeof clip.width === "number" &&
+      typeof clip.height === "number" &&
+      clip.x >= 0 &&
+      clip.y >= 0 &&
+      clip.width > 0 &&
+      clip.height > 0 &&
+      clip.width * clip.height <= 16_000_000
+    )
+      return {
+        action: "capture",
+        target: observed.target,
+        mode: "clip",
+        clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height },
+      }
+  }
+  throw new BrowserControlError(
+    "invalid_arguments",
+    "Use capture with an exact target and mode viewport/page, or mode clip with a positive document CSS-pixel rectangle (16 megapixel source paint safety bound).",
+  )
+}
+
+export type BrowserRequest =
+  | BrowserObservationRequest
+  | BrowserInputRequest
+  | BrowserNavigationRequest
+  | BrowserCaptureRequest
+
+export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (isJsonObject(value) && value.action === "capture")
+    return parseBrowserCaptureRequest(value)
   if (isJsonObject(value) && value.action === "navigate")
     return parseBrowserNavigationRequest(value)
   return isJsonObject(value) &&
@@ -363,10 +430,7 @@ export type BrowserOperation = Readonly<
   | {
       operation: "request"
       owner: BrowserOwner
-      input:
-        | BrowserObservationRequest
-        | BrowserInputRequest
-        | BrowserNavigationRequest
+      input: BrowserRequest
     }
   | { operation: "finishTurn"; owner: BrowserOwner }
   | { operation: "closeSession"; sessionId: string }
@@ -414,10 +478,7 @@ export function isDesktopBrowserResponse(
 
 export type DesktopBrowser = Readonly<{
   request(
-    input:
-      | BrowserObservationRequest
-      | BrowserInputRequest
-      | BrowserNavigationRequest,
+    input: BrowserRequest,
     owner: BrowserOwner,
     signal?: AbortSignal,
   ): Promise<JsonObject>

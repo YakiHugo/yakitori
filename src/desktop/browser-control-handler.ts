@@ -176,7 +176,9 @@ export function bindDesktopBrowserRequests(
               attempted
                 ? input.action === "navigate"
                   ? "navigate"
-                  : input.action === "list" || input.action === "observe"
+                  : input.action === "list" ||
+                      input.action === "observe" ||
+                      input.action === "capture"
                     ? undefined
                     : "input"
                 : undefined,

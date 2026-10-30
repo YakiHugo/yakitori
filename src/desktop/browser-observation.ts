@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto"
 import type { WebContents } from "electron"
 import {
+  type BrowserCaptureRequest,
   BrowserControlError,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserTextInputRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
+import { captureBrowserPage } from "./browser-capture.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 
 function object(value: unknown): Record<string, unknown> {
@@ -121,16 +123,22 @@ export class BrowserDocumentConnection {
     this.#debug.off("detach", this.#detached)
   }
 
-  async observe(signal: AbortSignal): Promise<JsonObject> {
+  async #read<T>(
+    signal: AbortSignal,
+    run: (
+      command: (
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<unknown>,
+    ) => Promise<T>,
+  ): Promise<T> {
     signal.throwIfAborted()
-    this.#references.clear()
     if (this.#heldInputs.length)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before observing again.",
       )
-    const contents = this.#contents,
-      debug = this.#debug
+    const debug = this.#debug
     if (this.closed || !debug.isAttached())
       throw new BrowserControlError(
         "browser_unavailable",
@@ -149,7 +157,7 @@ export class BrowserDocumentConnection {
           rejectAbort(
             new BrowserControlError(
               "browser_cancelled",
-              "Browser observation stopped or exceeded its 10-second operation safety deadline.",
+              "Browser read stopped or exceeded its 10-second operation safety deadline.",
             ),
           ),
         rejectAbort,
@@ -176,6 +184,16 @@ export class BrowserDocumentConnection {
     }
     try {
       if (deadline.aborted) abort()
+      return await Promise.race([run(command), aborted])
+    } finally {
+      deadline.removeEventListener("abort", abort)
+    }
+  }
+
+  async observe(signal: AbortSignal): Promise<JsonObject> {
+    this.#references.clear()
+    const contents = this.#contents
+    return this.#read(signal, async (command) => {
       const before = documentIdentity(await command("Page.getFrameTree"))
       const tree = object(
         await command("Accessibility.getFullAXTree", {
@@ -295,11 +313,7 @@ export class BrowserDocumentConnection {
           "browser_target_changed",
           "The browser navigated during observation. List and observe the current target again.",
         )
-      if (deadline.aborted)
-        throw new BrowserControlError(
-          "browser_cancelled",
-          "Browser observation stopped.",
-        )
+      signal.throwIfAborted()
       this.#references = references
       return {
         document: { ...after, url: after.url.slice(0, 8192) },
@@ -308,9 +322,47 @@ export class BrowserDocumentConnection {
         depth: 8,
         urlTruncated: after.url.length > 8192,
       }
-    } finally {
-      deadline.removeEventListener("abort", abort)
-    }
+    })
+  }
+
+  async capture(
+    input: BrowserCaptureRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    const contents = this.#contents
+    if (contents.isLoadingMainFrame())
+      throw new BrowserControlError(
+        "browser_unready",
+        "Wait for this document to finish loading before capturing it.",
+      )
+    return this.#read(signal, async (command) => {
+      const before = documentIdentity(await command("Page.getFrameTree"))
+      if (contents.isDestroyed())
+        throw new BrowserControlError(
+          "browser_unavailable",
+          "The browser target closed during capture.",
+        )
+      const zoom = contents.getZoomFactor()
+      const image = await captureBrowserPage(input, command, zoom)
+      const after = documentIdentity(await command("Page.getFrameTree"))
+      if (
+        before.frameId !== after.frameId ||
+        before.documentId !== after.documentId ||
+        before.url !== after.url ||
+        contents.isDestroyed() ||
+        contents.getURL() !== after.url ||
+        contents.getZoomFactor() !== zoom
+      )
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The browser document or zoom changed during capture. Inspect the current document before capturing again.",
+        )
+      return {
+        ...image,
+        document: { ...after, url: after.url.slice(0, 8192) },
+        urlTruncated: after.url.length > 8192,
+      }
+    })
   }
 
   #consumeReference(
