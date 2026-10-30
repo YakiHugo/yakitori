@@ -89,6 +89,7 @@ import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
 import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
+import { createBrowserDialogTool } from "./browser-dialog-tool.ts"
 import { createBrowserInputTool } from "./browser-input-tool.ts"
 import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
@@ -1092,6 +1093,11 @@ export async function createYakitoriApplication(
                 markBrowserCleanupPending,
               ),
               createBrowserNavigationTool(options.desktopBrowser, admitBrowser),
+              createBrowserDialogTool(
+                options.desktopBrowser,
+                admitBrowser,
+                markBrowserCleanupPending,
+              ),
               createBrowserChooserTool(
                 options.desktopBrowser,
                 admitBrowser,

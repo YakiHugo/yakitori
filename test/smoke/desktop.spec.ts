@@ -499,6 +499,14 @@ test("agent browser observations and actions use the exact owned tab through rea
   desktop,
 }, testInfo) => {
   const { page, application, userData, sidecarUrl, rendererErrors } = desktop
+  // The fixture's Playwright connection must not race the production dialog
+  // responder with its own automatic native dismissal.
+  const ignoreDialog = () => {},
+    bindDialogs = (page: Page) => {
+      page.on("dialog", ignoreDialog)
+    }
+  application.context().on("page", bindDialogs)
+  application.context().pages().forEach(bindDialogs)
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
   const observed = Promise.withResolvers<void>(),
     releaseCompletion = Promise.withResolvers<void>(),
@@ -513,6 +521,7 @@ test("agent browser observations and actions use the exact owned tab through rea
   const uploadedDirectoryFiles: { path: string; text: string }[][] = []
   const uploadedFiles: { name: string; text: string }[][] = []
   const chooserFiles: { name: string; text: string }[][] = []
+  const dialogReplies: { value: boolean; trusted: boolean }[] = []
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
     []
   const frameSelectEvents: {
@@ -676,6 +685,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         "/file-choice",
         "/directory-bytes",
         "/chooser-bytes",
+        "/dialog-reply",
       ].includes(request.url ?? "")
     ) {
       let body = ""
@@ -689,6 +699,8 @@ test("agent browser observations and actions use the exact owned tab through rea
           chooserFiles.push(JSON.parse(body))
         else if (request.url === "/directory-bytes")
           uploadedDirectoryFiles.push(JSON.parse(body))
+        else if (request.url === "/dialog-reply")
+          dialogReplies.push(JSON.parse(body))
         else fileChoiceEvents.push(JSON.parse(body))
         response.writeHead(204)
         response.end()
@@ -733,7 +745,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       )
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        `<!doctype html><title>After frame</title><body onload="navigator.sendBeacon('/frame-ready','')"><label>After frame field<input value="submitted"></label>`,
+        `<!doctype html><title>After frame</title><body onload="navigator.sendBeacon('/frame-ready','')"><label>After frame field<input value="submitted"></label><button onclick="navigator.sendBeacon('/dialog-reply',JSON.stringify({trusted:event.isTrusted,value:confirm('Owned confirmation?')}))">Native confirmation</button>`,
       )
       return
     }
@@ -1460,6 +1472,58 @@ test("agent browser observations and actions use the exact owned tab through rea
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
+              name: "browser_dialog",
+              input: {
+                action: "arm",
+                target: current.target,
+                frameReference: current.frameReference,
+                fromUrl: (current.document as { url: string }).url,
+                response: {
+                  type: "confirm",
+                  accept: false,
+                  message: "Owned confirmation?",
+                },
+              },
+              id: "arm_native_dialog",
+            }
+          } else if (step === 78) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              button = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native confirmation")
+            if (!button?.elementReference)
+              throw new Error("Missing native confirmation button")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: button.elementReference,
+              },
+              id: "trigger_native_dialog",
+            }
+          } else if (step === 79) {
+            const current = toolResult(body.messages ?? [], "delivered")
+            await expect.poll(() => dialogReplies.length).toBe(1)
+            tool = {
+              name: "browser_dialog",
+              input: { action: "inspect", target: current.target },
+              id: "inspect_native_dialog",
+            }
+          } else if (step === 80) {
+            const current = toolResult(body.messages ?? [], "state")
+            if (current.state !== "answered" || current.expired !== false)
+              throw new Error("Native dialog response was not acknowledged")
+            tool = {
+              name: "browser_dialog",
+              input: { action: "disarm", target: current.target },
+              id: "disarm_native_dialog",
+            }
+          } else if (step === 81) {
+            const current = frameAfterObservation
+            if (!current) throw new Error("Missing submitted frame observation")
+            tool = {
               name: "browser_navigate",
               input: {
                 action: "navigate",
@@ -1469,7 +1533,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 78) {
+          } else if (step === 82) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1666,7 +1730,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 78; approval++)
+    for (let approval = 0; approval < 82; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1867,6 +1931,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     expect(uploadedFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
+    expect(dialogReplies).toEqual([{ value: false, trusted: true }])
     expect(chooserFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
@@ -2009,12 +2074,20 @@ test("agent browser observations and actions use the exact owned tab through rea
         uploadedFiles,
         uploadedDirectoryFiles,
         fileChoiceEvents,
+        dialogReplies,
         protocol,
       }),
       contentType: "application/json",
     })
     throw cause
   } finally {
+    application.context().off("page", bindDialogs)
+    application
+      .context()
+      .pages()
+      .forEach((page) => {
+        page.off("dialog", ignoreDialog)
+      })
     releaseCompletion.resolve()
     client.close()
     source.closeAllConnections()

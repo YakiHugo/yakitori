@@ -3281,6 +3281,7 @@ describe("application composition", () => {
     "browser_upload",
     "browser_view",
     "browser_chooser",
+    "browser_dialog",
   ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
     const browserInput =
       browserTool === "browser"
@@ -3312,7 +3313,8 @@ describe("application composition", () => {
                 paths: [],
               }
             : browserTool === "browser_view" ||
-                browserTool === "browser_chooser"
+                browserTool === "browser_chooser" ||
+                browserTool === "browser_dialog"
               ? {
                   action: browserTool === "browser_view" ? "show" : "arm",
                   target: {
@@ -3322,6 +3324,9 @@ describe("application composition", () => {
                       "browser_target_00000000-0000-4000-8000-000000000001",
                   },
                   fromUrl: "https://owned.test/",
+                  ...(browserTool === "browser_dialog"
+                    ? { response: { type: "confirm", accept: true } }
+                    : {}),
                 }
               : {
                   action: "navigate",
