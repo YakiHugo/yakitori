@@ -1,8 +1,4 @@
 import type {
-  ModelRoutePreviewRequest,
-  ModelRoutePreview,
-} from "./model-routing.ts"
-import type {
   ApiAdmitInputRequest,
   ApiAdmitInputResponse,
   ApiCancelInputRequest,
@@ -11,8 +7,6 @@ import type {
   ApiCancelTurnResponse,
   ApiClearGoalResponse,
   ApiCompactSessionResponse,
-  ApiResumeTurnRequest,
-  ApiResumeTurnResponse,
   ApiCreateProjectResponse,
   ApiCreateSessionRequest,
   ApiCreateSessionResponse,
@@ -33,6 +27,8 @@ import type {
   ApiReadSubscriptionResponse,
   ApiReadUsageResponse,
   ApiResolvePermissionRequest,
+  ApiResumeTurnRequest,
+  ApiResumeTurnResponse,
   ApiSearchSessionOccurrencesRequest,
   ApiSearchSessionOccurrencesResponse,
   ApiSearchSessionsRequest,
@@ -46,12 +42,21 @@ import type {
   ApiUpdateUserModelPreferenceResponse,
   ApiUserModelPreference,
 } from "./application.ts"
+import type {
+  ComputerPreviewCatalog,
+  ComputerPreviewFrame,
+  ComputerPreviewTarget,
+} from "./computer-preview.ts"
 import type { ConfigurationSnapshot } from "./configuration.ts"
 import type { ComputerUseStatus } from "./connections.ts"
 import type { EngineRpcParams, EngineRpcResponses } from "./engine.ts"
 import type { AppSessionEventEnvelope } from "./events.ts"
 import type { ThreadGoal } from "./goal.ts"
 import type { QueuedInput } from "./input-queue.ts"
+import type {
+  ModelRoutePreview,
+  ModelRoutePreviewRequest,
+} from "./model-routing.ts"
 import type { ChatGPTRpcParams, ChatGPTRpcResponses } from "./rpc-chatgpt.ts"
 import type {
   InteractionRpcParams,
@@ -200,6 +205,12 @@ export type RpcMethodParams = Readonly<
       "computer/status": Readonly<Record<string, never>>
       "computer/connect": Readonly<Record<string, never>>
       "computer/disconnect": Readonly<Record<string, never>>
+      "computer/preview/catalog": Readonly<{ viewerId: string }>
+      "computer/preview/capture": Readonly<{
+        viewerId: string
+        target: ComputerPreviewTarget
+      }>
+      "computer/preview/stop": Readonly<{ viewerId: string }>
       initialize: InitializeParams
       "server/ping": Readonly<Record<string, never>>
       "server/diagnostics": Readonly<Record<string, never>>
@@ -270,6 +281,9 @@ export type RpcMethodResponses = Readonly<
       "computer/status": ComputerUseStatus
       "computer/connect": ComputerUseStatus
       "computer/disconnect": ComputerUseStatus
+      "computer/preview/catalog": ComputerPreviewCatalog
+      "computer/preview/capture": ComputerPreviewFrame
+      "computer/preview/stop": Readonly<Record<string, never>>
       initialize: InitializeResponse
       "server/ping": Readonly<Record<string, never>>
       "server/diagnostics": ApiServerDiagnostics

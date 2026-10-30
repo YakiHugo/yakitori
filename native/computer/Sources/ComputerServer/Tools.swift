@@ -62,7 +62,7 @@ let tools: [[String: Any]] = [
                 "steps": ["type": "array", "minItems": 1, "maxItems": 64, "items": ["type": "object"], "description": "Fixed AX/keyboard/wait_for steps for one pid+launch_time and window/app scope. Each input uses a unique selector and fresh AX state. No pixels, raw element indices, nested batches, target switches, retries, or planning. Prevalidates every step, stops on failure/cancellation, reports completed_steps. Local batch safety boundary: 64 steps/30 seconds."],
                 "isolation_action": ["type": "string", "enum": ["status", "conceal", "reveal"], "description": "conceal requires pid+launch_time; moves visible document windows to a private virtual display. reveal restores this helper's windows. Turn end/disconnect restores them; a detached resource service recovers helper crashes."],
                 "include_hidden": ["type": "boolean", "description": "list includes offscreen/minimized windows when true."],
-                "launch_time": ["type": "number", "description": "Exact process incarnation from list, required for window management."],
+                "launch_time": ["type": "number", "description": "Exact process incarnation from list, required for window management; optionally pins observe in window/app scope before any capture."],
                 "window_action": ["type": "string", "enum": ["activate", "hide", "show", "raise", "minimize", "restore", "move", "resize", "close"]],
                 "width": ["type": "number", "exclusiveMinimum": 0], "height": ["type": "number", "exclusiveMinimum": 0],
                 "delivery": ["type": "string", "enum": ["background", "foreground"]],
