@@ -392,6 +392,11 @@ it("releases a clearing key after its dispatch acknowledges cancellation", async
     await f.insertion
     cancellation.abort()
     expect(f.keyUps()).toBe(0)
+    await expect(f.connection.close()).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    expect(f.attached()).toBe(true)
+    expect(f.keyUps()).toBe(0)
     f.release.resolve()
     await expect(pending).rejects.toThrow()
     expect(f.keyDowns()).toBe(1)

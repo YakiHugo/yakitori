@@ -154,13 +154,7 @@ export class BrowserFrames {
     params: Record<string, unknown>,
     sessionId: string,
   ): Promise<unknown> {
-    const session = this.#sessions.get(sessionId)
-    if (!session)
-      throw new BrowserControlError(
-        "browser_frame_stale",
-        "The frame renderer disconnected. List frames again.",
-      )
-    const signal = session.closed.signal
+    const signal = this.sessionClosed(sessionId)
     let rejectClosed: (reason: unknown) => void = () => {}
     const closed = new Promise<never>((_resolve, reject) => {
       rejectClosed = reject
@@ -179,6 +173,16 @@ export class BrowserFrames {
     } finally {
       signal.removeEventListener("abort", abort)
     }
+  }
+
+  sessionClosed(sessionId: string): AbortSignal {
+    const session = this.#sessions.get(sessionId)
+    if (!session)
+      throw new BrowserControlError(
+        "browser_frame_stale",
+        "The frame renderer disconnected. List frames again.",
+      )
+    return session.closed.signal
   }
 
   readInSession(
