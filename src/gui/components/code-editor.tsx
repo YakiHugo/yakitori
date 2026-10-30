@@ -1,9 +1,9 @@
-import { Compartment, EditorState } from "@codemirror/state"
-import { EditorView, keymap } from "@codemirror/view"
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
+import { Annotation, Compartment, EditorState } from "@codemirror/state"
+import { EditorView, keymap } from "@codemirror/view"
 import { tags } from "@lezer/highlight"
 import { basicSetup } from "codemirror"
-import { useEffect, useRef } from "react"
+import { useEffect, useLayoutEffect, useRef } from "react"
 import "./code-editor.css"
 
 const colors = HighlightStyle.define([
@@ -16,6 +16,7 @@ const colors = HighlightStyle.define([
   },
   { tag: tags.comment, color: "var(--muted-foreground)", fontStyle: "italic" },
 ])
+const externalValue = Annotation.define<boolean>()
 
 export function CodeEditor({
   value,
@@ -34,19 +35,20 @@ export function CodeEditor({
   const editor = useRef<EditorView>(undefined)
   const callbacks = useRef({ onChange, onSave })
   callbacks.current = { onChange, onSave }
-  const initial = useRef(value)
+  const latestValue = useRef(value)
+  latestValue.current = value
   const wrapping = useRef(new Compartment())
   const initialWrap = useRef(wrap)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!host.current) return
     const language = new Compartment()
     // Explicit separators preserve CRLF and BOM on save. Mixed endings retain
     // their CR characters instead of silently normalizing the original file.
+    const source = latestValue.current
     const separator =
-      initial.current.includes("\r\n") &&
-      !/(?<!\r)\n|\r(?!\n)/.test(initial.current)
+      source.includes("\r\n") && !/(?<!\r)\n|\r(?!\n)/.test(source)
         ? "\r\n"
-        : initial.current.includes("\r") && !initial.current.includes("\n")
+        : source.includes("\r") && !source.includes("\n")
           ? "\r"
           : "\n"
     const normalizeInput = (text: string) =>
@@ -54,7 +56,7 @@ export function CodeEditor({
     const view = new EditorView({
       parent: host.current,
       state: EditorState.create({
-        doc: initial.current,
+        doc: source,
         extensions: [
           basicSetup,
           EditorState.lineSeparator.of(separator),
@@ -66,7 +68,9 @@ export function CodeEditor({
             if (normalized === text) return false
             view.dispatch({
               changes: { from, to, insert: normalized },
-              selection: { anchor: from + view.state.toText(normalized).length },
+              selection: {
+                anchor: from + view.state.toText(normalized).length,
+              },
               userEvent: "input.type",
               scrollIntoView: true,
             })
@@ -88,7 +92,13 @@ export function CodeEditor({
             initialWrap.current ? EditorView.lineWrapping : [],
           ),
           EditorView.updateListener.of((update) => {
-            if (update.docChanged)
+            if (
+              update.transactions.some(
+                (transaction) =>
+                  transaction.docChanged &&
+                  !transaction.annotation(externalValue),
+              )
+            )
               callbacks.current.onChange(update.state.sliceDoc())
           }),
         ],
@@ -115,11 +125,14 @@ export function CodeEditor({
       view.destroy()
     }
   }, [path])
-  useEffect(() => {
+  useLayoutEffect(() => {
     const view = editor.current
     if (!view || view.state.sliceDoc() === value) return
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: value },
+      // Prop echoes must finish during commit, before another editor input can
+      // arrive. Applying them is not a new user edit to persist again.
+      annotations: externalValue.of(true),
     })
   }, [value])
   useEffect(() => {
