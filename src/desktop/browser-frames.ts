@@ -7,8 +7,29 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 
-export type BrowserReadCommand = (
+export type BrowserProtocolCommand = (
   method: string,
+  params?: Record<string, unknown>,
+  sessionId?: string,
+) => Promise<unknown>
+const frameReadMethods = [
+  "Page.getFrameTree",
+  "Page.createIsolatedWorld",
+  "DOM.resolveNode",
+  "DOM.getFrameOwner",
+  "DOM.getBoxModel",
+  "Runtime.evaluate",
+  "Runtime.callFunctionOn",
+  "Accessibility.getFullAXTree",
+] as const
+export type BrowserFrameReadMethod = (typeof frameReadMethods)[number]
+export function isBrowserFrameReadMethod(
+  method: string,
+): method is BrowserFrameReadMethod {
+  return frameReadMethods.some((value) => value === method)
+}
+export type BrowserFrameReadCommand = (
+  method: BrowserFrameReadMethod,
   params?: Record<string, unknown>,
   sessionId?: string,
 ) => Promise<unknown>
@@ -125,9 +146,9 @@ export class BrowserFrames {
   }
 
   async #sessionCommand(
-    command: BrowserReadCommand,
+    command: BrowserProtocolCommand,
     method:
-      | "Page.getFrameTree"
+      | BrowserFrameReadMethod
       | "Target.setAutoAttach"
       | "Runtime.releaseObjectGroup",
     params: Record<string, unknown>,
@@ -160,9 +181,20 @@ export class BrowserFrames {
     }
   }
 
+  readInSession(
+    command: BrowserProtocolCommand,
+    method: BrowserFrameReadMethod,
+    params: Record<string, unknown>,
+    sessionId?: string,
+  ): Promise<unknown> {
+    return sessionId === undefined
+      ? command(method, params)
+      : this.#sessionCommand(command, method, params, sessionId)
+  }
+
   async releaseObjects(
     group: string,
-    command: BrowserReadCommand,
+    command: BrowserProtocolCommand,
     sessionId?: string,
   ): Promise<void> {
     if (sessionId === undefined) {
@@ -189,7 +221,7 @@ export class BrowserFrames {
     }
   }
 
-  async #snapshot(command: BrowserReadCommand): Promise<{
+  async #snapshot(command: BrowserProtocolCommand): Promise<{
     root: BrowserDocumentIdentity
     frames: Map<string, BrowserFrameBinding>
   }> {
@@ -286,7 +318,7 @@ export class BrowserFrames {
   }
 
   async list(
-    command: BrowserReadCommand,
+    command: BrowserProtocolCommand,
     offset: number,
   ): Promise<{ result: JsonObject; root: BrowserDocumentIdentity }> {
     this.#references.clear()
@@ -335,7 +367,7 @@ export class BrowserFrames {
 
   async resolve(
     token: string,
-    command: BrowserReadCommand,
+    command: BrowserProtocolCommand,
   ): Promise<FrameTicket & { path: BrowserFrameBinding[] }> {
     const ticket = this.#references.get(token)
     if (!ticket)

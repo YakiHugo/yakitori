@@ -74,6 +74,8 @@ function fixture(
     covered?: boolean
     coverAfterHover?: boolean
     failCapture?: boolean
+    blockFocusReadAt?: number
+    blockAX?: boolean
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -81,7 +83,9 @@ function fixture(
       method: string
       params: Record<string, unknown>
       sessionId?: string
-    }[] = []
+    }[] = [],
+    focusReadStarted = Promise.withResolvers<void>(),
+    focusReadReply = Promise.withResolvers<void>()
   let attached = false,
     mainLoader = "main_v1",
     remoteLoader = "remote_v1",
@@ -101,7 +105,8 @@ function fixture(
   >()
   const groups = new Map<string, Set<string | undefined>>()
   let focused = "",
-    destroyed = false
+    destroyed = false,
+    focusReads = 0
   const field = (id: string) => {
     let value = fields.get(id)
     if (!value) {
@@ -228,6 +233,10 @@ function fixture(
               : undefined
         if (sessionId !== expected)
           throw new Error("AX query crossed frame renderer ownership")
+        if (options.blockAX && id === "remote") {
+          focusReadStarted.resolve()
+          await focusReadReply.promise
+        }
         return {
           nodes: [
             {
@@ -285,8 +294,13 @@ function fixture(
         requireSession(id, sessionId)
         if (options.pointer)
           return { result: { value: { ok: true, x: 20, y: 30 } } }
-        if (!Array.isArray(params.arguments))
+        if (!Array.isArray(params.arguments)) {
+          if (++focusReads === options.blockFocusReadAt) {
+            focusReadStarted.resolve()
+            await focusReadReply.promise
+          }
           return { result: { value: focused === id } }
+        }
         const value = field(id),
           args = params.arguments as { value: boolean }[]
         if (args[1]?.value) {
@@ -365,6 +379,8 @@ function fixture(
     connection,
     calls,
     events,
+    focusReadStarted,
+    focusReadReply,
     attached: () => attached,
     destroy() {
       destroyed = true
@@ -805,6 +821,83 @@ it("releases root-owned keys after a child renderer disappears without retargeti
     await f.connection.close()
   }
   expect(f.attached()).toBe(false)
+})
+
+it.each([
+  1, 2,
+])("ends a pending child focus read at renderer replacement without retargeting or waiting for its old reply (read: %s)", async (read) => {
+  const f = fixture({ blockFocusReadAt: read })
+  let pending: Promise<unknown> | undefined
+  try {
+    const node = await f.control("remote")
+    pending = f.connection.pressKey(
+      {
+        action: "press",
+        target,
+        reference: node.elementReference,
+        key: "r",
+        modifiers: ["Meta"],
+      },
+      signal(),
+    )
+    void pending.catch(() => {})
+    await f.focusReadStarted.promise
+    f.change("renderer")
+    await expect(pending).rejects.toMatchObject({
+      code: read === 1 ? "browser_frame_stale" : "browser_input_unconfirmed",
+    })
+    expect(
+      f.calls
+        .filter((call) => call.method === "DOM.focus")
+        .map((call) => call.sessionId),
+    ).toEqual(["remote_session"])
+    expect(
+      f.calls
+        .filter((call) => call.method === "Input.dispatchKeyEvent")
+        .map((call) => ({
+          type: call.params.type,
+          key: call.params.key,
+          sessionId: call.sessionId,
+        })),
+    ).toEqual(
+      read === 1
+        ? []
+        : [
+            { type: "rawKeyDown", key: "Meta", sessionId: undefined },
+            { type: "keyUp", key: "Meta", sessionId: undefined },
+          ],
+    )
+    expect((await f.connection.observe(signal())).nodes).toEqual([
+      expect.objectContaining({ name: "Field main" }),
+    ])
+  } finally {
+    f.focusReadReply.resolve()
+    await pending?.catch(() => {})
+    await f.connection.close()
+  }
+})
+
+it("ends a pending accessibility observation at child renderer replacement and keeps the main target readable", async () => {
+  const f = fixture({ blockAX: true })
+  let pending: Promise<unknown> | undefined
+  try {
+    const row = (await f.catalog()).frames.find(
+      (frame) => frame.frameId === "remote",
+    )
+    if (!row) throw new Error("Missing remote frame")
+    pending = f.connection.observe(signal(), row.frameReference)
+    void pending.catch(() => {})
+    await f.focusReadStarted.promise
+    f.change("renderer")
+    await expect(pending).rejects.toMatchObject({ code: "browser_frame_stale" })
+    expect((await f.connection.observe(signal())).nodes).toEqual([
+      expect.objectContaining({ name: "Field main" }),
+    ])
+  } finally {
+    f.focusReadReply.resolve()
+    await pending?.catch(() => {})
+    await f.connection.close()
+  }
 })
 
 it.each([
