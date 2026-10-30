@@ -1,3 +1,9 @@
+import type { BrowserControlReference } from "./browser-accessibility.ts"
+
+export type BrowserDocumentScope = Readonly<
+  Pick<BrowserControlReference, "document" | "frame"> & { closed: AbortSignal }
+>
+
 export type BrowserProtocolCommand = (
   method: string,
   params?: Record<string, unknown>,

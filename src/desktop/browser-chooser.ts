@@ -1,20 +1,17 @@
 import type { WebContents } from "electron"
 import { BrowserControlError } from "../protocol/desktop-browser.ts"
 import type { BrowserControlReference } from "./browser-accessibility.ts"
-import type { BrowserProtocolCommand } from "./browser-protocol.ts"
-
-export type BrowserChooserDocument = Readonly<
-  Pick<BrowserControlReference, "document" | "frame"> & {
-    closed: AbortSignal
-  }
->
+import type {
+  BrowserDocumentScope,
+  BrowserProtocolCommand,
+} from "./browser-protocol.ts"
 
 // CDP intercepts a renderer's pickers; only the approved document's input may
 // become a file reference. Other local frames cannot receive that reference.
 export class BrowserFileChooser {
   readonly #debug: WebContents["debugger"]
   #scope:
-    | (BrowserChooserDocument & {
+    | (BrowserDocumentScope & {
         ready: boolean
         opened: number | undefined
         ambiguous: boolean
@@ -79,7 +76,7 @@ export class BrowserFileChooser {
   }
 
   async arm(
-    document: BrowserChooserDocument,
+    document: BrowserDocumentScope,
     command: BrowserProtocolCommand,
   ): Promise<void> {
     if (this.#scope)
@@ -108,7 +105,7 @@ export class BrowserFileChooser {
   }
 
   inspect(): {
-    scope: BrowserChooserDocument
+    scope: BrowserDocumentScope
     backendNodeId: number | undefined
   } {
     const scope = this.#scope
