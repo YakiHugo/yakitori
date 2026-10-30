@@ -26,6 +26,22 @@ function lease(sessionId: string) {
 }
 
 describe("computer input ownership", () => {
+  it("disconnect seals new calls from the current lease without interrupting its in-flight input", async () => {
+    const control = new ComputerControl()
+    const current = lease("current")
+    control.acquire(current.owner)
+    control.disconnect()
+    expect(control.admissionPaused).toBe(true)
+    expect(control.takenOver).toBe(false)
+    expect(control.acquire(current.owner)).toBe("computer_disconnected")
+    expect(control.acquire(lease("other").owner)).toBe("computer_disconnected")
+    expect(current.cancellations()).toBe(0)
+    expect(control.owner).toBe(current.owner)
+    control.release(current.owner)
+    control.resume(control.prepareResume())
+    expect(control.acquire(current.owner)).toBeUndefined()
+  })
+
   it("still interrupts and joins native release when persisting disconnection fails", async () => {
     const control = new ComputerControl()
     const current = lease("config_failure")

@@ -434,6 +434,10 @@ export async function createYakitoriApplication(
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     const computerControl = new ComputerControl()
+    if (
+      userConfiguration.mcpServers?.[computerUseServerName]?.enabled === false
+    )
+      computerControl.disconnect()
     const activeMate = await resolveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -1046,19 +1050,20 @@ export async function createYakitoriApplication(
                           throw new Error("Computer tool has no owning task.")
                         const refusal =
                           computerControl.acquire(activeComputerTurn)
-                        if (refusal)
+                        if (refusal) {
+                          const message =
+                            refusal === "computer_taken_over"
+                              ? "The user took over the computer. Do not retry input until computer use is reconnected."
+                              : refusal === "computer_disconnected"
+                                ? "Computer use is disconnected. Reconnect computer use before sending another action."
+                                : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
                           return {
                             ok: false,
                             code: refusal,
-                            message:
-                              refusal === "computer_taken_over"
-                                ? "The user took over the computer. Reconnect computer use before sending input."
-                                : "Computer use is busy in another conversation.",
-                            content:
-                              refusal === "computer_taken_over"
-                                ? "The user took over the computer. Do not retry input until computer use is reconnected."
-                                : "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
+                            message,
+                            content: message,
                           }
+                        }
                         return tool.execute(input, context)
                       },
                     })),

@@ -3273,33 +3273,77 @@ describe("application composition", () => {
     })
   })
 
+  it("disconnect refuses a computer tool already captured by a pending model request", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const { called, release } = await writeComputerMcpFixture(rootDir)
+      const requested = deferred<void>(),
+        continueModel = deferred<void>()
+      const provider = createFauxProvider([
+        {
+          async assertRequest() {
+            requested.resolve()
+            await continueModel.promise
+          },
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "late_input",
+              name: "computer__control",
+              input: { action: "test" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Control is disconnected" }] },
+      ])
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: provider.stream,
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      try {
+        const created = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(created)
+        const sessionId = created.value.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "pending_input",
+            content: inputFixture([
+              { type: "text", text: "Use the owned fixture" },
+            ]),
+          }),
+        )
+        await requested.promise
+        expect(
+          await rpcRequest(baseUrl, "computer/disconnect", {}),
+        ).toMatchObject({ connected: false })
+        continueModel.resolve()
+        await waitForThreadIdle(application, sessionId)
+        expect(await readFile(called, "utf8").catch(() => "absent")).toBe(
+          "absent",
+        )
+        expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+          "Computer use is disconnected",
+        )
+      } finally {
+        continueModel.resolve()
+        await writeFile(release, "release")
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        )
+        await application.close()
+      }
+    })
+  })
+
   it("takes over the owning computer turn and waits for its native cleanup while other turns keep running", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const script = join(rootDir, "computer.mjs")
-      const marker = join(rootDir, "stopping")
-      const release = join(rootDir, "release")
-      const configPath = join(rootDir, "config.toml")
-      await writeFile(
-        script,
-        `
-import {existsSync,writeFileSync} from 'node:fs';
-import {createInterface} from 'node:readline';
-createInterface({input:process.stdin}).on('line', async line => {
-  const m=JSON.parse(line); if(m.id === undefined) return;
-  const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}
-    : m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}
-    : {content:[{type:'text',text:'done'}]};
-  if(m.params?.name==='turn_ended') {
-    writeFileSync(${JSON.stringify(marker)}, 'waiting');
-    while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve=>setTimeout(resolve,5));
-  }
-  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
-});`,
-      )
-      await writeFile(
-        configPath,
-        `[mcp_servers.computer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(script)}]\nrequired = true\n`,
-      )
+      const { configPath, marker, release } =
+        await writeComputerMcpFixture(rootDir)
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
@@ -5148,6 +5192,37 @@ describe("provider login registration", () => {
     })
   })
 })
+
+async function writeComputerMcpFixture(rootDir: string) {
+  const script = join(rootDir, "computer.mjs")
+  const marker = join(rootDir, "stopping")
+  const release = join(rootDir, "release")
+  const configPath = join(rootDir, "config.toml")
+  const called = join(rootDir, "called")
+  await writeFile(
+    script,
+    `
+import {existsSync,writeFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+createInterface({input:process.stdin}).on('line', async line => {
+  const m=JSON.parse(line); if(m.id === undefined) return;
+  const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'owned-computer',version:'1'}}
+    : m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}
+    : {content:[{type:'text',text:'done'}]};
+  if(m.params?.name==='control') writeFileSync(${JSON.stringify(called)}, 'called');
+  if(m.params?.name==='turn_ended') {
+    writeFileSync(${JSON.stringify(marker)}, 'waiting');
+    while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
+});`,
+  )
+  await writeFile(
+    configPath,
+    `[mcp_servers.computer]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(script)}]\nrequired = true\n`,
+  )
+  return { configPath, marker, release, called }
+}
 
 async function withApplicationRoot(
   run: (rootDir: string, workspace: string) => Promise<void>,
