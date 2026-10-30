@@ -40,6 +40,7 @@ export function registerWorkspaceBrowser(
   window: BrowserWindow,
 ): DesktopBrowser {
   const tabs = new Map<string, BrowserTab>()
+  const loads = new Set<string>()
   // One current debugger per turn. Switching tabs closes the previous target;
   // model steps reuse the connection until the owning turn confirms cleanup.
   const connections = new Map<
@@ -287,18 +288,24 @@ export function registerWorkspaceBrowser(
       const contents = tab.view.webContents
       switch (input.action) {
         case "back":
-          if (contents.navigationHistory.canGoBack())
+          if (contents.navigationHistory.canGoBack()) {
+            tab.navigation++
             contents.navigationHistory.goBack()
+          }
           break
         case "forward":
-          if (contents.navigationHistory.canGoForward())
+          if (contents.navigationHistory.canGoForward()) {
+            tab.navigation++
             contents.navigationHistory.goForward()
+          }
           break
         case "reload":
+          tab.navigation++
           delete tab.error
           contents.reload()
           break
         case "stop":
+          tab.navigation++
           contents.stop()
           break
         default:
@@ -508,6 +515,94 @@ export function registerWorkspaceBrowser(
           "browser_target_changed",
           "The listed browser tab closed or was replaced. List targets again.",
         )
+      if (loads.has(target.instanceId))
+        throw new BrowserControlError(
+          "browser_busy",
+          "An agent navigation is still settling for this target.",
+        )
+      if (input.action === "navigate") {
+        if (!isBrowserNavigation(input.url))
+          throw new BrowserControlError(
+            "invalid_arguments",
+            "Use an HTTP(S) destination without credentials.",
+          )
+        const current = connections.get(ownerKey(owner))
+        if (
+          current?.busy ||
+          [...connections.values()].some(
+            (entry) =>
+              entry !== current && entry.targetId === target.instanceId,
+          )
+        )
+          throw new BrowserControlError(
+            "browser_busy",
+            "This browser target has an active owner or request.",
+          )
+        const contents = tab.view.webContents
+        const assertCurrent = () => {
+          signal.throwIfAborted()
+          if (
+            tabs.get(target.tabId) !== tab ||
+            contents.isDestroyed() ||
+            contents.getURL() !== input.fromUrl ||
+            contents.isLoadingMainFrame()
+          )
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "The listed page changed or is loading. List its current URL before navigating.",
+            )
+        }
+        assertCurrent()
+        await finishTurn(owner)
+        assertCurrent()
+        const navigation = ++tab.navigation
+        tab.requestedUrl = input.url
+        delete tab.error
+        const cancel = () => {
+          // A later user navigation owns its load. Never stop that replacement.
+          if (
+            tabs.get(target.tabId) === tab &&
+            tab.navigation === navigation &&
+            !contents.isDestroyed()
+          )
+            contents.stop()
+        }
+        signal.addEventListener("abort", cancel, { once: true })
+        loads.add(target.instanceId)
+        try {
+          signal.throwIfAborted()
+          // Wait for Electron's load completion/rejection, including cancellation.
+          // Abandoning this promise would make a retry duplicate navigation.
+          await contents.loadURL(input.url)
+          signal.throwIfAborted()
+          if (
+            tabs.get(target.tabId) !== tab ||
+            contents.isDestroyed() ||
+            tab.navigation !== navigation
+          )
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "A later navigation or replacement superseded this load. Inspect the current tab.",
+            )
+          return { target, url: contents.getURL(), loaded: true }
+        } catch (cause) {
+          if (
+            cause instanceof Error &&
+            "errno" in cause &&
+            typeof cause.errno === "number" &&
+            cause.errno < 0
+          )
+            throw new BrowserControlError(
+              "browser_navigation_unconfirmed",
+              "The requested load failed or was superseded. Inspect the current URL; do not retry automatically. " +
+                cause.message,
+            )
+          throw cause
+        } finally {
+          signal.removeEventListener("abort", cancel)
+          loads.delete(target.instanceId)
+        }
+      }
       const key = ownerKey(owner)
       let entry = connections.get(key)
       if (

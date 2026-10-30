@@ -88,6 +88,7 @@ import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
 import { createBrowserInputTool } from "./browser-input-tool.ts"
+import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
 import {
   type ChatGPTConnections,
@@ -1062,6 +1063,7 @@ export async function createYakitoriApplication(
                 admitBrowser,
               ),
               createBrowserInputTool(options.desktopBrowser, admitBrowser),
+              createBrowserNavigationTool(options.desktopBrowser, admitBrowser),
             ]
           : []),
       ])

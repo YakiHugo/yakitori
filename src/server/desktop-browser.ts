@@ -90,12 +90,13 @@ export function createDesktopBrowserClient(): DesktopBrowser & {
       // request never proves cleanup: finishTurn must still acknowledge it.
       const timer = setTimeout(() => {
         cancel(requestId)
-        // A dispatched text insertion cannot be safely abandoned or replayed.
+        // A dispatched browser mutation cannot be safely abandoned or replayed.
         // Keep this tool pending until the parent acknowledges it. Turn cleanup
         // has its own deadline and retains the lease if that acknowledgement is lost.
         if (
           operation.operation === "request" &&
-          operation.input.action === "type"
+          operation.input.action !== "list" &&
+          operation.input.action !== "observe"
         )
           return
         pending.delete(requestId)

@@ -40,7 +40,7 @@ export function bindDesktopBrowserRequests(
     requestId: string,
     run: () => Promise<JsonObject>,
     signal?: AbortSignal,
-    inputMayHaveRun: () => boolean = () => false,
+    mutationMayHaveRun: () => "type" | "navigate" | undefined = () => undefined,
   ) => {
     try {
       const result = await run()
@@ -56,11 +56,14 @@ export function bindDesktopBrowserRequests(
           type: "desktop_browser/response",
           requestId,
           ok: false,
-          code: inputMayHaveRun()
-            ? "browser_input_unconfirmed"
-            : "browser_cancelled",
-          error: inputMayHaveRun()
-            ? "Browser text dispatch may have occurred before cancellation. Observe again; never replay text automatically."
+          code:
+            mutationMayHaveRun() === "navigate"
+              ? "browser_navigation_unconfirmed"
+              : mutationMayHaveRun() === "type"
+                ? "browser_input_unconfirmed"
+                : "browser_cancelled",
+          error: mutationMayHaveRun()
+            ? "The browser operation may have taken effect before cancellation. Inspect the current target; never replay it automatically."
             : "Browser observation stopped.",
         })
       else if (cause instanceof BrowserControlError)
@@ -159,7 +162,11 @@ export function bindDesktopBrowserRequests(
               return browser.request(input, owner, cancellation.signal)
             },
             cancellation.signal,
-            () => attempted && input.action === "type",
+            () =>
+              attempted &&
+              (input.action === "type" || input.action === "navigate")
+                ? input.action
+                : undefined,
           ),
         )
         .finally(() => {

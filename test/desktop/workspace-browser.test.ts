@@ -3,9 +3,11 @@ import type { BrowserWindow } from "electron"
 import { beforeEach, expect, it, vi } from "vitest"
 import { registerWorkspaceBrowser } from "../../src/desktop/workspace-browser.ts"
 import type {
+  BrowserNavigationRequest,
   BrowserObservationRequest,
   BrowserTarget,
 } from "../../src/protocol/desktop-browser.ts"
+import { parseBrowserNavigationRequest } from "../../src/protocol/desktop-browser.ts"
 
 type IpcEvent = { sender: unknown; senderFrame: unknown }
 type Handler = (event: IpcEvent, input: unknown) => unknown
@@ -17,6 +19,9 @@ const electron = vi.hoisted(() => ({
       id: number
       url: string
       getURL(): string
+      loadURL(url: string): Promise<void>
+      stop: ReturnType<typeof vi.fn>
+      reload: ReturnType<typeof vi.fn>
       close: ReturnType<typeof vi.fn>
       isFocused: ReturnType<typeof vi.fn>
       capturePage: ReturnType<typeof vi.fn>
@@ -68,6 +73,8 @@ vi.mock("electron", async () => {
         },
         setWindowOpenHandler: vi.fn(),
         close: vi.fn(),
+        stop: vi.fn(),
+        reload: vi.fn(),
         async loadURL(url: string) {
           this.url = url
         },
@@ -107,7 +114,7 @@ function setup() {
   )
   const browser = {
     ...controller,
-    request: (input: BrowserObservationRequest) =>
+    request: (input: BrowserObservationRequest | BrowserNavigationRequest) =>
       controller.request(input, {
         sessionId: "session_owned",
         turnId: "turn_owned",
@@ -119,7 +126,7 @@ function setup() {
     if (!handler) throw new Error("Missing browser IPC handler")
     return handler(sender, input)
   }
-  return { call, window, sent, event, browser }
+  return { call, window, sent, event, browser, controller }
 }
 
 it("never observes another owned tab or a replacement under the same tab ID", async () => {
@@ -483,4 +490,155 @@ it("does not publish or cache a capture from a superseded page navigation", asyn
     "data:image/png;base64,cGFnZQ==",
   )
   expect(view.webContents.capturePage).toHaveBeenCalledTimes(2)
+})
+
+it("requires an exact browser source URL and the existing HTTP(S) destination policy", () => {
+  const valid = {
+    action: "navigate",
+    target: {
+      tabId: "owned",
+      webContentsId: 17,
+      instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+    },
+    fromUrl: "",
+    url: "https://destination.test",
+  }
+  expect(parseBrowserNavigationRequest(valid)).toMatchObject({
+    url: "https://destination.test/",
+  })
+  for (const input of [
+    { ...valid, url: "file:///private" },
+    { ...valid, url: "javascript:alert(1)" },
+    { ...valid, url: "https://name:secret@example.test" },
+    { ...valid, url: "destination.test" },
+    { ...valid, method: "Page.navigate" },
+    { ...valid, fromUrl: 42 },
+  ])
+    expect(() => parseBrowserNavigationRequest(input)).toThrow()
+})
+
+it("navigates a blank owned tab without requiring an attached debugger", async () => {
+  const { call, browser } = setup()
+  call("create", { tabId: "blank" })
+  const listed = await browser.request({ action: "list" })
+  const target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  if (!target) throw new Error("Missing blank target")
+  const contents = electron.views[0]?.webContents
+  if (!contents) throw new Error("Missing blank contents")
+  contents.loadURL = vi.fn(async () => {
+    contents.url = "https://redirected.test/"
+  })
+  await expect(
+    browser.request({
+      action: "navigate",
+      target,
+      fromUrl: "wrong",
+      url: "https://destination.test/",
+    }),
+  ).rejects.toMatchObject({ code: "browser_target_changed" })
+  expect(contents.loadURL).not.toHaveBeenCalled()
+  expect(
+    await browser.request({
+      action: "navigate",
+      target,
+      fromUrl: "",
+      url: "https://destination.test/",
+    }),
+  ).toMatchObject({ target, url: "https://redirected.test/", loaded: true })
+  expect(contents.loadURL).toHaveBeenCalledTimes(1)
+})
+
+it("cancels only its own load and waits for Electron to acknowledge cancellation", async () => {
+  const { call, browser, controller } = setup()
+  call("create", { tabId: "blank" })
+  const listed = await browser.request({ action: "list" }),
+    target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  const contents = electron.views[0]?.webContents
+  if (!target || !contents) throw new Error("Missing blank target")
+  const started = Promise.withResolvers<void>(),
+    load = Promise.withResolvers<void>(),
+    cancellation = new AbortController()
+  contents.loadURL = vi.fn(async (url) => {
+    contents.url = url
+    started.resolve()
+    await load.promise
+  })
+  let completed = false
+  const pending = controller
+    .request(
+      {
+        action: "navigate",
+        target,
+        fromUrl: "",
+        url: "https://destination.test/",
+      },
+      { sessionId: "session_owned", turnId: "turn_owned" },
+      cancellation.signal,
+    )
+    .finally(() => {
+      completed = true
+    })
+  await started.promise
+  await expect(
+    browser.request({
+      action: "navigate",
+      target,
+      fromUrl: "https://destination.test/",
+      url: "https://duplicate.test/",
+    }),
+  ).rejects.toMatchObject({ code: "browser_busy" })
+  cancellation.abort()
+  expect(contents.stop).toHaveBeenCalledTimes(1)
+  expect(completed).toBe(false)
+  load.reject(Object.assign(new Error("ERR_ABORTED"), { errno: -3 }))
+  await expect(pending).rejects.toMatchObject({
+    code: "browser_navigation_unconfirmed",
+  })
+  expect(contents.loadURL).toHaveBeenCalledTimes(1)
+})
+
+it.each([
+  "navigate",
+  "reload",
+])("does not stop a user navigation that superseded an agent load (action=%s)", async (action) => {
+  const { call, browser, controller } = setup()
+  call("create", { tabId: "blank" })
+  const listed = await browser.request({ action: "list" }),
+    target = (listed.tabs as { target: BrowserTarget }[])[0]?.target
+  const contents = electron.views[0]?.webContents
+  if (!target || !contents) throw new Error("Missing blank target")
+  const started = Promise.withResolvers<void>(),
+    load = Promise.withResolvers<void>(),
+    cancellation = new AbortController()
+  contents.loadURL = vi.fn(async (url) => {
+    contents.url = url
+    if (url === "https://destination.test/") {
+      started.resolve()
+      await load.promise
+    }
+  })
+  const pending = controller.request(
+    {
+      action: "navigate",
+      target,
+      fromUrl: "",
+      url: "https://destination.test/",
+    },
+    { sessionId: "session_owned", turnId: "turn_owned" },
+    cancellation.signal,
+  )
+  await started.promise
+  if (action === "navigate")
+    call("navigate", { tabId: "blank", url: "https://user.test/" })
+  else call("action", { tabId: "blank", action: "reload" })
+  cancellation.abort()
+  expect(contents.stop).not.toHaveBeenCalled()
+  load.reject(Object.assign(new Error("ERR_ABORTED"), { errno: -3 }))
+  await expect(pending).rejects.toMatchObject({
+    code: "browser_navigation_unconfirmed",
+  })
+  expect(contents.getURL()).toBe(
+    action === "navigate" ? "https://user.test/" : "https://destination.test/",
+  )
+  expect(contents.loadURL).toHaveBeenCalledTimes(action === "navigate" ? 2 : 1)
 })
