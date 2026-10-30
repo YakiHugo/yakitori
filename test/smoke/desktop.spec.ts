@@ -5,13 +5,13 @@ import { createServer } from "node:http"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
-import { parse } from "smol-toml"
 import {
   test as base,
   type ElectronApplication,
   expect,
   type Page,
 } from "@playwright/test"
+import { parse } from "smol-toml"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   createSmokeEnvironment,
@@ -185,7 +185,7 @@ const test = base.extend<{ desktop: DesktopSmoke }>({
 
 test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit", async ({
   desktop,
-}, testInfo) => {
+}) => {
   const { application, page, userData, sidecarUrl, rendererErrors } = desktop
   expect(
     await application.evaluate(({ app }) => ({
@@ -236,6 +236,13 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
   ).toHaveCount(0)
   await runFauxTurn(page)
   await runBudgetedGoal(page)
+  expect(rendererErrors).toEqual([])
+})
+
+test("desktop provider accounts, inference, downloads and removal cross the packaged bridge", async ({
+  desktop,
+}, testInfo) => {
+  const { application, page, rendererErrors } = desktop
   const downloadPath = testInfo.outputPath("ordered-smoke.pdf")
   await application.evaluate(({ BrowserWindow }, path) => {
     const window = BrowserWindow.getAllWindows()[0]
@@ -269,8 +276,14 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
       return readFile(downloadPath)
     },
   })
-  await runExternalEngineFlow(page)
   expect(rendererErrors).toEqual([])
+})
+
+test("desktop external engines connect and finish their isolated conversation", async ({
+  desktop,
+}) => {
+  await runExternalEngineFlow(desktop.page)
+  expect(desktop.rendererErrors).toEqual([])
 })
 
 test("desktop independent sessions route cross-provider models and appear in the sidebar", async ({
