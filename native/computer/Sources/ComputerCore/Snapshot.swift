@@ -130,6 +130,26 @@ struct Snapshot {
         }
     }
 
+    // Read-only frames carry no input ticket. Moves, resizes and another
+    // helper's input may change pixels; process/window replacement must not.
+    func validatePreview(windows current: [WindowIdentity], displays: [DisplayIdentity]) throws -> Bool {
+        if let display {
+            guard let active = displays.first(where: { $0.id == display.id }) else {
+                throw ComputerFailure("display_not_found", "The preview display disconnected.")
+            }
+            return active.frame == display.frame
+        }
+        guard let anchor = windows.first, let launched = anchor.launched else {
+            throw ComputerFailure("stale_target", "A preview requires a known process incarnation.")
+        }
+        let selected = current.filter { $0.pid == anchor.pid && (scope == .app || $0.windowID == anchor.windowID) }
+        guard !selected.isEmpty else { throw ComputerFailure("window_not_found", "The preview target closed or is no longer visible.") }
+        guard selected.allSatisfy({ $0.launched == launched }) else {
+            throw ComputerFailure("stale_target", "The preview process incarnation changed; list targets again.")
+        }
+        return selected == windows
+    }
+
     func point(x: Double, y: Double, space: String = "screenshot") throws -> CGPoint {
         guard x.isFinite, y.isFinite else { throw ComputerFailure("invalid_coordinates", "Coordinates must be finite.") }
         switch space {
