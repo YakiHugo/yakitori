@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { once } from "node:events"
-import { readFile, realpath, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { createConnection } from "node:net"
 import { join, resolve } from "node:path"
@@ -505,6 +505,8 @@ test("agent browser observations and actions use the exact owned tab through rea
     frameAfterReady = 0
   const uploadPath = join(userData, "upload-你好.txt")
   const uploadText = "Owned upload 你好 🌍\n"
+  const uploadDirectory = join(userData, "folder-你好")
+  const uploadedDirectoryFiles: { path: string; text: string }[][] = []
   const uploadedFiles: { name: string; text: string }[][] = []
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
     []
@@ -664,7 +666,9 @@ test("agent browser observations and actions use the exact owned tab through rea
   const source = createServer((request, response) => {
     if (
       request.method === "POST" &&
-      ["/file-bytes", "/file-choice"].includes(request.url ?? "")
+      ["/file-bytes", "/file-choice", "/directory-bytes"].includes(
+        request.url ?? "",
+      )
     ) {
       let body = ""
       request.setEncoding("utf8")
@@ -673,6 +677,8 @@ test("agent browser observations and actions use the exact owned tab through rea
       })
       request.on("end", () => {
         if (request.url === "/file-bytes") uploadedFiles.push(JSON.parse(body))
+        else if (request.url === "/directory-bytes")
+          uploadedDirectoryFiles.push(JSON.parse(body))
         else fileChoiceEvents.push(JSON.parse(body))
         response.writeHead(204)
         response.end()
@@ -762,7 +768,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             ? "Remote"
             : "Nested"
       response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label><label>Remote folder<input type="file" webkitdirectory onchange="Promise.all(Array.from(this.files,async file=>({path:file.webkitRelativePath,text:await file.text()}))).then(files=>fetch('/directory-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
       )
       return
     }
@@ -1270,13 +1276,62 @@ test("agent browser observations and actions use the exact owned tab through rea
               id: `observe_file_selection_${step}`,
             }
           } else if (step === 65) {
+            await page
+              .getByRole("button", { name: "Show workspace", exact: true })
+              .click()
+            const current = toolResult(body.messages ?? [], "nodes")
+            const control = (
+              current.nodes as {
+                role: string
+                name: string
+                elementReference?: string
+              }[]
+            ).find(
+              (node) => node.role === "button" && node.name === "Remote folder",
+            )
+            if (!control?.elementReference)
+              throw new Error("Missing remote directory input")
+            tool = {
+              name: "browser_upload",
+              input: {
+                action: "upload_directory",
+                target: current.target,
+                reference: control.elementReference,
+                fromUrl: (current.document as { url: string }).url,
+                paths: [uploadDirectory],
+              },
+              id: "provide_remote_directory",
+            }
+          } else if (step === 66) {
+            const selected = toolResult(body.messages ?? [], "filesVerified")
+            if (
+              selected.action !== "upload_directory" ||
+              selected.filesVerified !== true ||
+              selected.events !== "chromium"
+            )
+              throw new Error("Directory selection receipt was not verified")
+            await expect.poll(() => uploadedDirectoryFiles.length).toBe(1)
+            await page
+              .getByRole("button", { name: "Hide workspace", exact: true })
+              .click()
+            const previous = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser",
+              input: {
+                action: "observe",
+                target: previous.target,
+                frameReference: previous.frameReference,
+              },
+              id: "observe_directory_selection",
+            }
+          } else if (step === 67) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 66) {
+          } else if (step === 68) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1286,7 +1341,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 67) {
+          } else if (step === 69) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1301,7 +1356,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 68) {
+          } else if (step === 70) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
             tool = {
@@ -1314,7 +1369,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 69) {
+          } else if (step === 71) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
@@ -1369,6 +1424,9 @@ test("agent browser observations and actions use the exact owned tab through rea
   destinationUrl = `${origin}/third#arrived`
   try {
     await writeFile(uploadPath, uploadText)
+    await mkdir(join(uploadDirectory, "nested/empty"), { recursive: true })
+    await writeFile(join(uploadDirectory, ".hidden"), "Hidden 你好 🌍")
+    await writeFile(join(uploadDirectory, "nested/a.txt"), "Nested bytes")
     const helper = join(userData, "computer.cjs")
     await writeFile(
       helper,
@@ -1466,6 +1524,9 @@ test("agent browser observations and actions use the exact owned tab through rea
             state: "pending",
             error: "",
             geometry: undefined as unknown,
+            fileState: undefined as unknown,
+            files: params?.files,
+            completion: undefined as unknown,
           }
           append(entry)
           try {
@@ -1479,6 +1540,12 @@ test("agent browser observations and actions use the exact owned tab through rea
               )
             )
               entry.geometry = result.result?.value
+            if (
+              method === "Runtime.callFunctionOn" &&
+              Array.isArray(result.result?.value?.files)
+            )
+              entry.fileState = result.result.value
+            if (params?.awaitPromise) entry.completion = result.result?.value
             entry.state = "done"
             return result
           } catch (cause) {
@@ -1498,7 +1565,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 69; approval++)
+    for (let approval = 0; approval < 71; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1699,6 +1766,13 @@ test("agent browser observations and actions use the exact owned tab through rea
     expect(uploadedFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
+    expect(uploadedDirectoryFiles).toEqual([
+      expect.arrayContaining([
+        { path: "folder-你好/.hidden", text: "Hidden 你好 🌍" },
+        { path: "folder-你好/nested/a.txt", text: "Nested bytes" },
+      ]),
+    ])
+    expect(uploadedDirectoryFiles[0]).toHaveLength(2)
     await expect.poll(() => fileChoiceEvents.length).toBe(4)
     expect(fileChoiceEvents).toEqual([
       { type: "input", trusted: true, count: 1 },
@@ -1829,6 +1903,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         framePointerEvents,
         frameSelectEvents,
         uploadedFiles,
+        uploadedDirectoryFiles,
         fileChoiceEvents,
         protocol,
       }),
@@ -1887,3 +1962,131 @@ function acceptsConnections(url: URL): Promise<boolean> {
     })
   })
 }
+
+test("packaged Chromium enumerates a directory for its owned cross-site frame", async ({
+  desktop,
+}) => {
+  const directory = join(desktop.userData, "native-directory")
+  await mkdir(join(directory, "nested/empty"), { recursive: true })
+  await writeFile(join(directory, ".hidden"), "hidden")
+  await writeFile(join(directory, "nested/a.txt"), "nested")
+  const source = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "text/html" })
+    response.end(
+      request.url === "/frame"
+        ? '<label>Folder<input id="folder" type="file" webkitdirectory></label>'
+        : `<button>Root</button><iframe src="http://localhost:${(source.address() as { port: number }).port}/frame"></iframe>`,
+    )
+  })
+  source.listen(0, "127.0.0.1")
+  await once(source, "listening")
+  const address = source.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing owned directory fixture")
+  try {
+    const state = await desktop.application.evaluate(
+      async (
+        { BrowserWindow, WebContentsView, session },
+        { url, directory },
+      ) => {
+        const previousFocus = BrowserWindow.getFocusedWindow()?.id
+        const window = BrowserWindow.getAllWindows()[0]
+        if (!window) throw new Error("Missing owned host window")
+        const view = new WebContentsView({
+          webPreferences: {
+            session: session.fromPartition(
+              "persist:yakitori-workspace-browser",
+            ),
+            sandbox: true,
+            nodeIntegration: false,
+            contextIsolation: true,
+          },
+        })
+        view.setBounds({ x: 0, y: 0, width: 1200, height: 1000 })
+        window.contentView.addChildView(view)
+        view.setVisible(false)
+        const contents = view.webContents
+        const debug = contents.debugger
+        try {
+          await contents.loadURL(url)
+          if (contents.isLoadingMainFrame())
+            await new Promise<void>((resolve) =>
+              contents.once("did-stop-loading", () => resolve()),
+            )
+          view.setVisible(true)
+          debug.attach("1.3")
+          let frameSession: string | undefined
+          debug.on("message", (_event, method, params) => {
+            if (
+              method === "Target.attachedToTarget" &&
+              params.targetInfo?.type === "iframe"
+            )
+              frameSession = params.sessionId
+          })
+          await debug.sendCommand("Target.setAutoAttach", {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+            filter: [{ type: "iframe", exclude: false }, { exclude: true }],
+          })
+          if (!frameSession) throw new Error("Missing owned child renderer")
+          const { root } = await debug.sendCommand(
+            "DOM.getDocument",
+            {},
+            frameSession,
+          )
+          const { nodeId } = await debug.sendCommand(
+            "DOM.querySelector",
+            { nodeId: root.nodeId, selector: "input" },
+            frameSession,
+          )
+          await debug.sendCommand(
+            "Runtime.evaluate",
+            {
+              expression:
+                'window.completion = new Promise(resolve => { for(const type of ["change","cancel"]) folder.addEventListener(type,e=>resolve({type:e.type,trusted:e.isTrusted,files:Array.from(folder.files,f=>({path:f.webkitRelativePath,size:f.size}))}),{once:true}); })',
+            },
+            frameSession,
+          )
+          await debug.sendCommand(
+            "DOM.setFileInputFiles",
+            { nodeId, files: [directory] },
+            frameSession,
+          )
+          const result = await debug.sendCommand(
+            "Runtime.evaluate",
+            {
+              expression: "completion",
+              awaitPromise: true,
+              returnByValue: true,
+            },
+            frameSession,
+          )
+          return {
+            ...result.result.value,
+            focusUnchanged:
+              BrowserWindow.getFocusedWindow()?.id === previousFocus,
+          }
+        } finally {
+          if (debug.isAttached()) debug.detach()
+          contents.close({ waitForBeforeUnload: false })
+          window.contentView.removeChildView(view)
+        }
+      },
+      { url: `http://127.0.0.1:${address.port}/`, directory },
+    )
+    expect(state).toMatchObject({
+      type: "change",
+      focusUnchanged: true,
+      trusted: true,
+      files: expect.arrayContaining([
+        { path: "native-directory/.hidden", size: 6 },
+        { path: "native-directory/nested/a.txt", size: 6 },
+      ]),
+    })
+    expect(state.files).toHaveLength(2)
+  } finally {
+    source.closeAllConnections()
+    await new Promise<void>((resolve) => source.close(() => resolve()))
+  }
+})

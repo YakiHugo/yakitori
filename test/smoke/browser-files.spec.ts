@@ -1,4 +1,8 @@
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { expect, type Page, test } from "@playwright/test"
+import { prepareBrowserDirectory } from "../../src/desktop/browser-directory.ts"
 import {
   clearBrowserFiles,
   inspectBrowserFiles,
@@ -148,5 +152,48 @@ test("file metadata refuses oversized lists and names before producing an unboun
       ).files = data.files
     }, kind)
     expect(await inspect(page, true)).toMatchObject({ ok: false })
+  }
+})
+
+test("synthetic file events cannot complete an owned directory selection", async ({
+  page,
+}) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "yakitori-directory-events-")),
+  )
+  try {
+    await mkdir(join(directory, "folder"))
+    await writeFile(join(directory, "folder/file.txt"), "owned")
+    await page.evaluate((source) => {
+      const input = Reflect.get(
+        globalThis,
+        "fileFixtureControl",
+      ) as HTMLInputElement
+      input.webkitdirectory = true
+      const prepare = new Function(
+        `return (${source})`,
+      )() as typeof prepareBrowserDirectory
+      const ticket = prepare.call(input)
+      if (!ticket) throw new Error("Missing directory completion ticket")
+      Reflect.set(globalThis, "directoryCompletion", ticket.completion)
+      Reflect.set(globalThis, "directoryCompleted", false)
+      void ticket.completion.then(() =>
+        Reflect.set(globalThis, "directoryCompleted", true),
+      )
+      for (const type of ["change", "cancel"])
+        input.dispatchEvent(new Event(type))
+    }, prepareBrowserDirectory.toString())
+    expect(
+      await page.evaluate(() => Reflect.get(globalThis, "directoryCompleted")),
+    ).toBe(false)
+    await page.locator("input").setInputFiles(join(directory, "folder"))
+    expect(
+      await page.evaluate(() => Reflect.get(globalThis, "directoryCompletion")),
+    ).toBe("change")
+    expect(
+      await page.evaluate(() => Reflect.get(globalThis, "directoryCompleted")),
+    ).toBe(true)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
   }
 })

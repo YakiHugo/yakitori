@@ -54,6 +54,23 @@ it("allows cleanup after an ordinary command error from a live original session"
   owner.assertCompleted()
 })
 
+it("does not treat an async effect's failed observation as proof that its mutation stopped", async () => {
+  let destroyed = false
+  const owner = new BrowserPendingMutations(() => destroyed)
+  await expect(
+    owner.run(
+      async () => {
+        throw new Error("Directory completion context disappeared")
+      },
+      new AbortController().signal,
+      "effect",
+    ),
+  ).rejects.toThrow("completion context disappeared")
+  expect(() => owner.assertCompleted()).toThrow(/no confirmed completion/)
+  destroyed = true
+  owner.assertCompleted()
+})
+
 it("does not dispatch or retain a mutation if its original session closes before dispatch", async () => {
   const owner = new BrowserPendingMutations(() => false),
     scope = new AbortController()

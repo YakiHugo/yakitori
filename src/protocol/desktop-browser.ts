@@ -367,6 +367,7 @@ export type BrowserRequest =
   | BrowserNavigationRequest
   | BrowserCaptureRequest
   | BrowserUploadRequest
+  | BrowserDirectoryUploadRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -439,6 +440,91 @@ export function parseBrowserUploadRequest(
   )
 }
 
+export type BrowserDirectoryUploadRequest = Readonly<{
+  action: "upload_directory"
+  target: BrowserTarget
+  reference: string
+  fromUrl: string
+  directory: string
+  files: Readonly<{
+    name: string
+    size: number
+    lastModified: number
+    relativePath: string
+  }>[]
+}>
+
+export function parseBrowserDirectoryUploadRequest(
+  value: unknown,
+): BrowserDirectoryUploadRequest {
+  if (
+    !isJsonObject(value) ||
+    value.action !== "upload_directory" ||
+    Object.keys(value).length !== 6 ||
+    !["action", "target", "reference", "fromUrl", "directory", "files"].every(
+      (key) => Object.hasOwn(value, key),
+    ) ||
+    typeof value.directory !== "string" ||
+    !value.directory.startsWith("/") ||
+    value.directory.length > 8192 ||
+    value.directory.includes("\0") ||
+    !Array.isArray(value.files) ||
+    value.files.length > 256 ||
+    Buffer.byteLength(JSON.stringify(value.files)) > 65536 ||
+    !value.files.every(
+      (file) =>
+        isJsonObject(file) &&
+        Object.keys(file).length === 4 &&
+        typeof file.name === "string" &&
+        file.name.length > 0 &&
+        file.name.length <= 4096 &&
+        !file.name.includes("/") &&
+        !file.name.includes("\0") &&
+        typeof file.size === "number" &&
+        Number.isSafeInteger(file.size) &&
+        file.size >= 0 &&
+        typeof file.lastModified === "number" &&
+        Number.isSafeInteger(file.lastModified) &&
+        typeof file.relativePath === "string" &&
+        file.relativePath.length <= 8192 &&
+        !file.relativePath.includes("\0") &&
+        file.relativePath.split("/").length >= 2 &&
+        file.relativePath
+          .split("/")
+          .every((part) => part !== "" && part !== "." && part !== "..") &&
+        file.relativePath.split("/").at(-1) === file.name &&
+        file.relativePath.split("/")[0] ===
+          (typeof value.directory === "string"
+            ? value.directory.split("/").at(-1)
+            : undefined),
+    ) ||
+    new Set(
+      value.files.map((file) =>
+        isJsonObject(file) ? file.relativePath : undefined,
+      ),
+    ).size !== value.files.length
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use upload_directory with a canonical macOS directory and bounded regular-file metadata (256 files, 64KiB metadata). Relative paths must include the selected folder name.",
+    )
+  const base = parseBrowserUploadRequest({
+    action: "upload",
+    target: value.target,
+    reference: value.reference,
+    fromUrl: value.fromUrl,
+    files: [],
+  })
+  return {
+    action: "upload_directory",
+    target: base.target,
+    reference: base.reference,
+    fromUrl: base.fromUrl,
+    directory: value.directory,
+    files: value.files as BrowserDirectoryUploadRequest["files"],
+  }
+}
+
 const requestMutates: Record<BrowserRequest["action"], boolean> = {
   list: false,
   observe: false,
@@ -453,6 +539,7 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   select: true,
   navigate: true,
   upload: true,
+  upload_directory: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -460,6 +547,8 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (isJsonObject(value) && value.action === "upload_directory")
+    return parseBrowserDirectoryUploadRequest(value)
   if (isJsonObject(value) && value.action === "upload")
     return parseBrowserUploadRequest(value)
   if (isJsonObject(value) && value.action === "capture")
