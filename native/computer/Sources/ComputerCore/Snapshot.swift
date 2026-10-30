@@ -155,6 +155,11 @@ func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     return value
 }
 
+func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return value as! AXUIElement
+}
+
 func elementFrame(_ element: AXUIElement) -> CGRect? {
     guard let position = attribute(element, kAXPositionAttribute), CFGetTypeID(position) == AXValueGetTypeID(),
           let size = attribute(element, kAXSizeAttribute), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }

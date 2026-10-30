@@ -86,7 +86,7 @@ pnpm test:computer:live --group capabilities --case 'window management'
 pnpm test:computer:live --group isolation
 ```
 
-Groups are `base`, `capabilities`, and `isolation`; the default `all` is the final
+Groups are `base`, `capabilities`, `isolation`, and `interactions`; the default `all` is the final
 acceptance run. Base cases intentionally share a sequential state contract and do
 not accept a case filter. Other cases prepare their own prerequisites. Unmatched
 filters fail, and reports identify the group/filter and actually executed cases.

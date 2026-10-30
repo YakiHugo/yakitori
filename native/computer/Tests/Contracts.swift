@@ -56,6 +56,12 @@ import Foundation
         rejects { try screen.validate(id: screen.id, windows: [window, other], displays: []) }
         let textOnly = Snapshot(scope: .window, frame: window.frame, windows: [window], display: nil, imageWidth: nil, imageHeight: nil, elements: [])
         rejects { _ = try textOnly.point(x: 0, y: 0) }
+        let path = try menuPath(["File", "Open"])
+        precondition(path == ["File", "Open"])
+        rejects { _ = try menuPath([] as [String]) }
+        rejects { _ = try menuPath([" "]) }
+        rejects { _ = try menuPath([1]) }
+        rejects { _ = try menuPath(Array(repeating: "Item", count: 17)) }
         try observationContracts()
         try applicationContracts()
         try await advancedContracts()

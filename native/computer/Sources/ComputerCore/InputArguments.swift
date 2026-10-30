@@ -30,7 +30,8 @@ func validateInput(_ action: String, _ args: [String: Any]) throws {
         guard let value = args["value"], value is String || value is NSNumber else { throw ComputerFailure("invalid_arguments", "set_value requires value.") }
     case "perform_action":
         guard args["action_name"] is String else { throw ComputerFailure("invalid_arguments", "perform_action requires action_name.") }
-    case "press", "click", "scroll", "drag": break
+    case "invoke_menu": _ = try menuPath(args["path"])
+    case "press", "click", "scroll", "drag", "hover": break
     default: throw ComputerFailure("invalid_arguments", "Unsupported native input action.")
     }
 }

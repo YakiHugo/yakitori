@@ -17,6 +17,7 @@ import { parseArgs } from "node:util"
 import { McpClient } from "../src/runtime/mcp-client.ts"
 import { verifyComputerCapabilities } from "./computer-capabilities.ts"
 import { prepareComputerFixture } from "./computer-fixture.ts"
+import { verifyComputerInteractions } from "./computer-interactions.ts"
 import { verifyComputerIsolation } from "./computer-isolation.ts"
 
 const { values } = parseArgs({
@@ -30,12 +31,15 @@ const { values } = parseArgs({
 const repeats = Number(values.repeat)
 const group = values.group
 assert(
-  ["all", "base", "capabilities", "isolation"].includes(group),
-  "group must be all, base, capabilities, or isolation",
+  ["all", "base", "capabilities", "isolation", "interactions"].includes(group),
+  "group must be all, base, capabilities, isolation, or interactions",
 )
 assert(
-  !values.case || group === "capabilities" || group === "isolation",
-  "--case requires --group capabilities or isolation; base cases share a sequential state contract",
+  !values.case ||
+    group === "capabilities" ||
+    group === "isolation" ||
+    group === "interactions",
+  "--case requires --group capabilities, isolation, or interactions; base cases share a sequential state contract",
 )
 // A safety boundary for this interactive local test runner, not a product quota.
 // Twenty repetitions already exercise hundreds of GUI effects on the host Mac.
@@ -120,12 +124,21 @@ try {
   )
   for (let iteration = 1; iteration <= repeats; iteration++) {
     for (const runGroup of group === "all"
-      ? ["base", "capabilities", "isolation"]
+      ? ["base", "capabilities", "isolation", "interactions"]
       : [group]) {
       const stateFile = join(root, `state-${iteration}-${runGroup}.json`)
       fixture = spawn(
         "/usr/bin/open",
-        ["-W", "-n", "-g", fixtureApp, "--args", stateFile, "--multi-window"],
+        [
+          "-W",
+          "-n",
+          "-g",
+          fixtureApp,
+          "--args",
+          stateFile,
+          "--multi-window",
+          ...(runGroup === "interactions" ? ["--interaction-fixture"] : []),
+        ],
         {
           stdio: "ignore",
         },
@@ -144,6 +157,12 @@ try {
         mouse_up: number
         window_id: number
         secondary_window_id: number
+        interaction_window_id: number
+        hover_alternate: boolean
+        hover_moves: number
+        hover_transitions: number
+        menu_count: number
+        menus_open: number
         active: boolean
         rich: string
         rich_bold: boolean
@@ -153,7 +172,13 @@ try {
         pointer_down: number
         pointer_up: number
         rich_selection: { location: number; length: number }
-        events: { type: number; flags: number }[]
+        events: {
+          type: number
+          flags: number
+          window: number
+          x: number
+          y: number
+        }[]
         secondary_frame: { x: number; y: number; width: number; height: number }
         window_server: {
           id: number
@@ -746,6 +771,16 @@ try {
           executable,
           pid,
           windowID: (await state()).secondary_window_id,
+          state,
+          waitFor,
+          check,
+          cleanup: () => client.bindTool(cleanup)({}),
+        })
+      if (runGroup === "interactions")
+        await verifyComputerInteractions({
+          call,
+          pid,
+          windowID: (await state()).interaction_window_id,
           state,
           waitFor,
           check,
