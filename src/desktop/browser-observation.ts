@@ -8,6 +8,11 @@ import {
   type BrowserTextInputRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
+import {
+  type BrowserControlReference,
+  browserAccessibility,
+  documentIdentity,
+} from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 
@@ -16,30 +21,6 @@ function object(value: unknown): Record<string, unknown> {
     throw new Error("Chromium returned invalid browser observation data.")
   return value as Record<string, unknown>
 }
-
-function documentIdentity(value: unknown) {
-  const frame = object(object(object(value).frameTree).frame)
-  if (
-    typeof frame.id !== "string" ||
-    typeof frame.loaderId !== "string" ||
-    typeof frame.url !== "string"
-  )
-    throw new Error("Chromium returned no live document identity.")
-  // CDP separates the document URL and its same-document hash fragment.
-  return {
-    frameId: frame.id,
-    documentId: frame.loaderId,
-    url:
-      frame.url +
-      (typeof frame.urlFragment === "string" ? frame.urlFragment : ""),
-  }
-}
-
-type BrowserControlReference = Readonly<{
-  kind: "text" | "pointer"
-  backendNodeId: number
-  document: ReturnType<typeof documentIdentity>
-}>
 
 export class BrowserDocumentConnection {
   #closed = false
@@ -195,112 +176,13 @@ export class BrowserDocumentConnection {
     const contents = this.#contents
     return this.#read(signal, async (command) => {
       const before = documentIdentity(await command("Page.getFrameTree"))
-      const tree = object(
+      const { nodes, references, truncated } = browserAccessibility(
         await command("Accessibility.getFullAXTree", {
           frameId: before.frameId,
           depth: 8,
         }),
+        before,
       )
-      if (!Array.isArray(tree.nodes))
-        throw new Error("Chromium returned no accessibility nodes.")
-      // CDP exposes depth but no node-count limit on its intermediate AX reply.
-      // These bounds cover host output/IPC, not Chromium's traversal allocation.
-      const nodes: JsonObject[] = []
-      const references = new Map<string, BrowserControlReference>()
-      const known = new Set(
-        tree.nodes.slice(0, 1000).map((value) => object(value).nodeId),
-      )
-      let bytes = 0,
-        truncated = tree.nodes.length > 1000
-      const primitive = (
-        value: unknown,
-        limit = 2048,
-      ): string | number | boolean | undefined => {
-        if (value === undefined) return
-        const scalar = object(value).value
-        if (typeof scalar === "string") {
-          if (scalar.length > limit) truncated = true
-          return scalar.slice(0, limit)
-        }
-        if (
-          typeof scalar === "boolean" ||
-          (typeof scalar === "number" && Number.isFinite(scalar))
-        )
-          return scalar
-        return undefined
-      }
-      for (const rawNode of tree.nodes) {
-        const node = object(rawNode)
-        if (node.ignored === true) continue
-        if (typeof node.nodeId !== "string")
-          throw new Error(
-            "Chromium returned an invalid accessibility node identity.",
-          )
-        if (
-          Array.isArray(node.childIds) &&
-          node.childIds.some((id) => !known.has(id))
-        )
-          truncated = true
-        const state: [string, string | number | boolean][] = []
-        if (Array.isArray(node.properties))
-          for (const raw of node.properties) {
-            const property = object(raw)
-            if (typeof property.name !== "string")
-              throw new Error(
-                "Chromium returned an invalid accessibility property.",
-              )
-            const value = primitive(property.value)
-            if (value !== undefined) state.push([property.name, value])
-          }
-        const value = primitive(node.value)
-        const role = String(primitive(node.role, 512) ?? "")
-        const backendNodeId = node.backendDOMNodeId
-        const reference =
-          typeof backendNodeId === "number" &&
-          Number.isSafeInteger(backendNodeId) &&
-          backendNodeId > 0 &&
-          ["textbox", "searchbox"].includes(role)
-            ? `browser_node_${randomUUID()}`
-            : undefined
-        const pointerReference =
-          typeof backendNodeId === "number" &&
-          Number.isSafeInteger(backendNodeId) &&
-          backendNodeId > 0 &&
-          !["RootWebArea", "StaticText", "InlineTextBox"].includes(role)
-            ? `browser_click_${randomUUID()}`
-            : undefined
-        const entry: JsonObject = {
-          nodeId: node.nodeId,
-          ...(reference ? { inputReference: reference } : {}),
-          ...(pointerReference ? { clickReference: pointerReference } : {}),
-          role,
-          name: String(primitive(node.name) ?? ""),
-          ...(typeof node.backendDOMNodeId === "number"
-            ? { backendNodeId: node.backendDOMNodeId }
-            : {}),
-          ...(value !== undefined ? { value } : {}),
-          ...(state.length ? { properties: Object.fromEntries(state) } : {}),
-        }
-        const size = Buffer.byteLength(JSON.stringify(entry))
-        if (nodes.length >= 1000 || bytes + size > 256 * 1024) {
-          truncated = true
-          break
-        }
-        bytes += size
-        nodes.push(entry)
-        if (reference && typeof backendNodeId === "number")
-          references.set(reference, {
-            kind: "text",
-            backendNodeId,
-            document: before,
-          })
-        if (pointerReference && typeof backendNodeId === "number")
-          references.set(pointerReference, {
-            kind: "pointer",
-            backendNodeId,
-            document: before,
-          })
-      }
       const after = documentIdentity(await command("Page.getFrameTree"))
       if (
         before.frameId !== after.frameId ||
