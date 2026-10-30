@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { WebContents } from "electron"
 import {
   type BrowserCaptureRequest,
+  type BrowserChooserRequest,
   BrowserControlError,
   type BrowserDirectoryUploadRequest,
   type BrowserKeyRequest,
@@ -17,6 +18,10 @@ import {
   documentIdentity,
 } from "./browser-accessibility.ts"
 import { captureBrowserPage } from "./browser-capture.ts"
+import {
+  type BrowserChooserDocument,
+  BrowserFileChooser,
+} from "./browser-chooser.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import { BrowserFrames } from "./browser-frames.ts"
@@ -55,6 +60,7 @@ export class BrowserDocumentConnection {
   readonly #contents: WebContents
   readonly #debug: WebContents["debugger"]
   readonly #sessions: BrowserFrameSessions
+  readonly #chooser: BrowserFileChooser
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
   readonly #directoryReady: (signal: AbortSignal) => Promise<void>
@@ -69,6 +75,7 @@ export class BrowserDocumentConnection {
     this.#references.clear()
     this.#frameCatalog.close()
     this.#sessions.close()
+    this.#chooser.close()
   }
 
   constructor(
@@ -105,6 +112,7 @@ export class BrowserDocumentConnection {
       )
     }
     this.#sessions = new BrowserFrameSessions(debug)
+    this.#chooser = new BrowserFileChooser(debug)
     this.#frameCatalog = new BrowserFrames(this.#sessions)
     debug.on("detach", this.#detached)
   }
@@ -164,6 +172,19 @@ export class BrowserDocumentConnection {
   async close(): Promise<void> {
     this.#mutations.assertCompleted()
     await this.#releaseInput()
+    if (!this.closed && this.#debug.isAttached()) {
+      try {
+        await this.#chooser.disarm((method, params, sessionId) =>
+          this.#chooserCommand(method, params, sessionId),
+        )
+      } catch (cause) {
+        throw new BrowserControlError(
+          "browser_cleanup_failed",
+          "File chooser interception did not confirm cleanup.",
+          { cause },
+        )
+      }
+    }
     if (!this.closed && this.#debug.isAttached()) this.#debug.detach()
     this.#closed = true
     this.#lifetime.abort(
@@ -176,6 +197,7 @@ export class BrowserDocumentConnection {
     this.#debug.off("detach", this.#detached)
     this.#frameCatalog.close()
     this.#sessions.close()
+    this.#chooser.close()
   }
 
   async #read<T>(
@@ -447,8 +469,177 @@ export class BrowserDocumentConnection {
     }
   }
 
+  async #chooserCommand(
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ): Promise<unknown> {
+    if (!["Page.enable", "Page.setInterceptFileChooserDialog"].includes(method))
+      throw new Error("Unexpected file chooser configuration command.")
+    this.#mutations.assertCompleted()
+    try {
+      return await this.#mutations.run(
+        () => this.#debug.sendCommand(method, params, sessionId),
+        AbortSignal.any([
+          this.#mutationLifetime(sessionId),
+          AbortSignal.timeout(10_000),
+        ]),
+      )
+    } catch (cause) {
+      if (cause instanceof BrowserControlError) throw cause
+      throw new BrowserControlError(
+        "browser_protocol_error",
+        cause instanceof Error ? cause.message : String(cause),
+        { cause },
+      )
+    }
+  }
+
+  async fileChooser(
+    input: BrowserChooserRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    this.assertInputIdle()
+    const configure: BrowserProtocolCommand = (method, params, sessionId) =>
+      this.#chooserCommand(method, params, sessionId)
+    if (input.action === "chooser_disarm") {
+      try {
+        const disabled = await this.#chooser.disarm(configure)
+        return { armed: false, interceptionDisabled: disabled }
+      } catch (cause) {
+        throw new BrowserControlError(
+          "browser_cleanup_failed",
+          "File chooser interception did not confirm cleanup.",
+          { cause },
+        )
+      }
+    }
+    if (input.action === "chooser_arm") {
+      const scope: BrowserChooserDocument = await this.#read(
+        signal,
+        async (command) => {
+          const frame = input.frameReference
+              ? await this.#frameCatalog.resolve(input.frameReference, command)
+              : undefined,
+            document =
+              frame?.frame.document ??
+              documentIdentity(await command("Page.getFrameTree"))
+          if (document.url !== input.fromUrl)
+            throw new BrowserControlError(
+              "browser_target_changed",
+              "The file chooser document URL changed. Observe it again.",
+            )
+          return {
+            document,
+            ...(input.frameReference
+              ? {
+                  frame: {
+                    reference: input.frameReference,
+                    ...(frame?.frame.sessionId
+                      ? { sessionId: frame.frame.sessionId }
+                      : {}),
+                  },
+                }
+              : {}),
+            closed: this.#mutationLifetime(frame?.frame.sessionId),
+          }
+        },
+      )
+      let attempted = false
+      try {
+        signal.throwIfAborted()
+        await this.#chooser.arm(scope, (method, params, sessionId) => {
+          signal.throwIfAborted()
+          attempted = true
+          return configure(method, params, sessionId)
+        })
+        await this.#verifyDocument(scope, signal)
+        return {
+          armed: true,
+          fromUrl: scope.document.url,
+          ...(input.frameReference
+            ? { frameReference: input.frameReference }
+            : {}),
+        }
+      } catch (cause) {
+        if (attempted) {
+          try {
+            this.#mutations.assertCompleted()
+            await this.#chooser.disarm(configure)
+          } catch (cleanup) {
+            throw new BrowserControlError(
+              "browser_cleanup_failed",
+              "File chooser configuration completion or cleanup is unknown.",
+              { cause: new AggregateError([cause, cleanup]) },
+            )
+          }
+        }
+        throw cause
+      }
+    }
+    this.#references.clear()
+    return this.#read(signal, async () => {
+      const { scope, backendNodeId } = this.#chooser.inspect()
+      await this.#verifyDocument(scope, signal)
+      if (backendNodeId === undefined)
+        return { armed: true, opened: false, fromUrl: scope.document.url }
+      const reference: BrowserControlReference = {
+          kind: "element",
+          backendNodeId,
+          document: scope.document,
+          ...(scope.frame ? { frame: scope.frame } : {}),
+        },
+        group = `yakitori_${randomUUID()}`
+      try {
+        const objectId = await this.#resolveReference(reference, group, signal),
+          reply = object(
+            await this.#inputReadCommand(
+              "Runtime.callFunctionOn",
+              {
+                objectId,
+                returnByValue: true,
+                functionDeclaration: inspectBrowserFiles.toString(),
+                arguments: [{ value: false }],
+              },
+              signal,
+              scope.frame?.sessionId,
+            ),
+          ),
+          state = object(object(reply.result).value)
+        if (
+          state.ok !== true ||
+          typeof state.multiple !== "boolean" ||
+          typeof state.directory !== "boolean"
+        )
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The opened HTML file input is no longer available.",
+          )
+        await this.#verifyDocument(reference, signal)
+        const token = `browser_element_${randomUUID()}`
+        this.#references.set(token, reference)
+        return {
+          armed: true,
+          opened: true,
+          elementReference: token,
+          fromUrl: scope.document.url,
+          multiple: state.multiple,
+          directory: state.directory,
+        }
+      } finally {
+        await this.#sessions.releaseObjects(
+          group,
+          (method, params, sessionId) =>
+            this.#debug.sendCommand(method, params, sessionId),
+          scope.frame?.sessionId,
+        )
+      }
+    })
+  }
+
   async #verifyDocument(
-    reference: BrowserControlReference,
+    reference: Pick<BrowserControlReference, "document" | "frame">,
     signal: AbortSignal,
   ) {
     const frame = reference.frame
@@ -737,6 +928,7 @@ export class BrowserDocumentConnection {
     signal.throwIfAborted()
     const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
+    this.#chooser.selected(reference)
     const command = (method: string, params: Record<string, unknown> = {}) =>
       this.#inputCommand(method, params, signal, reference.frame?.sessionId)
     let attempted = false,

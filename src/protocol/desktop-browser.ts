@@ -369,6 +369,7 @@ export type BrowserRequest =
   | BrowserUploadRequest
   | BrowserDirectoryUploadRequest
   | BrowserViewRequest
+  | BrowserChooserRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -526,6 +527,74 @@ export function parseBrowserDirectoryUploadRequest(
   }
 }
 
+export type BrowserChooserRequest =
+  | Readonly<{
+      action: "chooser_arm"
+      target: BrowserTarget
+      fromUrl: string
+      frameReference?: string
+    }>
+  | Readonly<{
+      action: "chooser_inspect" | "chooser_disarm"
+      target: BrowserTarget
+    }>
+
+export function parseBrowserChooserRequest(
+  value: unknown,
+): BrowserChooserRequest {
+  if (
+    !isJsonObject(value) ||
+    !["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(
+      String(value.action),
+    )
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact target and a file chooser action.",
+    )
+  const arm = value.action === "chooser_arm"
+  if (
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "frameReference"]
+            : ["action", "target"]
+        ).includes(key),
+    ) ||
+    (arm &&
+      (typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arming requires the observed document URL and optional current frameReference; inspect/disarm accept only a target.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+    ...(arm && value.frameReference !== undefined
+      ? { frameReference: value.frameReference }
+      : {}),
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid chooser target parser result.")
+  if (arm)
+    return {
+      action: "chooser_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(observed.frameReference
+        ? { frameReference: observed.frameReference }
+        : {}),
+    }
+  return {
+    action: value.action as "chooser_inspect" | "chooser_disarm",
+    target: observed.target,
+  }
+}
+
 export type BrowserViewRequest = Readonly<{
   action: "show"
   target: BrowserTarget
@@ -572,6 +641,9 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   upload: true,
   upload_directory: true,
   show: true,
+  chooser_arm: true,
+  chooser_inspect: false,
+  chooser_disarm: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -579,6 +651,13 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (
+    isJsonObject(value) &&
+    ["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(
+      String(value.action),
+    )
+  )
+    return parseBrowserChooserRequest(value)
   if (isJsonObject(value) && value.action === "show")
     return parseBrowserViewRequest(value)
   if (isJsonObject(value) && value.action === "upload_directory")
