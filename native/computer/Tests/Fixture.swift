@@ -50,6 +50,19 @@ final class ZoomTarget: NSView {
     }
 }
 
+final class TextTarget: NSView {
+    var clicked: (() -> Void)?
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {}
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill(); bounds.fill()
+        ("OCR action" as NSString).draw(at: NSPoint(x: 6, y: 5), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 24), .foregroundColor: NSColor.black,
+        ])
+    }
+    override func mouseUp(with event: NSEvent) { if bounds.contains(convert(event.locationInWindow, from: nil)) { clicked?() } }
+}
+
 final class HoverTarget: NSView {
     var allowsAlternate = true
     var alternate = false
@@ -169,6 +182,10 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate {
             let exit = NSButton(title: "Hover exit", target: self, action: #selector(increment))
             exit.frame = NSRect(x: 230, y: 80, width: 140, height: 28)
             extra.contentView!.addSubview(exit)
+            let text = TextTarget(frame: NSRect(x: 20, y: 245, width: 180, height: 36))
+            text.setAccessibilityElement(false)
+            text.clicked = { [weak self] in self?.increment() }
+            extra.contentView!.addSubview(text)
             interaction = extra
             extra.orderBack(nil)
         }

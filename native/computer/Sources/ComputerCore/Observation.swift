@@ -88,6 +88,7 @@ extension Computer {
         snapshot = nil
         lastObservation = nil
         let request = try ObservationRequest(args)
+        let recognize = try recognitionEnabled(args, mode: request.mode)
         var subtree: ObservedElement?
         if args["root_element"] != nil {
             guard let previous, previous.id == args["snapshot_id"] as? String,
@@ -188,9 +189,16 @@ extension Computer {
             }
         }
         let tree = accessibilityTree(roots, applicationRoots: applicationRoots, deadline: axDeadline)
-        let next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
+        var next = Snapshot(scope: request.scope, frame: frame, windows: selected, display: display,
             imageWidth: image?.width, imageHeight: image?.height, elements: tree.elements,
             rows: tree.rows, truncated: tree.truncated || rootsTruncated, mode: request.mode, revisions: revisions)
+        var recognitionTruncated = false
+        if recognize, let image {
+            let recognized = try await recognizeText(image)
+            next.textRegions = recognized.regions
+            recognitionTruncated = recognized.truncated
+        }
+        try Task.checkCancellation()
         try next.validate(id: next.id, windows: windows(), displays: displays())
         var png: Data?
         if let image {
@@ -206,6 +214,7 @@ extension Computer {
         if let windowID = request.windowID { data["window_id"] = windowID }
         if let display { data["display_id"] = display.id }
         if let image { data["image_width"] = image.width; data["image_height"] = image.height }
+        if recognize { data["text_regions"] = next.textRegions.map(\.data); data["text_regions_truncated"] = recognitionTruncated }
         if args["disable_diff"] as? Bool != true, let previous,
            request.mode != .vision, previous.mode != .vision, AXIsProcessTrusted(),
            previous.scope == next.scope, previous.windows.map(\.windowID) == next.windows.map(\.windowID),

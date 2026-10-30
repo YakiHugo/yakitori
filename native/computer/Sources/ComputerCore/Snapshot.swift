@@ -66,12 +66,23 @@ struct Snapshot {
     var truncated = false
     var mode: ObservationMode = .both
     var revisions: [Int32: UInt64] = [:]
+    var textRegions: [TextRegion] = []
 
     func target(_ args: [String: Any]) throws -> InputTarget {
         let hasElement = args["element"] != nil || args["selector"] != nil
         let hasPoint = args["x"] != nil || args["y"] != nil
-        guard !hasElement || !hasPoint else {
-            throw ComputerFailure("invalid_arguments", "Choose either an element or screenshot coordinates, not both.")
+        let hasRegion = args["region_id"] != nil
+        guard [hasElement, hasPoint, hasRegion].filter({ $0 }).count <= 1 else {
+            throw ComputerFailure("invalid_arguments", "Choose an element, screenshot coordinates, or a recognized region.")
+        }
+        if hasRegion {
+            guard let id = args["region_id"] as? String, let region = textRegions.first(where: { $0.id == id }) else {
+                throw ComputerFailure("invalid_region", "region_id must belong to the latest screenshot's text_regions.")
+            }
+            let point = try point(x: region.frame.midX, y: region.frame.midY)
+            let window = windows.first { $0.frame.contains(point) }
+            guard scope == .screen || window != nil else { throw ComputerFailure("invalid_region", "The recognized region is outside the target windows.") }
+            return InputTarget(window: window, element: nil, point: point)
         }
         if hasElement {
             let index: Int?
