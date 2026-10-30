@@ -3453,12 +3453,41 @@ describe("application composition", () => {
     })
   })
 
-  it("blocks native and browser input after browser key cleanup fails until release is confirmed", async () => {
+  it.each([
+    "browser_input",
+    "browser",
+    "browser_capture",
+    "browser_navigate",
+  ])("blocks native and browser input after %s cleanup fails until release is confirmed", async (browserTool) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
       const cleaning = Promise.withResolvers<void>(),
         releaseCleanup = Promise.withResolvers<void>()
+      const target = {
+        tabId: "owned",
+        webContentsId: 17,
+        instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+      }
+      const input =
+        browserTool === "browser"
+          ? { action: "list" }
+          : browserTool === "browser_capture"
+            ? { action: "capture", target, mode: "viewport" }
+            : browserTool === "browser_navigate"
+              ? {
+                  action: "navigate",
+                  target,
+                  fromUrl: "https://owned.test/",
+                  url: "https://destination.test/",
+                }
+              : {
+                  action: "fill",
+                  target,
+                  reference:
+                    "browser_node_00000000-0000-4000-8000-000000000001",
+                  text: "",
+                }
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
@@ -3466,18 +3495,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "clear_browser",
-              name: "browser_input",
-              input: {
-                action: "fill",
-                target: {
-                  tabId: "owned",
-                  webContentsId: 17,
-                  instanceId:
-                    "browser_target_00000000-0000-4000-8000-000000000001",
-                },
-                reference: "browser_node_00000000-0000-4000-8000-000000000001",
-                text: "",
-              },
+              name: browserTool,
+              input,
             },
           ],
         },
