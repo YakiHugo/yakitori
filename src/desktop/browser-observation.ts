@@ -1,5 +1,9 @@
+import { randomUUID } from "node:crypto"
 import type { WebContents } from "electron"
-import { BrowserControlError } from "../protocol/desktop-browser.ts"
+import {
+  BrowserControlError,
+  type BrowserInputRequest,
+} from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 
 function object(value: unknown): Record<string, unknown> {
@@ -28,9 +32,14 @@ function documentIdentity(value: unknown) {
 
 export class BrowserDocumentConnection {
   #closed = false
+  #references = new Map<
+    string,
+    { backendNodeId: number; document: ReturnType<typeof documentIdentity> }
+  >()
   readonly #contents: WebContents
   readonly #detached = () => {
     this.#closed = true
+    this.#references.clear()
   }
 
   constructor(contents: WebContents) {
@@ -70,11 +79,13 @@ export class BrowserDocumentConnection {
     if (!this.closed && contents.debugger.isAttached())
       contents.debugger.detach()
     this.#closed = true
+    this.#references.clear()
     contents.debugger.off("detach", this.#detached)
   }
 
   async observe(signal: AbortSignal): Promise<JsonObject> {
     signal.throwIfAborted()
+    this.#references.clear()
     const contents = this.#contents,
       debug = contents.debugger
     if (this.closed || !debug.isAttached())
@@ -136,6 +147,10 @@ export class BrowserDocumentConnection {
       // CDP exposes depth but no node-count limit on its intermediate AX reply.
       // These bounds cover host output/IPC, not Chromium's traversal allocation.
       const nodes: JsonObject[] = []
+      const references = new Map<
+        string,
+        { backendNodeId: number; document: ReturnType<typeof documentIdentity> }
+      >()
       const known = new Set(
         tree.nodes.slice(0, 1000).map((value) => object(value).nodeId),
       )
@@ -182,9 +197,19 @@ export class BrowserDocumentConnection {
             if (value !== undefined) state.push([property.name, value])
           }
         const value = primitive(node.value)
+        const role = String(primitive(node.role, 512) ?? "")
+        const backendNodeId = node.backendDOMNodeId
+        const reference =
+          typeof backendNodeId === "number" &&
+          Number.isSafeInteger(backendNodeId) &&
+          backendNodeId > 0 &&
+          ["textbox", "searchbox"].includes(role)
+            ? `browser_node_${randomUUID()}`
+            : undefined
         const entry: JsonObject = {
           nodeId: node.nodeId,
-          role: String(primitive(node.role, 512) ?? ""),
+          ...(reference ? { inputReference: reference } : {}),
+          role,
           name: String(primitive(node.name) ?? ""),
           ...(typeof node.backendDOMNodeId === "number"
             ? { backendNodeId: node.backendDOMNodeId }
@@ -199,6 +224,8 @@ export class BrowserDocumentConnection {
         }
         bytes += size
         nodes.push(entry)
+        if (reference && typeof backendNodeId === "number")
+          references.set(reference, { backendNodeId, document: before })
       }
       const after = documentIdentity(await command("Page.getFrameTree"))
       if (
@@ -217,6 +244,7 @@ export class BrowserDocumentConnection {
           "browser_cancelled",
           "Browser observation stopped.",
         )
+      this.#references = references
       return {
         document: { ...after, url: after.url.slice(0, 8192) },
         nodes,
@@ -226,6 +254,152 @@ export class BrowserDocumentConnection {
       }
     } finally {
       deadline.removeEventListener("abort", abort)
+    }
+  }
+
+  async typeText(
+    input: BrowserInputRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    const reference = this.#references.get(input.reference)
+    // A mutation consumes the observation, including sibling references. There
+    // is no automatic retry after focus, dispatch or an uncertain text receipt.
+    this.#references.clear()
+    if (!reference || this.closed)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Observe this document again before typing.",
+      )
+    const contents = this.#contents,
+      debug = contents.debugger
+    const group = `yakitori_${randomUUID()}`
+    let dispatched = false
+    const command = async (
+      method: string,
+      params: Record<string, unknown> = {},
+    ): Promise<unknown> => {
+      signal.throwIfAborted()
+      if (this.closed)
+        throw new BrowserControlError(
+          "browser_unavailable",
+          "The owned debugger disconnected.",
+        )
+      // Unlike read-only observation, do not race a dispatched command against
+      // cancellation or detach. The caller/turn waits for its acknowledgement.
+      try {
+        return await debug.sendCommand(method, params)
+      } catch (cause) {
+        throw new BrowserControlError(
+          "browser_protocol_error",
+          cause instanceof Error ? cause.message : String(cause),
+        )
+      }
+    }
+    const verifyDocument = async () => {
+      const current = documentIdentity(await command("Page.getFrameTree"))
+      if (
+        current.frameId !== reference.document.frameId ||
+        current.documentId !== reference.document.documentId ||
+        current.url !== reference.document.url ||
+        contents.getURL() !== current.url
+      )
+        throw new BrowserControlError(
+          "browser_target_changed",
+          "The observed document navigated. Observe it again.",
+        )
+      return current
+    }
+    try {
+      await verifyDocument()
+      const world = object(
+        await command("Page.createIsolatedWorld", {
+          frameId: reference.document.frameId,
+          worldName: "yakitori-browser-input",
+        }),
+      )
+      if (typeof world.executionContextId !== "number")
+        throw new Error("Chromium returned no isolated input context.")
+      const resolved = object(
+        object(
+          await command("DOM.resolveNode", {
+            backendNodeId: reference.backendNodeId,
+            executionContextId: world.executionContextId,
+            objectGroup: group,
+          }),
+        ).object,
+      )
+      if (typeof resolved.objectId !== "string")
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "The observed control no longer exists.",
+        )
+      await command("DOM.focus", { backendNodeId: reference.backendNodeId })
+      // This fixed function runs in an isolated world, with no page-controlled
+      // prototype methods or caller-supplied code. It verifies the exact node,
+      // including focus redirection and the current text selection.
+      const read = async (requireFocus: boolean) => {
+        const response = object(
+          await command("Runtime.callFunctionOn", {
+            objectId: resolved.objectId,
+            returnByValue: true,
+            arguments: [{ value: requireFocus }],
+            functionDeclaration: `function(requireFocus) {
+            if (!this.isConnected || (requireFocus && this.getRootNode().activeElement !== this) || this.disabled || this.readOnly) return {ok:false};
+            if (!(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement)) return {ok:false};
+            if (typeof this.selectionStart !== 'number' || typeof this.selectionEnd !== 'number' || this.value.length > 65536) return {ok:false};
+            return {ok:true,value:this.value,start:this.selectionStart,end:this.selectionEnd};
+          }`,
+          }),
+        )
+        const value = object(object(response.result).value)
+        if (
+          value.ok !== true ||
+          typeof value.value !== "string" ||
+          typeof value.start !== "number" ||
+          typeof value.end !== "number"
+        )
+          throw new BrowserControlError(
+            "browser_input_unavailable",
+            "The exact text control is unavailable, read-only or no longer focused.",
+          )
+        return { value: value.value, start: value.start, end: value.end }
+      }
+      const before = await read(true)
+      await verifyDocument()
+      signal.throwIfAborted()
+      dispatched = true
+      await command("Input.insertText", { text: input.text })
+      await verifyDocument()
+      const after = await read(false)
+      const expected =
+        before.value.slice(0, before.start) +
+        input.text +
+        before.value.slice(before.end)
+      if (after.value !== expected)
+        throw new BrowserControlError(
+          "browser_input_unconfirmed",
+          "Text was dispatched but the exact control did not confirm the expected value. Do not replay it automatically.",
+        )
+      return {
+        delivered: true,
+        textVerified: true,
+        bytes: Buffer.byteLength(input.text),
+      }
+    } catch (cause) {
+      if (dispatched && cause instanceof BrowserControlError)
+        throw new BrowserControlError(
+          "browser_input_unconfirmed",
+          "Text dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+            cause.message,
+        )
+      throw cause
+    } finally {
+      // Detach at finishTurn also releases this group if the target disappeared.
+      if (!this.closed)
+        await debug.sendCommand("Runtime.releaseObjectGroup", {
+          objectGroup: group,
+        })
     }
   }
 }

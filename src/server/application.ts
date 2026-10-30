@@ -87,6 +87,7 @@ import type {
 import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
+import { createBrowserInputTool } from "./browser-input-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
 import {
   type ChatGPTConnections,
@@ -1024,6 +1025,30 @@ export async function createYakitoriApplication(
               : "Computer use is busy in another conversation. Wait for that turn to finish before retrying."
         return { ok: false, code: refusal, message, content: message }
       }
+      async function admitBrowser(
+        context: ToolExecutionContext,
+      ): Promise<ToolFailure | undefined> {
+        const configured = (await userConfig.readConfiguration()).mcpServers?.[
+          computerUseServerName
+        ]
+        if (
+          !configured ||
+          configured.enabled === false ||
+          configured.disabledTools?.includes("control") ||
+          (configured.enabledTools !== undefined &&
+            !configured.enabledTools.includes("control"))
+        ) {
+          const message =
+            "Connect computer use before inspecting desktop browser tabs."
+          return {
+            ok: false,
+            code: "computer_disconnected",
+            message,
+            content: message,
+          }
+        }
+        return claimComputer(context)
+      }
       const toolRegistry = createToolRegistry([
         ...createTrustedTools(sessionShellEnv, !sideConversation).filter(
           (tool) =>
@@ -1034,28 +1059,9 @@ export async function createYakitoriApplication(
           ? [
               createBrowserObservationTool(
                 options.desktopBrowser,
-                async (context) => {
-                  const configured = (await userConfig.readConfiguration())
-                    .mcpServers?.[computerUseServerName]
-                  if (
-                    !configured ||
-                    configured.enabled === false ||
-                    configured.disabledTools?.includes("control") ||
-                    (configured.enabledTools !== undefined &&
-                      !configured.enabledTools.includes("control"))
-                  ) {
-                    const message =
-                      "Connect computer use before inspecting desktop browser tabs."
-                    return {
-                      ok: false,
-                      code: "computer_disconnected",
-                      message,
-                      content: message,
-                    }
-                  }
-                  return claimComputer(context)
-                },
+                admitBrowser,
               ),
+              createBrowserInputTool(options.desktopBrowser, admitBrowser),
             ]
           : []),
       ])

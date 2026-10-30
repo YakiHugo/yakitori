@@ -529,6 +529,11 @@ export function registerWorkspaceBrowser(
         connections.delete(key)
         entry = undefined
       }
+      if (!entry && input.action === "type")
+        throw new BrowserControlError(
+          "browser_reference_stale",
+          "Observe this target in the current turn before typing.",
+        )
       if (!entry) {
         entry = {
           owner,
@@ -541,7 +546,10 @@ export function registerWorkspaceBrowser(
       entry.busy = true
       let observation: JsonObject
       try {
-        observation = await entry.connection.observe(signal)
+        observation =
+          input.action === "type"
+            ? await entry.connection.typeText(input, signal)
+            : await entry.connection.observe(signal)
       } finally {
         entry.busy = false
       }

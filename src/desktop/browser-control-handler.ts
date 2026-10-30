@@ -4,8 +4,8 @@ import {
   type BrowserOwner,
   type DesktopBrowser,
   type DesktopBrowserResponse,
-  parseBrowserObservationRequest,
   parseBrowserOwner,
+  parseBrowserRequest,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
 
@@ -40,6 +40,7 @@ export function bindDesktopBrowserRequests(
     requestId: string,
     run: () => Promise<JsonObject>,
     signal?: AbortSignal,
+    inputMayHaveRun: () => boolean = () => false,
   ) => {
     try {
       const result = await run()
@@ -55,8 +56,12 @@ export function bindDesktopBrowserRequests(
           type: "desktop_browser/response",
           requestId,
           ok: false,
-          code: "browser_cancelled",
-          error: "Browser observation stopped.",
+          code: inputMayHaveRun()
+            ? "browser_input_unconfirmed"
+            : "browser_cancelled",
+          error: inputMayHaveRun()
+            ? "Browser text dispatch may have occurred before cancellation. Observe again; never replay text automatically."
+            : "Browser observation stopped.",
         })
       else if (cause instanceof BrowserControlError)
         send({
@@ -120,9 +125,11 @@ export function bindDesktopBrowserRequests(
         return
       }
       const cancellation = new AbortController()
-      let owner: BrowserOwner
+      let owner: BrowserOwner, input: ReturnType<typeof parseBrowserRequest>
+      let attempted = false
       try {
         owner = parsedOwner()
+        input = parseBrowserRequest("input" in value ? value.input : undefined)
       } catch (cause) {
         void reply(requestId, async () => {
           throw cause
@@ -148,15 +155,11 @@ export function bindDesktopBrowserRequests(
                   "browser_busy",
                   "Browser cleanup is in progress or the four-request safety bound was reached.",
                 )
-              return browser.request(
-                parseBrowserObservationRequest(
-                  "input" in value ? value.input : undefined,
-                ),
-                owner,
-                cancellation.signal,
-              )
+              attempted = true
+              return browser.request(input, owner, cancellation.signal)
             },
             cancellation.signal,
+            () => attempted && input.action === "type",
           ),
         )
         .finally(() => {

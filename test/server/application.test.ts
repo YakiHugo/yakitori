@@ -3273,7 +3273,23 @@ describe("application composition", () => {
     })
   })
 
-  it("browser observations share computer ownership and remain disconnected after takeover", async () => {
+  it.each([
+    "browser",
+    "browser_input",
+  ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
+    const browserInput =
+      browserTool === "browser"
+        ? { action: "list" }
+        : {
+            action: "type",
+            target: {
+              tabId: "owned",
+              webContentsId: 17,
+              instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+            },
+            reference: "browser_node_00000000-0000-4000-8000-000000000001",
+            text: "Must stay blocked",
+          }
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
@@ -3296,8 +3312,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "competing_browser",
-              name: "browser",
-              input: { action: "list" },
+              name: browserTool,
+              input: browserInput,
             },
           ],
         },
@@ -3308,8 +3324,8 @@ describe("application composition", () => {
             {
               type: "tool_call",
               id: "disconnected_browser",
-              name: "browser",
-              input: { action: "list" },
+              name: browserTool,
+              input: browserInput,
             },
           ],
         },
