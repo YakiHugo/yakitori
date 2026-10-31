@@ -26,10 +26,7 @@ import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import { BrowserPendingMutations } from "./browser-mutations.ts"
-import {
-  BrowserFramePointer,
-  browserPointerGeometry,
-} from "./browser-pointer.ts"
+import { BrowserPointerTarget } from "./browser-pointer.ts"
 import {
   type BrowserDocumentScope,
   type BrowserFrameReadMethod,
@@ -1422,105 +1419,53 @@ export class BrowserDocumentConnection {
     signal.throwIfAborted()
     const reference = this.#consumeReference(input.reference, "element"),
       group = `yakitori_${randomUUID()}`
-    const command = (method: string, params: Record<string, unknown> = {}) =>
-      this.#inputCommand(method, params, signal, reference.frame?.sessionId)
-    let framePointer: BrowserFramePointer | undefined
-    const flushFrameLayout = async () => {
-      if (!framePointer) return
-      // Hidden WebContentsViews can retain stale compositor hit-test data:
-      // root mouse events then reach the parent instead of its OOPIF. A tiny
-      // capture requests a current frame without showing or focusing the view.
-      await this.#read(signal, async () => {
-        try {
-          await this.#contents.capturePage(
-            { x: 0, y: 0, width: 1, height: 1 },
-            { stayHidden: true, stayAwake: true },
-          )
-        } catch (cause) {
-          throw new BrowserControlError(
-            "browser_input_unavailable",
-            "The page could not produce current compositor hit-test data. Observe again before clicking. " +
-              (cause instanceof Error ? cause.message : String(cause)),
-          )
-        }
-      })
-    }
+    let pointer: BrowserPointerTarget | undefined
     const verifyDocument = async () => {
       const frame = await this.#verifyDocument(reference, signal)
-      if (framePointer && frame) framePointer.verifyPath(frame.path)
+      if (frame) pointer?.verifyPath(frame.path)
     }
     let dispatched = false,
       result: JsonObject | undefined,
       failure: unknown
     try {
       const objectId = await this.#resolveReference(reference, group, signal)
-      if (reference.frame) {
-        const selected = await this.#verifyDocument(reference, signal)
-        if (!selected) throw new Error("Missing pointer frame binding.")
-        framePointer = new BrowserFramePointer(
-          selected.path,
-          (method, params = {}, sessionId) =>
-            this.#inputReadCommand(method, params, signal, sessionId),
-          (method, params = {}, sessionId) =>
-            this.#inputCommand(method, params, signal, sessionId),
-          group,
-        )
-        await framePointer.prepare()
-        await verifyDocument()
-      }
-      const probe = async (
-        scroll: boolean,
-        point?: { x: number; y: number },
-      ) => {
-        const params = {
-          objectId,
-          returnByValue: true,
-          functionDeclaration: browserPointerGeometry,
-          arguments: [{ value: scroll }, { value: point ?? null }],
-        }
-        const response = object(
-          await (scroll
-            ? command("Runtime.callFunctionOn", params)
-            : this.#inputReadCommand(
-                "Runtime.callFunctionOn",
-                params,
-                signal,
-                reference.frame?.sessionId,
-              )),
-        )
-        const value = object(object(response.result).value)
-        if (value.ok !== true)
-          throw new BrowserControlError(
-            "browser_input_unavailable",
-            "The exact control has no visible unoccluded click point, or is disabled. Observe again before clicking.",
-          )
-        if (
-          typeof value.x !== "number" ||
-          !Number.isFinite(value.x) ||
-          typeof value.y !== "number" ||
-          !Number.isFinite(value.y)
-        )
-          throw new Error("Chromium returned an invalid browser click point.")
-        return { x: value.x, y: value.y }
-      }
-      const localPoint = await probe(true)
-      await flushFrameLayout()
-      const point = framePointer
-        ? await framePointer.project(localPoint)
-        : localPoint
-      const verifyPoint = async () => {
-        await probe(false, localPoint)
-        if (framePointer) {
-          const current = await framePointer.project(localPoint)
-          if (
-            Math.abs(current.x - point.x) > 0.5 ||
-            Math.abs(current.y - point.y) > 0.5
-          )
-            throw new BrowserControlError(
-              "browser_input_unavailable",
-              "The frame moved during pointer input. Observe again before clicking.",
-            )
-        }
+      const selected = reference.frame
+        ? await this.#verifyDocument(reference, signal)
+        : undefined
+      if (reference.frame && !selected)
+        throw new Error("Missing pointer frame binding.")
+      pointer = new BrowserPointerTarget({
+        objectId,
+        sessionId: reference.frame?.sessionId,
+        path: selected?.path,
+        group,
+        read: (method, params = {}, sessionId) =>
+          this.#inputReadCommand(method, params, signal, sessionId),
+        command: (method, params = {}, sessionId) =>
+          this.#inputCommand(method, params, signal, sessionId),
+        flush: () =>
+          this.#read(signal, async () => {
+            // Hidden views need a current compositor frame to route input to OOPIFs.
+            try {
+              await this.#contents.capturePage(
+                { x: 0, y: 0, width: 1, height: 1 },
+                { stayHidden: true, stayAwake: true },
+              )
+            } catch (cause) {
+              throw new BrowserControlError(
+                "browser_input_unavailable",
+                "The page could not produce current compositor hit-test data. Observe again before clicking. " +
+                  (cause instanceof Error ? cause.message : String(cause)),
+              )
+            }
+          }),
+      })
+      await pointer.prepareFrames()
+      if (selected) await verifyDocument()
+      const point = await pointer.scrollIntoView()
+      const verifyPoint = () => {
+        if (!pointer) throw new Error("Missing pointer target.")
+        return pointer.verifyPoint(point)
       }
       dispatched = input.action === "hover"
       await this.#inputCommand(
@@ -1533,7 +1478,7 @@ export class BrowserDocumentConnection {
         signal,
       )
       await verifyDocument()
-      await flushFrameLayout()
+      await pointer.flushLayout()
       await verifyPoint()
       await verifyDocument()
       signal.throwIfAborted()
@@ -1618,7 +1563,7 @@ export class BrowserDocumentConnection {
       group,
       failure,
       reference.frame?.sessionId,
-      framePointer?.sessions,
+      pointer?.sessions,
     )
     if (!result) throw new Error("Browser pointer input produced no result.")
     return result
