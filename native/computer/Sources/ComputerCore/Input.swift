@@ -54,7 +54,6 @@ extension Computer {
             throw ComputerFailure("invalid_arguments", "Replacement requires a target element so its complete selection can be confirmed before typing.")
         }
         let elementAction = ["press", "perform_action", "set_value", "select_text"].contains(action)
-        let axAction = elementAction || action == "invoke_menu"
         if elementAction, element == nil { throw ComputerFailure("invalid_arguments", "This AX action requires an element.") }
         let buttonName = args["button"] as? String ?? "left"
         guard ["left", "right", "middle"].contains(buttonName) else { throw ComputerFailure("invalid_arguments", "Unknown mouse button.") }
@@ -98,6 +97,17 @@ extension Computer {
         // Consume before any action, including focus. A failed delivery must
         // never invite replay against the same stale element or screenshot.
         snapshot = nil
+        // AppKit can deliver even window-numbered keys to its retained key
+        // window. Choose a supported element-bound insertion before dispatch
+        // when addressing another window; never retry keys after a write.
+        var addressedText = false
+        if action == "type", text?.isEmpty == false, !foreground, let element, let window,
+           elementAttribute(AXUIElementCreateApplication(window.pid), kAXFocusedWindowAttribute).flatMap(accessibilityWindowID) != window.windowID,
+           let owner = elementAttribute(element, kAXWindowAttribute), accessibilityWindowID(owner) == window.windowID {
+            var settable = DarwinBoolean(false)
+            addressedText = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success && settable.boolValue
+        }
+        let axAction = elementAction || action == "invoke_menu" || addressedText
         let alternateHover = try updateHover(target, reveal: action == "hover")
         var backgroundRelease: CGEvent?
         defer {
@@ -166,14 +176,21 @@ extension Computer {
         } else if action == "invoke_menu" {
             guard let window, ticket.scope != .screen else { throw ComputerFailure("invalid_arguments", "invoke_menu requires an observed application window.") }
             evidence = try await invokeMenu(menuPath(args["path"]), window: window)
+        } else if addressedText, let element, let text, let window {
+            evidence = try await insertSelectedText(text, element: element, replace: args["replace"] as? Bool == true) {
+                try Task.checkCancellation()
+                guard try windows().contains(window) else {
+                    throw ComputerFailure("stale_snapshot", "The target changed during text insertion; observe before another action.")
+                }
+            }
         } else if axAction, let element {
             evidence = try accessibilityInput(action, args: args, element: element)
         } else {
             if ["type", "key", "keys", "paste"].contains(action) {
                 if let element {
-                    let focusError = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
                     guard let window else { throw ComputerFailure("invalid_element", "The element has no target window.") }
                     let app = AXUIElementCreateApplication(window.pid)
+                    let focusError = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
                     // Cross-process web providers publish focus asynchronously.
                     // Submit focus once and poll readback; never replay a click,
                     // activate the app, or send a key to discover whether it took.
@@ -188,6 +205,9 @@ extension Computer {
                                 "focus_set_error": focusError.rawValue, "target_role": attribute(element, kAXRoleAttribute) as? String ?? "",
                                 "target_focused": attribute(element, kAXFocusedAttribute) as? Bool ?? false,
                                 "focused_role": focused.flatMap { attribute($0, kAXRoleAttribute) as? String } ?? "",
+                                "target_window_id": window.windowID,
+                                "element_window_id": elementAttribute(element, kAXWindowAttribute).flatMap(accessibilityWindowID) ?? 0,
+                                "focused_window_id": elementAttribute(app, kAXFocusedWindowAttribute).flatMap(accessibilityWindowID) ?? 0,
                             ])
                         }
                         try await Task.sleep(nanoseconds: 20_000_000)

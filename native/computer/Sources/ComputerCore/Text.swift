@@ -36,6 +36,36 @@ func confirmSelection(_ range: CFRange, element: AXUIElement) throws {
     }
 }
 
+func insertSelectedText(_ text: String, element: AXUIElement, replace: Bool, checkpoint: () throws -> Void) async throws -> [String: Any] {
+    guard let value = attribute(element, kAXValueAttribute) as? String else {
+        throw ComputerFailure("selection_unconfirmed", "Addressed text insertion requires readable text; no text was sent.")
+    }
+    if replace { try confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element) }
+    guard let encoded = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(encoded) == AXValueGetTypeID() else {
+        throw ComputerFailure("selection_unconfirmed", "The target does not expose a text selection; no text was sent.")
+    }
+    var range = CFRange()
+    guard AXValueGetValue(encoded as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0,
+          range.location <= value.utf16.count, range.length <= value.utf16.count - range.location else {
+        throw ComputerFailure("selection_unconfirmed", "The target selection cannot confirm insertion; no text was sent.")
+    }
+    let expected = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+    try checkpoint()
+    let error = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
+    guard error == .success else {
+        throw ComputerFailure("text_unconfirmed", "Addressed insertion was refused. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_selection", "set_error": error.rawValue])
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while attribute(element, kAXValueAttribute) as? String != expected {
+        try checkpoint()
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            throw ComputerFailure("text_unconfirmed", "The target did not retain the complete text. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_selection", "value_matches": false])
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    return ["text_route": "accessibility_selection", "value_matches": true]
+}
+
 func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) throws -> [String: Any] {
     switch action {
     case "press", "perform_action":

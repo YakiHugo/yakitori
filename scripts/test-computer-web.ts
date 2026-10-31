@@ -53,6 +53,7 @@ const rows: {
   durationMs: number
   status: string
   state?: State | undefined
+  secondaryState?: State | undefined
   evidence?: Record<string, unknown> | undefined
 }[] = []
 type State = {
@@ -125,10 +126,11 @@ try {
     let lastAction: Record<string, unknown> | undefined
     let focusPID: number | undefined
     let backgroundPID: number | undefined
-    const state = async () => {
+    const state = async (file = output) => {
       try {
-        current = JSON.parse(await readFile(output, "utf8")) as State
-        return current
+        const observed = JSON.parse(await readFile(file, "utf8")) as State
+        if (file === output) current = observed
+        return observed
       } catch (error) {
         if (
           error instanceof Error &&
@@ -339,6 +341,9 @@ try {
             durationMs: performance.now() - start,
             status: "failed",
             state: await state(),
+            secondaryState: multipleWindows
+              ? await state(secondOutput)
+              : undefined,
             evidence: lastAction,
           })
           throw error
@@ -383,6 +388,22 @@ try {
             assert.equal((await readSecond()).first, "")
             assert(backgroundPID !== undefined)
             try {
+              const beforeKey = await observe()
+              const refused = await call({
+                action: "key",
+                delivery: "background",
+                snapshot_id: beforeKey.structuredContent?.snapshot_id,
+                element: target(beforeKey, "Web first").element,
+                key: "A",
+              })
+              lastAction = refused.structuredContent
+              assert(
+                refused.isError,
+                "Non-key-window physical input must be refused",
+              )
+              assert.equal(refused.structuredContent?.code, "focus_unconfirmed")
+              assert.equal((await state())?.first, "")
+              assert.equal((await readSecond()).first, "")
               for (const [id, text] of [
                 [primaryWindow, "Primary 猫"],
                 [secondWindow, "Secondary 犬"],
