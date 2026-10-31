@@ -36,6 +36,52 @@ func confirmSelection(_ range: CFRange, element: AXUIElement) throws {
     }
 }
 
+func insertTextValue(_ text: String, element: AXUIElement, replace: Bool, checkpoint: () throws -> Void) async throws -> [String: Any] {
+    AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    guard attribute(element, kAXFocusedAttribute) as? Bool == true else {
+        throw ComputerFailure("focus_unconfirmed", "The addressed text control did not confirm focus; no text was sent.")
+    }
+    guard let value = attribute(element, kAXValueAttribute) as? String else {
+        throw ComputerFailure("selection_unconfirmed", "Addressed text insertion requires readable text; no text was sent.")
+    }
+    if replace { try confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element) }
+    guard let encoded = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(encoded) == AXValueGetTypeID() else {
+        throw ComputerFailure("selection_unconfirmed", "The target does not expose a text selection; no text was sent.")
+    }
+    var range = CFRange()
+    guard AXValueGetValue(encoded as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0,
+          range.location <= value.utf16.count, range.length <= value.utf16.count - range.location else {
+        throw ComputerFailure("selection_unconfirmed", "The target selection cannot confirm insertion; no text was sent.")
+    }
+    let expected = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+    try checkpoint()
+    var currentRange = CFRange()
+    guard attribute(element, kAXValueAttribute) as? String == value,
+          let currentSelection = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(currentSelection) == AXValueGetTypeID(),
+          AXValueGetValue(currentSelection as! AXValue, .cfRange, &currentRange), currentRange.location == range.location, currentRange.length == range.length else {
+        throw ComputerFailure("text_changed", "The target text or selection changed while preparing insertion; no text was sent. Observe again.")
+    }
+    let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, expected as CFString)
+    guard error == .success else {
+        throw ComputerFailure("text_unconfirmed", "Addressed insertion was refused. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_value", "set_error": error.rawValue])
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while attribute(element, kAXValueAttribute) as? String != expected {
+        try checkpoint()
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            throw ComputerFailure("text_unconfirmed", "The target did not retain the complete text. Observe before continuing; do not replay the write blindly.", evidence: ["text_route": "accessibility_value", "value_matches": false])
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    try checkpoint()
+    do {
+        try confirmSelection(CFRange(location: range.location + text.utf16.count, length: 0), element: element)
+    } catch let error as ComputerFailure where error.code == "selection_unconfirmed" {
+        throw ComputerFailure("text_unconfirmed", "The text was inserted but its final caret could not be confirmed. Observe before continuing; do not replay the write.", evidence: ["text_route": "accessibility_value", "value_matches": true])
+    }
+    return ["text_route": "accessibility_value", "value_matches": true]
+}
+
 func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) throws -> [String: Any] {
     switch action {
     case "press", "perform_action":
