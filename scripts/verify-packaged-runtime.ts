@@ -24,6 +24,8 @@ const runtimeDirectory = join(
 await access(executable)
 await access(runtimeDirectory)
 await access(join(runtimeDirectory, "read-pdf-worker.js"))
+await access(join(runtimeDirectory, "script-worker.js"))
+await access(join(runtimeDirectory, "quickjs.wasm"))
 await access(
   join(
     applicationDirectory,
@@ -91,6 +93,9 @@ await new Promise<void>((resolve, reject) => {
     'if (format === "image") { const image = result.images[0]; if (!image) throw new Error("Packaged PDF image missing"); const stats = await sharp.default(Buffer.from(image.bytes)).stats(); if (stats.channels[0].min >= 100) throw new Error("Packaged PDF rendered a blank page"); }',
     "} finally { clearTimeout(timer); await worker.terminate(); }",
     "}",
+    'const wasm = await WebAssembly.compile(await (await import("node:fs/promises")).readFile("quickjs.wasm"));',
+    'const script = new Worker(pathToFileURL(join(process.cwd(), "script-worker.js")), { workerData: { code: "return [args.n*2,typeof process,typeof fetch]", argumentsJson: "{\\"n\\":21}", wasm, interrupt: new SharedArrayBuffer(4) }, execArgv: [] });',
+    'let scriptTimer; try { const result = await new Promise((resolve, reject) => { scriptTimer = setTimeout(() => reject(new Error("Packaged script VM timed out")), 10000); script.on("message", message => { if (message.type === "done") resolve(JSON.parse(message.outcomeJson)); else if (message.type === "failed") reject(new Error(message.message)); }); script.once("error", reject); script.once("exit", code => reject(new Error("Packaged script VM exited: "+code))); }); if (!result.ok || JSON.stringify(result.value) !== \'[42,"undefined","undefined"]\') throw new Error("Packaged script isolation failed"); } finally { clearTimeout(scriptTimer); await script.terminate(); }',
     "const spawnPty = pty.spawn ?? pty.default?.spawn;",
     'if (spawnPty === undefined) throw new Error("node-pty spawn export missing");',
     'const terminal = spawnPty("/bin/sh", ["-c", "test -t 0 && printf native-runtime-ok"], {',
