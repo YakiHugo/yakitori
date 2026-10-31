@@ -371,6 +371,7 @@ export type BrowserRequest =
   | BrowserViewRequest
   | BrowserChooserRequest
   | BrowserDialogRequest
+  | BrowserDownloadRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -525,6 +526,110 @@ export function parseBrowserDirectoryUploadRequest(
     fromUrl: base.fromUrl,
     directory: value.directory,
     files: value.files as BrowserDirectoryUploadRequest["files"],
+  }
+}
+
+// Bound one artifact copy (including hash/snapshot buffers) and stop oversized
+// native transfers when their next progress notification arrives.
+export const browserDownloadSafetyBytes = 64 * 1024 * 1024
+
+export type BrowserDownloadRequest =
+  | Readonly<{
+      action: "download_arm"
+      target: BrowserTarget
+      fromUrl: string
+      url?: string
+    }>
+  | Readonly<{
+      action:
+        | "download_status"
+        | "download_wait"
+        | "download_cancel"
+        | "download_collect"
+        | "download_release"
+      target: BrowserTarget
+      downloadId: string
+    }>
+
+export function isBrowserDownloadUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const url = new URL(value)
+  if (url.protocol === "data:") return true
+  if (url.protocol === "blob:" && !URL.canParse(url.pathname)) return false
+  const source = url.protocol === "blob:" ? new URL(url.pathname) : url
+  return (
+    (source.protocol === "http:" || source.protocol === "https:") &&
+    !source.username &&
+    !source.password
+  )
+}
+
+export function parseBrowserDownloadRequest(
+  value: unknown,
+): BrowserDownloadRequest {
+  if (
+    !isJsonObject(value) ||
+    ![
+      "download_arm",
+      "download_status",
+      "download_wait",
+      "download_cancel",
+      "download_collect",
+      "download_release",
+    ].includes(String(value.action))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact browser target and an owned download action.",
+    )
+  const arm = value.action === "download_arm"
+  if (
+    !(
+      arm ? ["action", "target", "fromUrl"] : ["action", "target", "downloadId"]
+    ).every((key) => Object.hasOwn(value, key)) ||
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "url"]
+            : ["action", "target", "downloadId"]
+        ).includes(key),
+    ) ||
+    (arm
+      ? typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192 ||
+        (value.url !== undefined &&
+          (typeof value.url !== "string" ||
+            value.url.length > 8192 ||
+            !isBrowserDownloadUrl(value.url)))
+      : typeof value.downloadId !== "string" ||
+        !/^browser_download_[a-f0-9-]{36}$/.test(value.downloadId))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm requires the observed root fromUrl and optional HTTP(S), blob or data URL (8192-character metadata safety bound); other actions require an issued downloadId.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid download target parser result.")
+  if (arm)
+    return {
+      action: "download_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(typeof value.url === "string" ? { url: value.url } : {}),
+    }
+  return {
+    action: value.action as Exclude<
+      BrowserDownloadRequest["action"],
+      "download_arm"
+    >,
+    target: observed.target,
+    downloadId: value.downloadId as string,
   }
 }
 
@@ -749,6 +854,12 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   dialog_arm: true,
   dialog_inspect: false,
   dialog_disarm: true,
+  download_arm: true,
+  download_status: false,
+  download_wait: false,
+  download_cancel: true,
+  download_collect: false,
+  download_release: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -756,6 +867,12 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (
+    isJsonObject(value) &&
+    typeof value.action === "string" &&
+    value.action.startsWith("download_")
+  )
+    return parseBrowserDownloadRequest(value)
   if (
     isJsonObject(value) &&
     ["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(

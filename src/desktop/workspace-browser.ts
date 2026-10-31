@@ -15,6 +15,7 @@ import {
   type DesktopBrowser,
 } from "../protocol/desktop-browser.ts"
 import type { JsonObject } from "../protocol/events.ts"
+import { BrowserDownloads } from "./browser-downloads.ts"
 import { BrowserDocumentConnection } from "./browser-observation.ts"
 import { BrowserViewRequests } from "./browser-view-requests.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
@@ -67,16 +68,32 @@ export function registerWorkspaceBrowser(
   }
   const ownerKey = (owner: BrowserOwner) =>
     JSON.stringify([owner.sessionId, owner.turnId])
+  const confirmCleanup = async (operations: Promise<unknown>[]) => {
+    const results = await Promise.allSettled(operations)
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : [],
+    )
+    if (failures.length)
+      throw new BrowserControlError(
+        "browser_cleanup_failed",
+        "Owned browser input or download cleanup could not be confirmed.",
+        { cause: new AggregateError(failures) },
+      )
+  }
   const finishTurn = async (owner: BrowserOwner) => {
-    viewRequests.finishTurn(owner)
     const key = ownerKey(owner),
       entry = connections.get(key)
-    if (!entry) return
-    entry.busy = true
+    if (entry) entry.busy = true
     try {
-      await closeConnection(key, entry)
+      // A stalled network cancellation cannot delay releasable keys/buttons.
+      // Downloads own their turn independently of the current debugger target.
+      await confirmCleanup([
+        Promise.resolve().then(() => viewRequests.finishTurn(owner)),
+        ...(entry ? [closeConnection(key, entry)] : []),
+        downloads.finishTurn(owner),
+      ])
     } finally {
-      entry.busy = false
+      if (entry) entry.busy = false
     }
   }
 
@@ -116,6 +133,7 @@ export function registerWorkspaceBrowser(
     callback(false),
   )
   profile.setPermissionCheckHandler(() => false)
+  const downloads = new BrowserDownloads(profile)
 
   function state(tabId: string, tab: BrowserTab): WorkspaceBrowserState {
     const contents = tab.view.webContents
@@ -537,6 +555,11 @@ export function registerWorkspaceBrowser(
   }
   window.on("closed", () => {
     viewRequests.close()
+    void downloads
+      .close()
+      .catch((cause: unknown) =>
+        console.error("Browser download shutdown failed:", cause),
+      )
     for (const name of Object.keys(handlers))
       ipcMain.removeHandler(`yakitori:browser-${name}`)
     for (const tab of tabs.values()) {
@@ -596,6 +619,54 @@ export function registerWorkspaceBrowser(
         }
       }
       const { target } = input
+      if ("downloadId" in input) {
+        const current = connections.get(ownerKey(owner))
+        if (current?.busy)
+          throw new BrowserControlError(
+            "browser_busy",
+            "The owning browser request is still settling.",
+          )
+        if (current) current.busy = true
+        try {
+          // A completed file remains owned even after its original tab closes.
+          // These actions use the pinned download token, not a replacement tab.
+          let downloadState: JsonObject
+          switch (input.action) {
+            case "download_status":
+              downloadState = downloads.inspect(input.downloadId, target, owner)
+              break
+            case "download_wait":
+              downloadState = await downloads.wait(
+                input.downloadId,
+                target,
+                owner,
+                signal,
+              )
+              break
+            case "download_cancel":
+              downloadState = await downloads.cancel(
+                input.downloadId,
+                target,
+                owner,
+              )
+              break
+            case "download_collect":
+              downloadState = await downloads.collect(
+                input.downloadId,
+                target,
+                owner,
+              )
+              break
+            case "download_release":
+              await downloads.release(input.downloadId, target, owner)
+              downloadState = { downloadId: input.downloadId, released: true }
+              break
+          }
+          return { target, ...downloadState }
+        } finally {
+          if (current) current.busy = false
+        }
+      }
       const tab = tabs.get(target.tabId)
       if (
         !tab ||
@@ -698,7 +769,8 @@ export function registerWorkspaceBrowser(
             )
         }
         assertCurrent()
-        await finishTurn(owner)
+        const previous = connections.get(ownerKey(owner))
+        if (previous) await closeConnection(ownerKey(owner), previous)
         assertCurrent()
         const navigation = ++tab.navigation
         tab.requestedUrl = input.url
@@ -803,6 +875,17 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         switch (input.action) {
+          case "download_arm":
+            entry.connection.assertInputIdle()
+            observation = await downloads.arm(
+              target,
+              entry.contents,
+              owner,
+              input.fromUrl,
+              input.url,
+              signal,
+            )
+            break
           case "dialog_arm":
           case "dialog_inspect":
           case "dialog_disarm":
@@ -860,17 +943,20 @@ export function registerWorkspaceBrowser(
     },
     finishTurn,
     async closeSession(sessionId) {
-      viewRequests.closeSession(sessionId)
-      const results = await Promise.allSettled(
-        [...connections.values()]
-          .filter((entry) => entry.owner.sessionId === sessionId)
-          .map((entry) => finishTurn(entry.owner)),
-      )
-      const errors = results.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
-      )
-      if (errors.length)
-        throw new AggregateError(errors, "Browser session cleanup failed.")
+      await confirmCleanup([
+        Promise.resolve().then(() => viewRequests.closeSession(sessionId)),
+        ...[...connections.entries()]
+          .filter(([, entry]) => entry.owner.sessionId === sessionId)
+          .map(async ([key, entry]) => {
+            entry.busy = true
+            try {
+              await closeConnection(key, entry)
+            } finally {
+              entry.busy = false
+            }
+          }),
+        downloads.finishSession(sessionId),
+      ])
     },
   }
 }

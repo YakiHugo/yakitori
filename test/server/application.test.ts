@@ -3282,6 +3282,7 @@ describe("application composition", () => {
     "browser_view",
     "browser_chooser",
     "browser_dialog",
+    "browser_download",
   ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
     const browserInput =
       browserTool === "browser"
@@ -3314,7 +3315,8 @@ describe("application composition", () => {
               }
             : browserTool === "browser_view" ||
                 browserTool === "browser_chooser" ||
-                browserTool === "browser_dialog"
+                browserTool === "browser_dialog" ||
+                browserTool === "browser_download"
               ? {
                   action: browserTool === "browser_view" ? "show" : "arm",
                   target: {
@@ -3458,6 +3460,7 @@ describe("application composition", () => {
     "browser",
     "browser_capture",
     "browser_navigate",
+    "browser_download",
   ])("blocks native and browser input after %s cleanup fails until release is confirmed", async (browserTool) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
@@ -3470,24 +3473,31 @@ describe("application composition", () => {
         instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
       }
       const input =
-        browserTool === "browser"
-          ? { action: "list" }
-          : browserTool === "browser_capture"
-            ? { action: "capture", target, mode: "viewport" }
-            : browserTool === "browser_navigate"
-              ? {
-                  action: "navigate",
-                  target,
-                  fromUrl: "https://owned.test/",
-                  url: "https://destination.test/",
-                }
-              : {
-                  action: "fill",
-                  target,
-                  reference:
-                    "browser_node_00000000-0000-4000-8000-000000000001",
-                  text: "",
-                }
+        browserTool === "browser_download"
+          ? {
+              action: "cancel",
+              target,
+              downloadId:
+                "browser_download_00000000-0000-4000-8000-000000000001",
+            }
+          : browserTool === "browser"
+            ? { action: "list" }
+            : browserTool === "browser_capture"
+              ? { action: "capture", target, mode: "viewport" }
+              : browserTool === "browser_navigate"
+                ? {
+                    action: "navigate",
+                    target,
+                    fromUrl: "https://owned.test/",
+                    url: "https://destination.test/",
+                  }
+                : {
+                    action: "fill",
+                    target,
+                    reference:
+                      "browser_node_00000000-0000-4000-8000-000000000001",
+                    text: "",
+                  }
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,

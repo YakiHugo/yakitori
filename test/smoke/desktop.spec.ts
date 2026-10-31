@@ -523,6 +523,8 @@ test("agent browser observations and actions use the exact owned tab through rea
   const chooserFiles: { name: string; text: string }[][] = []
   const dialogReplies: { value: boolean; trusted: boolean }[] = []
   const promptReplies: { value: string | null; trusted: boolean }[] = []
+  const downloadBytes = Buffer.from([0, 255, 1, 2, 3])
+  let downloadArtifact: Record<string, unknown> | undefined
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
     []
   const frameSelectEvents: {
@@ -817,11 +819,21 @@ test("agent browser observations and actions use the exact owned tab through rea
       response.end()
       return
     }
+    if (request.method === "GET" && request.url === "/native-download") {
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": downloadBytes.length,
+        "content-disposition":
+          "attachment; filename*=UTF-8''download-%E4%BD%A0%E5%A5%BD.bin",
+      })
+      response.end(downloadBytes)
+      return
+    }
     if (request.method === "GET" && request.url?.startsWith("/third")) {
       thirdRequests++
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button>`,
+        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button><a href="/native-download" download>Native download</a>`,
       )
       return
     }
@@ -1604,6 +1616,68 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "observe", target: current.target },
               id: "observe_restored_prompt",
             }
+          } else if (step === 88) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "arm",
+                target: current.target,
+                fromUrl: destinationUrl,
+                url: `${new URL(destinationUrl).origin}/native-download`,
+              },
+              id: "arm_native_download",
+            }
+          } else if (step === 89) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              link = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native download")
+            if (!link?.elementReference)
+              throw new Error("Missing native download link")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: link.elementReference,
+              },
+              id: "trigger_native_download",
+            }
+          } else if (step === 90) {
+            const current = toolResult(body.messages ?? [], "downloadId")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "wait",
+                target: current.target,
+                downloadId: current.downloadId,
+              },
+              id: "await_native_download",
+            }
+          } else if (step === 91) {
+            const current = toolResult(body.messages ?? [], "downloadId")
+            if (current.state !== "completed")
+              throw new Error("Native download did not finish")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "collect",
+                target: current.target,
+                downloadId: current.downloadId,
+              },
+              id: "collect_native_download",
+            }
+          } else if (step === 92) {
+            downloadArtifact = toolResult(body.messages ?? [], "sha256")
+            if (downloadArtifact.byteLength !== 5)
+              throw new Error("Native download artifact size differs")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: downloadArtifact.target },
+              id: "observe_after_download",
+            }
           } else {
             navigatedObservation = toolResult(body.messages ?? [], "nodes")
             observed.resolve()
@@ -1794,7 +1868,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 87; approval++)
+    for (let approval = 0; approval < 92; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -2008,6 +2082,13 @@ test("agent browser observations and actions use the exact owned tab through rea
     ])
     expect(dialogReplies).toEqual([{ value: false, trusted: true }])
     expect(promptReplies).toEqual([{ value: "你好 猫 🌍", trusted: true }])
+    if (typeof downloadArtifact?.path !== "string")
+      throw new Error("Missing durable download artifact")
+    expect(await readFile(downloadArtifact.path)).toEqual(downloadBytes)
+    expect(downloadArtifact.sha256).toBe(
+      "4be72cf29a33b5f223067ab9d5dd9567e0c14978e6ed54e2d556ddc9e2cc6038",
+    )
+    expect(downloadArtifact.filename).toBe("download-你好.bin")
     expect(chooserFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
@@ -2152,6 +2233,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         fileChoiceEvents,
         dialogReplies,
         promptReplies,
+        downloadArtifact,
         protocol,
       }),
       contentType: "application/json",
