@@ -30,7 +30,6 @@ import {
   type SessionConfigurationSnapshot,
   type StartedExecutionItem,
   type TokenUsage,
-  type ToolExecutionItem,
   type TurnLatency,
 } from "../kernel/index.ts"
 import type { AgentConfiguration } from "../protocol/configuration.ts"
@@ -100,7 +99,7 @@ import {
 } from "./session-configuration.ts"
 import type { ThreadCollaboration } from "./thread-collaboration.ts"
 import {
-  completeToolExecution,
+  completeToolItem,
   executeToolCalls,
   toolFileObservations,
 } from "./tool-execution.ts"
@@ -112,7 +111,6 @@ import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
 import { finalizeToolOutput } from "./tools/result-output.ts"
 import { captureStepContext, type StepContext } from "./tools/spec-plan.ts"
-import type { ToolExecutionResult } from "./tools/types.ts"
 import { createVisibleFileObservationsFromMessages } from "./tools/visible-file-observations.ts"
 import { waitForTurnReadiness } from "./turn-readiness.ts"
 import {
@@ -1518,6 +1516,11 @@ async function executeTurnModelLoop(
                   modelCallId,
                 })
               },
+              recordNestedToolResult: (completion) =>
+                input.session.recordNestedToolResult(input.execution, {
+                  ...completion,
+                  modelCallId,
+                }),
               publishPermissionEvent: (event) =>
                 input.session.emitPermissionEvent(input.execution, event),
               permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
@@ -3001,30 +3004,6 @@ function completedResponseItems(
       },
     ]
   })
-}
-
-function completeToolItem(
-  toolPlan: ReturnType<ToolRegistry["finalize"]>,
-  started: ToolExecutionItem,
-  resultItemId: string,
-  result: ToolExecutionResult,
-  modelContent: import("./tools/types.ts").ToolModelContent,
-): Extract<CompletedExecutionItem, { toolCallId: string }> {
-  const completed = completeToolExecution(toolPlan, started, result)
-  return {
-    ...completed,
-    resultItemId,
-    content: { kind: "tool_result", parts: modelContent.content },
-    ...(result.output === undefined ? {} : { output: result.output }),
-    ...(result.ok
-      ? {}
-      : {
-          error: {
-            message: result.message,
-            code: result.code,
-          },
-        }),
-  }
 }
 
 function completeCompactionItem(

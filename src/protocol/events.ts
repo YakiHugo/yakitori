@@ -4,8 +4,8 @@ import type {
   ModelToolContentBlock,
 } from "./conversation.ts"
 import type { ContextExcerpt } from "./input-context.ts"
-import type { InputContent } from "./user-input.ts"
 import type { ModelOutputSource } from "./model-output.ts"
+import type { InputContent } from "./user-input.ts"
 export const EventType = {
   SessionCreated: "session.created",
   InputAdmitted: "input.admitted",
@@ -303,6 +303,7 @@ export type ToolExecutionItemBase = Readonly<{
   itemId: string
   toolCallId: string
   modelCallId?: string
+  parentToolCallId?: string
   name: string
   input: JsonValue
   requiresPermission: boolean

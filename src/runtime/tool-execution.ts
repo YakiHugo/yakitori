@@ -1,6 +1,10 @@
 import type { RolloutAssets } from "../core/rollout-assets.ts"
 import { TaskCleanupError } from "../core/session-task.ts"
-import type { JsonValue, ToolExecutionItem } from "../kernel/index.ts"
+import type {
+  CompletedExecutionItem,
+  JsonValue,
+  ToolExecutionItem,
+} from "../kernel/index.ts"
 import type { SessionPermissionEvent } from "../protocol/permissions.ts"
 import type { BoundAgentControl } from "./agent-control.ts"
 import { isAbortError } from "./errors.ts"
@@ -10,14 +14,17 @@ import { toolContentText } from "./model-tool-content.ts"
 import type { PermissionGate } from "./permission-gate.ts"
 import type { ApprovalPolicy } from "./session-configuration.ts"
 import type { BoundThreadCollaboration } from "./thread-collaboration.ts"
-import type {
-  ToolExecutionGate,
-  ToolExecutionReservation,
+import {
+  createToolExecutionGate,
+  type ToolExecutionGate,
+  type ToolExecutionReservation,
 } from "./tool-execution-gate.ts"
 import { resolveToolPermissionRequest } from "./tool-permissions.ts"
 import type { ToolRegistry } from "./tools/registry.ts"
 import { finalizeToolOutput } from "./tools/result-output.ts"
 import type {
+  ComposedToolResult,
+  ToolExecutionContext,
   ToolExecutionResult,
   ToolPermissionRequest,
 } from "./tools/types.ts"
@@ -37,6 +44,10 @@ type ToolExecutionScope = Readonly<{
   toolPlan: ReturnType<ToolRegistry["finalize"]>
   permissionGate: PermissionGate
   recordToolStarted: (item: ToolExecutionItem) => Promise<void>
+  recordNestedToolResult: (
+    item: Extract<CompletedExecutionItem, { toolCallId: string }>,
+  ) => Promise<void>
+  parentToolCallId?: string
   publishPermissionEvent: (event: SessionPermissionEvent) => void
   permissionTimeoutMs: number
   approvalPolicy: ApprovalPolicy
@@ -121,6 +132,9 @@ export async function* executeToolCalls(
           item: {
             itemId: `tool_${globalThis.crypto.randomUUID()}`,
             toolCallId: call.id,
+            ...(input.parentToolCallId
+              ? { parentToolCallId: input.parentToolCallId }
+              : {}),
             name: invocation.name,
             input: invocation.input,
             requiresPermission: permission !== undefined,
@@ -146,6 +160,9 @@ export async function* executeToolCalls(
           item: {
             itemId: `tool_${globalThis.crypto.randomUUID()}`,
             toolCallId: call.id,
+            ...(input.parentToolCallId
+              ? { parentToolCallId: input.parentToolCallId }
+              : {}),
             name: invocation.name,
             input: invocation.input,
             requiresPermission: false,
@@ -190,7 +207,7 @@ export async function* executeToolCalls(
   }
 }
 
-export function completeToolExecution(
+function completeToolExecution(
   toolPlan: ReturnType<ToolRegistry["finalize"]>,
   started: ToolExecutionItem,
   result: ToolExecutionResult,
@@ -212,6 +229,160 @@ export function completeToolExecution(
   return { ...started, ...descriptor } as ToolExecutionItem
 }
 
+async function executeComposedTool(
+  input: ToolExecutionScope,
+  prepared: PreparedToolCall,
+  context: ToolExecutionContext,
+): Promise<ToolExecutionResult> {
+  const gate = createToolExecutionGate(),
+    children = new Set<Promise<ComposedToolResult>>()
+  let accepting = true
+  const persist = async (
+    item: ToolExecutionItem,
+    result: ToolExecutionResult,
+  ): Promise<ComposedToolResult> => {
+    const projected = await finalizeToolOutput(
+      result,
+      { maxBytes: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER },
+      {
+        workspaceRoot: input.workspaceRoot,
+        rolloutId: input.rolloutId,
+        toolCallId: item.toolCallId,
+        ...(input.rolloutAssets ? { rolloutAssets: input.rolloutAssets } : {}),
+      },
+    )
+    await input.recordNestedToolResult(
+      completeToolItem(
+        input.toolPlan,
+        item,
+        `nested_result_${crypto.randomUUID()}`,
+        result,
+        projected,
+      ),
+    )
+    return { toolCallId: item.toolCallId, result, content: projected.content }
+  }
+  const execute = async (
+    name: string,
+    arguments_: JsonValue,
+    signal?: AbortSignal,
+  ): Promise<ComposedToolResult> => {
+    if (!accepting)
+      throw new Error("The parent tool has closed its child execution scope.")
+    const lifetime = signal
+      ? AbortSignal.any([input.signal, signal])
+      : input.signal
+    lifetime.throwIfAborted()
+    const call: ModelToolCallBlock = {
+      type: "tool_call",
+      id: `call_nested_${crypto.randomUUID()}`,
+      name,
+      input: arguments_,
+    }
+    let started: ToolExecutionItem | undefined,
+      completed:
+        | { item: ToolExecutionItem; result: ToolExecutionResult }
+        | undefined,
+      failure: unknown
+    try {
+      for await (const outcome of executeToolCalls({
+        ...input,
+        signal: lifetime,
+        calls: [call],
+        onScheduled: () => {},
+        parentToolCallId: prepared.call.id,
+        toolExecutionGate: gate,
+        recordToolStarted: async (item) => {
+          await input.recordToolStarted(item)
+          started = item
+        },
+      }))
+        completed = outcome
+    } catch (cause) {
+      failure = cause
+    }
+    if (completed) {
+      const recorded = await persist(completed.item, completed.result)
+      if (failure !== undefined) throw failure
+      return recorded
+    }
+    if (lifetime.aborted && isAbortError(failure) && started) {
+      return persist(started, {
+        ok: false,
+        code: "tool_cancelled_unconfirmed",
+        message:
+          "This child tool was cancelled without a confirmed result. Effects may have occurred; inspect the owned target before continuing and do not replay automatically.",
+        content:
+          "This child tool was cancelled without a confirmed result. Effects may have occurred; inspect the owned target before continuing and do not replay automatically.",
+      })
+    }
+    if (failure !== undefined) throw failure
+    throw new Error("A composed child tool returned no execution result.")
+  }
+  const parent = await Promise.allSettled([
+    input.toolPlan.execute(
+      prepared.invocation.name,
+      prepared.invocation.input,
+      {
+        ...context,
+        toolCalls: {
+          execute(name, arguments_, signal) {
+            const pending = execute(name, arguments_, signal)
+            children.add(pending)
+            // Observe early rejections even if the caller did not await its call.
+            // The owned drain below still propagates every unexpected failure.
+            void pending.catch(() => {})
+            return pending
+          },
+        },
+      },
+    ),
+  ])
+  accepting = false
+  const settled = await Promise.allSettled([...children]),
+    failures = [...parent, ...settled].flatMap((outcome) =>
+      outcome.status === "rejected" ? [outcome.reason as unknown] : [],
+    )
+  if (failures.some((cause) => cause instanceof TaskCleanupError))
+    throw new TaskCleanupError(
+      new AggregateError(
+        failures,
+        "A composed tool cannot settle its owned resources.",
+      ),
+    )
+  if (failures.length === 1) throw failures[0]
+  if (failures.length)
+    throw new AggregateError(failures, "A composed tool or child failed.")
+  const result = parent[0]
+  if (result?.status !== "fulfilled")
+    throw new Error("Missing composed tool result.")
+  return result.value
+}
+
+export function completeToolItem(
+  toolPlan: ReturnType<ToolRegistry["finalize"]>,
+  started: ToolExecutionItem,
+  resultItemId: string,
+  result: ToolExecutionResult,
+  modelContent: import("./tools/types.ts").ToolModelContent,
+): Extract<CompletedExecutionItem, { toolCallId: string }> {
+  const completed = completeToolExecution(toolPlan, started, result)
+  return {
+    ...completed,
+    resultItemId,
+    content: { kind: "tool_result", parts: modelContent.content },
+    ...(result.output === undefined ? {} : { output: result.output }),
+    ...(result.ok
+      ? {}
+      : {
+          error: {
+            message: result.message,
+            code: result.code,
+          },
+        }),
+  }
+}
+
 async function executePreparedTool(
   input: ToolExecutionScope,
   prepared: PreparedToolCall,
@@ -229,6 +400,18 @@ async function executePreparedTool(
         code: "hook_blocked",
         message: prepared.hookBlockedReason,
         content: `hook_blocked: ${prepared.hookBlockedReason}`,
+      }
+    }
+    if (
+      input.parentToolCallId &&
+      input.toolPlan.get(prepared.invocation.name)?.composesTools
+    ) {
+      reservation.cancel()
+      return {
+        ok: false,
+        code: "nested_composition_disabled",
+        message: "A composed tool cannot invoke another composed tool.",
+        content: "A composed tool cannot invoke another composed tool.",
       }
     }
     if (prepared.permission !== undefined) {
@@ -293,29 +476,32 @@ async function executePreparedTool(
       input.signal,
     )
     return await reservation.run(async () => {
-      const result = await input.toolPlan.execute(
-        prepared.invocation.name,
-        prepared.invocation.input,
-        {
-          workspaceRoot: input.workspaceRoot,
-          threadId: input.threadId,
-          rolloutId: input.rolloutId,
-          toolCallId: prepared.call.id,
-          turnId: input.turnId,
-          signal: input.signal,
-          documentReading: input.documentReading,
-          ...(input.rolloutAssets === undefined
-            ? {}
-            : { rolloutAssets: input.rolloutAssets }),
-          visibleFileObservations: input.visibleFileObservations,
-          ...(input.agentControl === undefined
-            ? {}
-            : { agentControl: input.agentControl }),
-          ...(input.threadCollaboration === undefined
-            ? {}
-            : { threadCollaboration: input.threadCollaboration }),
-        },
-      )
+      const context: ToolExecutionContext = {
+        workspaceRoot: input.workspaceRoot,
+        threadId: input.threadId,
+        rolloutId: input.rolloutId,
+        toolCallId: prepared.call.id,
+        turnId: input.turnId,
+        signal: input.signal,
+        documentReading: input.documentReading,
+        ...(input.rolloutAssets === undefined
+          ? {}
+          : { rolloutAssets: input.rolloutAssets }),
+        visibleFileObservations: input.visibleFileObservations,
+        ...(input.agentControl === undefined
+          ? {}
+          : { agentControl: input.agentControl }),
+        ...(input.threadCollaboration === undefined
+          ? {}
+          : { threadCollaboration: input.threadCollaboration }),
+      }
+      const result = input.toolPlan.get(prepared.invocation.name)?.composesTools
+        ? await executeComposedTool(input, prepared, context)
+        : await input.toolPlan.execute(
+            prepared.invocation.name,
+            prepared.invocation.input,
+            context,
+          )
       let postHook: Awaited<ReturnType<HookRunner["run"]>> | undefined
       try {
         postHook = await input.hookRunner?.run({
