@@ -345,3 +345,106 @@ export class BrowserFramePointer {
     return mainPoint
   }
 }
+
+export class BrowserPointerTarget {
+  readonly #objectId: string
+  readonly #sessionId: string | undefined
+  readonly #read: BrowserFrameReadCommand
+  readonly #command: BrowserProtocolCommand
+  readonly #flush: () => Promise<void>
+  readonly #frame: BrowserFramePointer | undefined
+  #localPoint: BrowserPoint | undefined
+
+  constructor(options: {
+    objectId: string
+    sessionId: string | undefined
+    path: BrowserFrameBinding[] | undefined
+    group: string
+    read: BrowserFrameReadCommand
+    command: BrowserProtocolCommand
+    flush: () => Promise<void>
+  }) {
+    this.#objectId = options.objectId
+    this.#sessionId = options.sessionId
+    this.#read = options.read
+    this.#command = options.command
+    this.#flush = options.flush
+    this.#frame = options.path
+      ? new BrowserFramePointer(
+          options.path,
+          options.read,
+          options.command,
+          options.group,
+        )
+      : undefined
+  }
+
+  get sessions(): Iterable<string | undefined> {
+    return this.#frame?.sessions ?? []
+  }
+
+  verifyPath(path: BrowserFrameBinding[]): void {
+    this.#frame?.verifyPath(path)
+  }
+
+  async prepareFrames(): Promise<void> {
+    await this.#frame?.prepare()
+  }
+
+  async flushLayout(): Promise<void> {
+    if (this.#frame) await this.#flush()
+  }
+
+  async #probe(scroll: boolean, point?: BrowserPoint): Promise<BrowserPoint> {
+    const response = record(
+      await (scroll ? this.#command : this.#read)(
+        "Runtime.callFunctionOn",
+        {
+          objectId: this.#objectId,
+          returnByValue: true,
+          functionDeclaration: browserPointerGeometry,
+          arguments: [{ value: scroll }, { value: point ?? null }],
+        },
+        this.#sessionId,
+      ),
+    )
+    const value = record(record(response.result).value)
+    if (value.ok !== true)
+      throw new BrowserControlError(
+        "browser_input_unavailable",
+        "The exact control has no visible unoccluded click point, or is disabled. Observe again before clicking.",
+      )
+    if (
+      typeof value.x !== "number" ||
+      !Number.isFinite(value.x) ||
+      typeof value.y !== "number" ||
+      !Number.isFinite(value.y)
+    )
+      throw new Error("Chromium returned an invalid browser click point.")
+    return { x: value.x, y: value.y }
+  }
+
+  async scrollIntoView(): Promise<BrowserPoint> {
+    const local = await this.#probe(true)
+    this.#localPoint = local
+    await this.flushLayout()
+    return this.#frame ? this.#frame.project(local) : local
+  }
+
+  async verifyPoint(point: BrowserPoint): Promise<void> {
+    const local = this.#localPoint
+    if (!local) throw new Error("The pointer target has not been prepared.")
+    await this.#probe(false, local)
+    if (this.#frame) {
+      const current = await this.#frame.project(local)
+      if (
+        Math.abs(current.x - point.x) > 0.5 ||
+        Math.abs(current.y - point.y) > 0.5
+      )
+        throw new BrowserControlError(
+          "browser_input_unavailable",
+          "The frame moved during pointer input. Observe again before clicking.",
+        )
+    }
+  }
+}
