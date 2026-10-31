@@ -18,8 +18,8 @@ import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
 import {
   createVisibleFileObservations,
-  grantsFromToolOutput,
   type FileObservationGrant,
+  grantsFromToolOutput,
 } from "../../../src/runtime/tools/visible-file-observations.ts"
 import { createWriteFileTool } from "../../../src/runtime/tools/write-file.ts"
 
@@ -913,6 +913,10 @@ describe("bounded file tools", () => {
       "read_thread",
       "send_message_to_thread",
       "wait_threads",
+      "tool_search",
+    ])
+    expect(router.deferredDefinitions.map((tool) => tool.name)).toEqual([
+      "run_script",
     ])
     expect(
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema,

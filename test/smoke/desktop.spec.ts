@@ -2388,6 +2388,243 @@ test("agent browser observations and actions use the exact owned tab through rea
   }
 })
 
+test("packaged scripts compose approved MCP and browser calls through real desktop IPC", async ({
+  desktop,
+}) => {
+  const { page, application, userData, sidecarUrl, rendererErrors } = desktop
+  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  const failed = Promise.withResolvers<Error>()
+  let modelCalls = 0,
+    url = ""
+  const source = createServer((request, response) => {
+    if (request.url === "/page") {
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<!doctype html><title>Script source</title><label>Script field<input value="initial"></label>',
+      )
+      return
+    }
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({ data: [{ id: "script-model" }] }))
+      return
+    }
+    let raw = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      raw += chunk
+    })
+    request.on("end", () => {
+      try {
+        const body = JSON.parse(raw) as {
+          tools?: unknown[]
+          messages?: {
+            role?: string
+            tool_call_id?: string
+            content?: unknown
+          }[]
+        }
+        let delta: Record<string, unknown> = {
+            role: "assistant",
+            content: "Script browser verified.",
+          },
+          finish = "stop"
+        if (body.tools?.length) {
+          if (modelCalls++ === 0) {
+            const code = `const control = await tools.call('computer__control',{action:'fixture_effect'}); if(!control.ok) throw control;
+const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
+const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
+const observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
+const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.inputReference); if(!node) throw 'Missing script input';
+const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.inputReference,text:'Script 你好 🌍'}); if(!result.ok) throw result;
+const image = await tools.call('browser_capture',{action:'capture',mode:'viewport',target:tab.target}); if(!image.ok) throw image; show(image); return result.output;`
+            delta = {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "script_call",
+                  type: "function",
+                  function: {
+                    name: "run_script",
+                    arguments: JSON.stringify({ code, arguments: { url } }),
+                  },
+                },
+              ],
+            }
+            finish = "tool_calls"
+          } else {
+            const results = (body.messages ?? []).filter(
+              (message) => message.role === "tool",
+            )
+            expect(results.map((message) => message.tool_call_id)).toEqual([
+              "script_call",
+            ])
+            expect(JSON.stringify(results[0]?.content)).toContain(
+              "textVerified",
+            )
+            // Chat Completions carries tool media in the following user batch.
+            const blocks: unknown[] = (body.messages ?? []).flatMap(
+              (message) =>
+                Array.isArray(message.content) ? message.content : [],
+            )
+            expect(blocks).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  type: "image_url",
+                  image_url: expect.objectContaining({
+                    url: expect.stringMatching(/^data:image\/jpeg;base64,/),
+                  }),
+                }),
+              ]),
+            )
+          }
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" })
+        response.end(
+          `data: ${JSON.stringify({ id: `script_${modelCalls}`, object: "chat.completion.chunk", created: 1, model: "script-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`,
+        )
+      } catch (cause) {
+        failed.resolve(
+          cause instanceof Error ? cause : new Error(String(cause)),
+        )
+        response.writeHead(500)
+        response.end("Owned script fixture failed")
+      }
+    })
+  })
+  source.listen(0, "127.0.0.1")
+  await once(source, "listening")
+  const address = source.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing script source")
+  const origin = `http://127.0.0.1:${address.port}`
+  url = `${origin}/page`
+  const helper = join(userData, "script-computer.cjs"),
+    log = join(userData, "script-computer.log")
+  try {
+    await writeFile(
+      helper,
+      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+    )
+    await client.request("config/write", {
+      keyPath: ["mcp_servers", "computer"],
+      value: {
+        command: process.execPath,
+        args: [helper],
+        enabled: true,
+        required: true,
+        enabled_tools: ["control"],
+      },
+    })
+    await client.request("provider/configuration/write", {
+      id: "script-fixture",
+      configuration: {
+        name: "Script fixture",
+        service: "openai",
+        authentication: "none",
+        baseURL: `${origin}/v1`,
+        wireApi: "openai_chat_completions",
+        models: [
+          {
+            id: "script-model",
+            displayName: "Script Model",
+            inputModalities: ["text", "image"],
+          },
+        ],
+      },
+    })
+    await client.request("userPreference/write", {
+      provider: "openai",
+      model: "script-model",
+    })
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await page
+      .getByRole("button", { name: "Select model and effort", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Script Model", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("textbox", { name: "Browser address" }).fill(url)
+    await page.getByRole("textbox", { name: "Browser address" }).press("Enter")
+    await expect(
+      page.getByRole("tab", { name: "Script source", exact: true }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Hide workspace", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Run the owned script.")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    for (let index = 0; index < 5; index++)
+      await Promise.race([
+        page.getByRole("button", { name: "Allow", exact: true }).click(),
+        failed.promise.then((error) => {
+          throw error
+        }),
+      ])
+    await Promise.race([
+      expect(
+        page.getByText("Script browser verified.", { exact: true }).first(),
+      ).toBeVisible(),
+      failed.promise.then((error) => {
+        throw error
+      }),
+    ])
+    expect(modelCalls).toBe(2)
+    await expect
+      .poll(
+        async () => (await client.request("computer/status", {})).inputOwner,
+      )
+      .toBeUndefined()
+    expect(
+      await application.evaluate(async ({ webContents }, url) => {
+        const owned = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+        if (!owned) throw new Error("Missing owned script browser")
+        return {
+          value: await owned.executeJavaScript(
+            "document.querySelector('input').value",
+          ),
+          attached: owned.debugger.isAttached(),
+        }
+      }, url),
+    ).toEqual({ value: "Script 你好 🌍", attached: false })
+    const calls = (await readFile(log, "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as { name: string; arguments?: { action?: string } },
+      )
+    expect(
+      calls.filter(
+        (call) =>
+          call.name === "control" &&
+          call.arguments?.action === "fixture_effect",
+      ),
+    ).toHaveLength(1)
+    expect(calls.filter((call) => call.name === "turn_ended")).toHaveLength(1)
+    expect(
+      (await client.request("computer/status", {})).inputOwner,
+    ).toBeUndefined()
+    expect(rendererErrors).toEqual([])
+  } finally {
+    client.close()
+    source.closeAllConnections()
+    await new Promise<void>((resolve) => source.close(() => resolve()))
+  }
+})
+
 function killProcessGroup(pid: number): void {
   // Playwright 1.63 launches Electron detached on macOS. Its PID is the
   // private group ID, and the directly spawned sidecar inherits that group.

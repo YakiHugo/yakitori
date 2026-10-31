@@ -12,6 +12,7 @@ import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools, createSpawnAgentTool } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
+import { createRunScriptTool } from "./run-script.ts"
 import {
   createThreadCollaborationTools,
   createThreadTool,
@@ -584,10 +585,17 @@ function createToolSearchTool(
       type: "object",
       additionalProperties: false,
       properties: {
-        query: { type: "string", minLength: 1 },
+        query: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Capability description or exact tool name to search for.",
+        },
         limit: {
           type: "integer",
           minimum: 1,
+          description:
+            "Maximum matching tool definitions to return; omit to use the search default.",
         },
       },
       required: ["query"],
@@ -834,6 +842,7 @@ export function createDefaultTools(
     createReadFileTool(),
     createViewImageTool(),
     createReadDocumentTool(),
+    createRunScriptTool(),
     createGrepTool(),
     createGlobTool(),
     createEditFileTool(),
