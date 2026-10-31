@@ -585,10 +585,17 @@ function createToolSearchTool(
       type: "object",
       additionalProperties: false,
       properties: {
-        query: { type: "string", minLength: 1 },
+        query: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Capability description or exact tool name to search for.",
+        },
         limit: {
           type: "integer",
           minimum: 1,
+          description:
+            "Maximum matching tool definitions to return; omit to use the search default.",
         },
       },
       required: ["query"],

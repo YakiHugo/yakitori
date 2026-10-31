@@ -15,7 +15,17 @@ export function createRunScriptTool(): RuntimeTool {
       "Run an isolated JavaScript async function body. Use await tools.call(name, input) to invoke enabled tools with normal approvals and execution records. Results have ok, output and content; show(result) forwards its media to the model. print/console.log produce text. args contains the supplied JSON arguments. No ambient filesystem, network, process or timers. Await every call. The VM is fresh each run; source/arguments 64KiB each, copied output 128KiB, tool replies 2MiB, 64 calls, 64MiB heap, one second cumulative VM CPU, two minutes elapsed time (host safety boundaries).",
     inputSchema: {
       type: "object",
-      properties: { code: { type: "string" }, arguments: {} },
+      properties: {
+        code: {
+          type: "string",
+          description:
+            "JavaScript async function body. Await tools.call(name, input); use return for the final JSON value.",
+        },
+        arguments: {
+          description:
+            "JSON value available as args inside the script; defaults to null.",
+        },
+      },
       required: ["code"],
       additionalProperties: false,
     },
