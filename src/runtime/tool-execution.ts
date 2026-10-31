@@ -316,20 +316,30 @@ async function executePreparedTool(
             : { threadCollaboration: input.threadCollaboration }),
         },
       )
-      const postHook = await input.hookRunner?.run({
-        event: HookEvent.PostToolUse,
-        matcher: prepared.invocation.name,
-        payload: {
-          session_id: input.threadId,
-          turn_id: input.turnId,
-          tool_name: prepared.invocation.name,
-          tool_use_id: prepared.call.id,
-          tool_input: prepared.invocation.input,
-          tool_response: result.output ?? result.content,
-        },
-        cwd: input.workspaceRoot,
-        signal: input.signal,
-      })
+      let postHook: Awaited<ReturnType<HookRunner["run"]>> | undefined
+      try {
+        postHook = await input.hookRunner?.run({
+          event: HookEvent.PostToolUse,
+          matcher: prepared.invocation.name,
+          payload: {
+            session_id: input.threadId,
+            turn_id: input.turnId,
+            tool_name: prepared.invocation.name,
+            tool_use_id: prepared.call.id,
+            tool_input: prepared.invocation.input,
+            tool_response: result.output ?? result.content,
+          },
+          cwd: input.workspaceRoot,
+          signal: input.signal,
+        })
+      } catch (cause) {
+        if (!input.signal.aborted || !isAbortError(cause)) throw cause
+        // The tool already confirmed its effect. Cancellation of the later
+        // check must not erase that fact from the ordered durable result drain.
+        hookContext.push(
+          "PostToolUse was interrupted after the tool completed. The result records the completed effect; do not replay it automatically.",
+        )
+      }
       if (postHook?.continue === false) {
         const reason =
           postHook.reason ?? "PostToolUse hook rejected the tool result."
