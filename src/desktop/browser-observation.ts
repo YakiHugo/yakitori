@@ -25,6 +25,7 @@ import { BrowserDialogs } from "./browser-dialogs.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
 import { BrowserDrag } from "./browser-drag.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
+import { BrowserPageFocus } from "./browser-focus.ts"
 import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
 import { BrowserPendingMutations } from "./browser-mutations.ts"
@@ -61,6 +62,7 @@ export class BrowserDocumentConnection {
   readonly #sessions: BrowserFrameSessions
   readonly #dialogs: BrowserDialogs
   readonly #drag: BrowserDrag
+  readonly #pointerFocus = new BrowserPageFocus()
   #preparedDrag: { id: string; reference: BrowserControlReference } | undefined
   readonly #chooser: BrowserFileChooser
   readonly #frameCatalog: BrowserFrames
@@ -128,7 +130,11 @@ export class BrowserDocumentConnection {
 
   assertInputIdle(): void {
     this.#mutations.assertCompleted()
-    if (this.#heldInputs.length || this.#drag.active)
+    if (
+      this.#heldInputs.length ||
+      this.#drag.active ||
+      this.#pointerFocus.active
+    )
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before changing the browser view or sending more input.",
@@ -150,6 +156,7 @@ export class BrowserDocumentConnection {
         if (contents.isDestroyed()) {
           this.#heldInputs.length = 0
           await this.#drag.cleanup(true)
+          await this.#pointerFocus.cleanup(true)
           return
         }
         if (this.closed || !this.#debug.isAttached())
@@ -192,6 +199,7 @@ export class BrowserDocumentConnection {
 
   async close(): Promise<void> {
     await this.#releaseInput()
+    await this.#pointerFocus.cleanup(this.#contents.isDestroyed())
     this.#mutations.assertCompleted()
     if (!this.#contents.isDestroyed()) await this.#dialogs.disarm()
     if (!this.closed && this.#debug.isAttached()) {
@@ -856,7 +864,9 @@ export class BrowserDocumentConnection {
     // before releasing the remote ticket needed by a later cleanup retry.
     if (this.#drag.active) await this.#releaseInput()
     const [inputCleanup, ...groupsCleanup] = await Promise.allSettled([
-      this.#releaseInput(),
+      this.#releaseInput().then(() =>
+        this.#pointerFocus.cleanup(this.#contents.isDestroyed()),
+      ),
       ...[...new Set([sessionId, ...additionalSessions])].map((id) =>
         this.closed
           ? undefined
@@ -1701,6 +1711,24 @@ export class BrowserDocumentConnection {
         return pointer.verifyPoint(point)
       }
       dispatched = input.action === "hover"
+      if (input.action === "click")
+        await this.#pointerFocus.enable((enabled, confirmed) => {
+          if (this.closed)
+            throw new BrowserControlError(
+              "browser_cleanup_failed",
+              "The page focus completion channel disconnected.",
+            )
+          return this.#mutations.run(
+            () =>
+              this.#debug
+                .sendCommand("Emulation.setFocusEmulationEnabled", { enabled })
+                .then((result) => {
+                  confirmed?.()
+                  return result
+                }),
+            this.#mutationDeadline(),
+          )
+        })
       await this.#inputCommand(
         "Input.dispatchMouseEvent",
         {
