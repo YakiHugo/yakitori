@@ -475,12 +475,15 @@ function isToolExecutionItemWithLifecycle(
     "input",
     "requiresPermission",
     "modelCallId",
+    "parentToolCallId",
     ...lifecycleKeys,
   ]
   if (
     !isString(value.itemId) ||
     !isString(value.toolCallId) ||
     (value.modelCallId !== undefined && !isString(value.modelCallId)) ||
+    (value.parentToolCallId !== undefined &&
+      !isString(value.parentToolCallId)) ||
     !isString(value.name) ||
     !isJsonValue(value.input) ||
     typeof value.requiresPermission !== "boolean"

@@ -43,6 +43,19 @@ export type ToolExecutionContext = Readonly<{
   agentControl?: BoundAgentControl
   threadCollaboration?: BoundThreadCollaboration
   documentReading?: Readonly<{ nativePdf: boolean; images: boolean }>
+  toolCalls?: Readonly<{
+    execute(
+      name: string,
+      input: JsonValue,
+      signal?: AbortSignal,
+    ): Promise<ComposedToolResult>
+  }>
+}>
+
+export type ComposedToolResult = Readonly<{
+  toolCallId: string
+  result: ToolExecutionResult
+  content: ModelToolResultMessage["content"]
 }>
 
 export type ToolReadinessContext = Readonly<{
@@ -96,6 +109,9 @@ export type RuntimeTool = Readonly<{
   exposure?: ToolExposure
   search?: ToolSearchMetadata
   supportsParallelToolCalls?: boolean
+  // Composition holds an exclusive parent barrier while its own child gate
+  // schedules calls; child completion is part of parent settlement.
+  composesTools?: boolean
   description: string
   inputSchema: JsonObject
   customInputFormat?: ModelToolInputFormat

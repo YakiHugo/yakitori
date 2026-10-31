@@ -1,16 +1,3 @@
-import { answerTextParts } from "../protocol/model-output.ts"
-import { canResumeTurn } from "../protocol/turn-recovery.ts"
-import type { ModelOutputPresentation } from "../protocol/model-output.ts"
-import {
-  TaskCleanupError,
-  type ExecutionContext,
-  type SessionTask,
-  type SessionTaskRunner,
-  type SessionTaskHandle,
-  type TaskOutcome,
-  type TaskSettlement,
-  type TurnControl,
-} from "./session-task.ts"
 import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import type {
   CompletedExecutionItem,
@@ -23,6 +10,9 @@ import type {
   TurnMetrics,
 } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
+import { answerTextParts } from "../protocol/model-output.ts"
+import { canResumeTurn } from "../protocol/turn-recovery.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ModelAttemptRecord,
@@ -30,8 +20,8 @@ import type {
   ResponseItemEnvelope,
   RolloutItem,
   StoredThread,
-  ThreadMetadata,
   ThreadMessageAdmission,
+  ThreadMetadata,
   TurnContextItem,
 } from "./rollout.ts"
 import {
@@ -40,19 +30,29 @@ import {
   BoundedQueue,
   createSessionEventReceiver,
   fingerprintTurnInput,
+  type InputPurpose,
+  type InputSource,
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
+  type SessionEndpoints,
   type SessionEvent,
   type SessionIdleCause,
-  type SessionEndpoints,
   type SessionOp,
   type SessionPermissionEvent,
   SessionStatus,
   type TurnInput,
-  type InputSource,
-  type InputPurpose,
   type TurnInputSubmission,
 } from "./session-io.ts"
+import {
+  type ExecutionContext,
+  type SessionTask,
+  type SessionTaskHandle,
+  type SessionTaskRunner,
+  TaskCleanupError,
+  type TaskOutcome,
+  type TaskSettlement,
+  type TurnControl,
+} from "./session-task.ts"
 import {
   PersistContext,
   type RolloutAppend,
@@ -1498,6 +1498,30 @@ export class Session {
         },
       ])
       this.#contextManager.record([response])
+      this.#notifyExecution(execution, { type: "tool_result", completion })
+    })
+  }
+
+  async recordNestedToolResult(
+    execution: ExecutionContext,
+    completion: Extract<CompletedExecutionItem, { toolCallId: string }>,
+  ): Promise<void> {
+    const active = this.#requireExecution(execution, true)
+    if (
+      !completion.parentToolCallId ||
+      completion.parentToolCallId === completion.toolCallId
+    )
+      throw new Error("A nested tool result requires its distinct parent call.")
+    // Nested effects belong to the trace, not the model's tool-call protocol.
+    // In particular, recovery must not invent assistant calls for these IDs.
+    await this.#withContextMutation(async () => {
+      await this.#appendRollout([
+        {
+          type: "item_completed",
+          turnId: active.input.submissionId,
+          item: completion,
+        },
+      ])
       this.#notifyExecution(execution, { type: "tool_result", completion })
     })
   }

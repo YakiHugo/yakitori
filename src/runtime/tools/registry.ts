@@ -368,6 +368,7 @@ export function createToolRegistry(
           const entry = snapshot.get(name)
           return (
             entry?.exposure !== "hidden" &&
+            entry?.runtime.composesTools !== true &&
             entry?.runtime.supportsParallelToolCalls === true
           )
         },
@@ -778,6 +779,9 @@ function snapshotRuntime(tool: RuntimeTool): RuntimeTool {
     ...(tool.supportsParallelToolCalls === undefined
       ? {}
       : { supportsParallelToolCalls: tool.supportsParallelToolCalls }),
+    ...(tool.composesTools === undefined
+      ? {}
+      : { composesTools: tool.composesTools }),
     description: tool.description,
     inputSchema: deepFreeze(structuredClone(tool.inputSchema)),
     ...(tool.customInputFormat === undefined
