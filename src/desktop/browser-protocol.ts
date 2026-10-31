@@ -11,6 +11,7 @@ export type BrowserProtocolCommand = (
 ) => Promise<unknown>
 const frameReadMethods = [
   "Page.getFrameTree",
+  "Page.getLayoutMetrics",
   "Page.createIsolatedWorld",
   "DOM.resolveNode",
   "DOM.getFrameOwner",
