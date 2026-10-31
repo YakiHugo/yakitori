@@ -58,6 +58,7 @@ function fixture(
     navigateAfterRelease?: boolean
     blockFocusReadAt?: number
     blockKeyUp?: boolean
+    failFocusRestore?: boolean
     viewReady?: (signal: AbortSignal) => Promise<void>
   } = {},
 ) {
@@ -69,6 +70,8 @@ function fixture(
     keyUpStarted = Promise.withResolvers<void>(),
     keyUpReply = Promise.withResolvers<void>()
   const mouseEvents: Record<string, unknown>[] = []
+  const focusEvents: boolean[] = []
+  const focusStatesOnPress: (boolean | undefined)[] = []
   const keyEvents: Record<string, unknown>[] = []
   let destroyed = false,
     keyDowns = 0,
@@ -156,12 +159,19 @@ function fixture(
             },
           }
         }
+        if (method === "Emulation.setFocusEmulationEnabled") {
+          focusEvents.push(params.enabled === true)
+          if (!params.enabled && options.failFocusRestore)
+            throw new Error("Focus restoration failed")
+          return {}
+        }
         if (method === "Input.dispatchMouseEvent") {
           mouseEvents.push(params)
           if (params.type === "mouseMoved") {
             moves++
             if (options.coverAfterHover) options.covered = true
           } else if (params.type === "mousePressed") {
+            focusStatesOnPress.push(focusEvents.at(-1))
             presses++
             insertion.resolve()
             if (options.blockPress) await release.promise
@@ -262,6 +272,11 @@ function fixture(
         ?.elementReference
       if (!reference) throw new Error("Missing pointer reference")
       return { action: "click", target, reference }
+    },
+    focusEvents,
+    focusStatesOnPress,
+    allowFocusRestore: () => {
+      options.failFocusRestore = false
     },
     async request(text = "你好 🌍"): Promise<BrowserTextInputRequest> {
       const observed = await connection.observe(new AbortController().signal)
@@ -776,6 +791,8 @@ it("delivers both intentional double-click pairs with the requested button and r
         clickCount: 2 as const,
       }
       await f.connection.inputPointer(request, new AbortController().signal)
+      expect(f.focusStatesOnPress).toEqual([true, true])
+      expect(f.focusEvents).toEqual([true, false])
       expect(f.mouseEvents.slice(1)).toEqual([
         {
           type: "mousePressed",
@@ -1097,5 +1114,49 @@ it.each([
     await new Promise<void>((done) => setImmediate(done))
     await f.connection.close()
     deadlines.restore()
+  }
+})
+
+it("retains page focus after a failed restoration without repeating acknowledged mouse input", async () => {
+  const f = fixture({ pointer: true, failFocusRestore: true })
+  try {
+    await expect(
+      f.connection.inputPointer(
+        await f.clickRequest(),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "browser_cleanup_failed" })
+    expect(f.presses()).toBe(1)
+    expect(f.releases()).toBe(1)
+    expect(f.focusEvents).toEqual([true, false])
+    expect(() => f.connection.assertInputIdle()).toThrow()
+    f.allowFocusRestore()
+    await f.connection.close()
+    expect(f.focusEvents).toEqual([true, false, false])
+    expect(f.presses()).toBe(1)
+    expect(f.releases()).toBe(1)
+  } finally {
+    f.allowFocusRestore()
+    await f.connection.close()
+  }
+})
+
+it.each([
+  "hover",
+  "scroll",
+] as const)("does not emulate page focus for %s", async (action) => {
+  const f = fixture({ pointer: true })
+  try {
+    const captured = await f.clickRequest()
+    const request: BrowserPointerRequest =
+      action === "hover"
+        ? { ...captured, action }
+        : { ...captured, action, deltaX: 0, deltaY: 20 }
+    await f.connection.inputPointer(request, new AbortController().signal)
+    expect(f.focusEvents).toEqual([])
+    expect(f.presses()).toBe(0)
+    expect(f.releases()).toBe(0)
+  } finally {
+    await f.connection.close()
   }
 })
