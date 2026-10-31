@@ -1932,14 +1932,71 @@ test("agent browser observations and actions use the exact owned tab through rea
       }
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 97; approval++)
+    // Cover real pointer hit testing once. The remaining decisions use the
+    // same renderer/RPC handler, driven by keyed DOM requests rather than 96
+    // compositor waits and repeated protocol round trips from the test runner.
+    const firstApproval = await page
+      .getByRole("button", { name: "Allow", exact: true })
+      .elementHandle()
+    if (!firstApproval) throw new Error("Missing initial permission button")
+    await firstApproval.click()
+    const approvalDriver = await page.evaluateHandle(
+      ({ first, remaining }) => {
+        const seen = new WeakSet<Element>([first])
+        let accepted = 0,
+          finish = () => {}
+        const done = new Promise<void>((resolve) => {
+          finish = resolve
+        })
+        const scan = () => {
+          for (const button of document.querySelectorAll("button")) {
+            if (
+              button.textContent?.trim() !== "Allow" ||
+              button.disabled ||
+              !button.getClientRects().length ||
+              seen.has(button)
+            )
+              continue
+            seen.add(button)
+            accepted++
+            button.click()
+            if (accepted === remaining) {
+              observer.disconnect()
+              finish()
+            }
+            break
+          }
+        }
+        const observer = new MutationObserver(scan)
+        observer.observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["disabled"],
+        })
+        scan()
+        return {
+          done,
+          stop() {
+            observer.disconnect()
+            finish()
+          },
+        }
+      },
+      { first: firstApproval, remaining: 96 },
+    )
+    try {
       await Promise.race([
-        page.getByRole("button", { name: "Allow", exact: true }).click(),
+        approvalDriver.evaluate((driver) => driver.done),
         failed.promise.then((cause) => {
           throw cause
         }),
       ])
+    } finally {
+      await approvalDriver.evaluate((driver) => driver.stop())
+      await approvalDriver.dispose()
+      await firstApproval.dispose()
+    }
     await Promise.race([
       observed.promise,
       failed.promise.then((cause) => {
