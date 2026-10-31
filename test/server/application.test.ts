@@ -3283,64 +3283,75 @@ describe("application composition", () => {
     "browser_chooser",
     "browser_dialog",
     "browser_download",
+    "browser_drag",
   ])("browser observations share computer ownership and remain disconnected after takeover (tool=%s)", async (browserTool) => {
     const browserInput =
-      browserTool === "browser"
-        ? { action: "list" }
-        : browserTool === "browser_input"
-          ? {
-              action: "type",
-              target: {
-                tabId: "owned",
-                webContentsId: 17,
-                instanceId:
-                  "browser_target_00000000-0000-4000-8000-000000000001",
-              },
-              reference: "browser_node_00000000-0000-4000-8000-000000000001",
-              text: "Must stay blocked",
-            }
-          : browserTool === "browser_upload"
+      browserTool === "browser_drag"
+        ? {
+            action: "prepare",
+            target: {
+              tabId: "owned",
+              webContentsId: 17,
+              instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
+            },
+            reference: "browser_element_00000000-0000-4000-8000-000000000001",
+          }
+        : browserTool === "browser"
+          ? { action: "list" }
+          : browserTool === "browser_input"
             ? {
-                action: "upload",
+                action: "type",
                 target: {
                   tabId: "owned",
                   webContentsId: 17,
                   instanceId:
                     "browser_target_00000000-0000-4000-8000-000000000001",
                 },
-                reference:
-                  "browser_element_00000000-0000-4000-8000-000000000001",
-                fromUrl: "https://owned.test/",
-                paths: [],
+                reference: "browser_node_00000000-0000-4000-8000-000000000001",
+                text: "Must stay blocked",
               }
-            : browserTool === "browser_view" ||
-                browserTool === "browser_chooser" ||
-                browserTool === "browser_dialog" ||
-                browserTool === "browser_download"
+            : browserTool === "browser_upload"
               ? {
-                  action: browserTool === "browser_view" ? "show" : "arm",
+                  action: "upload",
                   target: {
                     tabId: "owned",
                     webContentsId: 17,
                     instanceId:
                       "browser_target_00000000-0000-4000-8000-000000000001",
                   },
+                  reference:
+                    "browser_element_00000000-0000-4000-8000-000000000001",
                   fromUrl: "https://owned.test/",
-                  ...(browserTool === "browser_dialog"
-                    ? { response: { type: "confirm", accept: true } }
-                    : {}),
+                  paths: [],
                 }
-              : {
-                  action: "navigate",
-                  target: {
-                    tabId: "owned",
-                    webContentsId: 17,
-                    instanceId:
-                      "browser_target_00000000-0000-4000-8000-000000000001",
-                  },
-                  fromUrl: "",
-                  url: "https://destination.test/",
-                }
+              : browserTool === "browser_view" ||
+                  browserTool === "browser_chooser" ||
+                  browserTool === "browser_dialog" ||
+                  browserTool === "browser_download"
+                ? {
+                    action: browserTool === "browser_view" ? "show" : "arm",
+                    target: {
+                      tabId: "owned",
+                      webContentsId: 17,
+                      instanceId:
+                        "browser_target_00000000-0000-4000-8000-000000000001",
+                    },
+                    fromUrl: "https://owned.test/",
+                    ...(browserTool === "browser_dialog"
+                      ? { response: { type: "confirm", accept: true } }
+                      : {}),
+                  }
+                : {
+                    action: "navigate",
+                    target: {
+                      tabId: "owned",
+                      webContentsId: 17,
+                      instanceId:
+                        "browser_target_00000000-0000-4000-8000-000000000001",
+                    },
+                    fromUrl: "",
+                    url: "https://destination.test/",
+                  }
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release } = await writeComputerMcpFixture(rootDir)
       await writeFile(release, "release")
@@ -3461,6 +3472,7 @@ describe("application composition", () => {
     "browser_capture",
     "browser_navigate",
     "browser_download",
+    "browser_drag",
   ])("blocks native and browser input after %s cleanup fails until release is confirmed", async (browserTool) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const { release, called } = await writeComputerMcpFixture(rootDir)
@@ -3473,31 +3485,38 @@ describe("application composition", () => {
         instanceId: "browser_target_00000000-0000-4000-8000-000000000001",
       }
       const input =
-        browserTool === "browser_download"
+        browserTool === "browser_drag"
           ? {
-              action: "cancel",
+              action: "drop",
               target,
-              downloadId:
-                "browser_download_00000000-0000-4000-8000-000000000001",
+              dragId: "browser_drag_00000000-0000-4000-8000-000000000001",
+              reference: "browser_element_00000000-0000-4000-8000-000000000001",
             }
-          : browserTool === "browser"
-            ? { action: "list" }
-            : browserTool === "browser_capture"
-              ? { action: "capture", target, mode: "viewport" }
-              : browserTool === "browser_navigate"
-                ? {
-                    action: "navigate",
-                    target,
-                    fromUrl: "https://owned.test/",
-                    url: "https://destination.test/",
-                  }
-                : {
-                    action: "fill",
-                    target,
-                    reference:
-                      "browser_node_00000000-0000-4000-8000-000000000001",
-                    text: "",
-                  }
+          : browserTool === "browser_download"
+            ? {
+                action: "cancel",
+                target,
+                downloadId:
+                  "browser_download_00000000-0000-4000-8000-000000000001",
+              }
+            : browserTool === "browser"
+              ? { action: "list" }
+              : browserTool === "browser_capture"
+                ? { action: "capture", target, mode: "viewport" }
+                : browserTool === "browser_navigate"
+                  ? {
+                      action: "navigate",
+                      target,
+                      fromUrl: "https://owned.test/",
+                      url: "https://destination.test/",
+                    }
+                  : {
+                      action: "fill",
+                      target,
+                      reference:
+                        "browser_node_00000000-0000-4000-8000-000000000001",
+                      text: "",
+                    }
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,

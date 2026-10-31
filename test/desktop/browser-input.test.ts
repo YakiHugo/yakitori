@@ -3,6 +3,7 @@ import type { WebContents } from "electron"
 import { expect, it, vi } from "vitest"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 import {
+  BrowserControlError,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserTextInputRequest,
@@ -57,6 +58,7 @@ function fixture(
     navigateAfterRelease?: boolean
     blockFocusReadAt?: number
     blockKeyUp?: boolean
+    viewReady?: (signal: AbortSignal) => Promise<void>
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -217,6 +219,7 @@ function fixture(
   }
   const connection = new BrowserDocumentConnection(
     contents as unknown as WebContents,
+    options.viewReady,
   )
   return {
     connection,
@@ -269,6 +272,43 @@ function fixture(
     },
   }
 }
+
+it("refuses a hidden drag view before delivering any mouse input", async () => {
+  const f = fixture({
+    pointer: true,
+    viewReady: async () => {
+      throw new BrowserControlError(
+        "browser_requires_visibility",
+        "Show the exact owned browser view first.",
+      )
+    },
+  })
+  try {
+    const source = await f.clickRequest(),
+      prepared = await f.connection.drag(
+        { action: "drag_prepare", target, reference: source.reference },
+        new AbortController().signal,
+      ),
+      destination = await f.clickRequest()
+    if (typeof prepared.dragId !== "string")
+      throw new Error("Missing prepared source")
+    await expect(
+      f.connection.drag(
+        {
+          action: "drag_drop",
+          target,
+          reference: destination.reference,
+          dragId: prepared.dragId,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "browser_requires_visibility" })
+    expect(f.mouseEvents).toEqual([])
+    f.connection.assertInputIdle()
+  } finally {
+    await f.connection.close()
+  }
+})
 
 it("consumes an observation once and verifies the exact text receipt", async () => {
   const f = fixture()

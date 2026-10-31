@@ -6,6 +6,7 @@ import {
   BrowserControlError,
   type BrowserDialogRequest,
   type BrowserDirectoryUploadRequest,
+  type BrowserDragRequest,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserSelectRequest,
@@ -22,6 +23,7 @@ import { captureBrowserPage } from "./browser-capture.ts"
 import { BrowserFileChooser } from "./browser-chooser.ts"
 import { BrowserDialogs } from "./browser-dialogs.ts"
 import { setBrowserDirectory } from "./browser-directory.ts"
+import { BrowserDrag } from "./browser-drag.ts"
 import { clearBrowserFiles, inspectBrowserFiles } from "./browser-files.ts"
 import { BrowserFrames } from "./browser-frames.ts"
 import { browserKeyStroke } from "./browser-key.ts"
@@ -58,10 +60,12 @@ export class BrowserDocumentConnection {
   readonly #debug: WebContents["debugger"]
   readonly #sessions: BrowserFrameSessions
   readonly #dialogs: BrowserDialogs
+  readonly #drag: BrowserDrag
+  #preparedDrag: { id: string; reference: BrowserControlReference } | undefined
   readonly #chooser: BrowserFileChooser
   readonly #frameCatalog: BrowserFrames
   readonly #mutations: BrowserPendingMutations
-  readonly #directoryReady: (signal: AbortSignal) => Promise<void>
+  readonly #viewReady: (signal: AbortSignal) => Promise<void>
   readonly #detached = () => {
     this.#closed = true
     this.#lifetime.abort(
@@ -79,12 +83,12 @@ export class BrowserDocumentConnection {
 
   constructor(
     contents: WebContents,
-    directoryReady: (signal: AbortSignal) => Promise<void> = async (signal) => {
+    viewReady: (signal: AbortSignal) => Promise<void> = async (signal) => {
       signal.throwIfAborted()
     },
   ) {
     this.#contents = contents
-    this.#directoryReady = directoryReady
+    this.#viewReady = viewReady
     this.#mutations = new BrowserPendingMutations(() => contents.isDestroyed())
     const debug = contents.debugger
     this.#debug = debug
@@ -113,6 +117,7 @@ export class BrowserDocumentConnection {
     this.#sessions = new BrowserFrameSessions(debug)
     this.#chooser = new BrowserFileChooser(debug)
     this.#dialogs = new BrowserDialogs(debug)
+    this.#drag = new BrowserDrag(debug)
     this.#frameCatalog = new BrowserFrames(this.#sessions)
     debug.on("detach", this.#detached)
   }
@@ -123,7 +128,7 @@ export class BrowserDocumentConnection {
 
   assertInputIdle(): void {
     this.#mutations.assertCompleted()
-    if (this.#heldInputs.length)
+    if (this.#heldInputs.length || this.#drag.active)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before changing the browser view or sending more input.",
@@ -137,12 +142,14 @@ export class BrowserDocumentConnection {
     const release = Promise.resolve().then(async () => {
       if (!this.#contents.isDestroyed()) await this.#dialogs.settle()
       this.#mutations.assertCompleted()
+      await this.#drag.settle(this.#contents.isDestroyed())
       while (this.#heldInputs.length) {
         const held = this.#heldInputs.at(-1)
         if (!held) throw new Error("Missing owned held input.")
         const contents = this.#contents
         if (contents.isDestroyed()) {
           this.#heldInputs.length = 0
+          await this.#drag.cleanup(true)
           return
         }
         if (this.closed || !this.#debug.isAttached())
@@ -172,6 +179,8 @@ export class BrowserDocumentConnection {
           )
         }
       }
+      // Keep the page focus override until the owned mouse-up is acknowledged.
+      await this.#drag.cleanup(this.#contents.isDestroyed())
     })
     this.#releasingInput = release
     try {
@@ -212,6 +221,8 @@ export class BrowserDocumentConnection {
     this.#sessions.close()
     this.#chooser.close()
     this.#dialogs.close(this.#contents.isDestroyed())
+    this.#drag.close()
+    this.#preparedDrag = undefined
   }
 
   async #read<T>(
@@ -221,7 +232,7 @@ export class BrowserDocumentConnection {
   ): Promise<T> {
     signal.throwIfAborted()
     this.#mutations.assertCompleted()
-    if (this.#heldInputs.length && !duringInput)
+    if ((this.#heldInputs.length || this.#drag.active) && !duringInput)
       throw new BrowserControlError(
         "browser_cleanup_failed",
         "Confirm held-input cleanup before observing again.",
@@ -432,6 +443,7 @@ export class BrowserDocumentConnection {
     this.assertInputIdle()
     const reference = this.#references.get(token)
     this.#references.clear()
+    this.#preparedDrag = undefined
     if (!reference || reference.kind !== kind || this.closed)
       throw new BrowserControlError(
         "browser_reference_stale",
@@ -840,6 +852,9 @@ export class BrowserDocumentConnection {
     this.#mutations.assertCompleted()
     // Release is independent of cancellation. A failed key-up is surfaced to
     // the shared input gate and remains retryable by finishTurn/closeSession.
+    // The drag observer itself lives in this object group. Confirm its removal
+    // before releasing the remote ticket needed by a later cleanup retry.
+    if (this.#drag.active) await this.#releaseInput()
     const [inputCleanup, ...groupsCleanup] = await Promise.allSettled([
       this.#releaseInput(),
       ...[...new Set([sessionId, ...additionalSessions])].map((id) =>
@@ -1086,7 +1101,7 @@ export class BrowserDocumentConnection {
           "This input requires a directory workflow, not individual file paths.",
         )
       if (input.action === "upload_directory")
-        await this.#directoryReady(
+        await this.#viewReady(
           AbortSignal.any([
             signal,
             this.#mutationLifetime(reference.frame?.sessionId),
@@ -1412,6 +1427,254 @@ export class BrowserDocumentConnection {
     return result
   }
 
+  async #pointerTarget(
+    reference: BrowserControlReference,
+    objectId: string,
+    group: string,
+    signal: AbortSignal,
+  ): Promise<BrowserPointerTarget> {
+    const selected = reference.frame
+      ? await this.#verifyDocument(reference, signal)
+      : undefined
+    if (reference.frame && !selected)
+      throw new Error("Missing pointer frame binding.")
+    return new BrowserPointerTarget({
+      objectId,
+      sessionId: reference.frame?.sessionId,
+      path: selected?.path,
+      group,
+      read: (method, params = {}, sessionId) =>
+        this.#inputReadCommand(method, params, signal, sessionId),
+      command: (method, params = {}, sessionId) =>
+        this.#inputCommand(method, params, signal, sessionId),
+      flush: () =>
+        this.#read(
+          signal,
+          async () => {
+            // Hidden views need a current compositor frame to route input to OOPIFs.
+            try {
+              await this.#contents.capturePage(
+                { x: 0, y: 0, width: 1, height: 1 },
+                { stayHidden: true, stayAwake: true },
+              )
+            } catch (cause) {
+              throw new BrowserControlError(
+                "browser_input_unavailable",
+                "The page could not produce current compositor hit-test data. Observe again before clicking. " +
+                  (cause instanceof Error ? cause.message : String(cause)),
+              )
+            }
+          },
+          true,
+        ),
+    })
+  }
+
+  async drag(
+    input: BrowserDragRequest,
+    signal: AbortSignal,
+  ): Promise<JsonObject> {
+    signal.throwIfAborted()
+    this.assertInputIdle()
+    if (input.action === "drag_prepare") {
+      const reference = this.#consumeReference(input.reference, "element")
+      await this.#verifyDocument(reference, signal)
+      const id = `browser_drag_${randomUUID()}`
+      this.#preparedDrag = { id, reference }
+      return { dragId: id, prepared: true, document: reference.document }
+    }
+    const prepared = this.#preparedDrag
+    if (!prepared || prepared.id !== input.dragId)
+      throw new BrowserControlError(
+        "browser_reference_stale",
+        "Prepare a drag source in this exact target and owning turn first.",
+      )
+    this.#preparedDrag = undefined
+    if (input.action === "drag_cancel")
+      return { cancelled: true, dragId: input.dragId }
+    const source = prepared.reference,
+      destination = this.#consumeReference(input.reference, "element"),
+      group = `yakitori_${randomUUID()}`
+    let from: BrowserPointerTarget | undefined,
+      to: BrowserPointerTarget | undefined,
+      dispatched = false,
+      result: JsonObject | undefined,
+      failure: unknown
+    const verify = async () => {
+      for (const [reference, pointer] of [
+        [source, from],
+        [destination, to],
+      ] as const) {
+        const selected = await this.#verifyDocument(reference, signal)
+        if (selected) pointer?.verifyPath(selected.path)
+      }
+    }
+    try {
+      await this.#viewReady(signal)
+      const objectId = await this.#resolveReference(source, group, signal),
+        destinationId = await this.#resolveReference(destination, group, signal)
+      from = await this.#pointerTarget(source, objectId, group, signal)
+      to = await this.#pointerTarget(destination, destinationId, group, signal)
+      await to.prepareFrames()
+      await from.prepareFrames()
+      await to.scrollIntoView()
+      const point = await from.scrollIntoView()
+      const viewport = object(
+        object(
+          await this.#inputReadCommand("Page.getLayoutMetrics", {}, signal),
+        ).cssVisualViewport,
+      )
+      if (
+        typeof viewport.clientWidth !== "number" ||
+        typeof viewport.clientHeight !== "number" ||
+        !Number.isFinite(viewport.clientWidth) ||
+        !Number.isFinite(viewport.clientHeight)
+      )
+        throw new Error("Chromium returned an invalid drag viewport.")
+      const startPoint = { ...point }
+      startPoint.x =
+        point.x < viewport.clientWidth / 2
+          ? Math.min(point.x + 20, viewport.clientWidth - 0.5)
+          : Math.max(point.x - 20, 0.5)
+      if (Math.abs(startPoint.x - point.x) < 10)
+        startPoint.y =
+          point.y < viewport.clientHeight / 2
+            ? Math.min(point.y + 20, viewport.clientHeight - 0.5)
+            : Math.max(point.y - 20, 0.5)
+      if (Math.hypot(startPoint.x - point.x, startPoint.y - point.y) < 10)
+        throw new BrowserControlError(
+          "browser_input_unavailable",
+          "The viewport has insufficient room to establish a browser drag. Enlarge this browser view before dragging.",
+        )
+      await verify()
+      await this.#inputCommand(
+        "Input.dispatchMouseEvent",
+        { type: "mouseMoved", ...point, buttons: 0 },
+        signal,
+      )
+      await from.flushLayout()
+      await from.verifyPoint(point)
+      await verify()
+      await this.#drag.arm(
+        { ...source, closed: this.#mutationLifetime(source.frame?.sessionId) },
+        objectId,
+        group,
+        (method, params = {}, sessionId, confirmed) => {
+          if (this.closed)
+            throw new BrowserControlError(
+              "browser_cleanup_failed",
+              "The drag completion channel disconnected.",
+            )
+          return this.#mutations.run(
+            () =>
+              this.#debug
+                .sendCommand(method, params, sessionId)
+                .then((result) => {
+                  confirmed?.(result)
+                  return result
+                }),
+            this.#mutationDeadline(sessionId),
+          )
+        },
+      )
+      await verify()
+      signal.throwIfAborted()
+      const release = {
+        method: "Input.dispatchMouseEvent" as const,
+        params: {
+          type: "mouseReleased",
+          ...point,
+          button: "left",
+          buttons: 0,
+          clickCount: 1,
+        },
+      }
+      this.#heldInputs.push(release)
+      dispatched = true
+      await this.#inputCommand(
+        "Input.dispatchMouseEvent",
+        {
+          type: "mousePressed",
+          ...point,
+          button: "left",
+          buttons: 1,
+          clickCount: 1,
+        },
+        signal,
+      )
+      await verify()
+      // Establish the drag while its source is still under the down point.
+      // Scrolling a narrow viewport to the destination first changes that hit
+      // target and can prevent Chromium from starting the native drag at all.
+      release.params.x = startPoint.x
+      release.params.y = startPoint.y
+      await this.#inputCommand(
+        "Input.dispatchMouseEvent",
+        { type: "mouseMoved", ...startPoint, button: "left", buttons: 1 },
+        signal,
+      )
+      const nativeStarted = await this.#drag.start(signal)
+      await verify()
+      const destinationPoint = await to.scrollIntoView()
+      await verify()
+      await to.verifyPoint(destinationPoint)
+      await verify()
+      // Release belongs at the latest intentional drag position, including
+      // cancellation after the move's unknown acknowledgement.
+      release.params.x = destinationPoint.x
+      release.params.y = destinationPoint.y
+      if (!nativeStarted)
+        await this.#inputCommand(
+          "Input.dispatchMouseEvent",
+          {
+            type: "mouseMoved",
+            ...destinationPoint,
+            button: "left",
+            buttons: 1,
+          },
+          signal,
+        )
+      await verify()
+      await to.flushLayout()
+      await to.verifyPoint(destinationPoint)
+      await verify()
+      const native = await this.#drag.transfer(
+        destinationPoint,
+        signal,
+        async () => {
+          await verify()
+          if (!to) throw new Error("Missing drag destination.")
+          await to.verifyPoint(destinationPoint)
+          await verify()
+        },
+      )
+      await this.#releaseInput()
+      result = {
+        dragId: input.dragId,
+        delivered: true,
+        native,
+        point: destinationPoint,
+        documentChanged: await this.#documentChanged(destination, signal),
+      }
+    } catch (cause) {
+      failure =
+        dispatched && cause instanceof BrowserControlError
+          ? new BrowserControlError(
+              "browser_input_unconfirmed",
+              "Drag dispatch was attempted but its receipt could not be confirmed. Observe again; do not replay automatically. " +
+                cause.message,
+            )
+          : cause
+    }
+    await this.#finishInput(group, failure, source.frame?.sessionId, [
+      destination.frame?.sessionId,
+      ...(from?.sessions ?? []),
+      ...(to?.sessions ?? []),
+    ])
+    if (!result) throw new Error("Browser drag produced no result.")
+    return result
+  }
+
   async inputPointer(
     input: BrowserPointerRequest,
     signal: AbortSignal,
@@ -1429,39 +1692,9 @@ export class BrowserDocumentConnection {
       failure: unknown
     try {
       const objectId = await this.#resolveReference(reference, group, signal)
-      const selected = reference.frame
-        ? await this.#verifyDocument(reference, signal)
-        : undefined
-      if (reference.frame && !selected)
-        throw new Error("Missing pointer frame binding.")
-      pointer = new BrowserPointerTarget({
-        objectId,
-        sessionId: reference.frame?.sessionId,
-        path: selected?.path,
-        group,
-        read: (method, params = {}, sessionId) =>
-          this.#inputReadCommand(method, params, signal, sessionId),
-        command: (method, params = {}, sessionId) =>
-          this.#inputCommand(method, params, signal, sessionId),
-        flush: () =>
-          this.#read(signal, async () => {
-            // Hidden views need a current compositor frame to route input to OOPIFs.
-            try {
-              await this.#contents.capturePage(
-                { x: 0, y: 0, width: 1, height: 1 },
-                { stayHidden: true, stayAwake: true },
-              )
-            } catch (cause) {
-              throw new BrowserControlError(
-                "browser_input_unavailable",
-                "The page could not produce current compositor hit-test data. Observe again before clicking. " +
-                  (cause instanceof Error ? cause.message : String(cause)),
-              )
-            }
-          }),
-      })
+      pointer = await this.#pointerTarget(reference, objectId, group, signal)
       await pointer.prepareFrames()
-      if (selected) await verifyDocument()
+      if (reference.frame) await verifyDocument()
       const point = await pointer.scrollIntoView()
       const verifyPoint = () => {
         if (!pointer) throw new Error("Missing pointer target.")

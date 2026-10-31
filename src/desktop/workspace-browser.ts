@@ -121,7 +121,7 @@ export function registerWorkspaceBrowser(
       if (performance.now() >= deadline)
         throw new BrowserControlError(
           "browser_requires_visibility",
-          "Show this tab in Yakitori's workspace and restore its window before selecting a directory. No file selection was dispatched.",
+          "Show this tab in Yakitori's workspace and restore its window before this browser interaction. No input was dispatched.",
         )
       await delay(25, undefined, { signal })
     }
@@ -875,6 +875,11 @@ export function registerWorkspaceBrowser(
       let observation: JsonObject
       try {
         switch (input.action) {
+          case "drag_prepare":
+          case "drag_drop":
+          case "drag_cancel":
+            observation = await entry.connection.drag(input, signal)
+            break
           case "download_arm":
             entry.connection.assertInputIdle()
             observation = await downloads.arm(

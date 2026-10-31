@@ -523,6 +523,7 @@ test("agent browser observations and actions use the exact owned tab through rea
   const chooserFiles: { name: string; text: string }[][] = []
   const dialogReplies: { value: boolean; trusted: boolean }[] = []
   const promptReplies: { value: string | null; trusted: boolean }[] = []
+  const dragReplies: { text: string; trusted: boolean }[] = []
   const downloadBytes = Buffer.from([0, 255, 1, 2, 3])
   let downloadArtifact: Record<string, unknown> | undefined
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
@@ -690,6 +691,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         "/chooser-bytes",
         "/dialog-reply",
         "/prompt-reply",
+        "/drag-reply",
       ].includes(request.url ?? "")
     ) {
       let body = ""
@@ -707,6 +709,8 @@ test("agent browser observations and actions use the exact owned tab through rea
           dialogReplies.push(JSON.parse(body))
         else if (request.url === "/prompt-reply")
           promptReplies.push(JSON.parse(body))
+        else if (request.url === "/drag-reply")
+          dragReplies.push(JSON.parse(body))
         else fileChoiceEvents.push(JSON.parse(body))
         response.writeHead(204)
         response.end()
@@ -833,7 +837,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       thirdRequests++
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button><a href="/native-download" download>Native download</a>`,
+        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt;window.dragProbe=[];for(const type of ["mousedown","mousemove","mouseup","dragstart"])document.addEventListener(type,e=>dragProbe.push({type,target:e.target.getAttribute("aria-label"),x:e.clientX,y:e.clientY,buttons:e.buttons,trusted:e.isTrusted}))</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button><a href="/native-download" download>Native download</a><div role="button" aria-label="Native drag source" tabindex="0" draggable="true" style="width:120px;height:60px;margin:20px" ondragstart="event.dataTransfer.setData('text/plain','你好 猫 🌍')">Drag</div><div role="button" aria-label="Native drag destination" tabindex="0" style="width:150px;height:60px;margin:20px 240px" ondragover="event.preventDefault()" ondrop="event.preventDefault();navigator.sendBeacon('/drag-reply',JSON.stringify({trusted:event.isTrusted,text:event.dataTransfer.getData('text/plain')}))">Drop</div>`,
       )
       return
     }
@@ -1678,6 +1682,67 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "observe", target: downloadArtifact.target },
               id: "observe_after_download",
             }
+          } else if (step === 93) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_view",
+              input: {
+                action: "show",
+                target: current.target,
+                fromUrl: destinationUrl,
+              },
+              id: "show_native_drag_view",
+            }
+          } else if (step === 94) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_drag",
+              input: {
+                ...pointerRequest(current, "Native drag source"),
+                action: "prepare",
+              },
+              id: "prepare_native_drag",
+            }
+          } else if (step === 95) {
+            const current = toolResult(body.messages ?? [], "dragId")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_drag_destination",
+            }
+          } else if (step === 96) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              prepared = toolResult(body.messages ?? [], "dragId")
+            tool = {
+              name: "browser_drag",
+              input: {
+                ...pointerRequest(current, "Native drag destination"),
+                action: "drop",
+                dragId: prepared.dragId,
+              },
+              id: "deliver_native_drag",
+            }
+          } else if (step === 97) {
+            const current = toolResult(body.messages ?? [], "native")
+            if (current.delivered !== true || current.native !== true) {
+              const probe = await application.evaluate(
+                ({ webContents }, url) =>
+                  webContents
+                    .getAllWebContents()
+                    .find((contents) => contents.getURL() === url)
+                    ?.executeJavaScript("window.dragProbe"),
+                destinationUrl,
+              )
+              throw new Error(
+                "Native drag was not acknowledged: " +
+                  JSON.stringify({ current, probe }),
+              )
+            }
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_after_drag",
+            }
           } else {
             navigatedObservation = toolResult(body.messages ?? [], "nodes")
             observed.resolve()
@@ -1868,7 +1933,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
     // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 92; approval++)
+    for (let approval = 0; approval < 97; approval++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((cause) => {
@@ -1901,9 +1966,9 @@ test("agent browser observations and actions use the exact owned tab through rea
       }, destinationUrl),
     ).toEqual({ restored: true, frames: 0 })
     expect(await attached()).toBe(true)
-    await page
-      .getByRole("button", { name: "Show workspace", exact: true })
-      .click()
+    await expect(
+      page.getByRole("button", { name: "Hide workspace", exact: true }),
+    ).toBeVisible()
     await page.getByRole("button", { name: "Reload page", exact: true }).click()
     await expect.poll(() => thirdRequests).toBe(2)
     await expect(
@@ -2082,6 +2147,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     ])
     expect(dialogReplies).toEqual([{ value: false, trusted: true }])
     expect(promptReplies).toEqual([{ value: "你好 猫 🌍", trusted: true }])
+    expect(dragReplies).toEqual([{ text: "你好 猫 🌍", trusted: true }])
     if (typeof downloadArtifact?.path !== "string")
       throw new Error("Missing durable download artifact")
     expect(await readFile(downloadArtifact.path)).toEqual(downloadBytes)
@@ -2234,6 +2300,7 @@ test("agent browser observations and actions use the exact owned tab through rea
         dialogReplies,
         promptReplies,
         downloadArtifact,
+        dragReplies,
         protocol,
       }),
       contentType: "application/json",

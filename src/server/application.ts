@@ -94,6 +94,7 @@ import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
 import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
 import { createBrowserDialogTool } from "./browser-dialog-tool.ts"
 import { createBrowserDownloadTool } from "./browser-download-tool.ts"
+import { createBrowserDragTool } from "./browser-drag-tool.ts"
 import { createBrowserInputTool } from "./browser-input-tool.ts"
 import { createBrowserNavigationTool } from "./browser-navigation-tool.ts"
 import { createBrowserObservationTool } from "./browser-observation-tool.ts"
@@ -1119,6 +1120,11 @@ export async function createYakitoriApplication(
               ),
               createBrowserNavigationTool(desktopBrowser, admitBrowser),
               createBrowserDownloadTool(
+                desktopBrowser,
+                admitBrowser,
+                markBrowserCleanupPending,
+              ),
+              createBrowserDragTool(
                 desktopBrowser,
                 admitBrowser,
                 markBrowserCleanupPending,

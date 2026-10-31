@@ -39,6 +39,74 @@ export type BrowserInputRequest =
   | BrowserKeyRequest
   | BrowserSelectRequest
 
+export type BrowserDragRequest = Readonly<
+  { target: BrowserTarget } & (
+    | { action: "drag_prepare"; reference: string }
+    | { action: "drag_drop"; dragId: string; reference: string }
+    | { action: "drag_cancel"; dragId: string }
+  )
+>
+
+export function parseBrowserDragRequest(value: unknown): BrowserDragRequest {
+  if (
+    !isJsonObject(value) ||
+    !["drag_prepare", "drag_drop", "drag_cancel"].includes(
+      String(value.action),
+    ) ||
+    !["action", "target"].every((key) => Object.hasOwn(value, key))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use a prepared browser drag source and an exact observed destination.",
+    )
+  const prepare = value.action === "drag_prepare",
+    cancel = value.action === "drag_cancel",
+    keys = [
+      "action",
+      "target",
+      ...(cancel ? [] : ["reference"]),
+      ...(prepare ? [] : ["dragId"]),
+    ]
+  if (
+    Object.keys(value).length !== keys.length ||
+    !keys.every((key) => Object.hasOwn(value, key)) ||
+    (!cancel &&
+      (typeof value.reference !== "string" ||
+        !/^browser_element_[a-f0-9-]{36}$/.test(value.reference))) ||
+    (!prepare &&
+      (typeof value.dragId !== "string" ||
+        !/^browser_drag_[a-f0-9-]{36}$/.test(value.dragId)))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use only an exact browser element reference and the owning drag ID.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid drag target parser result.")
+  if (value.action === "drag_prepare")
+    return {
+      action: value.action,
+      target: observed.target,
+      reference: value.reference as string,
+    }
+  if (value.action === "drag_cancel")
+    return {
+      action: value.action,
+      target: observed.target,
+      dragId: value.dragId as string,
+    }
+  return {
+    action: "drag_drop",
+    target: observed.target,
+    dragId: value.dragId as string,
+    reference: value.reference as string,
+  }
+}
+
 export type BrowserSelectRequest = Readonly<{
   action: "select"
   target: BrowserTarget
@@ -372,6 +440,7 @@ export type BrowserRequest =
   | BrowserChooserRequest
   | BrowserDialogRequest
   | BrowserDownloadRequest
+  | BrowserDragRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -842,6 +911,9 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   click: true,
   hover: true,
   scroll: true,
+  drag_prepare: true,
+  drag_drop: true,
+  drag_cancel: true,
   press: true,
   select: true,
   navigate: true,
@@ -867,6 +939,12 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (
+    isJsonObject(value) &&
+    typeof value.action === "string" &&
+    value.action.startsWith("drag_")
+  )
+    return parseBrowserDragRequest(value)
   if (
     isJsonObject(value) &&
     typeof value.action === "string" &&
