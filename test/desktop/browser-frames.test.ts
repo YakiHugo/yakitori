@@ -334,6 +334,11 @@ function fixture(
         insert(focused, String(params.text))
         return {}
       }
+      if (method === "Emulation.setFocusEmulationEnabled") {
+        if (sessionId !== undefined)
+          throw new Error("Page focus left the root session")
+        return {}
+      }
       if (method === "Input.dispatchMouseEvent") {
         if (sessionId !== undefined)
           throw new Error("Mouse input left root session")
@@ -986,6 +991,17 @@ it.each([
       { type: "mouseMoved", sessionId: undefined },
       { type: "mousePressed", sessionId: undefined },
       { type: "mouseReleased", sessionId: undefined },
+    ])
+    expect(
+      f.calls
+        .filter((call) => call.method === "Emulation.setFocusEmulationEnabled")
+        .map((call) => ({
+          enabled: call.params.enabled,
+          sessionId: call.sessionId,
+        })),
+    ).toEqual([
+      { enabled: true, sessionId: undefined },
+      { enabled: false, sessionId: undefined },
     ])
     expect(
       new Set(

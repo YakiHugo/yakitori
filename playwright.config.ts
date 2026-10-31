@@ -29,6 +29,9 @@ export default defineConfig({
       ],
       use: { ...devices["Desktop Chrome"] },
     },
-    { name: "desktop", testMatch: "desktop.spec.ts" },
+    {
+      name: "desktop",
+      testMatch: ["desktop.spec.ts", "browser-native.spec.ts"],
+    },
   ],
 })

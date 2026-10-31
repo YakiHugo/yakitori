@@ -1,5 +1,6 @@
 import type { WebContents } from "electron"
 import { BrowserControlError } from "../protocol/desktop-browser.ts"
+import { BrowserPageFocus } from "./browser-focus.ts"
 import type { BrowserPoint } from "./browser-pointer.ts"
 import type { BrowserDocumentScope } from "./browser-protocol.ts"
 
@@ -93,12 +94,12 @@ type DragBinding = {
   contextGone: boolean
   interception: boolean
   nativeActive: boolean
-  focusEmulated: boolean
   data?: DragData
   captured: ReturnType<typeof Promise.withResolvers<unknown>>
 }
 
 export class BrowserDrag {
+  readonly #focus = new BrowserPageFocus()
   readonly #debug: WebContents["debugger"]
   #binding: DragBinding | undefined
   readonly #contexts = new Map<
@@ -161,7 +162,7 @@ export class BrowserDrag {
   }
 
   get active(): boolean {
-    return this.#binding !== undefined
+    return this.#binding !== undefined || this.#focus.active
   }
 
   async arm(
@@ -178,7 +179,6 @@ export class BrowserDrag {
       contextGone: false,
       interception: false,
       nativeActive: false,
-      focusEmulated: false,
       captured: Promise.withResolvers<unknown>(),
     }
     this.#binding = binding
@@ -216,11 +216,14 @@ export class BrowserDrag {
         "browser_drag_unavailable",
         "The original source document did not install its drag observer.",
       )
-    // An embedded Electron view can receive mouse movement while its widget
-    // ignores presses/HTML5 dragging without page focus. Emulation changes only
-    // this CDP page's focus state; it does not focus the OS window or view.
-    binding.focusEmulated = true
-    await command("Emulation.setFocusEmulationEnabled", { enabled: true })
+    await this.#focus.enable((enabled, confirmed) =>
+      command(
+        "Emulation.setFocusEmulationEnabled",
+        { enabled },
+        undefined,
+        confirmed,
+      ),
+    )
     // Record configuration before sending, including a lost or late ACK.
     binding.interception = true
     binding.nativeActive = true
@@ -363,30 +366,12 @@ export class BrowserDrag {
 
   async cleanup(destroyed: boolean): Promise<void> {
     await this.settle(destroyed)
-    const binding = this.#binding
-    if (!binding) return
-    try {
-      if (binding.focusEmulated)
-        await binding.command(
-          "Emulation.setFocusEmulationEnabled",
-          { enabled: false },
-          undefined,
-          () => {
-            binding.focusEmulated = false
-          },
-        )
-      this.#binding = undefined
-    } catch (cause) {
-      throw new BrowserControlError(
-        "browser_cleanup_failed",
-        "Browser page focus emulation did not confirm restoration. Computer input remains quarantined until cleanup succeeds or the original tab closes.",
-        { cause },
-      )
-    }
+    await this.#focus.cleanup(destroyed)
+    this.#binding = undefined
   }
 
   close(): void {
-    if (this.#binding)
+    if (this.active)
       throw new Error("An owned browser drag still needs cleanup.")
     this.#debug.off("message", this.#message)
     this.#contexts.clear()

@@ -2394,13 +2394,27 @@ test("packaged scripts compose approved MCP and browser calls through real deskt
   const { page, application, userData, sidecarUrl, rendererErrors } = desktop
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
   const failed = Promise.withResolvers<Error>()
+  const clicks: { trusted: boolean }[] = []
   let modelCalls = 0,
     url = ""
   const source = createServer((request, response) => {
+    if (request.url === "/cold-click") {
+      let raw = ""
+      request.setEncoding("utf8")
+      request.on("data", (chunk: string) => {
+        raw += chunk
+      })
+      request.on("end", () => {
+        clicks.push(JSON.parse(raw) as { trusted: boolean })
+        response.writeHead(204)
+        response.end()
+      })
+      return
+    }
     if (request.url === "/page") {
       response.writeHead(200, { "content-type": "text/html" })
       response.end(
-        '<!doctype html><title>Script source</title><label>Script field<input value="initial"></label>',
+        '<!doctype html><title>Script source</title><button onclick="navigator.sendBeacon(\'/cold-click\',JSON.stringify({trusted:event.isTrusted}))">Cold script click</button><label>Script field<input value="initial"></label>',
       )
       return
     }
@@ -2434,7 +2448,10 @@ test("packaged scripts compose approved MCP and browser calls through real deskt
             const code = `const control = await tools.call('computer__control',{action:'fixture_effect'}); if(!control.ok) throw control;
 const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
 const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
-const observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
+let observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
+const button = observed.output.nodes.find(node=>node.name==='Cold script click'&&node.elementReference); if(!button) throw 'Missing cold button';
+const clicked = await tools.call('browser_input',{action:'click',target:tab.target,reference:button.elementReference}); if(!clicked.ok) throw clicked;
+observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
 const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.inputReference); if(!node) throw 'Missing script input';
 const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.inputReference,text:'Script 你好 🌍'}); if(!result.ok) throw result;
 const image = await tools.call('browser_capture',{action:'capture',mode:'viewport',target:tab.target}); if(!image.ok) throw image; show(image); return result.output;`
@@ -2558,13 +2575,10 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
       page.getByRole("tab", { name: "Script source", exact: true }),
     ).toBeVisible()
     await page
-      .getByRole("button", { name: "Hide workspace", exact: true })
-      .click()
-    await page
       .getByRole("textbox", { name: "Message the Mate" })
       .fill("Run the owned script.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    for (let index = 0; index < 5; index++)
+    for (let index = 0; index < 7; index++)
       await Promise.race([
         page.getByRole("button", { name: "Allow", exact: true }).click(),
         failed.promise.then((error) => {
@@ -2580,6 +2594,7 @@ const image = await tools.call('browser_capture',{action:'capture',mode:'viewpor
       }),
     ])
     expect(modelCalls).toBe(2)
+    expect(clicks).toEqual([{ trusted: true }])
     await expect
       .poll(
         async () => (await client.request("computer/status", {})).inputOwner,
