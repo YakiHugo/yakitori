@@ -105,7 +105,7 @@ extension Computer {
            elementAttribute(AXUIElementCreateApplication(window.pid), kAXFocusedWindowAttribute).flatMap(accessibilityWindowID) != window.windowID,
            let owner = elementAttribute(element, kAXWindowAttribute), accessibilityWindowID(owner) == window.windowID {
             var settable = DarwinBoolean(false)
-            addressedText = AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable) == .success && settable.boolValue
+            addressedText = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
         }
         let axAction = elementAction || action == "invoke_menu" || addressedText
         let alternateHover = try updateHover(target, reveal: action == "hover")
@@ -177,7 +177,7 @@ extension Computer {
             guard let window, ticket.scope != .screen else { throw ComputerFailure("invalid_arguments", "invoke_menu requires an observed application window.") }
             evidence = try await invokeMenu(menuPath(args["path"]), window: window)
         } else if addressedText, let element, let text, let window {
-            evidence = try await insertSelectedText(text, element: element, replace: args["replace"] as? Bool == true) {
+            evidence = try await insertTextValue(text, element: element, replace: args["replace"] as? Bool == true) {
                 try Task.checkCancellation()
                 guard try windows().contains(window) else {
                     throw ComputerFailure("stale_snapshot", "The target changed during text insertion; observe before another action.")
