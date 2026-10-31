@@ -389,11 +389,18 @@ async function closeApplication(
 ): Promise<void> {
   // A failed quit contract must not strand the CI runner. The exit signal is
   // asserted separately, so this cleanup deadline cannot turn a hang into a pass.
-  const pid = application.process().pid
+  const child = application.process(),
+    pid = child.pid
   if (pid === undefined) throw new Error("Electron process PID is missing.")
   const timeout = setTimeout(() => killProcessGroup(pid), 10_000)
   try {
-    await application.close()
+    // Closing Chromium's context can finish before Node observes Electron's
+    // OS exit. Keep the same hard deadline through that actual exit boundary.
+    const exited =
+      child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : once(child, "exit")
+    await Promise.all([application.close(), exited])
   } finally {
     clearTimeout(timeout)
   }
