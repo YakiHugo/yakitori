@@ -326,8 +326,70 @@ test("live computer preview renders decoded frames and pointer positions and sen
       .getByRole("button", { name: "Close preview", exact: true })
       .click()
     await preview
+      .getByRole("button", { name: "Record preview", exact: true })
+      .click()
+    const captureCount = () =>
+      requests.filter((entry) => entry.method === "computer/preview/capture")
+        .length
+    const startedAt = captureCount()
+    await expect.poll(captureCount).toBeGreaterThanOrEqual(startedAt + 2)
+    await preview
+      .getByRole("button", { name: "Stop recording", exact: true })
+      .click()
+    const video = preview.getByLabel("Recorded computer preview")
+    await expect
+      .poll(() =>
+        video.evaluate((node) => (node as HTMLVideoElement).readyState),
+      )
+      .toBeGreaterThanOrEqual(2)
+    const pixels = await video.evaluate((node) => {
+      const video = node as HTMLVideoElement,
+        canvas = document.createElement("canvas")
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const drawing = canvas.getContext("2d")
+      if (!drawing) throw new Error("Missing video drawing context")
+      drawing.drawImage(video, 0, 0)
+      return {
+        width: video.videoWidth,
+        height: video.videoHeight,
+        background: [...drawing.getImageData(10, 10, 1, 1).data],
+        pointer: [...drawing.getImageData(40, 30, 1, 1).data],
+      }
+    })
+    expect(pixels.width).toBe(200)
+    expect(pixels.height).toBe(100)
+    for (const [index, expected] of [18, 52, 86].entries())
+      expect(
+        Math.abs((pixels.background[index] ?? -1000) - expected),
+      ).toBeLessThan(10)
+    expect(pixels.pointer.slice(0, 3).every((value) => value > 240)).toBe(true)
+    await video.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: testInfo.outputPath("recorded-preview.png") })
+    const download = page.waitForEvent("download")
+    await preview
+      .getByRole("link", { name: "Save recording", exact: true })
+      .click()
+    const saved = await download,
+      path = await saved.path()
+    if (!path) throw new Error("Preview recording was not downloaded")
+    expect(saved.suggestedFilename()).toMatch(/^yakitori-preview-.*\.webm$/)
+    expect([...(await readFile(path)).subarray(0, 4)]).toEqual([
+      26, 69, 223, 163,
+    ])
+    const firstClip = await video.getAttribute("src")
+    await preview
+      .getByRole("button", { name: "Record preview", exact: true })
+      .click()
+    const nextStartedAt = captureCount()
+    await expect.poll(captureCount).toBeGreaterThanOrEqual(nextStartedAt + 2)
+    await preview
       .getByRole("button", { name: "Stop preview", exact: true })
       .click()
+    await expect(
+      preview.getByRole("button", { name: "Record preview", exact: true }),
+    ).toBeDisabled()
+    await expect.poll(() => video.getAttribute("src")).not.toBe(firstClip)
     await expect(preview.getByRole("status")).toHaveText("Paused")
     await expect
       .poll(

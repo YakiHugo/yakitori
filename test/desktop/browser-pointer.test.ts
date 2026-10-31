@@ -1,9 +1,7 @@
 import { expect, it } from "vitest"
-import type {
-  BrowserFrameBinding,
-  BrowserProtocolCommand,
-} from "../../src/desktop/browser-frames.ts"
+import type { BrowserFrameBinding } from "../../src/desktop/browser-frames.ts"
 import { BrowserFramePointer } from "../../src/desktop/browser-pointer.ts"
+import type { BrowserProtocolCommand } from "../../src/desktop/browser-protocol.ts"
 
 function frame(
   id: string,

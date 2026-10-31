@@ -1,5 +1,5 @@
 import { BrowserControlError } from "../protocol/desktop-browser.ts"
-import type { BrowserProtocolCommand } from "./browser-frames.ts"
+import type { BrowserProtocolCommand } from "./browser-protocol.ts"
 
 // Serialized in the exact input's isolated world. Only a trusted native change
 // or cancel ends enumeration; clearing its value does not cancel Chromium's work.

@@ -12,6 +12,7 @@ import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools, createSpawnAgentTool } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
+import { createRunScriptTool } from "./run-script.ts"
 import {
   createThreadCollaborationTools,
   createThreadTool,
@@ -368,6 +369,7 @@ export function createToolRegistry(
           const entry = snapshot.get(name)
           return (
             entry?.exposure !== "hidden" &&
+            entry?.runtime.composesTools !== true &&
             entry?.runtime.supportsParallelToolCalls === true
           )
         },
@@ -583,10 +585,17 @@ function createToolSearchTool(
       type: "object",
       additionalProperties: false,
       properties: {
-        query: { type: "string", minLength: 1 },
+        query: {
+          type: "string",
+          minLength: 1,
+          description:
+            "Capability description or exact tool name to search for.",
+        },
         limit: {
           type: "integer",
           minimum: 1,
+          description:
+            "Maximum matching tool definitions to return; omit to use the search default.",
         },
       },
       required: ["query"],
@@ -778,6 +787,9 @@ function snapshotRuntime(tool: RuntimeTool): RuntimeTool {
     ...(tool.supportsParallelToolCalls === undefined
       ? {}
       : { supportsParallelToolCalls: tool.supportsParallelToolCalls }),
+    ...(tool.composesTools === undefined
+      ? {}
+      : { composesTools: tool.composesTools }),
     description: tool.description,
     inputSchema: deepFreeze(structuredClone(tool.inputSchema)),
     ...(tool.customInputFormat === undefined
@@ -830,6 +842,7 @@ export function createDefaultTools(
     createReadFileTool(),
     createViewImageTool(),
     createReadDocumentTool(),
+    createRunScriptTool(),
     createGrepTool(),
     createGlobTool(),
     createEditFileTool(),

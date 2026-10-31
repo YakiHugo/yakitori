@@ -755,7 +755,15 @@ describe("finalized tool router", () => {
       read_thread: "none",
       send_message_to_thread: "none",
       wait_threads: "none",
+      tool_search: "none",
     })
+    await expect(
+      router.approvalRequirement(
+        "run_script",
+        {},
+        { workspaceRoot: process.cwd() },
+      ),
+    ).resolves.toEqual({ kind: "none" })
 
     expect(
       router.describeExecution("exec_command", { cmd: "git status" }),

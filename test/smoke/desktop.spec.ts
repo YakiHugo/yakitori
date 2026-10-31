@@ -14,6 +14,10 @@ import {
 import { parse } from "smol-toml"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
+  computerPreviewCatalog,
+  computerPreviewFrame,
+} from "../fixtures/computer-preview.ts"
+import {
   createSmokeEnvironment,
   runBudgetedGoal,
   runExternalEngineFlow,
@@ -385,11 +389,18 @@ async function closeApplication(
 ): Promise<void> {
   // A failed quit contract must not strand the CI runner. The exit signal is
   // asserted separately, so this cleanup deadline cannot turn a hang into a pass.
-  const pid = application.process().pid
+  const child = application.process(),
+    pid = child.pid
   if (pid === undefined) throw new Error("Electron process PID is missing.")
   const timeout = setTimeout(() => killProcessGroup(pid), 10_000)
   try {
-    await application.close()
+    // Closing Chromium's context can finish before Node observes Electron's
+    // OS exit. Keep the same hard deadline through that actual exit boundary.
+    const exited =
+      child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : once(child, "exit")
+    await Promise.all([application.close(), exited])
   } finally {
     clearTimeout(timeout)
   }
@@ -495,6 +506,14 @@ test("agent browser observations and actions use the exact owned tab through rea
   desktop,
 }, testInfo) => {
   const { page, application, userData, sidecarUrl, rendererErrors } = desktop
+  // The fixture's Playwright connection must not race the production dialog
+  // responder with its own automatic native dismissal.
+  const ignoreDialog = () => {},
+    bindDialogs = (page: Page) => {
+      page.on("dialog", ignoreDialog)
+    }
+  application.context().on("page", bindDialogs)
+  application.context().pages().forEach(bindDialogs)
   const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
   const observed = Promise.withResolvers<void>(),
     releaseCompletion = Promise.withResolvers<void>(),
@@ -508,6 +527,12 @@ test("agent browser observations and actions use the exact owned tab through rea
   const uploadDirectory = join(userData, "folder-你好")
   const uploadedDirectoryFiles: { path: string; text: string }[][] = []
   const uploadedFiles: { name: string; text: string }[][] = []
+  const chooserFiles: { name: string; text: string }[][] = []
+  const dialogReplies: { value: boolean; trusted: boolean }[] = []
+  const promptReplies: { value: string | null; trusted: boolean }[] = []
+  const dragReplies: { text: string; trusted: boolean }[] = []
+  const downloadBytes = Buffer.from([0, 255, 1, 2, 3])
+  let downloadArtifact: Record<string, unknown> | undefined
   const fileChoiceEvents: { type: string; trusted: boolean; count: number }[] =
     []
   const frameSelectEvents: {
@@ -666,9 +691,15 @@ test("agent browser observations and actions use the exact owned tab through rea
   const source = createServer((request, response) => {
     if (
       request.method === "POST" &&
-      ["/file-bytes", "/file-choice", "/directory-bytes"].includes(
-        request.url ?? "",
-      )
+      [
+        "/file-bytes",
+        "/file-choice",
+        "/directory-bytes",
+        "/chooser-bytes",
+        "/dialog-reply",
+        "/prompt-reply",
+        "/drag-reply",
+      ].includes(request.url ?? "")
     ) {
       let body = ""
       request.setEncoding("utf8")
@@ -677,8 +708,16 @@ test("agent browser observations and actions use the exact owned tab through rea
       })
       request.on("end", () => {
         if (request.url === "/file-bytes") uploadedFiles.push(JSON.parse(body))
+        else if (request.url === "/chooser-bytes")
+          chooserFiles.push(JSON.parse(body))
         else if (request.url === "/directory-bytes")
           uploadedDirectoryFiles.push(JSON.parse(body))
+        else if (request.url === "/dialog-reply")
+          dialogReplies.push(JSON.parse(body))
+        else if (request.url === "/prompt-reply")
+          promptReplies.push(JSON.parse(body))
+        else if (request.url === "/drag-reply")
+          dragReplies.push(JSON.parse(body))
         else fileChoiceEvents.push(JSON.parse(body))
         response.writeHead(204)
         response.end()
@@ -723,7 +762,7 @@ test("agent browser observations and actions use the exact owned tab through rea
       )
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        `<!doctype html><title>After frame</title><body onload="navigator.sendBeacon('/frame-ready','')"><label>After frame field<input value="submitted"></label>`,
+        `<!doctype html><title>After frame</title><body onload="navigator.sendBeacon('/frame-ready','')"><label>After frame field<input value="submitted"></label><button onclick="navigator.sendBeacon('/dialog-reply',JSON.stringify({trusted:event.isTrusted,value:confirm('Owned confirmation?')}))">Native confirmation</button>`,
       )
       return
     }
@@ -768,7 +807,7 @@ test("agent browser observations and actions use the exact owned tab through rea
             ? "Remote"
             : "Nested"
       response.end(
-        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label><label>Remote folder<input type="file" webkitdirectory onchange="Promise.all(Array.from(this.files,async file=>({path:file.webkitRelativePath,text:await file.text()}))).then(files=>fetch('/directory-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
+        `<!doctype html><title>${kind} frame</title><form action="${new URL(wantedUrl).origin}/frame-after"><label>${kind} frame field<input name="field" value="${kind.toLowerCase()}"></label></form><button type="button" onclick="navigator.sendBeacon('/frame-pointer',JSON.stringify({kind:'${kind}',trusted:event.isTrusted}))">${kind} pointer</button>${kind === "Remote" ? `<label>Remote choices<select multiple oninput="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))" onchange="navigator.sendBeacon('/frame-select',JSON.stringify({type:event.type,trusted:event.isTrusted,values:Array.from(this.selectedOptions,option=>option.value)}))"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select></label><label>Remote files<input type="file" multiple oninput="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}))" onchange="navigator.sendBeacon('/file-choice',JSON.stringify({type:event.type,trusted:event.isTrusted,count:this.files.length}));if(this.files.length)Promise.all(Array.from(this.files,async file=>({name:file.name,text:await file.text()}))).then(files=>fetch('/file-bytes',{method:'POST',body:JSON.stringify(files)}))"></label><button id="pick-hidden" type="button">Remote picker</button><script>document.getElementById('pick-hidden').onclick=()=>{const input=document.createElement('input');input.type='file';input.hidden=true;input.onchange=async()=>{const files=await Promise.all(Array.from(input.files,async file=>({name:file.name,text:await file.text()})));await fetch('/chooser-bytes',{method:'POST',body:JSON.stringify(files)})};document.body.append(input);input.click()};</script><label>Remote folder<input type="file" webkitdirectory onchange="Promise.all(Array.from(this.files,async file=>({path:file.webkitRelativePath,text:await file.text()}))).then(files=>fetch('/directory-bytes',{method:'POST',body:JSON.stringify(files)}))"></label>` : ""}${kind === "Remote" ? `<iframe style="width:350px;height:150px;border:4px solid blue;padding:5px;transform:rotate(-4deg) scale(.8);transform-origin:0 0" title="Nested remote scope" src="${new URL(wantedUrl).origin}/frame-nested"></iframe>` : ""}`,
       )
       return
     }
@@ -791,11 +830,21 @@ test("agent browser observations and actions use the exact owned tab through rea
       response.end()
       return
     }
+    if (request.method === "GET" && request.url === "/native-download") {
+      response.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": downloadBytes.length,
+        "content-disposition":
+          "attachment; filename*=UTF-8''download-%E4%BD%A0%E5%A5%BD.bin",
+      })
+      response.end(downloadBytes)
+      return
+    }
     if (request.method === "GET" && request.url?.startsWith("/third")) {
       thirdRequests++
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
       response.end(
-        '<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label>',
+        `<!doctype html><title>Third owned source</title><label>Navigated field<input value="third"></label><script>window.originalPrompt=window.prompt;window.dragProbe=[];for(const type of ["mousedown","mousemove","mouseup","dragstart"])document.addEventListener(type,e=>dragProbe.push({type,target:e.target.getAttribute("aria-label"),x:e.clientX,y:e.clientY,buttons:e.buttons,trusted:e.isTrusted}))</script><button onclick="navigator.sendBeacon('/prompt-reply',JSON.stringify({trusted:event.isTrusted,value:prompt('Owned text?','default')}))">Native prompt</button><a href="/native-download" download>Native download</a><div role="button" aria-label="Native drag source" tabindex="0" draggable="true" style="width:120px;height:60px;margin:20px" ondragstart="event.dataTransfer.setData('text/plain','你好 猫 🌍')">Drag</div><div role="button" aria-label="Native drag destination" tabindex="0" style="width:150px;height:60px;margin:20px 240px" ondragover="event.preventDefault()" ondrop="event.preventDefault();navigator.sendBeacon('/drag-reply',JSON.stringify({trusted:event.isTrusted,text:event.dataTransfer.getData('text/plain')}))">Drop</div>`,
       )
       return
     }
@@ -1278,6 +1327,83 @@ test("agent browser observations and actions use the exact owned tab through rea
           } else if (step === 65) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
+              name: "browser_chooser",
+              input: {
+                action: "arm",
+                target: current.target,
+                fromUrl: (current.document as { url: string }).url,
+                frameReference: current.frameReference,
+              },
+              id: "arm_remote_picker",
+            }
+          } else if (step === 66) {
+            const armed = toolResult(body.messages ?? [], "armed")
+            if (armed.armed !== true)
+              throw new Error("Remote chooser was not armed")
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_input",
+              input: pointerRequest(current, "Remote picker"),
+              id: "open_hidden_picker",
+            }
+          } else if (step === 67) {
+            const clicked = toolResult(body.messages ?? [], "delivered")
+            tool = {
+              name: "browser_chooser",
+              input: { action: "inspect", target: clicked.target },
+              id: "inspect_hidden_picker",
+            }
+          } else if (step === 68) {
+            const opened = toolResult(body.messages ?? [], "opened")
+            if (
+              opened.opened !== true ||
+              typeof opened.elementReference !== "string"
+            )
+              throw new Error("No exact hidden file input was captured")
+            tool = {
+              name: "browser_upload",
+              input: {
+                action: "upload",
+                target: opened.target,
+                reference: opened.elementReference,
+                fromUrl: opened.fromUrl,
+                paths: [uploadPath],
+              },
+              id: "provide_hidden_file",
+            }
+          } else if (step === 69) {
+            const selected = toolResult(body.messages ?? [], "filesVerified")
+            if (selected.filesVerified !== true)
+              throw new Error("Hidden file selection was not verified")
+            await expect.poll(() => chooserFiles.length).toBe(1)
+            tool = {
+              name: "browser_chooser",
+              input: { action: "disarm", target: selected.target },
+              id: "disarm_remote_picker",
+            }
+          } else if (step === 70) {
+            const disabled = toolResult(
+              body.messages ?? [],
+              "interceptionDisabled",
+            )
+            if (
+              disabled.interceptionDisabled !== true ||
+              disabled.armed !== false
+            )
+              throw new Error("File picker interception did not stop")
+            const previous = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser",
+              input: {
+                action: "observe",
+                target: previous.target,
+                frameReference: previous.frameReference,
+              },
+              id: "observe_after_hidden_picker",
+            }
+          } else if (step === 71) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
               name: "browser_view",
               input: {
                 action: "show",
@@ -1286,7 +1412,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "display_directory_target",
             }
-          } else if (step === 66) {
+          } else if (step === 72) {
             const shown = toolResult(body.messages ?? [], "selectionApplied")
             if (shown.selectionApplied !== true || shown.visible !== true)
               throw new Error(
@@ -1315,7 +1441,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "provide_remote_directory",
             }
-          } else if (step === 67) {
+          } else if (step === 73) {
             const selected = toolResult(body.messages ?? [], "filesVerified")
             if (
               selected.action !== "upload_directory" ||
@@ -1337,14 +1463,14 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_directory_selection",
             }
-          } else if (step === 68) {
+          } else if (step === 74) {
             const current = toolResult(body.messages ?? [], "nodes")
             tool = {
               name: "browser_input",
               input: framePress(current, "Remote", "Enter"),
               id: "submit_remote_form",
             }
-          } else if (step === 69) {
+          } else if (step === 75) {
             const receipt = toolResult(body.messages ?? [], "delivered")
             if (receipt.action !== "press" || receipt.key !== "Enter")
               throw new Error("Remote form key was not acknowledged")
@@ -1354,7 +1480,7 @@ test("agent browser observations and actions use the exact owned tab through rea
               input: { action: "frames", target: receipt.target },
               id: "catalog_after_frame_navigation",
             }
-          } else if (step === 70) {
+          } else if (step === 76) {
             const current = toolResult(body.messages ?? [], "frames")
             const selected = (
               current.frames as { url: string; frameReference: string }[]
@@ -1369,9 +1495,61 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "observe_submitted_frame",
             }
-          } else if (step === 71) {
+          } else if (step === 77) {
             frameAfterObservation = toolResult(body.messages ?? [], "nodes")
             const current = frameAfterObservation
+            tool = {
+              name: "browser_dialog",
+              input: {
+                action: "arm",
+                target: current.target,
+                frameReference: current.frameReference,
+                fromUrl: (current.document as { url: string }).url,
+                response: {
+                  type: "confirm",
+                  accept: false,
+                  message: "Owned confirmation?",
+                },
+              },
+              id: "arm_native_dialog",
+            }
+          } else if (step === 78) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              button = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native confirmation")
+            if (!button?.elementReference)
+              throw new Error("Missing native confirmation button")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: button.elementReference,
+              },
+              id: "trigger_native_dialog",
+            }
+          } else if (step === 79) {
+            const current = toolResult(body.messages ?? [], "delivered")
+            await expect.poll(() => dialogReplies.length).toBe(1)
+            tool = {
+              name: "browser_dialog",
+              input: { action: "inspect", target: current.target },
+              id: "inspect_native_dialog",
+            }
+          } else if (step === 80) {
+            const current = toolResult(body.messages ?? [], "state")
+            if (current.state !== "answered" || current.expired !== false)
+              throw new Error("Native dialog response was not acknowledged")
+            tool = {
+              name: "browser_dialog",
+              input: { action: "disarm", target: current.target },
+              id: "disarm_native_dialog",
+            }
+          } else if (step === 81) {
+            const current = frameAfterObservation
+            if (!current) throw new Error("Missing submitted frame observation")
             tool = {
               name: "browser_navigate",
               input: {
@@ -1382,12 +1560,195 @@ test("agent browser observations and actions use the exact owned tab through rea
               },
               id: "navigate_browser",
             }
-          } else if (step === 72) {
+          } else if (step === 82) {
             navigationReceipt = toolResult(body.messages ?? [], "loaded")
             tool = {
               name: "browser",
               input: { action: "observe", target: navigationReceipt.target },
               id: "observe_navigation",
+            }
+          } else if (step === 83) {
+            navigatedObservation = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_dialog",
+              input: {
+                action: "arm",
+                target: navigatedObservation.target,
+                fromUrl: destinationUrl,
+                response: {
+                  type: "prompt",
+                  accept: true,
+                  message: "Owned text?",
+                  promptText: "你好 猫 🌍",
+                },
+              },
+              id: "arm_native_prompt",
+            }
+          } else if (step === 84) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              button = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native prompt")
+            if (!button?.elementReference)
+              throw new Error("Missing native prompt button")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: button.elementReference,
+              },
+              id: "trigger_native_prompt",
+            }
+          } else if (step === 85) {
+            const current = toolResult(body.messages ?? [], "delivered")
+            await expect.poll(() => promptReplies.length).toBe(1)
+            tool = {
+              name: "browser_dialog",
+              input: { action: "inspect", target: current.target },
+              id: "inspect_native_prompt",
+            }
+          } else if (step === 86) {
+            const current = toolResult(body.messages ?? [], "state")
+            if (current.state !== "answered" || current.expired !== false)
+              throw new Error("Native prompt response was not acknowledged")
+            tool = {
+              name: "browser_dialog",
+              input: { action: "disarm", target: current.target },
+              id: "disarm_native_prompt",
+            }
+          } else if (step === 87) {
+            const current = toolResult(body.messages ?? [], "armed")
+            if (current.armed !== false)
+              throw new Error("Native prompt did not disarm")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_restored_prompt",
+            }
+          } else if (step === 88) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "arm",
+                target: current.target,
+                fromUrl: destinationUrl,
+                url: `${new URL(destinationUrl).origin}/native-download`,
+              },
+              id: "arm_native_download",
+            }
+          } else if (step === 89) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              link = (
+                current.nodes as { name: string; elementReference?: string }[]
+              ).find((node) => node.name === "Native download")
+            if (!link?.elementReference)
+              throw new Error("Missing native download link")
+            tool = {
+              name: "browser_input",
+              input: {
+                action: "press",
+                key: "Enter",
+                target: current.target,
+                reference: link.elementReference,
+              },
+              id: "trigger_native_download",
+            }
+          } else if (step === 90) {
+            const current = toolResult(body.messages ?? [], "downloadId")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "wait",
+                target: current.target,
+                downloadId: current.downloadId,
+              },
+              id: "await_native_download",
+            }
+          } else if (step === 91) {
+            const current = toolResult(body.messages ?? [], "downloadId")
+            if (current.state !== "completed")
+              throw new Error("Native download did not finish")
+            tool = {
+              name: "browser_download",
+              input: {
+                action: "collect",
+                target: current.target,
+                downloadId: current.downloadId,
+              },
+              id: "collect_native_download",
+            }
+          } else if (step === 92) {
+            downloadArtifact = toolResult(body.messages ?? [], "sha256")
+            if (downloadArtifact.byteLength !== 5)
+              throw new Error("Native download artifact size differs")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: downloadArtifact.target },
+              id: "observe_after_download",
+            }
+          } else if (step === 93) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_view",
+              input: {
+                action: "show",
+                target: current.target,
+                fromUrl: destinationUrl,
+              },
+              id: "show_native_drag_view",
+            }
+          } else if (step === 94) {
+            const current = toolResult(body.messages ?? [], "nodes")
+            tool = {
+              name: "browser_drag",
+              input: {
+                ...pointerRequest(current, "Native drag source"),
+                action: "prepare",
+              },
+              id: "prepare_native_drag",
+            }
+          } else if (step === 95) {
+            const current = toolResult(body.messages ?? [], "dragId")
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_drag_destination",
+            }
+          } else if (step === 96) {
+            const current = toolResult(body.messages ?? [], "nodes"),
+              prepared = toolResult(body.messages ?? [], "dragId")
+            tool = {
+              name: "browser_drag",
+              input: {
+                ...pointerRequest(current, "Native drag destination"),
+                action: "drop",
+                dragId: prepared.dragId,
+              },
+              id: "deliver_native_drag",
+            }
+          } else if (step === 97) {
+            const current = toolResult(body.messages ?? [], "native")
+            if (current.delivered !== true || current.native !== true) {
+              const probe = await application.evaluate(
+                ({ webContents }, url) =>
+                  webContents
+                    .getAllWebContents()
+                    .find((contents) => contents.getURL() === url)
+                    ?.executeJavaScript("window.dragProbe"),
+                destinationUrl,
+              )
+              throw new Error(
+                "Native drag was not acknowledged: " +
+                  JSON.stringify({ current, probe }),
+              )
+            }
+            tool = {
+              name: "browser",
+              input: { action: "observe", target: current.target },
+              id: "observe_after_drag",
             }
           } else {
             navigatedObservation = toolResult(body.messages ?? [], "nodes")
@@ -1570,21 +1931,82 @@ test("agent browser observations and actions use the exact owned tab through rea
         debug.on("message", (_event, method, params, parentSessionId) => {
           if (
             method === "Target.attachedToTarget" ||
-            method === "Target.detachedFromTarget"
+            method === "Target.detachedFromTarget" ||
+            method === "Page.fileChooserOpened"
           )
             append({ method, sessionId: params.sessionId, parentSessionId })
         })
       }
     })
     await page.getByRole("button", { name: "Send", exact: true }).click()
-    // Exercise the normal harness permission decision for both read operations.
-    for (let approval = 0; approval < 72; approval++)
+    // Cover real pointer hit testing once. The remaining decisions use the
+    // same renderer/RPC handler, driven by keyed DOM requests rather than 96
+    // compositor waits and repeated protocol round trips from the test runner.
+    const firstApproval = await Promise.race([
+      page.getByRole("button", { name: "Allow", exact: true }).elementHandle(),
+      failed.promise.then((cause) => {
+        throw cause
+      }),
+    ])
+    if (!firstApproval) throw new Error("Missing initial permission button")
+    await firstApproval.click()
+    const approvalDriver = await page.evaluateHandle(
+      ({ first, remaining }) => {
+        const seen = new WeakSet<Element>([first])
+        let accepted = 0,
+          finish = () => {}
+        const done = new Promise<void>((resolve) => {
+          finish = resolve
+        })
+        const scan = () => {
+          for (const button of document.querySelectorAll("button")) {
+            if (
+              button.textContent?.trim() !== "Allow" ||
+              button.disabled ||
+              !button.getClientRects().length ||
+              seen.has(button)
+            )
+              continue
+            seen.add(button)
+            accepted++
+            button.click()
+            if (accepted === remaining) {
+              observer.disconnect()
+              finish()
+            }
+            break
+          }
+        }
+        const observer = new MutationObserver(scan)
+        observer.observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["disabled"],
+        })
+        scan()
+        return {
+          done,
+          stop() {
+            observer.disconnect()
+            finish()
+          },
+        }
+      },
+      { first: firstApproval, remaining: 96 },
+    )
+    try {
       await Promise.race([
-        page.getByRole("button", { name: "Allow", exact: true }).click(),
+        approvalDriver.evaluate((driver) => driver.done),
         failed.promise.then((cause) => {
           throw cause
         }),
       ])
+    } finally {
+      await approvalDriver.evaluate((driver) => driver.stop())
+      await approvalDriver.dispose()
+      await firstApproval.dispose()
+    }
     await Promise.race([
       observed.promise,
       failed.promise.then((cause) => {
@@ -1599,10 +2021,21 @@ test("agent browser observations and actions use the exact owned tab through rea
         if (!target) throw new Error("Owned browser target disappeared")
         return target.debugger.isAttached()
       }, destinationUrl)
+    expect(
+      await application.evaluate(async ({ webContents }, url) => {
+        const target = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+        if (!target) throw new Error("Missing native prompt target")
+        return target.executeJavaScript(
+          "({restored:window.prompt===window.originalPrompt,frames:document.querySelectorAll('iframe').length})",
+        )
+      }, destinationUrl),
+    ).toEqual({ restored: true, frames: 0 })
     expect(await attached()).toBe(true)
-    await page
-      .getByRole("button", { name: "Show workspace", exact: true })
-      .click()
+    await expect(
+      page.getByRole("button", { name: "Hide workspace", exact: true }),
+    ).toBeVisible()
     await page.getByRole("button", { name: "Reload page", exact: true }).click()
     await expect.poll(() => thirdRequests).toBe(2)
     await expect(
@@ -1779,6 +2212,19 @@ test("agent browser observations and actions use the exact owned tab through rea
     expect(uploadedFiles).toEqual([
       [{ name: "upload-你好.txt", text: uploadText }],
     ])
+    expect(dialogReplies).toEqual([{ value: false, trusted: true }])
+    expect(promptReplies).toEqual([{ value: "你好 猫 🌍", trusted: true }])
+    expect(dragReplies).toEqual([{ text: "你好 猫 🌍", trusted: true }])
+    if (typeof downloadArtifact?.path !== "string")
+      throw new Error("Missing durable download artifact")
+    expect(await readFile(downloadArtifact.path)).toEqual(downloadBytes)
+    expect(downloadArtifact.sha256).toBe(
+      "4be72cf29a33b5f223067ab9d5dd9567e0c14978e6ed54e2d556ddc9e2cc6038",
+    )
+    expect(downloadArtifact.filename).toBe("download-你好.bin")
+    expect(chooserFiles).toEqual([
+      [{ name: "upload-你好.txt", text: uploadText }],
+    ])
     expect(uploadedDirectoryFiles).toEqual([
       expect.arrayContaining([
         { path: "folder-你好/.hidden", text: "Hidden 你好 🌍" },
@@ -1918,13 +2364,261 @@ test("agent browser observations and actions use the exact owned tab through rea
         uploadedFiles,
         uploadedDirectoryFiles,
         fileChoiceEvents,
+        dialogReplies,
+        promptReplies,
+        downloadArtifact,
+        dragReplies,
         protocol,
       }),
       contentType: "application/json",
     })
     throw cause
   } finally {
+    application.context().off("page", bindDialogs)
+    application
+      .context()
+      .pages()
+      .forEach((page) => {
+        page.off("dialog", ignoreDialog)
+      })
     releaseCompletion.resolve()
+    client.close()
+    source.closeAllConnections()
+    await new Promise<void>((resolve) => source.close(() => resolve()))
+  }
+})
+
+test("packaged scripts compose approved MCP and browser calls through real desktop IPC", async ({
+  desktop,
+}) => {
+  const { page, application, userData, sidecarUrl, rendererErrors } = desktop
+  const client = createAppRpcClient({ apiBase: sidecarUrl.origin })
+  const failed = Promise.withResolvers<Error>()
+  let modelCalls = 0,
+    url = ""
+  const source = createServer((request, response) => {
+    if (request.url === "/page") {
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<!doctype html><title>Script source</title><label>Script field<input value="initial"></label>',
+      )
+      return
+    }
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" })
+      response.end(JSON.stringify({ data: [{ id: "script-model" }] }))
+      return
+    }
+    let raw = ""
+    request.setEncoding("utf8")
+    request.on("data", (chunk: string) => {
+      raw += chunk
+    })
+    request.on("end", () => {
+      try {
+        const body = JSON.parse(raw) as {
+          tools?: unknown[]
+          messages?: {
+            role?: string
+            tool_call_id?: string
+            content?: unknown
+          }[]
+        }
+        let delta: Record<string, unknown> = {
+            role: "assistant",
+            content: "Script browser verified.",
+          },
+          finish = "stop"
+        if (body.tools?.length) {
+          if (modelCalls++ === 0) {
+            const code = `const control = await tools.call('computer__control',{action:'fixture_effect'}); if(!control.ok) throw control;
+const listed = await tools.call('browser',{action:'list'}); if(!listed.ok) throw listed;
+const tab = listed.output.tabs.find(tab=>tab.url===args.url); if(!tab) throw 'Missing script tab';
+const observed = await tools.call('browser',{action:'observe',target:tab.target}); if(!observed.ok) throw observed;
+const node = observed.output.nodes.find(node=>node.name==='Script field'&&node.inputReference); if(!node) throw 'Missing script input';
+const result = await tools.call('browser_input',{action:'fill',target:tab.target,reference:node.inputReference,text:'Script 你好 🌍'}); if(!result.ok) throw result;
+const image = await tools.call('browser_capture',{action:'capture',mode:'viewport',target:tab.target}); if(!image.ok) throw image; show(image); return result.output;`
+            delta = {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "script_call",
+                  type: "function",
+                  function: {
+                    name: "run_script",
+                    arguments: JSON.stringify({ code, arguments: { url } }),
+                  },
+                },
+              ],
+            }
+            finish = "tool_calls"
+          } else {
+            const results = (body.messages ?? []).filter(
+              (message) => message.role === "tool",
+            )
+            expect(results.map((message) => message.tool_call_id)).toEqual([
+              "script_call",
+            ])
+            expect(JSON.stringify(results[0]?.content)).toContain(
+              "textVerified",
+            )
+            // Chat Completions carries tool media in the following user batch.
+            const blocks: unknown[] = (body.messages ?? []).flatMap(
+              (message) =>
+                Array.isArray(message.content) ? message.content : [],
+            )
+            expect(blocks).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  type: "image_url",
+                  image_url: expect.objectContaining({
+                    url: expect.stringMatching(/^data:image\/jpeg;base64,/),
+                  }),
+                }),
+              ]),
+            )
+          }
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" })
+        response.end(
+          `data: ${JSON.stringify({ id: `script_${modelCalls}`, object: "chat.completion.chunk", created: 1, model: "script-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`,
+        )
+      } catch (cause) {
+        failed.resolve(
+          cause instanceof Error ? cause : new Error(String(cause)),
+        )
+        response.writeHead(500)
+        response.end("Owned script fixture failed")
+      }
+    })
+  })
+  source.listen(0, "127.0.0.1")
+  await once(source, "listening")
+  const address = source.address()
+  if (!address || typeof address === "string")
+    throw new Error("Missing script source")
+  const origin = `http://127.0.0.1:${address.port}`
+  url = `${origin}/page`
+  const helper = join(userData, "script-computer.cjs"),
+    log = join(userData, "script-computer.log")
+  try {
+    await writeFile(
+      helper,
+      `const fs=require('node:fs'); const rl=require('node:readline').createInterface({input:process.stdin}); rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return; if(m.method==='tools/call')fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m.params)+'\\n'); const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'script-computer',version:'1'}}:m.method==='tools/list'?{tools:['control','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))}:{content:[{type:'text',text:'Owned helper acknowledged'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n')});`,
+    )
+    await client.request("config/write", {
+      keyPath: ["mcp_servers", "computer"],
+      value: {
+        command: process.execPath,
+        args: [helper],
+        enabled: true,
+        required: true,
+        enabled_tools: ["control"],
+      },
+    })
+    await client.request("provider/configuration/write", {
+      id: "script-fixture",
+      configuration: {
+        name: "Script fixture",
+        service: "openai",
+        authentication: "none",
+        baseURL: `${origin}/v1`,
+        wireApi: "openai_chat_completions",
+        models: [
+          {
+            id: "script-model",
+            displayName: "Script Model",
+            inputModalities: ["text", "image"],
+          },
+        ],
+      },
+    })
+    await client.request("userPreference/write", {
+      provider: "openai",
+      model: "script-model",
+    })
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await page
+      .getByRole("button", { name: "Select model and effort", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Script Model", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Browser/ }).click()
+    await page.getByRole("textbox", { name: "Browser address" }).fill(url)
+    await page.getByRole("textbox", { name: "Browser address" }).press("Enter")
+    await expect(
+      page.getByRole("tab", { name: "Script source", exact: true }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Hide workspace", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Run the owned script.")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    for (let index = 0; index < 5; index++)
+      await Promise.race([
+        page.getByRole("button", { name: "Allow", exact: true }).click(),
+        failed.promise.then((error) => {
+          throw error
+        }),
+      ])
+    await Promise.race([
+      expect(
+        page.getByText("Script browser verified.", { exact: true }).first(),
+      ).toBeVisible(),
+      failed.promise.then((error) => {
+        throw error
+      }),
+    ])
+    expect(modelCalls).toBe(2)
+    await expect
+      .poll(
+        async () => (await client.request("computer/status", {})).inputOwner,
+      )
+      .toBeUndefined()
+    expect(
+      await application.evaluate(async ({ webContents }, url) => {
+        const owned = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === url)
+        if (!owned) throw new Error("Missing owned script browser")
+        return {
+          value: await owned.executeJavaScript(
+            "document.querySelector('input').value",
+          ),
+          attached: owned.debugger.isAttached(),
+        }
+      }, url),
+    ).toEqual({ value: "Script 你好 🌍", attached: false })
+    const calls = (await readFile(log, "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as { name: string; arguments?: { action?: string } },
+      )
+    expect(
+      calls.filter(
+        (call) =>
+          call.name === "control" &&
+          call.arguments?.action === "fixture_effect",
+      ),
+    ).toHaveLength(1)
+    expect(calls.filter((call) => call.name === "turn_ended")).toHaveLength(1)
+    expect(
+      (await client.request("computer/status", {})).inputOwner,
+    ).toBeUndefined()
+    expect(rendererErrors).toEqual([])
+  } finally {
     client.close()
     source.closeAllConnections()
     await new Promise<void>((resolve) => source.close(() => resolve()))
@@ -2002,7 +2696,6 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
         { BrowserWindow, WebContentsView, session },
         { url, directory },
       ) => {
-        const previousFocus = BrowserWindow.getFocusedWindow()?.id
         const window = BrowserWindow.getAllWindows()[0]
         if (!window) throw new Error("Missing owned host window")
         const view = new WebContentsView({
@@ -2061,6 +2754,9 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
             },
             frameSession,
           )
+          // Measure file selection, after the fixture's own view load/show and
+          // debugger setup. Startup activation can finish during those awaits.
+          const previousFocus = BrowserWindow.getFocusedWindow()?.id
           await debug.sendCommand(
             "DOM.setFileInputFiles",
             { nodeId, files: [directory] },
@@ -2102,4 +2798,124 @@ test("packaged Chromium enumerates a directory for its owned cross-site frame", 
     source.closeAllConnections()
     await new Promise<void>((resolve) => source.close(() => resolve()))
   }
+})
+
+test("packaged preview recording decodes and saves WebM through Electron's download boundary", async ({
+  desktop,
+}) => {
+  const { page, application, userData, rendererErrors } = desktop
+  const frame = computerPreviewFrame()
+  let captures = 0
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const peer = socket.connectToServer()
+    peer.onMessage((message) => socket.send(message))
+    socket.onMessage((message) => {
+      if (typeof message !== "string") {
+        peer.send(message)
+        return
+      }
+      const request = JSON.parse(message) as { id?: number; method?: string }
+      let result: unknown
+      if (request.method === "computer/status")
+        result = {
+          available: true,
+          connected: true,
+          backend: "yakitori-native",
+          serverName: "computer",
+          tools: ["control"],
+          permissions: { accessibility: true, screenRecording: true },
+        }
+      else if (request.method === "computer/preview/catalog")
+        result = computerPreviewCatalog
+      else if (request.method === "computer/preview/capture") {
+        captures++
+        result = frame
+      } else if (request.method === "computer/preview/stop") result = {}
+      else {
+        peer.send(message)
+        return
+      }
+      socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }))
+    })
+  })
+  // Only the native frame source is supplied. The packaged renderer, encoder,
+  // video decoder and Electron download all execute their real implementations.
+  await page.reload()
+  await page
+    .getByRole("button", { name: "Show workspace", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Add workspace tab", exact: true })
+    .click()
+  await page.getByRole("menuitem", { name: "Computer", exact: true }).click()
+  const preview = page.getByRole("region", { name: "Live computer preview" })
+  await preview
+    .getByRole("button", { name: "Start preview", exact: true })
+    .click()
+  await expect(
+    preview.getByRole("img", { name: "Live computer preview", exact: true }),
+  ).toBeVisible()
+  await preview
+    .getByRole("button", { name: "Record preview", exact: true })
+    .click()
+  const startedAt = captures
+  await expect.poll(() => captures).toBeGreaterThanOrEqual(startedAt + 2)
+  await preview
+    .getByRole("button", { name: "Stop preview", exact: true })
+    .click()
+  const video = preview.getByLabel("Recorded computer preview")
+  await expect
+    .poll(() =>
+      video.evaluate((node) => ({
+        width: (node as HTMLVideoElement).videoWidth,
+        height: (node as HTMLVideoElement).videoHeight,
+        ready: (node as HTMLVideoElement).readyState >= 2,
+      })),
+    )
+    .toEqual({ width: 200, height: 100, ready: true })
+  const destination = join(userData, "preview.webm")
+  await application.evaluate(({ BrowserWindow }, destination) => {
+    const renderer = BrowserWindow.getAllWindows()[0]?.webContents
+    if (!renderer) throw new Error("Missing recording renderer")
+    const completion = Promise.withResolvers<string>()
+    Reflect.set(globalThis, "yakitoriRecordingSaved", completion.promise)
+    // Choose this fixture's disposable destination in place of the OS save UI.
+    renderer.session.once("will-download", (_event, item, contents) => {
+      if (contents !== renderer) throw new Error("Unowned recording download")
+      item.setSavePath(destination)
+      item.once("done", (_event, state) => completion.resolve(state))
+    })
+  }, destination)
+  await preview
+    .getByRole("link", { name: "Save recording", exact: true })
+    .click()
+  const saved = await application.evaluate(async () => {
+    const pending = Reflect.get(
+      globalThis,
+      "yakitoriRecordingSaved",
+    ) as Promise<string>
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error("The owned recording did not finish downloading"),
+              ),
+            10_000,
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+      Reflect.deleteProperty(globalThis, "yakitoriRecordingSaved")
+    }
+  })
+  expect(saved).toBe("completed")
+  expect([...(await readFile(destination)).subarray(0, 4)]).toEqual([
+    26, 69, 223, 163,
+  ])
+  expect(rendererErrors).toEqual([])
 })

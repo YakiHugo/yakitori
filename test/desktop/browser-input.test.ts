@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events"
 import type { WebContents } from "electron"
-import { expect, it } from "vitest"
+import { expect, it, vi } from "vitest"
 import { BrowserDocumentConnection } from "../../src/desktop/browser-observation.ts"
 import {
+  BrowserControlError,
   type BrowserKeyRequest,
   type BrowserPointerRequest,
   type BrowserTextInputRequest,
@@ -57,6 +58,7 @@ function fixture(
     navigateAfterRelease?: boolean
     blockFocusReadAt?: number
     blockKeyUp?: boolean
+    viewReady?: (signal: AbortSignal) => Promise<void>
   } = {},
 ) {
   const events = new EventEmitter(),
@@ -217,6 +219,7 @@ function fixture(
   }
   const connection = new BrowserDocumentConnection(
     contents as unknown as WebContents,
+    options.viewReady,
   )
   return {
     connection,
@@ -246,6 +249,10 @@ function fixture(
     destroy: () => {
       destroyed = true
     },
+    disconnect: () => {
+      attached = false
+      events.emit("detach", {}, "closed")
+    },
     navigate: () => {
       documentId = "replacement"
     },
@@ -265,6 +272,43 @@ function fixture(
     },
   }
 }
+
+it("refuses a hidden drag view before delivering any mouse input", async () => {
+  const f = fixture({
+    pointer: true,
+    viewReady: async () => {
+      throw new BrowserControlError(
+        "browser_requires_visibility",
+        "Show the exact owned browser view first.",
+      )
+    },
+  })
+  try {
+    const source = await f.clickRequest(),
+      prepared = await f.connection.drag(
+        { action: "drag_prepare", target, reference: source.reference },
+        new AbortController().signal,
+      ),
+      destination = await f.clickRequest()
+    if (typeof prepared.dragId !== "string")
+      throw new Error("Missing prepared source")
+    await expect(
+      f.connection.drag(
+        {
+          action: "drag_drop",
+          target,
+          reference: destination.reference,
+          dragId: prepared.dragId,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "browser_requires_visibility" })
+    expect(f.mouseEvents).toEqual([])
+    f.connection.assertInputIdle()
+  } finally {
+    await f.connection.close()
+  }
+})
 
 it("consumes an observation once and verifies the exact text receipt", async () => {
   const f = fixture()
@@ -961,4 +1005,97 @@ it("retains only unreleased modifiers for cleanup retries and never repeats a co
   expect(f.keyUps()).toBe(3)
   expect(f.keyDowns()).toBe(3)
   expect(f.attached()).toBe(false)
+})
+
+function commandDeadlines() {
+  const deadlines: AbortController[] = []
+  const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+    const deadline = new AbortController()
+    deadlines.push(deadline)
+    return deadline.signal
+  })
+  return {
+    expireLatest() {
+      const deadline = deadlines.at(-1)
+      if (!deadline) throw new Error("No current command deadline")
+      deadline.abort(new Error("Native acknowledgement deadline"))
+    },
+    restore: () => timeout.mockRestore(),
+  }
+}
+
+it("retains a timed-out key-down until its late acknowledgement before releasing the key", async () => {
+  const deadlines = commandDeadlines(),
+    f = fixture({ pointer: true, keys: true, blockKeyDown: true })
+  try {
+    const input: BrowserKeyRequest = {
+      ...(await f.clickRequest()),
+      action: "press",
+      key: "Enter",
+    }
+    const pending = f.connection.pressKey(input, new AbortController().signal)
+    const failed = expect(pending).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    await f.insertion
+    deadlines.expireLatest()
+    await failed
+    expect(f.keyUps()).toBe(0)
+    await expect(f.connection.close()).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    f.release.resolve()
+    await new Promise<void>((done) => setImmediate(done))
+    await f.connection.close()
+    expect(f.keyDowns()).toBe(1)
+    expect(f.keyUps()).toBe(1)
+    expect(f.keyEvents.filter((event) => event.type === "keyUp")).toHaveLength(
+      1,
+    )
+  } finally {
+    f.release.resolve()
+    await new Promise<void>((done) => setImmediate(done))
+    await f.connection.close()
+    deadlines.restore()
+  }
+})
+
+it.each([
+  "deadline",
+  "disconnect",
+])("retires a late key-up acknowledgement after %s without replaying the release", async (terminal) => {
+  const deadlines = commandDeadlines(),
+    f = fixture({ pointer: true, keys: true, blockKeyUp: true })
+  try {
+    const input: BrowserKeyRequest = {
+      ...(await f.clickRequest()),
+      action: "press",
+      key: "Enter",
+    }
+    const pending = f.connection.pressKey(input, new AbortController().signal)
+    const failed = expect(pending).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    await f.keyUpStarted.promise
+    if (terminal === "deadline") deadlines.expireLatest()
+    else f.disconnect()
+    await failed
+    expect(() => f.connection.assertInputIdle()).toThrow()
+    await expect(f.connection.close()).rejects.toMatchObject({
+      code: "browser_cleanup_failed",
+    })
+    f.keyUpReply.resolve()
+    await new Promise<void>((done) => setImmediate(done))
+    await f.connection.close()
+    expect(f.keyUps()).toBe(1)
+    expect(f.keyEvents.filter((event) => event.type === "keyUp")).toHaveLength(
+      1,
+    )
+    expect(f.attached()).toBe(false)
+  } finally {
+    f.keyUpReply.resolve()
+    await new Promise<void>((done) => setImmediate(done))
+    await f.connection.close()
+    deadlines.restore()
+  }
 })

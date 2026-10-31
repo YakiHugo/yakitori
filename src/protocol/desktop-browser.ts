@@ -39,6 +39,74 @@ export type BrowserInputRequest =
   | BrowserKeyRequest
   | BrowserSelectRequest
 
+export type BrowserDragRequest = Readonly<
+  { target: BrowserTarget } & (
+    | { action: "drag_prepare"; reference: string }
+    | { action: "drag_drop"; dragId: string; reference: string }
+    | { action: "drag_cancel"; dragId: string }
+  )
+>
+
+export function parseBrowserDragRequest(value: unknown): BrowserDragRequest {
+  if (
+    !isJsonObject(value) ||
+    !["drag_prepare", "drag_drop", "drag_cancel"].includes(
+      String(value.action),
+    ) ||
+    !["action", "target"].every((key) => Object.hasOwn(value, key))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use a prepared browser drag source and an exact observed destination.",
+    )
+  const prepare = value.action === "drag_prepare",
+    cancel = value.action === "drag_cancel",
+    keys = [
+      "action",
+      "target",
+      ...(cancel ? [] : ["reference"]),
+      ...(prepare ? [] : ["dragId"]),
+    ]
+  if (
+    Object.keys(value).length !== keys.length ||
+    !keys.every((key) => Object.hasOwn(value, key)) ||
+    (!cancel &&
+      (typeof value.reference !== "string" ||
+        !/^browser_element_[a-f0-9-]{36}$/.test(value.reference))) ||
+    (!prepare &&
+      (typeof value.dragId !== "string" ||
+        !/^browser_drag_[a-f0-9-]{36}$/.test(value.dragId)))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use only an exact browser element reference and the owning drag ID.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid drag target parser result.")
+  if (value.action === "drag_prepare")
+    return {
+      action: value.action,
+      target: observed.target,
+      reference: value.reference as string,
+    }
+  if (value.action === "drag_cancel")
+    return {
+      action: value.action,
+      target: observed.target,
+      dragId: value.dragId as string,
+    }
+  return {
+    action: "drag_drop",
+    target: observed.target,
+    dragId: value.dragId as string,
+    reference: value.reference as string,
+  }
+}
+
 export type BrowserSelectRequest = Readonly<{
   action: "select"
   target: BrowserTarget
@@ -369,6 +437,10 @@ export type BrowserRequest =
   | BrowserUploadRequest
   | BrowserDirectoryUploadRequest
   | BrowserViewRequest
+  | BrowserChooserRequest
+  | BrowserDialogRequest
+  | BrowserDownloadRequest
+  | BrowserDragRequest
 
 export type BrowserUploadRequest = Readonly<{
   action: "upload"
@@ -526,6 +598,279 @@ export function parseBrowserDirectoryUploadRequest(
   }
 }
 
+// Bound one artifact copy (including hash/snapshot buffers) and stop oversized
+// native transfers when their next progress notification arrives.
+export const browserDownloadSafetyBytes = 64 * 1024 * 1024
+
+export type BrowserDownloadRequest =
+  | Readonly<{
+      action: "download_arm"
+      target: BrowserTarget
+      fromUrl: string
+      url?: string
+    }>
+  | Readonly<{
+      action:
+        | "download_status"
+        | "download_wait"
+        | "download_cancel"
+        | "download_collect"
+        | "download_release"
+      target: BrowserTarget
+      downloadId: string
+    }>
+
+export function isBrowserDownloadUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const url = new URL(value)
+  if (url.protocol === "data:") return true
+  if (url.protocol === "blob:" && !URL.canParse(url.pathname)) return false
+  const source = url.protocol === "blob:" ? new URL(url.pathname) : url
+  return (
+    (source.protocol === "http:" || source.protocol === "https:") &&
+    !source.username &&
+    !source.password
+  )
+}
+
+export function parseBrowserDownloadRequest(
+  value: unknown,
+): BrowserDownloadRequest {
+  if (
+    !isJsonObject(value) ||
+    ![
+      "download_arm",
+      "download_status",
+      "download_wait",
+      "download_cancel",
+      "download_collect",
+      "download_release",
+    ].includes(String(value.action))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact browser target and an owned download action.",
+    )
+  const arm = value.action === "download_arm"
+  if (
+    !(
+      arm ? ["action", "target", "fromUrl"] : ["action", "target", "downloadId"]
+    ).every((key) => Object.hasOwn(value, key)) ||
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "url"]
+            : ["action", "target", "downloadId"]
+        ).includes(key),
+    ) ||
+    (arm
+      ? typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192 ||
+        (value.url !== undefined &&
+          (typeof value.url !== "string" ||
+            value.url.length > 8192 ||
+            !isBrowserDownloadUrl(value.url)))
+      : typeof value.downloadId !== "string" ||
+        !/^browser_download_[a-f0-9-]{36}$/.test(value.downloadId))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm requires the observed root fromUrl and optional HTTP(S), blob or data URL (8192-character metadata safety bound); other actions require an issued downloadId.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid download target parser result.")
+  if (arm)
+    return {
+      action: "download_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(typeof value.url === "string" ? { url: value.url } : {}),
+    }
+  return {
+    action: value.action as Exclude<
+      BrowserDownloadRequest["action"],
+      "download_arm"
+    >,
+    target: observed.target,
+    downloadId: value.downloadId as string,
+  }
+}
+
+export type BrowserDialogRule = Readonly<{
+  type: "alert" | "confirm" | "beforeunload" | "prompt"
+  accept: boolean
+  message?: string
+  promptText?: string
+}>
+export type BrowserDialogRequest =
+  | Readonly<{
+      action: "dialog_arm"
+      target: BrowserTarget
+      fromUrl: string
+      frameReference?: string
+      response: BrowserDialogRule
+    }>
+  | Readonly<{
+      action: "dialog_inspect" | "dialog_disarm"
+      target: BrowserTarget
+    }>
+
+export function parseBrowserDialogRequest(
+  value: unknown,
+): BrowserDialogRequest {
+  if (
+    !isJsonObject(value) ||
+    !["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
+      String(value.action),
+    )
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact target and a JavaScript dialog action.",
+    )
+  const arm = value.action === "dialog_arm",
+    response = value.response
+  if (
+    arm &&
+    (!isJsonObject(response) ||
+      Object.keys(response).some(
+        (key) => !["type", "accept", "message", "promptText"].includes(key),
+      ) ||
+      !["alert", "confirm", "beforeunload", "prompt"].includes(
+        String(response.type),
+      ) ||
+      typeof response.accept !== "boolean" ||
+      (response.type === "alert" && !response.accept) ||
+      (Object.hasOwn(response, "promptText") &&
+        (response.type !== "prompt" ||
+          !response.accept ||
+          typeof response.promptText !== "string" ||
+          Buffer.byteLength(response.promptText) > 8192)) ||
+      (response.message !== undefined &&
+        (typeof response.message !== "string" ||
+          Buffer.byteLength(response.message) > 8192)))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm with one response: alert (accept true), confirm, beforeunload or prompt, an explicit accept boolean and optional exact message. Only an accepted prompt allows promptText (8KiB text safety bounds).",
+    )
+  if (
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "frameReference", "response"]
+            : ["action", "target"]
+        ).includes(key),
+    ) ||
+    (arm &&
+      (typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arm requires the observed fromUrl, optional frameReference and response; inspect/disarm accept only a target.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+    ...(arm && value.frameReference !== undefined
+      ? { frameReference: value.frameReference }
+      : {}),
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid dialog target parser result.")
+  if (arm)
+    return {
+      action: "dialog_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(observed.frameReference
+        ? { frameReference: observed.frameReference }
+        : {}),
+      response: response as BrowserDialogRule,
+    }
+  return {
+    action: value.action as "dialog_inspect" | "dialog_disarm",
+    target: observed.target,
+  }
+}
+
+export type BrowserChooserRequest =
+  | Readonly<{
+      action: "chooser_arm"
+      target: BrowserTarget
+      fromUrl: string
+      frameReference?: string
+    }>
+  | Readonly<{
+      action: "chooser_inspect" | "chooser_disarm"
+      target: BrowserTarget
+    }>
+
+export function parseBrowserChooserRequest(
+  value: unknown,
+): BrowserChooserRequest {
+  if (
+    !isJsonObject(value) ||
+    !["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(
+      String(value.action),
+    )
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Use an exact target and a file chooser action.",
+    )
+  const arm = value.action === "chooser_arm"
+  if (
+    Object.keys(value).some(
+      (key) =>
+        !(
+          arm
+            ? ["action", "target", "fromUrl", "frameReference"]
+            : ["action", "target"]
+        ).includes(key),
+    ) ||
+    (arm &&
+      (typeof value.fromUrl !== "string" ||
+        !value.fromUrl.length ||
+        value.fromUrl.length > 8192))
+  )
+    throw new BrowserControlError(
+      "invalid_arguments",
+      "Arming requires the observed document URL and optional current frameReference; inspect/disarm accept only a target.",
+    )
+  const observed = parseBrowserObservationRequest({
+    action: "observe",
+    target: value.target,
+    ...(arm && value.frameReference !== undefined
+      ? { frameReference: value.frameReference }
+      : {}),
+  })
+  if (observed.action !== "observe")
+    throw new Error("Invalid chooser target parser result.")
+  if (arm)
+    return {
+      action: "chooser_arm",
+      target: observed.target,
+      fromUrl: value.fromUrl as string,
+      ...(observed.frameReference
+        ? { frameReference: observed.frameReference }
+        : {}),
+    }
+  return {
+    action: value.action as "chooser_inspect" | "chooser_disarm",
+    target: observed.target,
+  }
+}
+
 export type BrowserViewRequest = Readonly<{
   action: "show"
   target: BrowserTarget
@@ -566,12 +911,27 @@ const requestMutates: Record<BrowserRequest["action"], boolean> = {
   click: true,
   hover: true,
   scroll: true,
+  drag_prepare: true,
+  drag_drop: true,
+  drag_cancel: true,
   press: true,
   select: true,
   navigate: true,
   upload: true,
   upload_directory: true,
   show: true,
+  chooser_arm: true,
+  chooser_inspect: false,
+  chooser_disarm: true,
+  dialog_arm: true,
+  dialog_inspect: false,
+  dialog_disarm: true,
+  download_arm: true,
+  download_status: false,
+  download_wait: false,
+  download_cancel: true,
+  download_collect: false,
+  download_release: true,
 }
 
 export function browserRequestMutates(input: BrowserRequest): boolean {
@@ -579,6 +939,32 @@ export function browserRequestMutates(input: BrowserRequest): boolean {
 }
 
 export function parseBrowserRequest(value: unknown): BrowserRequest {
+  if (
+    isJsonObject(value) &&
+    typeof value.action === "string" &&
+    value.action.startsWith("drag_")
+  )
+    return parseBrowserDragRequest(value)
+  if (
+    isJsonObject(value) &&
+    typeof value.action === "string" &&
+    value.action.startsWith("download_")
+  )
+    return parseBrowserDownloadRequest(value)
+  if (
+    isJsonObject(value) &&
+    ["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
+      String(value.action),
+    )
+  )
+    return parseBrowserDialogRequest(value)
+  if (
+    isJsonObject(value) &&
+    ["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(
+      String(value.action),
+    )
+  )
+    return parseBrowserChooserRequest(value)
   if (isJsonObject(value) && value.action === "show")
     return parseBrowserViewRequest(value)
   if (isJsonObject(value) && value.action === "upload_directory")
