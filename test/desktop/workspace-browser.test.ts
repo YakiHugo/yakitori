@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events"
+import { readFile, writeFile } from "node:fs/promises"
 import type { BrowserWindow } from "electron"
 import { beforeEach, expect, it, vi } from "vitest"
 import { registerWorkspaceBrowser } from "../../src/desktop/workspace-browser.ts"
@@ -32,6 +33,8 @@ const electron = vi.hoisted(() => ({
   }>,
   menu: [] as Array<{ label?: string; click?: () => void }>,
   profile: {
+    on: vi.fn(),
+    off: vi.fn(),
     setPermissionRequestHandler: vi.fn(),
     setPermissionCheckHandler: vi.fn(),
   },
@@ -97,6 +100,8 @@ vi.mock("electron", async () => {
 })
 
 beforeEach(() => {
+  electron.profile.on.mockClear()
+  electron.profile.off.mockClear()
   electron.handlers.clear()
   electron.views.length = 0
   electron.menu.length = 0
@@ -987,5 +992,161 @@ it.each([
       sessionId: "session_owned",
       turnId: "turn_owned",
     })
+  }
+})
+
+it.each([
+  "closed-tab collection",
+  "independent input cleanup",
+  "target switch",
+] as const)("preserves download ownership during %s", async (scenario) => {
+  const { call, browser } = setup()
+  call("create", { tabId: "download", url: "https://owned.test/" })
+  const view = electron.views[0]
+  if (!view) throw new Error("Missing download source")
+  const cancelRequested = Promise.withResolvers<void>()
+  const createDebugger = () => {
+    const events = new EventEmitter()
+    let attached = false
+    return {
+      get attached() {
+        return attached
+      },
+      native: {
+        on: events.on.bind(events),
+        off: events.off.bind(events),
+        isAttached: () => attached,
+        attach: () => {
+          attached = true
+        },
+        detach: () => {
+          attached = false
+          events.emit("detach")
+        },
+        async sendCommand(method: string) {
+          if (method === "Page.getFrameTree")
+            return {
+              frameTree: {
+                frame: {
+                  id: "main",
+                  loaderId: "original",
+                  url: "https://owned.test/",
+                },
+              },
+            }
+          if (method === "Accessibility.getFullAXTree") return { nodes: [] }
+          throw new Error(`Unexpected download setup command ${method}`)
+        },
+      },
+    }
+  }
+  const debug = createDebugger(),
+    itemEvents = new EventEmitter()
+  let destroyed = false,
+    path: string | undefined
+  Object.assign(view.webContents, {
+    isDestroyed: () => destroyed,
+    isDevToolsOpened: () => false,
+    close: () => {
+      destroyed = true
+      view.webContents.emit("destroyed")
+    },
+    debugger: debug.native,
+  })
+  const target = (
+    (await browser.request({ action: "list" })).tabs as {
+      target: BrowserTarget
+    }[]
+  )[0]?.target
+  if (!target) throw new Error("Missing download target")
+  try {
+    await browser.request({ action: "observe", target })
+    const armed = await browser.request({
+      action: "download_arm",
+      target,
+      fromUrl: "https://owned.test/",
+    })
+    if (typeof armed.downloadId !== "string")
+      throw new Error("Missing download ID")
+    if (scenario === "target switch") {
+      call("create", { tabId: "other", url: "https://owned.test/" })
+      const other = electron.views[1]
+      if (!other) throw new Error("Missing second target")
+      Object.assign(other.webContents, {
+        isDevToolsOpened: () => false,
+        debugger: createDebugger().native,
+      })
+      const second = (
+        (await browser.request({ action: "list" })).tabs as {
+          target: BrowserTarget
+        }[]
+      ).find((row) => row.target.tabId === "other")?.target
+      if (!second) throw new Error("Missing listed second target")
+      await browser.request({ action: "observe", target: second })
+      expect(debug.attached).toBe(false)
+    }
+    const listener: unknown = electron.profile.on.mock.calls.at(-1)?.[1]
+    if (typeof listener !== "function")
+      throw new Error("Missing native download listener")
+    const native = Object.assign(itemEvents, {
+      getURLChain: () => ["https://owned.test/file"],
+      getReceivedBytes: () => 5,
+      getTotalBytes: () => 5,
+      getFilename: () => "file.txt",
+      getMimeType: () => "text/plain",
+      setSavePath: (value: string) => {
+        path = value
+      },
+      cancel: () => {
+        cancelRequested.resolve()
+      },
+    })
+    listener(
+      {
+        preventDefault: () => {
+          throw new Error("Owned download was refused")
+        },
+      },
+      native,
+      view.webContents,
+    )
+    if (!path) throw new Error("Native download lacks its owned save path")
+    await writeFile(path, "owned")
+    if (scenario === "independent input cleanup") {
+      let settled = false
+      const finishing = browser
+        .finishTurn({ sessionId: "session_owned", turnId: "turn_owned" })
+        .then(() => {
+          settled = true
+        })
+      await cancelRequested.promise
+      await vi.waitFor(() => expect(debug.attached).toBe(false))
+      expect(settled).toBe(false)
+      itemEvents.emit("done", {}, "cancelled")
+      await finishing
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" })
+      return
+    }
+    itemEvents.emit("done", {}, "completed")
+    if (scenario === "closed-tab collection") {
+      call("close", { tabId: "download" })
+      expect((await browser.request({ action: "list" })).tabs).toEqual([])
+    }
+    expect(
+      await browser.request({
+        action: "download_collect",
+        target,
+        downloadId: armed.downloadId,
+      }),
+    ).toMatchObject({ state: "completed", path, size: 5 })
+    await browser.request({
+      action: "download_release",
+      target,
+      downloadId: armed.downloadId,
+    })
+    await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" })
+  } finally {
+    itemEvents.emit("done", {}, "cancelled")
+    await browser.closeSession("session_owned")
   }
 })
