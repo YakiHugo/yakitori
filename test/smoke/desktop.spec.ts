@@ -1935,9 +1935,12 @@ test("agent browser observations and actions use the exact owned tab through rea
     // Cover real pointer hit testing once. The remaining decisions use the
     // same renderer/RPC handler, driven by keyed DOM requests rather than 96
     // compositor waits and repeated protocol round trips from the test runner.
-    const firstApproval = await page
-      .getByRole("button", { name: "Allow", exact: true })
-      .elementHandle()
+    const firstApproval = await Promise.race([
+      page.getByRole("button", { name: "Allow", exact: true }).elementHandle(),
+      failed.promise.then((cause) => {
+        throw cause
+      }),
+    ])
     if (!firstApproval) throw new Error("Missing initial permission button")
     await firstApproval.click()
     const approvalDriver = await page.evaluateHandle(
