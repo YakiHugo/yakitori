@@ -10,7 +10,11 @@ export default defineConfig(({ mode }) => {
     return {
       // Prompt markdown ships as assets next to the bundle so the runtime
       // reads real files; verify-desktop-prompts guards the copy.
-      plugins: [desktopPromptAssets(), desktopPreloadAsset()],
+      plugins: [
+        desktopPromptAssets(),
+        desktopPreloadAsset(),
+        scriptWasmAsset(),
+      ],
       build: {
         // Node target: resolve node export conditions and skip package.json
         // "browser" field shims (e.g. @anthropic-ai/sdk's node.browser
@@ -23,6 +27,7 @@ export default defineConfig(({ mode }) => {
             // (ELECTRON_RUN_AS_NODE) in the packaged app.
             server: "src/server/desktop-entry.ts",
             "read-pdf-worker": "src/runtime/tools/read-pdf-worker.ts",
+            "script-worker": "src/runtime/script/worker.ts",
           },
           fileName: (_format, entryName) => `${entryName}.js`,
           formats: ["es"],
@@ -146,6 +151,21 @@ function desktopPreloadAsset(): Plugin {
         type: "asset",
         fileName: "preload.cjs",
         source: readFileSync(preloadPath),
+      })
+    },
+  }
+}
+
+function scriptWasmAsset(): Plugin {
+  return {
+    name: "yakitori-script-wasm",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "quickjs.wasm",
+        source: readFileSync(
+          new URL(import.meta.resolve("quickjs-wasi/quickjs.wasm")),
+        ),
       })
     },
   }
