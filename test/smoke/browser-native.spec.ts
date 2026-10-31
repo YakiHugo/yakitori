@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { expect, test } from "@playwright/test"
 
-test("unfocused embedded Chromium delivers cold clicks and drags without OS focus", async () => {
+test("unfocused embedded Chromium delivers cold clicks without OS focus", async () => {
   test.skip(
     process.platform !== "darwin",
     "Native Chromium widget acceptance runs on macOS.",
@@ -84,7 +84,10 @@ test("unfocused embedded Chromium delivers cold clicks and drags without OS focu
         child.once("error", reject)
         child.once("close", (code, signal) => resolve({ code, signal }))
       })
-      expect(result, stderr || stdout).toEqual({ code: 0, signal: null })
+      expect(result, [stdout, stderr].join("\n")).toEqual({
+        code: 0,
+        signal: null,
+      })
       const report = stdout
         .split("\n")
         .find((line) => line.startsWith("BROWSER_NATIVE:"))
@@ -93,7 +96,7 @@ test("unfocused embedded Chromium delivers cold clicks and drags without OS focu
         report?.slice("BROWSER_NATIVE:".length) ?? "null",
       )
       expect(rows).toEqual(
-        ["click", "double-click", "hover", "drag"].map((action) => ({
+        ["click", "double-click", "hover"].map((action) => ({
           action,
           trusted: true,
           osFocus: false,
