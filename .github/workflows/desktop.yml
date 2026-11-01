@@ -10,6 +10,9 @@ permissions:
 jobs:
   package:
     runs-on: macos-latest
+    env:
+      # CI does not retain privacy grants or a developer signing key.
+      YAKITORI_CODESIGN_IDENTITY: "-"
     # Implementation safety bound for cold Electron downloads and native builds.
     timeout-minutes: 20
     steps:
