@@ -722,6 +722,11 @@ try {
         async () => {
           const initialPastes = (await state())?.pastes
           assert.equal(typeof initialPastes, "number")
+          const samples: {
+            text: string
+            confirmed: boolean
+            actual: string | undefined
+          }[] = []
           for (const text of [
             "ASCII",
             "中文",
@@ -757,6 +762,11 @@ try {
               assert.equal(typed.structuredContent?.value_matches, true)
               await waitFor(async () => (await state())?.first === text)
             }
+            samples.push({
+              text,
+              confirmed: !typed.isError,
+              actual: (await state())?.first,
+            })
             assert.equal((await state())?.pastes, initialPastes)
             if (values.delivery === "background")
               assert.equal(
@@ -765,6 +775,7 @@ try {
                 backgroundPID,
               )
           }
+          lastAction = { delivery: values.delivery, samples }
         },
       )
       await check(
