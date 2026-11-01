@@ -127,11 +127,23 @@ import Foundation
         let nativeScroll = NSEvent(cgEvent: try windowPointerEvent(scroll, window: window))!
         precondition(nativeScroll.windowNumber == 7 && nativeScroll.type == .scrollWheel)
         precondition(nativeScroll.hasPreciseScrollingDeltas && nativeScroll.scrollingDeltaY == 13 && nativeScroll.scrollingDeltaX == -7)
-        let keyEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)!
-        let characters = Array("猫😀".utf16)
-        characters.withUnsafeBufferPointer { keyEvent.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
-        let addressedKey = NSEvent(cgEvent: try windowKeyboardEvent(keyEvent, window: window))!
-        precondition(addressedKey.windowNumber == 7 && addressedKey.type == .keyDown && addressedKey.characters == "猫😀")
+        for text in ["ASCII", "中文", "😀", "𠮷", "👩‍💻", "e\u{301}"] {
+            let characters = Array(text.utf16)
+            for keyDown in [true, false] {
+                let keyEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: keyDown)!
+                characters.withUnsafeBufferPointer { keyEvent.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
+                let routed = try windowKeyboardEvent(keyEvent, window: window)
+                var length = 0
+                var actual = [UniChar](repeating: 0, count: characters.count)
+                actual.withUnsafeMutableBufferPointer {
+                    routed.keyboardGetUnicodeString(maxStringLength: $0.count, actualStringLength: &length, unicodeString: $0.baseAddress)
+                }
+                precondition(length == characters.count && actual == characters)
+                let addressedKey = NSEvent(cgEvent: routed)!
+                precondition(addressedKey.windowNumber == 7 && addressedKey.type == (keyDown ? .keyDown : .keyUp))
+                if keyDown { precondition(addressedKey.characters == text) }
+            }
+        }
         let (started, callback) = AsyncStream<(Result<Int, Error>) -> Void>.makeStream()
         let waiting = Task { try await nativeRequest { done in callback.yield(done) } }
         var events = started.makeAsyncIterator()

@@ -47,12 +47,6 @@ extension Computer {
         let paste = action == "paste" ? try pasteboardItem(args) : nil
         let text = args["text"] as? String
         if action == "type", text == nil { throw ComputerFailure("invalid_arguments", "type requires text.") }
-        let supplementaryText = action == "type" && text?.unicodeScalars.contains(where: { $0.value > 0xffff }) == true
-        // Foreground paste preserves supplementary characters across web
-        // engines. Background native controls can handle Unicode while ignoring
-        // paste, so retain their event route and verify risky scalar insertion.
-        let unicodePaste = foreground && supplementaryText
-            ? try pasteboardItem(["text": text ?? "", "format": "text"]) : nil
         if action == "type", args["replace"] as? Bool == true, element == nil {
             throw ComputerFailure("invalid_arguments", "Replacement requires a target element so its complete selection can be confirmed before typing.")
         }
@@ -274,13 +268,13 @@ extension Computer {
                 return try windowPointerEvent(event, window: window, windowFrame: pointerFrame)
             }
             func sendKey(_ code: CGKeyCode?, flags: CGEventFlags) async throws {
-                try await withHeldChord(code, flags: flags.union(action == "type" ? [] : modifiers), duration: action == "type" ? 0 : duration, source: source, prepare: keyboardEvent, post: post,
+                try await withHeldChord(code, flags: flags.union(modifiers), duration: duration, source: source, prepare: keyboardEvent, post: post,
                     release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {}
             }
             func pasteContent(_ content: NSPasteboardItem) async throws {
                 try await withPasteContent(content) {
                     try checkpoint()
-                    if !foreground, (action == "type" || (modifiers.isEmpty && duration == 0)), let window,
+                    if !foreground, modifiers.isEmpty, duration == 0, let window,
                        let item = try pasteMenuItem(window) {
                         try checkpoint()
                         guard (attribute(item, kAXMenuItemCmdCharAttribute) as? String)?.lowercased() == "v",
@@ -357,53 +351,47 @@ extension Computer {
                         }
                         try await confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element)
                     }
-                    if let unicodePaste {
-                        evidence["text_route"] = "clipboard"
-                        try await pasteContent(unicodePaste)
-                    } else {
-                        evidence["text_route"] = "unicode_events"
-                        var expected: String?
-                        if supplementaryText {
-                            guard let element, let value = attribute(element, kAXValueAttribute) as? String,
-                                  let encoded = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(encoded) == AXValueGetTypeID() else {
-                                throw ComputerFailure("foreground_required", "Background supplementary text requires readable text and selection for delivery confirmation; no characters were sent.")
-                            }
-                            var range = CFRange()
-                            guard AXValueGetValue(encoded as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0,
-                                  range.location <= value.utf16.count, range.length <= value.utf16.count - range.location else {
-                                throw ComputerFailure("foreground_required", "The target selection cannot confirm supplementary text insertion; no characters were sent.")
-                            }
-                            expected = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+                    evidence["text_route"] = "unicode_events"
+                    var expected: String?
+                    // Verification depends on the control's readable state, not
+                    // the language or Unicode plane of the inserted text.
+                    if let element, let value = attribute(element, kAXValueAttribute) as? String,
+                       let encoded = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(encoded) == AXValueGetTypeID() {
+                        var range = CFRange()
+                        guard AXValueGetValue(encoded as! AXValue, .cfRange, &range), range.location >= 0, range.length >= 0,
+                              range.location <= value.utf16.count, range.length <= value.utf16.count - range.location else {
+                            throw ComputerFailure("selection_unconfirmed", "The target exposed an invalid text selection; no characters were sent.")
                         }
-                        for scalar in text.unicodeScalars {
-                            try Task.checkCancellation()
-                            let units = Array(String(scalar).utf16)
-                            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-                                throw ComputerFailure("input_failed", "macOS could not create a text event.")
-                            }
-                            down.flags = []
-                            up.flags = []
-                            units.withUnsafeBufferPointer { buffer in
-                                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                                up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                            }
-                            let routedDown = try keyboardEvent(down), routedUp = try keyboardEvent(up)
-                            try post(routedDown)
-                            deliver(routedUp, window: window, foreground: foreground)
-                            try await Task.sleep(nanoseconds: 2_000_000)
+                        expected = (value as NSString).replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+                    }
+                    for scalar in text.unicodeScalars {
+                        try Task.checkCancellation()
+                        let units = Array(String(scalar).utf16)
+                        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                            throw ComputerFailure("input_failed", "macOS could not create a text event.")
                         }
-                        if let expected, let element {
-                            let deadline = ProcessInfo.processInfo.systemUptime + 1
-                            while attribute(element, kAXValueAttribute) as? String != expected {
-                                try checkpoint()
-                                guard ProcessInfo.processInfo.systemUptime < deadline else {
-                                    throw ComputerFailure("text_unconfirmed", "The application did not retain the complete supplementary text. Input may have partly completed; observe before continuing, and do not replay the write blindly.", evidence: ["text_route": "unicode_events", "value_matches": false])
-                                }
-                                try await Task.sleep(nanoseconds: 20_000_000)
-                            }
-                            evidence["value_matches"] = true
+                        down.flags = []
+                        up.flags = []
+                        units.withUnsafeBufferPointer { buffer in
+                            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+                            up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
                         }
+                        let routedDown = try keyboardEvent(down), routedUp = try keyboardEvent(up)
+                        try post(routedDown)
+                        deliver(routedUp, window: window, foreground: foreground)
+                        try await Task.sleep(nanoseconds: 2_000_000)
+                    }
+                    if let expected, let element {
+                        let deadline = ProcessInfo.processInfo.systemUptime + 1
+                        while attribute(element, kAXValueAttribute) as? String != expected {
+                            try checkpoint()
+                            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                                throw ComputerFailure("text_unconfirmed", "The application did not retain the complete text. Input may have partly completed; observe before continuing, and do not replay the write blindly.", evidence: ["text_route": "unicode_events", "value_matches": false])
+                            }
+                            try await Task.sleep(nanoseconds: 20_000_000)
+                        }
+                        evidence["value_matches"] = true
                     }
                 }
             }
