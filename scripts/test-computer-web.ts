@@ -62,6 +62,8 @@ type State = {
   ready: boolean
   first: string
   second: string
+  bounded: string
+  pastes: number
   count: number
   scrollTop: number
   drops: number
@@ -716,32 +718,82 @@ try {
         },
       )
       await check(
-        "background supplementary text is complete or explicitly unconfirmed",
+        "text input confirms readable values without clipboard use",
         async () => {
-          const before = (await state())?.first
+          const initialPastes = (await state())?.pastes
+          assert.equal(typeof initialPastes, "number")
+          const samples: {
+            text: string
+            confirmed: boolean
+            actual: string | undefined
+          }[] = []
+          for (const text of [
+            "ASCII",
+            "中文",
+            "😀",
+            "𠮷",
+            "👩‍💻",
+            "e\u0301",
+            "A猫😀B",
+          ]) {
+            const observed = await observe()
+            const typed = await call({
+              action: "type",
+              delivery: values.delivery,
+              snapshot_id: observed.structuredContent?.snapshot_id,
+              element: target(observed, "Web first").element,
+              text,
+              replace: true,
+            })
+            lastAction = typed.structuredContent
+            if (typed.isError) {
+              assert.equal(
+                values.delivery,
+                "background",
+                "Foreground text input must retain the complete text",
+              )
+              assert.equal(
+                typed.structuredContent?.code,
+                "text_unconfirmed",
+                JSON.stringify(typed.structuredContent),
+              )
+              assert.equal(typed.structuredContent?.value_matches, false)
+            } else {
+              assert.equal(typed.structuredContent?.value_matches, true)
+              await waitFor(async () => (await state())?.first === text)
+            }
+            samples.push({
+              text,
+              confirmed: !typed.isError,
+              actual: (await state())?.first,
+            })
+            assert.equal((await state())?.pastes, initialPastes)
+            if (values.delivery === "background")
+              assert.equal(
+                (await call({ action: "status" })).structuredContent
+                  ?.frontmost_pid,
+                backgroundPID,
+              )
+          }
+          lastAction = { delivery: values.delivery, samples }
+        },
+      )
+      await check(
+        "text input reports ordinary text truncated by the control",
+        async () => {
           const observed = await observe()
           const typed = await call({
             action: "type",
+            delivery: values.delivery,
             snapshot_id: observed.structuredContent?.snapshot_id,
-            element: target(observed, "Web first").element,
-            text: "😀",
+            element: target(observed, "Web bounded").element,
+            text: "ABCD",
           })
           lastAction = typed.structuredContent
-          if (typed.isError) {
-            assert(
-              ["text_unconfirmed", "foreground_required"].includes(
-                String(typed.structuredContent?.code),
-              ),
-              JSON.stringify(typed.structuredContent),
-            )
-            assert.equal((await state())?.first, before)
-          } else {
-            await waitFor(async () => (await state())?.first === `${before}😀`)
-          }
-          assert.equal(
-            (await call({ action: "status" })).structuredContent?.frontmost_pid,
-            backgroundPID,
-          )
+          assert(typed.isError, JSON.stringify(typed.structuredContent))
+          assert.equal(typed.structuredContent?.code, "text_unconfirmed")
+          assert.equal(typed.structuredContent?.value_matches, false)
+          await waitFor(async () => (await state())?.bounded === "ABC")
         },
       )
       await check(
@@ -855,26 +907,6 @@ try {
           assert(!dragged.isError, JSON.stringify(dragged.structuredContent))
           await waitFor(async () => (await state())?.drops === 1)
           assert.equal((await state())?.dragStarts, 1)
-        },
-      )
-      await check(
-        "foreground paste delivers full Unicode without dropping emoji",
-        async () => {
-          const observed = await observe()
-          const before = (await state())?.second
-          const typed = await call({
-            action: "type",
-            delivery: "foreground",
-            snapshot_id: observed.structuredContent?.snapshot_id,
-            element: target(observed, "Web second").element,
-            text: " 猫😀",
-          })
-          lastAction = typed.structuredContent
-          assert(!typed.isError, JSON.stringify(typed.structuredContent))
-          assert.equal(typed.structuredContent?.text_route, "clipboard")
-          await waitFor(
-            async () => (await state())?.second === `${before} 猫😀`,
-          )
         },
       )
     } finally {
