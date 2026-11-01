@@ -11,7 +11,7 @@ final class WebFixture: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     let window: NSWindow
     var lastState: [String: Any] = [:]
     var nativeEvents: [[String: Any]] = []
-    init(output: URL, page: URL) {
+    init(output: URL, page: URL, second: Bool = false) {
         self.output = output
         window = NSWindow(contentRect: NSRect(x: 140, y: 140, width: 640, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
@@ -19,7 +19,8 @@ final class WebFixture: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         configuration.userContentController.add(self, name: "fixture")
         let web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = self
-        window.title = "Yakitori WebKit Fixture"
+        window.title = second ? "Yakitori WebKit Fixture 2" : "Yakitori WebKit Fixture"
+        if second { window.setFrameOrigin(NSPoint(x: 660, y: 140)) }
         window.contentView = web
         window.makeKeyAndOrderFront(nil)
         web.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
@@ -39,7 +40,8 @@ final class WebFixture: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         } catch { fatalError("Fixture output failed: \(error)") }
     }
     func record(_ event: NSEvent) {
-        guard [.leftMouseDown, .leftMouseUp, .leftMouseDragged].contains(event.type) else { return }
+        guard event.windowNumber == window.windowNumber,
+              [.leftMouseDown, .leftMouseUp, .leftMouseDragged].contains(event.type) else { return }
         let view = window.contentView
         let hit = view.flatMap { $0.hitTest($0.convert(event.locationInWindow, from: nil)) }
         nativeEvents.append(["type": event.type.rawValue, "window": event.windowNumber, "resolved_window": event.window?.windowNumber ?? 0,
@@ -81,7 +83,11 @@ if CommandLine.arguments[2] == "--focus-holder" {
     withExtendedLifetime((window, observer)) { app.run() }
 } else {
     app.setActivationPolicy(.regular)
-    let fixture = WebFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]), page: URL(fileURLWithPath: CommandLine.arguments[2]))
-    app.received = { fixture.record($0) }
-    withExtendedLifetime(fixture) { app.run() }
+    let page = URL(fileURLWithPath: CommandLine.arguments[2])
+    var fixtures = [WebFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]), page: page)]
+    if CommandLine.arguments.count > 3 {
+        fixtures.append(WebFixture(output: URL(fileURLWithPath: CommandLine.arguments[3]), page: page, second: true))
+    }
+    app.received = { event in fixtures.forEach { $0.record(event) } }
+    withExtendedLifetime(fixtures) { app.run() }
 }

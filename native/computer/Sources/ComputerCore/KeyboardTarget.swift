@@ -28,12 +28,14 @@ func windowKeyboardEvent(_ event: CGEvent, window: WindowIdentity) throws -> CGE
 
 func keyboardFocusMatches(_ element: AXUIElement, window: WindowIdentity, windowBound: Bool) -> Bool {
     let app = AXUIElementCreateApplication(window.pid)
+    // AppKit can ignore an event's window number for keyboard dispatch. DOM
+    // focus alone is insufficient when another native window retains keys.
+    if windowBound, elementAttribute(app, kAXFocusedWindowAttribute).flatMap(accessibilityWindowID) != window.windowID { return false }
     if let focused = elementAttribute(app, kAXFocusedUIElementAttribute) { return CFEqual(focused, element) }
     // WebKit can expose DOM focus while its inactive application's global AX
     // focus is absent. Accept that only with a proven native window identity
-    // and keyboard events encoded for that exact window, never PID-only keys.
+    // and a matching native keyboard window, never DOM focus alone.
     guard windowBound, attribute(element, kAXFocusedAttribute) as? Bool == true,
           let owner = elementAttribute(element, kAXWindowAttribute), accessibilityWindowID(owner) == window.windowID else { return false }
-    if let focusedWindow = elementAttribute(app, kAXFocusedWindowAttribute), accessibilityWindowID(focusedWindow) != window.windowID { return false }
     return true
 }
