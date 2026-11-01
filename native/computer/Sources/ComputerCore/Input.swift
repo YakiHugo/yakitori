@@ -13,6 +13,9 @@ extension Computer {
         try ticket.validate(id: args["snapshot_id"] as? String, windows: windows(), displays: displays())
         let target = try ticket.target(args)
         let window = target.window, element = target.element
+        guard window == nil || window?.launched != nil else {
+            throw ComputerFailure("process_identity_unavailable", "The target's kernel process identity is unavailable; no input was sent.")
+        }
         var point = target.point
         if action == "hover", point == nil, let element, let frame = elementFrame(element),
            let window, !target.applicationUI, window.frame.contains(frame) {

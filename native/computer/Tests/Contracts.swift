@@ -5,9 +5,12 @@ import Foundation
 // The macOS Command Line Tools ship no XCTest/Testing runtime. Compile these
 // process-failing contracts with the core sources so CI needs no full Xcode.
 @main struct Contracts {
-    static func rejects(code: String? = nil, file: StaticString = #fileID, line: UInt = #line, _ operation: () throws -> Void) {
+    @discardableResult static func rejects(code: String? = nil, file: StaticString = #fileID, line: UInt = #line, _ operation: () throws -> Void) -> ComputerFailure {
         do { try operation(); fatalError("Expected a ComputerFailure", file: file, line: line) }
-        catch let failure as ComputerFailure { if let code { precondition(failure.code == code, "Expected \(code), received \(failure.code)") } }
+        catch let failure as ComputerFailure {
+            if let code { precondition(failure.code == code, "Expected \(code), received \(failure.code)") }
+            return failure
+        }
         catch { fatalError("Unexpected error: \(error)") }
     }
 
@@ -287,7 +290,14 @@ import Foundation
         precondition(running == found)
         let byID = try applicationURL(.bundleID("test.editor"), roots: [], running: [first])
         precondition(byID == found)
-        rejects(code: "app_ambiguous") { _ = try applicationURL(.name("Editor"), roots: [root], running: []) }
+        let ambiguousName = rejects(code: "app_ambiguous") { _ = try applicationURL(.name("Editor"), roots: [root], running: []) }
+        precondition(ambiguousName.evidence["ambiguity"] as? String == "installation")
+        let paths = (ambiguousName.evidence["candidates"] as? [[String: Any]])?.compactMap { $0["app_path"] as? String }
+        precondition(paths == [first.path, root.appendingPathComponent("two/Editor.app").path])
+        let ambiguousBundle = rejects(code: "app_ambiguous") {
+            _ = try applicationURL(.bundleID("test.editor"), roots: [], running: [root.appendingPathComponent("two/Editor.app"), first])
+        }
+        precondition((ambiguousBundle.evidence["candidates"] as? [[String: Any]])?.compactMap { $0["app_path"] as? String } == paths)
         rejects(code: "app_not_found") { _ = try applicationURL(.name("Edit"), roots: [root], running: []) }
         rejects(code: "invalid_arguments") { _ = try applicationURL(.path("Editor.app"), roots: [], running: []) }
         rejects(code: "app_not_found") { _ = try applicationURL(.path(root.path), roots: [], running: []) }

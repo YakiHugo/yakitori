@@ -60,6 +60,39 @@ enum ApplicationTarget {
     }
 }
 
+struct ApplicationInstance {
+    let application: NSRunningApplication
+    let url: URL?
+    let launched: Date?
+    let name: String
+    let bundleID: String?
+
+    init(_ application: NSRunningApplication) {
+        self.application = application
+        let started = processLaunchDate(application.processIdentifier)
+        url = application.bundleURL?.resolvingSymlinksInPath().standardizedFileURL
+        name = application.localizedName ?? ""
+        bundleID = application.bundleIdentifier
+        launched = !application.isTerminated && started == processLaunchDate(application.processIdentifier) ? started : nil
+    }
+
+    var isCurrent: Bool {
+        launched != nil && !application.isTerminated && processLaunchDate(application.processIdentifier) == launched
+    }
+
+    var data: [String: Any] {
+        ["pid": application.processIdentifier, "name": name, "bundle_id": bundleID ?? "", "app_path": url?.path ?? "",
+            "launch_time": launched.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
+            "hidden": application.isHidden, "active": application.isActive]
+    }
+}
+
+func installedApplicationData(_ url: URL) -> [String: Any] {
+    let bundle = Bundle(url: url)
+    return ["app_path": url.path, "bundle_id": bundle?.bundleIdentifier ?? "",
+        "name": bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? url.deletingPathExtension().lastPathComponent]
+}
+
 func applicationURL(_ target: ApplicationTarget, roots: [URL], running: [URL]) throws -> URL {
     let url: URL
     switch target {
@@ -67,7 +100,8 @@ func applicationURL(_ target: ApplicationTarget, roots: [URL], running: [URL]) t
         let active = Set(running.filter { Bundle(url: $0)?.bundleIdentifier?.caseInsensitiveCompare(id) == .orderedSame }
             .map { $0.resolvingSymlinksInPath().standardizedFileURL })
         guard active.count <= 1 else {
-            throw ComputerFailure("app_ambiguous", "Multiple running applications have bundle_id \(id); use app_path.")
+            throw ComputerFailure("app_ambiguous", "Multiple running installations have bundle_id \(id); choose a candidate app_path.",
+                evidence: ["ambiguity": "installation", "candidates": active.sorted { $0.path < $1.path }.map(installedApplicationData)])
         }
         guard let installed = active.first ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else {
             throw ComputerFailure("app_not_found", "No installed application has bundle_id \(id).")
@@ -103,7 +137,8 @@ func applicationURL(_ target: ApplicationTarget, roots: [URL], running: [URL]) t
         guard matches.count == 1, let match = matches.first else {
             throw ComputerFailure(matches.isEmpty ? "app_not_found" : "app_ambiguous",
                 matches.isEmpty ? "No application named \(name) was found. Use bundle_id or app_path for other install locations."
-                    : "Multiple applications match \(name); use app_path: \(matches.map(\.path).joined(separator: ", "))")
+                    : "Multiple applications match \(name); choose a candidate app_path.",
+                evidence: matches.isEmpty ? [:] : ["ambiguity": "installation", "candidates": matches.map(installedApplicationData)])
         }
         url = match
     }
@@ -115,57 +150,159 @@ func applicationURL(_ target: ApplicationTarget, roots: [URL], running: [URL]) t
 }
 
 extension Computer {
+    func applicationCandidates(_ instances: [ApplicationInstance]) -> [[String: Any]] {
+        let rows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]]
+        return instances.sorted { $0.application.processIdentifier < $1.application.processIdentifier }.map { instance in
+            var data = instance.data
+            // Unknown window discovery is not evidence that an app has no windows.
+            data["windows"] = rows.map { rows in
+                rows.filter { $0[kCGWindowOwnerPID as String] as? Int32 == instance.application.processIdentifier }.compactMap { row -> [String: Any]? in
+                    guard let id = row[kCGWindowNumber as String] as? UInt32,
+                          let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                          let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                          frame.width > 1, frame.height > 1 else { return nil }
+                    return ["window_id": id, "title": row[kCGWindowName as String] as? String ?? "", "frame": frameData(frame)]
+                }
+            } as Any? ?? NSNull()
+            return data
+        }
+    }
+
     func launch(_ args: [String: Any]) async throws -> [String: Any] {
-        let options = try ApplicationLaunchOptions(args)
-        let url = try applicationURL(ApplicationTarget(args), roots: [
-            "/Applications", "/System/Applications", "/System/Library/CoreServices", NSHomeDirectory() + "/Applications",
-        ].map { URL(fileURLWithPath: $0) }, running: NSWorkspace.shared.runningApplications.compactMap(\.bundleURL))
-        let key = SHA256.hash(data: Data(url.path.utf8)).map { String(format: "%02x", $0) }.joined()
-        let launchResource = try await NativeResources.acquire(["launch-" + key])
-        defer { withExtendedLifetime(launchResource) {} }
-        let running = NSWorkspace.shared.runningApplications.filter { $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == url }
-        guard options.newInstance || running.count <= 1 else {
-            throw ComputerFailure("app_ambiguous", "Multiple processes use this application bundle. Use new_instance=true to launch a distinct target.")
-        }
-        guard options.newInstance || running.isEmpty || options.arguments.isEmpty else {
-            throw ComputerFailure("arguments_require_new_instance", "Launch arguments only apply to a new process. Use new_instance=true or omit arguments when reusing a running app.")
-        }
-        let affected = options.newInstance ? [] : running.map(\.processIdentifier)
-        let resources = try await NativeResources.acquire(affected.filter { isolation?.owns($0) != true }.map { "app-\($0)" } + (options.foreground ? ["foreground"] : []))
-        defer { withExtendedLifetime(resources) {} }
-        if !options.newInstance, options.foreground, affected.contains(where: { isolation?.owns($0) == true }) {
-            throw ComputerFailure("app_concealed", "Reveal the isolated app before foreground launch.")
-        }
-        snapshot = nil
-        for pid in affected {
-            if isolation?.owns(pid) == true { try isolation?.advanceRevision(pid) }
-            else { try resources.advanceRevision(pid) }
-        }
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = options.foreground
-        config.allowsRunningApplicationSubstitution = false
-        config.createsNewApplicationInstance = options.newInstance
-        config.arguments = options.arguments
-        config.addsToRecentItems = false
-        config.promptsUserIfNeeded = false
-        // LaunchServices may finish after cancellation. Drain the tool promptly
-        // without replaying launch; a fresh list can discover the late result.
-        let app: NSRunningApplication = try await nativeRequest { done in
-            let completed: (NSRunningApplication?, Error?) -> Void = { app, error in
-                if let error { done(.failure(error)) }
-                else if let app { done(.success(app)) }
-                else { done(.failure(ComputerFailure("launch_failed", "LaunchServices returned no application."))) }
+        var stage = "selection"
+        var dispatched = false
+        var requested = args.filter { ["bundle_id", "app_path", "app_name", "pid", "launch_time", "new_instance", "delivery", "open_urls"].contains($0.key) }
+        var returned: [String: Any]?
+        do {
+            let options = try ApplicationLaunchOptions(args)
+            let pinned: ApplicationInstance?
+            let url: URL
+            if args["pid"] != nil || args["launch_time"] != nil {
+                guard !["bundle_id", "app_path", "app_name"].contains(where: { args[$0] != nil }),
+                      let number = args["pid"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      let pid = args["pid"] as? Int32, pid > 0,
+                      let birth = args["launch_time"] as? NSNumber, CFGetTypeID(birth) != CFBooleanGetTypeID(),
+                      birth.doubleValue.isFinite, birth.doubleValue > 0, !options.newInstance else {
+                    throw ComputerFailure("invalid_arguments", "Select an existing process with only pid and its launch_time; new_instance requires an installation selector.")
+                }
+                guard options.urls.isEmpty else {
+                    throw ComputerFailure("process_open_unsupported", "URL/document delivery to an exact process is unsupported. An installation selector may only be used when that installation's instance selection is acceptable.")
+                }
+                guard let app = NSRunningApplication(processIdentifier: pid) else {
+                    throw ComputerFailure("stale_target", "The selected process exited; list targets again.")
+                }
+                let instance = ApplicationInstance(app)
+                guard instance.isCurrent, instance.launched?.timeIntervalSince1970 == birth.doubleValue, let path = instance.url else {
+                    throw ComputerFailure("stale_target", "The selected process identity changed or is unavailable; list targets again.",
+                        evidence: ["candidates": applicationCandidates([instance])])
+                }
+                pinned = instance
+                url = path
+            } else {
+                pinned = nil
+                url = try applicationURL(ApplicationTarget(args), roots: [
+                    "/Applications", "/System/Applications", "/System/Library/CoreServices", NSHomeDirectory() + "/Applications",
+                ].map { URL(fileURLWithPath: $0) }, running: NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }.compactMap(\.bundleURL))
             }
-            if options.urls.isEmpty { NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: completed) }
-            else { NSWorkspace.shared.open(options.urls, withApplicationAt: url, configuration: config, completionHandler: completed) }
+            requested["app_path"] = url.path
+            let key = SHA256.hash(data: Data(url.path.utf8)).map { String(format: "%02x", $0) }.joined()
+            let launchResource = try await NativeResources.acquire(["launch-" + key])
+            defer { withExtendedLifetime(launchResource) {} }
+            let running = NSWorkspace.shared.runningApplications.filter {
+                !$0.isTerminated && $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == url
+            }.map(ApplicationInstance.init)
+            guard pinned != nil || options.newInstance || running.count <= 1 else {
+                throw ComputerFailure("app_ambiguous", "Multiple processes use this installation. Choose pid and launch_time from candidates, then observe its window; creating another process is a separate decision.",
+                    evidence: ["ambiguity": "process", "candidates": applicationCandidates(running)])
+            }
+            let existing = pinned ?? (options.newInstance ? nil : running.first)
+            guard existing == nil || options.arguments.isEmpty else {
+                throw ComputerFailure("arguments_require_new_instance", "Launch arguments cannot be applied to an existing process. Omit arguments to bind it, or explicitly request a new instance.",
+                    evidence: ["candidates": applicationCandidates(existing.map { [$0] } ?? [])])
+            }
+            let affected = existing.map { [$0.application.processIdentifier] } ?? []
+            let resources = try await NativeResources.acquire(affected.filter { isolation?.owns($0) != true }.map { "app-\($0)" } + (options.foreground ? ["foreground"] : []))
+            defer { withExtendedLifetime(resources) {} }
+            if let existing {
+                guard existing.isCurrent else {
+                    throw ComputerFailure("stale_target", "The selected process exited or its identity is unavailable; list targets again.",
+                        evidence: ["candidates": applicationCandidates([existing])])
+                }
+                if options.foreground, isolation?.owns(existing.application.processIdentifier) == true {
+                    throw ComputerFailure("app_concealed", "Reveal the isolated app before foreground activation.")
+                }
+            }
+            try Task.checkCancellation()
+            if let existing, options.urls.isEmpty, !options.foreground {
+                // Resolving an existing target must not dispatch reopen events,
+                // invalidate an input snapshot, or change the app's revision.
+                return try result(existing.data.merging(["instance_status": "existing", "mutation_dispatched": false,
+                    "effect": "none", "opened_url_count": 0, "delivery": "background"]) { _, value in value })
+            }
+            snapshot = nil
+            for pid in affected {
+                if isolation?.owns(pid) == true { try isolation?.advanceRevision(pid) }
+                else { try resources.advanceRevision(pid) }
+            }
+            stage = "dispatch"
+            let instance: ApplicationInstance
+            if let existing, options.urls.isEmpty {
+                dispatched = true
+                let error = requestApplicationActivation(existing.application)
+                returned = existing.data
+                guard error == .success else { throw ComputerFailure("activation_unconfirmed", "macOS did not confirm the activation request (\(error.rawValue)); inspect the target before retrying.") }
+                instance = existing
+            } else {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = options.foreground
+                config.allowsRunningApplicationSubstitution = false
+                config.createsNewApplicationInstance = options.newInstance
+                config.arguments = options.arguments
+                config.addsToRecentItems = false
+                config.promptsUserIfNeeded = false
+                // A timed-out/cancelled request can still finish. Never replay it.
+                let app: NSRunningApplication = try await nativeRequest { done in
+                    let completed: (NSRunningApplication?, Error?) -> Void = { app, error in
+                        if let error {
+                            let native = error as NSError
+                            done(.failure(ComputerFailure("launch_failed", error.localizedDescription,
+                                evidence: ["native_domain": native.domain, "native_code": native.code])))
+                        } else if let app { done(.success(app)) }
+                        else { done(.failure(ComputerFailure("launch_failed", "LaunchServices returned no application."))) }
+                    }
+                    dispatched = true
+                    if options.urls.isEmpty { NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: completed) }
+                    else { NSWorkspace.shared.open(options.urls, withApplicationAt: url, configuration: config, completionHandler: completed) }
+                }
+                instance = ApplicationInstance(app)
+                returned = instance.data
+            }
+            stage = "verification"
+            try Task.checkCancellation()
+            guard instance.url == url, instance.isCurrent,
+                  !options.newInstance || !running.contains(where: { $0.application.processIdentifier == instance.application.processIdentifier }),
+                  existing == nil || (instance.application.processIdentifier == existing?.application.processIdentifier && instance.launched == existing?.launched) else {
+                throw ComputerFailure("launch_identity_unconfirmed", "The returned application, process identity or requested new instance was not confirmed. Inspect list and the returned target before deciding whether another action is needed.")
+            }
+            // New means absent from the captured inventory, not exclusive ownership.
+            return try result(instance.data.merging(["instance_status": existing == nil ? "new" : "existing",
+                "mutation_dispatched": dispatched, "effect": "unverified", "delivery": options.foreground ? "foreground" : "background",
+                "opened_url_count": options.urls.count, "delivery_status": "unverified"]) { _, value in value })
+        } catch let failure as ComputerFailure {
+            var evidence = failure.evidence
+            evidence["stage"] = stage
+            evidence["mutation_dispatched"] = dispatched
+            evidence["effect"] = dispatched ? "unverified" : "none"
+            evidence["requested"] = requested
+            if let returned { evidence["returned"] = returned }
+            throw ComputerFailure(failure.code, failure.message, evidence: evidence)
+        } catch is CancellationError {
+            var evidence: [String: Any] = ["stage": stage, "mutation_dispatched": dispatched,
+                "effect": dispatched ? "unverified" : "none", "requested": requested]
+            if let returned { evidence["returned"] = returned }
+            throw ComputerFailure("cancelled", dispatched
+                ? "Application request stopped after dispatch; it may still complete. Inspect list before continuing."
+                : "Application request stopped before dispatch; no application action was sent.", evidence: evidence)
         }
-        try Task.checkCancellation()
-        guard app.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == url,
-              !options.newInstance || !running.contains(where: { $0.processIdentifier == app.processIdentifier }) else {
-            throw ComputerFailure("launch_identity_unconfirmed", "LaunchServices returned a different application or reused an existing process. Inspect list before any retry.")
-        }
-        return try result(["pid": app.processIdentifier, "app_path": url.path, "bundle_id": app.bundleIdentifier ?? "", "name": app.localizedName ?? "",
-            "launch_time": processLaunchDate(app.processIdentifier).map { $0.timeIntervalSince1970 as Any } ?? NSNull(), "delivery": options.foreground ? "foreground" : "background",
-            "new_instance": options.newInstance, "opened_url_count": options.urls.count, "delivery_status": "unverified"])
     }
 }

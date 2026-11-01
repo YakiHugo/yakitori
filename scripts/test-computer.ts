@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -73,6 +74,35 @@ let helperPid: number | undefined
 let fixturePid: number | undefined
 const extraFixturePids = new Set<number>()
 const fixtureRoot = await mkdtemp(join(tmpdir(), "yakitori-launch-mcp-"))
+type LaunchState = {
+  pid: number
+  arguments: string[]
+  opened_urls: string[]
+  reopens: number
+}
+async function waitForLaunchState(
+  path: string,
+  matches: (state: LaunchState) => boolean,
+): Promise<LaunchState> {
+  const deadline = Date.now() + 3_000
+  for (;;) {
+    let state: LaunchState | undefined
+    try {
+      state = JSON.parse(await readFile(path, "utf8"))
+    } catch (error) {
+      if (
+        !(error instanceof Error && "code" in error && error.code === "ENOENT")
+      )
+        throw error
+    }
+    if (state && matches(state)) return state
+    assert(
+      Date.now() < deadline,
+      "The real launch fixture did not reach its expected state",
+    )
+    await new Promise((done) => setTimeout(done, 20))
+  }
+}
 try {
   const tools = await client.start()
   const control = tools.find((tool) => tool.name === "control")
@@ -119,10 +149,31 @@ try {
 <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeExtensions</key><array><string>yakitori</string></array><key>CFBundleTypeRole</key><string>Editor</string></dict></array>
 </dict></plist>`,
   )
-  const launched = await call({ action: "launch", app_path: app })
+  const initialStatePath = join(fixtureRoot, "initial-state.json")
+  const canonicalApp = await realpath(app)
+  const launched = await call({
+    action: "launch",
+    app_path: app,
+    arguments: [initialStatePath],
+  })
   assert(!launched.isError, JSON.stringify(launched))
   assert.equal(typeof launched.structuredContent?.pid, "number")
+  assert.equal(launched.structuredContent?.instance_status, "new")
+  assert.equal(launched.structuredContent?.mutation_dispatched, true)
+  assert.equal(typeof launched.structuredContent?.launch_time, "number")
   fixturePid = launched.structuredContent?.pid as number
+  const launchTime = launched.structuredContent?.launch_time
+  const initial = await waitForLaunchState(
+    initialStatePath,
+    (state) => state.pid === fixturePid,
+  )
+  // Establish that the fixture observes real reopen events, then ensure
+  // discovery/reuse cannot send another one.
+  await run("/usr/bin/open", ["-g", "-a", app])
+  const reopened = await waitForLaunchState(
+    initialStatePath,
+    (state) => state.reopens > initial.reopens,
+  )
   for (const target of [
     { bundle_id: bundleID },
     { app_name: "Yakitori Launch Fixture" },
@@ -134,7 +185,26 @@ try {
       fixturePid,
       "Repeated launch must resolve the running app",
     )
+    assert.equal(resolved.structuredContent?.instance_status, "existing")
+    assert.equal(resolved.structuredContent?.mutation_dispatched, false)
+    assert.equal(resolved.structuredContent?.effect, "none")
+    assert.equal(resolved.structuredContent?.launch_time, launchTime)
   }
+  await new Promise((done) => setTimeout(done, 200))
+  const unchanged = await waitForLaunchState(initialStatePath, () => true)
+  assert.equal(
+    unchanged.reopens,
+    reopened.reopens,
+    "Binding an existing app must not send reopen",
+  )
+  const stale = await call({
+    action: "launch",
+    pid: fixturePid,
+    launch_time: Number(launchTime) + 1,
+  })
+  assert.equal(stale.structuredContent?.code, "stale_target")
+  assert.equal(stale.structuredContent?.mutation_dispatched, false)
+  assert.equal(stale.structuredContent?.stage, "selection")
   const invalid = await call({
     action: "launch",
     app_path: app,
@@ -150,6 +220,24 @@ try {
     ignoredArguments.structuredContent?.code,
     "arguments_require_new_instance",
   )
+  assert.equal(ignoredArguments.structuredContent?.mutation_dispatched, false)
+  // Explicit URL delivery to a unique installation retains the existing
+  // process, but is an actual mutation rather than a bind/no-op.
+  const document = join(fixtureRoot, "document.yakitori")
+  await writeFile(document, "owned launch acceptance fixture")
+  const documentUrl = pathToFileURL(await realpath(document)).href
+  const delivered = await call({
+    action: "launch",
+    app_path: app,
+    open_urls: [documentUrl],
+  })
+  assert(!delivered.isError, JSON.stringify(delivered))
+  assert.equal(delivered.structuredContent?.pid, fixturePid)
+  assert.equal(delivered.structuredContent?.instance_status, "existing")
+  assert.equal(delivered.structuredContent?.mutation_dispatched, true)
+  await waitForLaunchState(initialStatePath, (state) =>
+    state.opened_urls.includes(documentUrl),
+  )
   const nextStatePath = join(fixtureRoot, "new-instance-state.json")
   const literal = "literal $(not-a-shell) with spaces"
   const distinct = await call({
@@ -163,9 +251,6 @@ try {
   assert.equal(typeof distinctPid, "number")
   extraFixturePids.add(distinctPid as number)
   assert.notEqual(distinctPid, fixturePid)
-  const document = join(fixtureRoot, "document.yakitori")
-  await writeFile(document, "owned launch acceptance fixture")
-  const documentUrl = pathToFileURL(await realpath(document)).href
   // New-instance argv has its own output file; URL delivery is verified from
   // actual NSApplication delegate state rather than LaunchServices' callback.
   const openedState = join(fixtureRoot, "opened-state.json")
@@ -185,42 +270,141 @@ try {
     open_urls: [documentUrl],
   })
   assert.equal(ambiguous.structuredContent?.code, "app_ambiguous")
+  assert.equal(ambiguous.structuredContent?.ambiguity, "process")
+  assert.equal(ambiguous.structuredContent?.mutation_dispatched, false)
+  const processCandidates = ambiguous.structuredContent?.candidates as {
+    pid: number
+    launch_time: number
+    app_path: string
+    windows: { window_id: number; title: string }[] | null
+  }[]
+  assert.deepEqual(
+    processCandidates.map((candidate) => candidate.pid).sort((a, b) => a - b),
+    [fixturePid, distinctPid, opened.structuredContent?.pid].sort(
+      (a, b) => Number(a) - Number(b),
+    ),
+  )
+  assert.deepEqual(
+    await Promise.all(
+      processCandidates.map((candidate) => realpath(candidate.app_path)),
+    ),
+    processCandidates.map(() => canonicalApp),
+  )
+  const chosen = processCandidates.find(
+    (candidate) => candidate.pid === fixturePid,
+  )
+  assert(chosen)
+  assert.equal(chosen.launch_time, launchTime)
+  assert(chosen.windows?.some((window) => window.window_id > 0))
+  const bound = await call({
+    action: "launch",
+    pid: chosen.pid,
+    launch_time: chosen.launch_time,
+  })
+  assert(!bound.isError, JSON.stringify(bound))
+  assert.equal(bound.structuredContent?.pid, fixturePid)
+  assert.equal(bound.structuredContent?.mutation_dispatched, false)
+  const processOpen = await call({
+    action: "launch",
+    pid: chosen.pid,
+    launch_time: chosen.launch_time,
+    open_urls: [documentUrl],
+  })
+  assert.equal(processOpen.structuredContent?.code, "process_open_unsupported")
+  assert.equal(processOpen.structuredContent?.mutation_dispatched, false)
   for (const [path, expectedPid, expectedUrls] of [
     [nextStatePath, distinctPid, []],
     [openedState, opened.structuredContent?.pid, [documentUrl]],
   ] as const) {
-    const deadline = Date.now() + 3_000
-    for (;;) {
-      let state:
-        | { pid: number; arguments: string[]; opened_urls: string[] }
-        | undefined
-      try {
-        state = JSON.parse(await readFile(path, "utf8"))
-      } catch (error) {
-        if (
-          !(
-            error instanceof Error &&
-            "code" in error &&
-            error.code === "ENOENT"
-          )
-        )
-          throw error
-      }
-      if (state && state.opened_urls.length === expectedUrls.length) {
-        assert.equal(state.pid, expectedPid)
-        assert.deepEqual(state.arguments, [path, literal])
-        assert.deepEqual(state.opened_urls, expectedUrls)
-        break
-      }
-      assert(
-        Date.now() < deadline,
-        "Launch arguments/documents did not reach the real fixture",
-      )
-      await new Promise((done) => setTimeout(done, 20))
-    }
+    const state = await waitForLaunchState(
+      path,
+      (state) => state.opened_urls.length === expectedUrls.length,
+    )
+    assert.equal(state.pid, expectedPid)
+    assert.deepEqual(state.arguments, [path, literal])
+    assert.deepEqual(state.opened_urls, expectedUrls)
   }
+  assert.deepEqual(
+    (await waitForLaunchState(initialStatePath, () => true)).opened_urls,
+    [documentUrl],
+    "Ambiguous or unsupported delivery must not open another document",
+  )
+  // A second installation sharing both name and bundle ID must be returned
+  // as an installation candidate, rather than silently substituted.
+  const otherApp = join(fixtureRoot, "other", "Yakitori Launch Fixture.app")
+  await mkdir(join(otherApp, "Contents", "MacOS"), { recursive: true })
+  await copyFile(
+    join(contents, "MacOS/fixture"),
+    join(otherApp, "Contents", "MacOS/fixture"),
+  )
+  await copyFile(
+    join(contents, "Info.plist"),
+    join(otherApp, "Contents", "Info.plist"),
+  )
+  const other = await call({
+    action: "launch",
+    app_path: otherApp,
+    new_instance: true,
+    arguments: [join(fixtureRoot, "other-state.json")],
+  })
+  assert(!other.isError, JSON.stringify(other))
+  extraFixturePids.add(other.structuredContent?.pid as number)
+  for (const target of [
+    { app_name: "Yakitori Launch Fixture" },
+    { bundle_id: bundleID },
+  ]) {
+    const multiple = await call({ action: "launch", ...target })
+    assert.equal(multiple.structuredContent?.code, "app_ambiguous")
+    assert.equal(multiple.structuredContent?.ambiguity, "installation")
+    assert.equal(multiple.structuredContent?.mutation_dispatched, false)
+    assert.deepEqual(
+      (
+        await Promise.all(
+          (
+            multiple.structuredContent?.candidates as { app_path: string }[]
+          ).map((candidate) => realpath(candidate.app_path)),
+        )
+      ).sort(),
+      [canonicalApp, await realpath(otherApp)].sort(),
+    )
+  }
+  const brokenApp = join(fixtureRoot, "Broken.app")
+  await mkdir(join(brokenApp, "Contents", "MacOS"), { recursive: true })
+  await writeFile(
+    join(brokenApp, "Contents", "Info.plist"),
+    '<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.yakitori.broken-launch</string><key>CFBundleExecutable</key><string>broken</string></dict></plist>',
+  )
+  const brokenExecutable = join(brokenApp, "Contents", "MacOS", "broken")
+  await writeFile(brokenExecutable, "not an executable image")
+  await chmod(brokenExecutable, 0o755)
+  const failed = await call({ action: "launch", app_path: brokenApp })
+  assert.equal(failed.isError, true)
+  assert.equal(failed.structuredContent?.code, "launch_failed")
+  assert.equal(failed.structuredContent?.mutation_dispatched, true)
+  assert.equal(failed.structuredContent?.effect, "unverified")
+  assert.equal(failed.structuredContent?.stage, "dispatch")
+  assert.equal(
+    await realpath(
+      (failed.structuredContent?.requested as { app_path: string }).app_path,
+    ),
+    await realpath(brokenApp),
+  )
   const listed = await call({ action: "list" })
   assert(Array.isArray(listed.structuredContent?.displays))
+  const listedWindows = (
+    listed.structuredContent?.windows as {
+      pid: number
+      launch_time: number
+    }[]
+  ).filter((window) => window.pid === fixturePid)
+  assert(
+    listedWindows.length > 0,
+    "Discovery must retain the running fixture's windows",
+  )
+  assert(
+    listedWindows.every((window) => window.launch_time === launchTime),
+    "Discovery and launch must use the same kernel process identity",
+  )
   console.log(
     "MCP launches by path, bundle ID and exact name resolve the same real application.",
   )
