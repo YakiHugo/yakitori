@@ -7,6 +7,16 @@ LaunchServices starts the signed app so macOS permission grants belong to
 connection owns one app process; EOF, parent death, and cancellation drain its
 active input before release.
 
+Before local macOS development, run `pnpm setup:computer-signing` once. This
+creates a local signing identity in the user keychain without changing system
+certificate trust. Keep that identity across rebuilds: ad-hoc signatures bind privacy
+grants to a specific binary and can leave an enabled Settings entry that no
+longer matches the running helper. Rebuild, then grant the newly signed helper
+Accessibility and Screen Recording once. `YAKITORI_CODESIGN_IDENTITY` selects
+another identity explicitly; CI uses `-` because it retains no developer key or
+interactive privacy grants. Local signing does not provide Developer ID
+notarization for distribution.
+
 Background events use public per-process CGEvents. Some applications ignore these
 events or consult the physical cursor instead; delivery is explicitly unverified.
 There is no automatic foreground retry. Observation targets the current desktop's

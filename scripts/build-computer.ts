@@ -48,7 +48,7 @@ await writeFile(
 await run("/usr/bin/codesign", [
   "--force",
   "--sign",
-  process.env.YAKITORI_CODESIGN_IDENTITY ?? "-",
+  process.env.YAKITORI_CODESIGN_IDENTITY ?? "Yakitori Local Development",
   "--identifier",
   "com.yakitori.computer",
   resolve(contents, ".."),
