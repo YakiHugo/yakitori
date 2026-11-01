@@ -114,9 +114,16 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
     var menusOpen = 0
     var events: [[String: Any]] = []
     var openedURLs: [String] = []
+    var reopens = 0
 
     func application(_ application: NSApplication, open urls: [URL]) {
         openedURLs.append(contentsOf: urls.map(\.absoluteString)); save()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        reopens += 1
+        save()
+        return false
     }
 
     func record(_ event: NSEvent) {
@@ -222,7 +229,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
                 }
             let bytes = try JSONSerialization.data(withJSONObject: [
                 "pid": getpid(), "count": count, "first": first.stringValue, "second": second.stringValue,
-                "arguments": Array(CommandLine.arguments.dropFirst()), "opened_urls": openedURLs,
+                "arguments": Array(CommandLine.arguments.dropFirst()), "opened_urls": openedURLs, "reopens": reopens,
                 "moves": moves, "visible": window.isVisible, "height": window.frame.height,
                 "dragging": canvas.dragging, "mouse_down": canvas.downCount, "mouse_up": canvas.upCount,
                 "window_id": window.windowNumber, "secondary_window_id": secondary?.windowNumber ?? 0,

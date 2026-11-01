@@ -1,13 +1,11 @@
-import AppKit
+import Foundation
 import DisplayBridge
 
 func processLaunchDate(_ pid: pid_t) -> Date? {
     guard pid > 0 else { return nil }
-    // LaunchServices omits launchDate for apps started directly (including
-    // Electron). Kernel birth time remains stable for that process incarnation
-    // and prevents both PID reuse and repeatedly resetting Chromium's delayed
-    // accessibility-provider activation. Prefer it for every identity boundary.
+    // Identity must have one source across discovery, input and recovery.
+    // LaunchServices dates are application metadata, not an interchangeable
+    // fallback for kernel process birth time. Unknown identity stays unknown.
     let started = YKProcessStartTime(pid)
-    if started > 0 { return Date(timeIntervalSince1970: started) }
-    return NSRunningApplication(processIdentifier: pid)?.launchDate
+    return started > 0 ? Date(timeIntervalSince1970: started) : nil
 }
