@@ -23,16 +23,27 @@ func selectedRange(in value: String, text: String, prefix: String?, suffix: Stri
     }
 }
 
-func confirmSelection(_ range: CFRange, element: AXUIElement) throws {
+func confirmSelection(_ range: CFRange, element: AXUIElement) async throws {
     var range = range
     guard let encoded = AXValueCreate(.cfRange, &range),
-          AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, encoded) == .success,
-          let value = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(value) == AXValueGetTypeID() else {
+          AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, encoded) == .success else {
         throw ComputerFailure("selection_unconfirmed", "The target did not accept the requested text selection; no text was sent.")
     }
-    var actual = CFRange()
-    guard AXValueGetValue(value as! AXValue, .cfRange, &actual), actual.location == range.location, actual.length == range.length else {
-        throw ComputerFailure("selection_unconfirmed", "The target did not confirm the requested text selection; no text was sent.")
+    // Cross-process providers can acknowledge before publishing selection.
+    // Submit once, then bound the OS readback wait without replaying the write.
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while true {
+        try Task.checkCancellation()
+        var actual = CFRange()
+        if let value = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(value) == AXValueGetTypeID(),
+           AXValueGetValue(value as! AXValue, .cfRange, &actual), actual.location == range.location, actual.length == range.length { return }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            throw ComputerFailure("selection_unconfirmed", "The target did not confirm the requested text selection; no text was sent.", evidence: [
+                "expected_selection": ["location": range.location, "length": range.length],
+                "actual_selection": ["location": actual.location, "length": actual.length],
+            ])
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
     }
 }
 
@@ -44,7 +55,7 @@ func insertTextValue(_ text: String, element: AXUIElement, replace: Bool, checkp
     guard let value = attribute(element, kAXValueAttribute) as? String else {
         throw ComputerFailure("selection_unconfirmed", "Addressed text insertion requires readable text; no text was sent.")
     }
-    if replace { try confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element) }
+    if replace { try await confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element) }
     guard let encoded = attribute(element, kAXSelectedTextRangeAttribute), CFGetTypeID(encoded) == AXValueGetTypeID() else {
         throw ComputerFailure("selection_unconfirmed", "The target does not expose a text selection; no text was sent.")
     }
@@ -75,14 +86,14 @@ func insertTextValue(_ text: String, element: AXUIElement, replace: Bool, checkp
     }
     try checkpoint()
     do {
-        try confirmSelection(CFRange(location: range.location + text.utf16.count, length: 0), element: element)
+        try await confirmSelection(CFRange(location: range.location + text.utf16.count, length: 0), element: element)
     } catch let error as ComputerFailure where error.code == "selection_unconfirmed" {
         throw ComputerFailure("text_unconfirmed", "The text was inserted but its final caret could not be confirmed. Observe before continuing; do not replay the write.", evidence: ["text_route": "accessibility_value", "value_matches": true])
     }
     return ["text_route": "accessibility_value", "value_matches": true]
 }
 
-func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) throws -> [String: Any] {
+func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) async throws -> [String: Any] {
     switch action {
     case "press", "perform_action":
         let name: String
@@ -111,7 +122,7 @@ func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElem
             throw ComputerFailure("invalid_arguments", "select_text requires readable text, text, and selection_type=text/cursor_before/cursor_after.")
         }
         let range = try selectedRange(in: value, text: text, prefix: args["prefix"] as? String, suffix: args["suffix"] as? String, kind: kind)
-        try confirmSelection(range, element: element)
+        try await confirmSelection(range, element: element)
         return ["selection": ["location": range.location, "length": range.length]]
     default: preconditionFailure("Unexpected AX input action")
     }

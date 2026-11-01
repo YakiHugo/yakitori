@@ -404,10 +404,12 @@ try {
               assert.equal(refused.structuredContent?.code, "focus_unconfirmed")
               assert.equal((await state())?.first, "")
               assert.equal((await readSecond()).first, "")
-              for (const [id, text] of [
-                [primaryWindow, "Primary 猫"],
-                [secondWindow, "Secondary 犬"],
-                [primaryWindow, " again"],
+              for (const [id, text, expected, replace] of [
+                [primaryWindow, "Primary 猫", "Primary 猫", false],
+                [secondWindow, "Secondary 犬", "Secondary 犬", false],
+                [primaryWindow, " again", "Primary 猫 again", false],
+                [primaryWindow, "更新 🐈", "更新 🐈", true],
+                [primaryWindow, " 完", "更新 🐈 完", false],
               ] as const) {
                 windowID = id
                 const observed = await observe()
@@ -417,14 +419,14 @@ try {
                   snapshot_id: observed.structuredContent?.snapshot_id,
                   element: target(observed, "Web first").element,
                   text,
+                  replace,
                 })
                 lastAction = typed.structuredContent
                 assert(!typed.isError, JSON.stringify(typed.structuredContent))
                 await waitFor(async () =>
                   id === primaryWindow
-                    ? (await state())?.first ===
-                      (text === " again" ? "Primary 猫 again" : text)
-                    : (await readSecond()).first === text,
+                    ? (await state())?.first === expected
+                    : (await readSecond()).first === expected,
                 )
                 assert.equal(
                   (await call({ action: "status" })).structuredContent
@@ -432,7 +434,7 @@ try {
                   backgroundPID,
                 )
               }
-              assert.equal((await state())?.first, "Primary 猫 again")
+              assert.equal((await state())?.first, "更新 🐈 完")
               assert.equal((await readSecond()).first, "Secondary 犬")
               assert.equal((await state())?.second, "")
               assert.equal((await readSecond()).second, "")

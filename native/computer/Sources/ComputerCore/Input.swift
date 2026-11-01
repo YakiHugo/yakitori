@@ -184,7 +184,7 @@ extension Computer {
                 }
             }
         } else if axAction, let element {
-            evidence = try accessibilityInput(action, args: args, element: element)
+            evidence = try await accessibilityInput(action, args: args, element: element)
         } else {
             if ["type", "key", "keys", "paste"].contains(action) {
                 if let element {
@@ -352,7 +352,7 @@ extension Computer {
                         guard let value = attribute(element, kAXValueAttribute) as? String else {
                             throw ComputerFailure("selection_unconfirmed", "The target does not expose text for a confirmed replacement; no replacement text was sent.")
                         }
-                        try confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element)
+                        try await confirmSelection(CFRange(location: 0, length: value.utf16.count), element: element)
                     }
                     if let unicodePaste {
                         evidence["text_route"] = "clipboard"
