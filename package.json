@@ -33,6 +33,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "setup:computer-signing": "node scripts/setup-computer-signing.ts",
     "build:computer": "node scripts/build-computer.ts",
     "test:computer": "pnpm build:computer && node scripts/test-computer.ts",
     "test:computer:live": "node scripts/test-computer-live.ts",
