@@ -752,11 +752,18 @@ it.each([
   ["gemini", "gemini_generate_content", true],
   ["gemini", "gemini_interactions", false],
   ["gemini", "openai_chat_completions", false],
+  ["qwen", "openai_chat_completions", true],
+  ["qwen", "openai_responses", false],
+  [undefined, "openai_chat_completions", false],
 ] as const)("captures native image delegation from service and protocol, not provider label (%s, %s)", (serviceId, wireApi, expected) => {
   const step = captureStepContext({
     registry: createToolRegistry([]),
     configuration: configuration(
-      target("anthropic", "claude-sonnet-4-6", "anthropic"),
+      target(
+        "anthropic",
+        serviceId === "qwen" ? "qwen3.8-max" : "claude-sonnet-4-6",
+        "anthropic",
+      ),
       [],
     ),
     ...(serviceId === undefined ? {} : { serviceId }),

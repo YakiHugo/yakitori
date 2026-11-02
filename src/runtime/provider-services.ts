@@ -92,7 +92,13 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "DASHSCOPE_API_KEY",
     flavor: "qwen",
-    models: [{ id: "qwen3.8-max" }],
+    models: [
+      {
+        id: "qwen3.8-max",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+    ],
     documentationURL:
       "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
   },

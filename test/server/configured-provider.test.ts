@@ -872,6 +872,27 @@ it.each([
     undefined,
     false,
   ],
+  [
+    "qwen",
+    "openai_chat_completions",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "qwen",
+    false,
+  ],
+  [
+    "qwen",
+    "openai_chat_completions",
+    "https://relay.example/v1",
+    undefined,
+    false,
+  ],
+  [
+    "qwen",
+    "openai_chat_completions",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/other",
+    undefined,
+    false,
+  ],
 ] as const)("defers image projection only for confirmed service/protocol %s %s %s", async (service, wireApi, baseURL, expectedService, deferred) => {
   const provider = createConfiguredProvider(
     "editable-account",
