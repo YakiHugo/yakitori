@@ -244,6 +244,28 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.mistral.ai/vibe/code/cli/configuration",
   },
   {
+    id: "mimo",
+    name: "Xiaomi MiMo",
+    baseURL: "https://api.xiaomimimo.com/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "MIMO_API_KEY",
+    flavor: "mimo",
+    models: [
+      "mimo-v2.6-pro",
+      "mimo-v2.6-flash",
+      "mimo-v2.6-pro-ultraspeed",
+    ].map((id) => ({
+      id,
+      contextWindowTokens: 1_000_000,
+      contextWindowScope: "total" as const,
+      maxOutputTokens: 131072,
+      inputModalities: ["text", "image"],
+      imageDetailModes: ["high"],
+    })),
+    documentationURL:
+      "https://mimo.mi.com/docs/en-US/quick-start/summary/model",
+  },
+  {
     id: "stepfun",
     name: "StepFun",
     baseURL: "https://api.stepfun.com/v1",

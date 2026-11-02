@@ -1,5 +1,6 @@
-import { isMetaVisionModel } from "../meta-image-policy.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
+import { isMetaVisionModel } from "../meta-image-policy.ts"
+import { isMimoVisionModel } from "../mimo-image-policy.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
 import type { ProviderToolCapabilities } from "../model-provider.ts"
@@ -244,7 +245,10 @@ export function captureStepContext(
         target.model === "glm-5.3-flash") ||
       (input.serviceId === "stepfun" &&
         input.wireApi === "openai_chat_completions" &&
-        target.model === "step-5-preview"),
+        target.model === "step-5-preview") ||
+      (input.serviceId === "mimo" &&
+        input.wireApi === "openai_chat_completions" &&
+        isMimoVisionModel(target.model)),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,
