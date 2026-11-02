@@ -140,8 +140,7 @@ describe("composer", () => {
     })
   })
 
-  it("lets an unsupported original-detail draft switch to High before admission", async () => {
-    const user = userEvent.setup()
+  it("keeps image quality internal and allows original source images on high-only models", async () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       modelSelections: {
@@ -162,53 +161,41 @@ describe("composer", () => {
       ],
       promptDraft: inputParts("Review this", [draftImage("original")]),
     })
-    fakeRef.current.respond = (method, params) => {
-      if (method === "model/preview") {
-        const { requirements } = params as {
-          requirements: { imageDetail?: string }
-        }
-        const available = requirements.imageDetail !== "original"
+    fakeRef.current.respond = (method) => {
+      if (method === "model/preview")
         return {
-          available,
+          available: true,
           efforts: [],
           speeds: [],
-          inputModalities: available ? ["text", "image"] : [],
-          imageDetailModes: available ? ["high"] : [],
-          rejections: available
-            ? []
-            : [
-                {
-                  message:
-                    "This account does not support original image detail.",
-                },
-              ],
+          inputModalities: ["text", "image"],
+          imageDetailModes: ["high"],
+          rejections: [],
         }
-      }
       throw new Error(`Unexpected RPC: ${method}`)
     }
     render(<Composer />)
-    await screen.findByText(
-      "This account does not support original image detail.",
+    await waitFor(() =>
+      expect(
+        fakeRef.current.requestsFor("model/preview").length,
+      ).toBeGreaterThan(0),
     )
     expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
       "disabled",
-      true,
+      false,
     )
-    const detail = screen.getByRole("button", {
-      name: "Use high detail for screenshot.png",
+    expect(screen.queryByRole("button", { name: /detail/i })).toBeNull()
+    expect(screen.queryByText(/Original detail/)).toBeNull()
+    expect(
+      fakeRef.current.requestsFor("model/preview")[0]?.params,
+    ).toMatchObject({
+      requirements: { inputModalities: ["image"] },
     })
-    expect(detail).toHaveProperty("disabled", false)
-    await user.click(detail)
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
-        "disabled",
-        false,
-      ),
-    )
+    expect(
+      fakeRef.current.requestsFor("model/preview")[0]?.params,
+    ).not.toHaveProperty("requirements.imageDetail")
     expect(useAppStore.getState().promptDraft?.attachments[0]).toMatchObject({
-      detail: "high",
+      detail: "original",
     })
-    expect(fakeRef.current.requestsFor("session/input/admit")).toEqual([])
   })
 
   it("resumes an interrupted turn without submitting or clearing a user message", async () => {
@@ -615,7 +602,7 @@ describe("composer", () => {
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
   })
 
-  it("attaches an image, selects original detail, and sends without text", async () => {
+  it("attaches an image and sends without exposing image quality", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn(() => Promise.resolve())
     useAppStore.setState({
@@ -632,11 +619,7 @@ describe("composer", () => {
         ),
       ).toHaveLength(1)
     })
-    await user.click(
-      screen.getByRole("button", {
-        name: "Use original detail for screenshot.png",
-      }),
-    )
+    expect(screen.queryByRole("button", { name: /detail/i })).toBeNull()
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(admitInput).toHaveBeenCalledWith(
@@ -644,7 +627,7 @@ describe("composer", () => {
         {
           name: "screenshot.png",
           mediaType: "image/png",
-          detail: "original",
+          detail: "high",
           sizeBytes: 9,
           file: {
             rolloutId: "session_1",
@@ -991,12 +974,8 @@ describe("composer", () => {
     })
     render(<Composer />)
 
-    expect(screen.getByText(/Original detail is unavailable/)).toBeDefined()
-    expect(
-      screen.getByRole("button", {
-        name: "Use high detail for screenshot.png",
-      }),
-    ).toHaveProperty("disabled", false)
+    expect(screen.queryByText(/Original detail/)).toBeNull()
+    expect(screen.queryByRole("button", { name: /detail/i })).toBeNull()
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(

@@ -144,7 +144,38 @@ it("previews an unset effort using the session's preferred account default", asy
   })
 })
 
-async function createFixture() {
+it.each([
+  "user",
+  "tool",
+] as const)("allows a high-detail model to continue with an original %s image in history", async (role) => {
+  const fixture = await createFixture(true)
+  const content = [{ ...fixture.image, detail: "original" as const }]
+  const sessionId = await fixture.storeSession(`original_${role}`, "first", [
+    {
+      type: "response_item",
+      item: {
+        id: "historical_image",
+        turnId: "old_turn",
+        createdAt,
+        item:
+          role === "user"
+            ? { role, content }
+            : { role, toolCallId: "read_image", content },
+      },
+    },
+  ])
+  const preview = await fixture.client.request("model/preview", {
+    selection: logical,
+    sessionId,
+  })
+  expect(preview).toMatchObject({
+    available: true,
+    target: { provider: "first", model: "shared" },
+    imageDetailModes: ["high"],
+  })
+})
+
+async function createFixture(vision = false) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-model-preview-"))
   onTestFinished(() => rm(root, { recursive: true, force: true }))
   const workspace = join(root, "workspace")
@@ -194,7 +225,8 @@ async function createFixture() {
               {
                 id: "shared",
                 identity: { namespace: "shared-vendor", model: "coder" },
-                inputModalities: ["text"],
+                inputModalities: vision ? ["text", "image"] : ["text"],
+                ...(vision ? { imageDetailModes: ["high"] } : {}),
                 efforts: ["low", "high"],
                 defaultEffort: name === "first" ? "low" : "high",
               },

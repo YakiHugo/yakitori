@@ -993,16 +993,10 @@ test("model preview prevents mixed-provider effort and image combinations before
     ).toBeVisible()
     await expect(
       page.getByRole("button", { name: "Send", exact: true }),
-    ).toBeDisabled()
-    await page
-      .getByRole("button", {
-        name: "Use high detail for preview.png",
-        exact: true,
-      })
-      .click()
-    await expect(
-      page.getByRole("button", { name: "Send", exact: true }),
     ).toBeEnabled()
+    await expect(
+      page.getByRole("button", { name: /detail for preview.png/ }),
+    ).toHaveCount(0)
     await selector.click()
     await expect(
       page.getByRole("button", { name: "high", exact: true }),

@@ -14,21 +14,16 @@ export function modelRoutingRequirements(
 ): ModelRouteRequirements & Readonly<{ preferredAccount?: string }> {
   const attachments = input.attachments ?? []
   let image = attachments.some((file) => file.mediaType.startsWith("image/"))
-  let original = attachments.some(
-    (file) => "detail" in file && file.detail === "original",
-  )
   for (const message of input.history) {
     if (message.role !== "user" && message.role !== "tool") continue
     for (const block of message.content) {
       if (block.type !== "image") continue
       image = true
-      original ||= block.detail === "original"
     }
   }
 
   return {
     ...(image ? { inputModalities: ["image"] } : {}),
-    ...(original ? { imageDetail: "original" } : {}),
     ...(input.configuration === undefined
       ? {}
       : { preferredAccount: input.configuration.defaultTarget.provider }),

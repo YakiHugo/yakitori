@@ -1275,9 +1275,6 @@ export async function createYakitoriApplication(
                 ...(context.requiresImages
                   ? { inputModalities: ["image"] }
                   : {}),
-                ...(context.imageDetail === undefined
-                  ? {}
-                  : { imageDetail: context.imageDetail }),
                 ...(context.contextWindowTokens === undefined
                   ? {}
                   : { contextWindowTokens: context.contextWindowTokens }),
@@ -1721,9 +1718,6 @@ export async function createYakitoriApplication(
                   ...(requirements?.inputModalities ?? []),
                 ]),
               ],
-              ...(active.imageDetail === "original"
-                ? { imageDetail: "original" }
-                : {}),
               ...(active.contextWindowTokens === undefined
                 ? {}
                 : {

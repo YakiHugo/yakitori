@@ -235,14 +235,6 @@ export function createModelRouter(input: {
           `This account does not support ${modality} input.`,
         )
       if (
-        requirements.imageDetail &&
-        !model.imageDetailModes.includes(requirements.imageDetail)
-      )
-        return reject(
-          "unsupported_image_detail",
-          `This account does not support ${requirements.imageDetail} image detail.`,
-        )
-      if (
         selection.effort !== undefined &&
         !model.efforts?.includes(selection.effort)
       )

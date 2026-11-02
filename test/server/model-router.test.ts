@@ -335,7 +335,6 @@ describe("account model routing", () => {
         { ...selection, effort: "high" },
         {
           inputModalities: ["image"],
-          imageDetail: "original",
           contextWindowTokens: 64_000,
         },
       )
@@ -349,7 +348,6 @@ describe("account model routing", () => {
           { ...selection, effort: "high" },
           {
             inputModalities: ["image"],
-            imageDetail: "original",
             contextWindowTokens: 64_000,
           },
         ),
