@@ -1389,7 +1389,7 @@ async function executeTurnModelLoop(
           return prepareModelMedia(history, {
             target: executionStep.target,
             imageCapabilities: executionStep.modelInfo,
-            nativeAnthropicImages: executionStep.nativeAnthropicImages,
+            deferImagePreparation: executionStep.deferImagePreparation,
             rolloutAssets: input.options.rolloutAssets,
             documentReading: executionStep.documentReading,
             userDocumentReading: executionStep.userDocumentReading,
@@ -1407,7 +1407,7 @@ async function executeTurnModelLoop(
         messages: await prepareModelMedia(messages, {
           target: step.target,
           imageCapabilities: step.modelInfo,
-          nativeAnthropicImages: step.nativeAnthropicImages,
+          deferImagePreparation: step.deferImagePreparation,
           rolloutAssets: input.options.rolloutAssets,
           documentReading: step.documentReading,
           userDocumentReading: step.userDocumentReading,
@@ -1970,7 +1970,7 @@ async function executeTurnModelLoop(
               {
                 target: step.target,
                 imageCapabilities: step.modelInfo,
-                nativeAnthropicImages: step.nativeAnthropicImages,
+                deferImagePreparation: step.deferImagePreparation,
                 rolloutAssets: input.options.rolloutAssets,
                 documentReading: step.documentReading,
                 userDocumentReading: step.userDocumentReading,
@@ -2764,7 +2764,7 @@ async function compactLiveHistory(
         {
           target: compactionStep.target,
           imageCapabilities: compactionStep.modelInfo,
-          nativeAnthropicImages: compactionStep.nativeAnthropicImages,
+          deferImagePreparation: compactionStep.deferImagePreparation,
           rolloutAssets: input.rolloutAssets,
           documentReading: compactionStep.documentReading,
           userDocumentReading: compactionStep.userDocumentReading,

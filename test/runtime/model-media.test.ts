@@ -44,7 +44,7 @@ it.each([
   [true, "claude-sonnet-4-6", 2400],
   [false, "claude-sonnet-4-6", 2048],
   [true, "claude-future", 2400],
-] as const)("defers resizing only for a captured native endpoint, leaving model-specific decisions to its adapter (%s, %s)", async (nativeAnthropicImages, model, width) => {
+] as const)("defers resizing only for a captured native endpoint, leaving model-specific decisions to its adapter (%s, %s)", async (deferImagePreparation, model, width) => {
   const { default: sharp } = await import("sharp")
   const bytes = await sharp({
     create: { width: 2400, height: 1200, channels: 3, background: "red" },
@@ -66,7 +66,7 @@ it.each([
   ]
   const original = JSON.stringify(messages)
   const projected = await prepareModelMedia(messages, {
-    nativeAnthropicImages,
+    deferImagePreparation,
     target: {
       provider: "custom-label",
       model,

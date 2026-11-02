@@ -1142,7 +1142,7 @@ describe("native Gemini provider", () => {
     expect(events).toMatchObject([
       {
         type: "failure",
-        failure: { kind: "protocol_error", stage: "request_build" },
+        failure: { kind: "invalid_request", stage: "request_build" },
       },
     ])
   })
