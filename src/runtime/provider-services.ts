@@ -150,7 +150,17 @@ export const providerServices: readonly ProviderPreset[] = [
     baseURL: "https://api.z.ai/api/paas/v4/",
     wireApi: "openai_chat_completions",
     envKey: "ZAI_API_KEY",
-    models: [{ id: "glm-5.3" }],
+    flavor: "glm",
+    models: [
+      { id: "glm-5.3" },
+      {
+        id: "glm-5.3-flash",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        efforts: ["low", "high", "max"],
+        defaultEffort: "max",
+      },
+    ],
     documentationURL: "https://docs.z.ai/guides/overview/quick-start",
   },
   {
