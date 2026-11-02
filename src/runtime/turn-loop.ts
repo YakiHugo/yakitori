@@ -968,13 +968,17 @@ async function executeTurnModelLoop(
             ])
             const history = input.session.executionSnapshot(input.execution)
               .context.history
-            const tokens = estimateModelRequestBudget({
-              target: step.target,
-              system: [configuration.baseInstructions],
-              messages: history.map(({ item }) => item),
-              tools: step.toolRouter.modelDefinitions,
-              toolWireProtocol: step.toolWireProtocol,
-            }).estimatedInputTokens
+            const tokens = estimateModelRequestBudget(
+              {
+                target: step.target,
+                system: [configuration.baseInstructions],
+                messages: history.map(({ item }) => item),
+                tools: step.toolRouter.modelDefinitions,
+                toolWireProtocol: step.toolWireProtocol,
+              },
+              step.imageTokenEstimator,
+              "history",
+            ).estimatedInputTokens
             await input.session.recordContextTokens(input.execution, {
               activeContextTokens: tokens,
               inputTokens: tokens,
@@ -1422,6 +1426,7 @@ async function executeTurnModelLoop(
       }
       const plan = prepareModelRequestPlan(rawRequest, {
         model: step.modelInfo,
+        imageTokenEstimator: step.imageTokenEstimator,
         wireApi: wireApi ?? "unknown",
         ...(modelSession?.toolCapabilities === undefined
           ? {}
@@ -2574,11 +2579,13 @@ function assessModelRequest(input: {
     input.baselineModel === input.step.target.model
   const estimatedHistoryTokens = estimateHistoryTokens(
     input.history.map(({ item }) => item),
+    input.step.imageTokenEstimator,
   )
   const anchoredTokens = hasAnchoredMeasurement
     ? input.activeContextTokens +
       estimateHistoryTokens(
         input.history.slice(anchorIndex + 1).map(({ item }) => item),
+        input.step.imageTokenEstimator,
       )
     : undefined
   // A foreign model's measurement is not a calibrated prefix for the target
@@ -2911,15 +2918,19 @@ async function compactLiveHistory(
             },
           }),
     })
-    const estimatedContextTokens = estimateModelRequestBudget({
-      target: compactionStep.target,
-      system: [compactionStep.configuration.baseInstructions],
-      messages: input.session
-        .executionSnapshot(input.execution)
-        .context.history.map((item) => item.item),
-      tools: [],
-      toolWireProtocol: "eager",
-    }).estimatedInputTokens
+    const estimatedContextTokens = estimateModelRequestBudget(
+      {
+        target: compactionStep.target,
+        system: [compactionStep.configuration.baseInstructions],
+        messages: input.session
+          .executionSnapshot(input.execution)
+          .context.history.map((item) => item.item),
+        tools: [],
+        toolWireProtocol: "eager",
+      },
+      compactionStep.imageTokenEstimator,
+      "history",
+    ).estimatedInputTokens
     await input.session.recordContextTokens(input.execution, {
       activeContextTokens: estimatedContextTokens,
       inputTokens: estimatedContextTokens,

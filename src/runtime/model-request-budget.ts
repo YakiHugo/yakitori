@@ -1,4 +1,5 @@
 import { readImageDimensions } from "../kernel/image-metadata.ts"
+import type { ImageTokenEstimator } from "./openai-image-budget.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import type { ModelImageBlock, ModelMessage, ModelRequest } from "./model.ts"
 
@@ -20,6 +21,8 @@ export type ModelRequestBudget = Readonly<{
 
 export function estimateModelRequestBudget(
   request: ModelRequest,
+  imageTokenEstimator: ImageTokenEstimator = estimateImageTokens,
+  imageStage: "history" | "prepared" = "prepared",
 ): ModelRequestBudget {
   const envelopeTokens = estimateTextTokens(
     JSON.stringify({
@@ -60,7 +63,8 @@ export function estimateModelRequestBudget(
           [...message.content]
             .filter((block): block is ModelImageBlock => block.type === "image")
             .reduce(
-              (subtotal, image) => subtotal + estimateImageTokens(image),
+              (subtotal, image) =>
+                subtotal + imageTokenEstimator(image, imageStage),
               0,
             ),
     0,
@@ -88,6 +92,7 @@ function estimateTextTokens(text: string): number {
 // local estimate. Image payload bytes are transport data, not text tokens.
 export function estimateHistoryTokens(
   messages: readonly ModelMessage[],
+  imageTokenEstimator: ImageTokenEstimator = estimateImageTokens,
 ): number {
   return messages.reduce(
     (total, message) =>
@@ -96,7 +101,10 @@ export function estimateHistoryTokens(
       (message.role === "user" || message.role === "tool"
         ? [...message.content]
             .filter((block): block is ModelImageBlock => block.type === "image")
-            .reduce((tokens, image) => tokens + estimateImageTokens(image), 0)
+            .reduce(
+              (tokens, image) => tokens + imageTokenEstimator(image, "history"),
+              0,
+            )
         : 0),
     0,
   )
@@ -153,6 +161,8 @@ function omitImagePayload(_key: string, value: unknown): unknown {
   return value
 }
 
+// Legacy cross-provider heuristic, not a verified model limit or upper bound.
+// Callers with captured native model facts supply a provider-specific estimator.
 export function estimateImageTokens(image: ModelImageBlock): number {
   if ((image.detail ?? "high") !== "original") {
     return HIGH_DETAIL_IMAGE_TOKENS
