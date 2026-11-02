@@ -12,6 +12,11 @@ import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import {
+  JsonRequestBudgetError,
+  jsonRequestByteLength,
+} from "./json-request-budget.ts"
+import { prepareKimiImageBytes } from "./kimi-image-policy.ts"
+import {
   requireChatGPTPlanNamespace,
   toChatGPTPlanRequest,
 } from "./chatgpt-plan-request.ts"
@@ -20,6 +25,7 @@ import {
   flattenModelSystem,
   type ModelContentBlock,
   type ModelMessage,
+  type ModelImageBlock,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
@@ -52,6 +58,16 @@ import {
 import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+
+// Local resource guard, not Moonshot's documented 100M request allowance.
+const KIMI_IMAGE_REQUEST_SAFETY_BYTES = 20_000_000
+class KimiImageRequestSizeError extends AssetMediaError {
+  constructor() {
+    super(
+      "Image request was not sent: exceeds Yakitori's conservative 20 MB local request budget. Send fewer images, crop or export a smaller copy, or reduce other request content; originals have not been changed.",
+    )
+  }
+}
 
 type OpenAIResponseProfile = "openai" | "grok" | "kimi"
 
@@ -238,7 +254,159 @@ async function* streamOpenAI(
       request,
       nativeDeferredLoading,
     )
+    const effort = resolveModelWireEffort(request.target, request.reasoning)
+    const buildBody = (
+      messages: readonly ModelMessage[],
+      uploadedFiles: Awaited<
+        ReturnType<typeof prepareProviderMedia>
+      >["uploadedFiles"],
+    ) => {
+      let body: ResponseCreateParamsStreaming = {
+        model: request.target.model || defaultModel,
+        instructions: flattenModelSystem(request.system),
+        input: [
+          ...toOpenAIInput(
+            messages,
+            nativeDeferredLoading,
+            request.target.provider,
+            request.continuationScope,
+            uploadedFiles,
+            request.target.model || defaultModel,
+          ),
+          ...(request.compaction === "codex_remote"
+            ? [{ type: "compaction_trigger" as const }]
+            : []),
+        ],
+        tools: toOpenAITools(request.tools, nativeDeferredLoading),
+        ...(responseProfile === "kimi"
+          ? {}
+          : { parallel_tool_calls: request.parallelToolCalls ?? true }),
+        ...(request.toolChoice === undefined
+          ? {}
+          : {
+              tool_choice: openAIToolChoice(request) as NonNullable<
+                ResponseCreateParamsStreaming["tool_choice"]
+              >,
+            }),
+        ...(request.outputFormat === undefined
+          ? {}
+          : {
+              text: {
+                format: {
+                  type: "json_schema" as const,
+                  name: request.outputFormat.name,
+                  schema: request.outputFormat.schema,
+                  strict: request.outputFormat.strict ?? true,
+                },
+              },
+            }),
+        // The Codex subscription endpoint rejects max_output_tokens. Its
+        // ResponsesApiRequest omits this API-only output control.
+        ...(requestProfile === "codex" || request.maxOutputTokens === undefined
+          ? {}
+          : { max_output_tokens: request.maxOutputTokens }),
+        ...(responseProfile === "kimi" ? {} : { store: false }),
+        stream: true,
+        ...(reasoningSummary
+          ? { include: ["reasoning.encrypted_content" as const] }
+          : {}),
+        ...(request.cacheKey === undefined
+          ? {}
+          : { prompt_cache_key: request.cacheKey }),
+        ...(effort === undefined && !reasoningSummary
+          ? {}
+          : {
+              reasoning: {
+                ...(effort === undefined
+                  ? {}
+                  : { effort: effort as ReasoningEffort }),
+                ...(reasoningSummary ? { summary: "auto" as const } : {}),
+              },
+            }),
+        // Speed tiers: only "fast" maps onto the wire ("priority"); anything
+        // else falls through to the server default.
+        ...(request.target.speed === "fast"
+          ? { service_tier: "priority" as const }
+          : {}),
+      }
+      body = applyModelRequestControls(request, "openai_responses", body)
+      if (responseProfile === "kimi") {
+        validateKimiResponsesRequest(request, body)
+        // The Kimi output schema includes a null placeholder absent from its
+        // reasoning input schema. Preserve it in native history, not on replay.
+        if (Array.isArray(body.input))
+          body.input = body.input.map((item) => {
+            if (item.type !== "reasoning" || item.encrypted_content !== null)
+              return item
+            const { encrypted_content: _encrypted, ...reasoning } = item
+            return reasoning
+          })
+      }
+      return body
+    }
+    const nativeKimiImages =
+      responseProfile === "kimi" &&
+      requestProfile === undefined &&
+      URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
+        "https://api.moonshot.ai/v1" &&
+      request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some((block) => block.type === "image"),
+      )
+    let preparedImageBytes = 0
+    if (nativeKimiImages) {
+      const placeholders = request.messages.map(
+        (message): ModelMessage =>
+          message.role === "user" || message.role === "tool"
+            ? {
+                ...message,
+                content: message.content.map((block) =>
+                  block.type === "image"
+                    ? {
+                        type: "image",
+                        mediaType: "image/png",
+                        data: "",
+                        detail: block.detail ?? "high",
+                      }
+                    : block,
+                ),
+              }
+            : message,
+      )
+      const size = jsonRequestByteLength(
+        buildBody(placeholders, new Map()),
+        KIMI_IMAGE_REQUEST_SAFETY_BYTES,
+      )
+      if (size === undefined) throw new KimiImageRequestSizeError()
+      preparedImageBytes = size
+    }
     const media = await prepareProviderMedia(request, {
+      ...(nativeKimiImages
+        ? {
+            prepareImage: async (
+              bytes: Buffer,
+              image: ModelImageBlock,
+            ): Promise<ModelImageBlock> => {
+              const prepared = await prepareKimiImageBytes(
+                bytes,
+                request.signal,
+              )
+              preparedImageBytes +=
+                4 * Math.ceil(prepared.bytes.length / 3) +
+                prepared.mediaType.length -
+                "image/png".length
+              if (preparedImageBytes > KIMI_IMAGE_REQUEST_SAFETY_BYTES)
+                throw new KimiImageRequestSizeError()
+              return {
+                type: "image",
+                mediaType: prepared.mediaType,
+                detail: image.detail ?? "high",
+                data: prepared.bytes.toString("base64"),
+              }
+            },
+          }
+        : {}),
       // Kimi accepts data URLs for both user and tool images, not HTTP URLs.
       ...(responseProfile === "kimi" ? { inlineImageUrls: true } : {}),
       ...(upload === undefined
@@ -327,88 +495,12 @@ async function* streamOpenAI(
       throw new ModelRequestControlsError(
         "compaction_trigger belongs to the Codex backend, not the public Responses API.",
       )
-    const effort = resolveModelWireEffort(request.target, request.reasoning)
-    let body: ResponseCreateParamsStreaming = {
-      model: request.target.model || defaultModel,
-      instructions: flattenModelSystem(request.system),
-      input: [
-        ...toOpenAIInput(
-          media.messages,
-          nativeDeferredLoading,
-          request.target.provider,
-          request.continuationScope,
-          media.uploadedFiles,
-          request.target.model || defaultModel,
-        ),
-        ...(request.compaction === "codex_remote"
-          ? [{ type: "compaction_trigger" as const }]
-          : []),
-      ],
-      tools: toOpenAITools(request.tools, nativeDeferredLoading),
-      ...(responseProfile === "kimi"
-        ? {}
-        : { parallel_tool_calls: request.parallelToolCalls ?? true }),
-      ...(request.toolChoice === undefined
-        ? {}
-        : {
-            tool_choice: openAIToolChoice(request) as NonNullable<
-              ResponseCreateParamsStreaming["tool_choice"]
-            >,
-          }),
-      ...(request.outputFormat === undefined
-        ? {}
-        : {
-            text: {
-              format: {
-                type: "json_schema" as const,
-                name: request.outputFormat.name,
-                schema: request.outputFormat.schema,
-                strict: request.outputFormat.strict ?? true,
-              },
-            },
-          }),
-      // The Codex subscription endpoint rejects max_output_tokens. Its
-      // ResponsesApiRequest omits this API-only output control.
-      ...(requestProfile === "codex" || request.maxOutputTokens === undefined
-        ? {}
-        : { max_output_tokens: request.maxOutputTokens }),
-      ...(responseProfile === "kimi" ? {} : { store: false }),
-      stream: true,
-      ...(reasoningSummary
-        ? { include: ["reasoning.encrypted_content" as const] }
-        : {}),
-      ...(request.cacheKey === undefined
-        ? {}
-        : { prompt_cache_key: request.cacheKey }),
-      ...(effort === undefined && !reasoningSummary
-        ? {}
-        : {
-            reasoning: {
-              ...(effort === undefined
-                ? {}
-                : { effort: effort as ReasoningEffort }),
-              ...(reasoningSummary ? { summary: "auto" as const } : {}),
-            },
-          }),
-      // Speed tiers: only "fast" maps onto the wire ("priority"); anything
-      // else falls through to the server default.
-      ...(request.target.speed === "fast"
-        ? { service_tier: "priority" as const }
-        : {}),
-    }
-    body = applyModelRequestControls(request, "openai_responses", body)
-    if (responseProfile === "kimi") {
-      validateKimiResponsesRequest(request, body)
-      // The Kimi output schema includes a null placeholder absent from its
-      // reasoning input schema. Preserve it in native history, not on replay.
-      if (Array.isArray(body.input))
-        body.input = body.input.map((item) => {
-          if (item.type !== "reasoning" || item.encrypted_content !== null)
-            return item
-          const { encrypted_content: _encrypted, ...reasoning } = item
-          return reasoning
-        })
-    }
+    let body = buildBody(media.messages, media.uploadedFiles)
+    if (
+      nativeKimiImages &&
+      jsonRequestByteLength(body, KIMI_IMAGE_REQUEST_SAFETY_BYTES) === undefined
+    )
+      throw new KimiImageRequestSizeError()
     if (requestProfile === "chatgpt-plan") {
       const allowed = new Set([
         "reasoning",
@@ -854,6 +946,7 @@ async function* streamOpenAI(
     }
     if (
       error instanceof AssetMediaError ||
+      error instanceof JsonRequestBudgetError ||
       error instanceof ModelRequestControlsError ||
       error instanceof ModelHistoryScopeError
     ) {
