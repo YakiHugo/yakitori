@@ -782,6 +782,27 @@ it.each([
 
 it.each([
   [
+    "minimax",
+    "openai_chat_completions",
+    "https://api.minimax.io/v1",
+    "minimax",
+    true,
+  ],
+  [
+    "minimax",
+    "openai_chat_completions",
+    "https://relay.example/v1",
+    undefined,
+    false,
+  ],
+  [
+    "minimax",
+    "openai_responses",
+    "https://api.minimax.io/v1",
+    undefined,
+    false,
+  ],
+  [
     "moonshot",
     "openai_responses",
     "https://api.moonshot.ai/v1",

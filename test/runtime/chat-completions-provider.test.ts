@@ -1299,11 +1299,23 @@ describe("Chat Completions provider", () => {
     )
   })
 
-  it("rehydrates persisted tool images into wire-only messages after reopening a thread", async () => {
-    const png = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
-      "base64",
-    )
+  it.each([
+    "generic",
+    "minimax",
+  ] as const)("rehydrates persisted tool images into wire-only messages after reopening a thread (%s)", async (flavor) => {
+    const { default: sharp } = await import("sharp")
+    const model = flavor === "minimax" ? "MiniMax-M3" : "configured-model"
+    const png =
+      flavor === "minimax"
+        ? await sharp({
+            create: { width: 3000, height: 2, channels: 3, background: "red" },
+          })
+            .png()
+            .toBuffer()
+        : Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+            "base64",
+          )
     const bodies: Record<string, unknown>[] = []
     await withServer(
       async (incoming, outgoing) => {
@@ -1351,6 +1363,7 @@ describe("Chat Completions provider", () => {
                   custom_1: createModelProvider({
                     info: {
                       id: "custom_1",
+                      ...(flavor === "minimax" ? { serviceId: "minimax" } : {}),
                       wireApi: "openai_chat_completions",
                       capabilities: { remoteCompaction: false },
                     },
@@ -1359,16 +1372,21 @@ describe("Chat Completions provider", () => {
                       wireApi: "openai_chat_completions",
                       models: [
                         {
-                          id: "configured-model",
+                          id: model,
                           inputModalities: ["text", "image"],
                         },
                       ],
                     }),
-                    stream: provider(baseURL),
+                    stream: createChatCompletionsProvider({
+                      baseURL,
+                      apiKey: "test-key",
+                      model,
+                      flavor,
+                    }),
                   }),
                 }).createClient(),
                 provider: "custom_1",
-                model: "configured-model",
+                model,
                 toolRegistry: createToolRegistry(),
                 rolloutAssets: assets,
                 baseInstructions: "Image test",

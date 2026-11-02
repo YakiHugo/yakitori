@@ -205,7 +205,10 @@ export function captureStepContext(
         input.wireApi === "anthropic_messages") ||
       (input.serviceId === "gemini" &&
         input.wireApi === "gemini_generate_content") ||
-      (input.serviceId === "moonshot" && input.wireApi === "openai_responses"),
+      (input.serviceId === "moonshot" &&
+        input.wireApi === "openai_responses") ||
+      (input.serviceId === "minimax" &&
+        input.wireApi === "openai_chat_completions"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,

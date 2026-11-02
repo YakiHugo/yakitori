@@ -1,3 +1,6 @@
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
+import { validateModelImage } from "./prepare-model-image.ts"
+import { jsonRequestByteLength } from "./json-request-budget.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -49,7 +52,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
   model: string
   baseURL: string
   defaultHeaders?: Record<string, string | null>
-  flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral"
+  flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral" | "minimax"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -114,8 +117,55 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
+    const minimax = options.flavor === "minimax"
+    const model = request.target.model || options.model
+    const hasImages = request.messages.some(
+      (message) =>
+        (message.role === "user" || message.role === "tool") &&
+        message.content.some((block) => block.type === "image"),
+    )
+    if (
+      minimax &&
+      hasImages &&
+      !["MiniMax-M3", "MiniMax-M3.1-Flash"].includes(model)
+    )
+      throw new AssetMediaError(
+        "Image input is only supported for documented MiniMax M3 and M3.1-Flash models.",
+      )
+    // MiniMax OpenAI API: 10 MB/image, 64 MB/body. Preserve source pixels;
+    // detail high delegates visual processing to the service (not OpenAI auto).
+    // https://platform.minimax.io/docs/api-reference/text-openai-api
+    // These byte bounds are not context-token bounds. MiniMax publishes only
+    // rough visual token ranges (high can exceed 15k); the harness's generic
+    // image estimate can undercount them. Do not invent a local token ceiling
+    // or silently reduce detail: provider context rejection remains visible.
+    let imageBytes = 0
     const media = await prepareProviderMedia(request, {
       inlineDocumentUrls: true,
+      ...(minimax
+        ? {
+            inlineImageUrls: true,
+            prepareImage: async (bytes, image) => {
+              if (bytes.length > 10_000_000)
+                throw new AssetMediaError(
+                  "MiniMax image exceeds 10 MB. Resize a copy; the original has not been changed.",
+                )
+              imageBytes += 4 * Math.ceil(bytes.length / 3)
+              if (imageBytes > 64_000_000)
+                throw new AssetMediaError(
+                  "MiniMax request exceeds 64 MB including encoded images.",
+                )
+              const metadata = inspectImageBytes(bytes)
+              await validateModelImage(bytes, request.signal)
+              return {
+                type: "image" as const,
+                mediaType: metadata.mediaType,
+                detail: image.detail ?? "high",
+                data: bytes.toString("base64"),
+              }
+            },
+          }
+        : {}),
     })
     const messages = toChatCompletionsMessages(
       media.messages,
@@ -133,97 +183,102 @@ async function* streamChatCompletions(
         return [[tool.name, tool.customInputFallbackKey] as const]
       }),
     )
+    const body = applyModelRequestControls(request, "openai_chat_completions", {
+      model: request.target.model || options.model,
+      messages,
+      stream: true as const,
+      stream_options: { include_usage: true },
+      ...(request.parallelToolCalls === undefined
+        ? {}
+        : { parallel_tool_calls: request.parallelToolCalls }),
+      ...(request.outputFormat === undefined
+        ? {}
+        : {
+            response_format: {
+              type: "json_schema" as const,
+              json_schema: {
+                name: request.outputFormat.name,
+                schema: request.outputFormat.schema,
+                strict: request.outputFormat.strict ?? true,
+              },
+            },
+          }),
+      ...(request.maxOutputTokens === undefined
+        ? {}
+        : { max_tokens: request.maxOutputTokens }),
+      ...(request.tools.length === 0
+        ? {}
+        : {
+            tools: request.tools.map((tool) =>
+              tool.kind === "custom" &&
+              tool.customInputFallbackKey === undefined
+                ? {
+                    type: "custom" as const,
+                    custom: {
+                      name: tool.name,
+                      description: tool.description,
+                      ...(tool.inputFormat === undefined
+                        ? {}
+                        : {
+                            format: {
+                              type: "grammar" as const,
+                              grammar: {
+                                syntax: tool.inputFormat.syntax,
+                                definition: tool.inputFormat.definition,
+                              },
+                            },
+                          }),
+                    },
+                  }
+                : {
+                    type: "function" as const,
+                    function: {
+                      name: tool.name,
+                      description: tool.description,
+                      parameters: tool.inputSchema,
+                      ...(tool.strict === undefined
+                        ? {}
+                        : { strict: tool.strict }),
+                    },
+                  },
+            ),
+          }),
+      ...(request.tools.length === 0 && request.toolChoice === undefined
+        ? {}
+        : {
+            tool_choice:
+              typeof request.toolChoice === "object"
+                ? request.tools.some(
+                    (tool) =>
+                      tool.kind === "custom" &&
+                      tool.customInputFallbackKey === undefined &&
+                      typeof request.toolChoice === "object" &&
+                      tool.name === request.toolChoice.name,
+                  )
+                  ? {
+                      type: "custom" as const,
+                      custom: { name: request.toolChoice.name },
+                    }
+                  : {
+                      type: "function" as const,
+                      function: { name: request.toolChoice.name },
+                    }
+                : (request.toolChoice ?? "auto"),
+          }),
+      // The configured model owns its supported effort values. Omit the
+      // field entirely when that model has no explicit effort selection.
+      ...(request.target.effort === undefined
+        ? {}
+        : { reasoning_effort: request.target.effort as ReasoningEffort }),
+    })
+    if (minimax && jsonRequestByteLength(body, 64_000_000) === undefined)
+      throw new AssetMediaError(
+        "MiniMax request exceeds 64 MB including text, tools and encoded images.",
+      )
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
-        applyModelRequestControls(request, "openai_chat_completions", {
-          model: request.target.model || options.model,
-          messages,
-          stream: true,
-          stream_options: { include_usage: true },
-          ...(request.parallelToolCalls === undefined
-            ? {}
-            : { parallel_tool_calls: request.parallelToolCalls }),
-          ...(request.outputFormat === undefined
-            ? {}
-            : {
-                response_format: {
-                  type: "json_schema" as const,
-                  json_schema: {
-                    name: request.outputFormat.name,
-                    schema: request.outputFormat.schema,
-                    strict: request.outputFormat.strict ?? true,
-                  },
-                },
-              }),
-          ...(request.maxOutputTokens === undefined
-            ? {}
-            : { max_tokens: request.maxOutputTokens }),
-          ...(request.tools.length === 0
-            ? {}
-            : {
-                tools: request.tools.map((tool) =>
-                  tool.kind === "custom" &&
-                  tool.customInputFallbackKey === undefined
-                    ? {
-                        type: "custom" as const,
-                        custom: {
-                          name: tool.name,
-                          description: tool.description,
-                          ...(tool.inputFormat === undefined
-                            ? {}
-                            : {
-                                format: {
-                                  type: "grammar" as const,
-                                  grammar: {
-                                    syntax: tool.inputFormat.syntax,
-                                    definition: tool.inputFormat.definition,
-                                  },
-                                },
-                              }),
-                        },
-                      }
-                    : {
-                        type: "function" as const,
-                        function: {
-                          name: tool.name,
-                          description: tool.description,
-                          parameters: tool.inputSchema,
-                          ...(tool.strict === undefined
-                            ? {}
-                            : { strict: tool.strict }),
-                        },
-                      },
-                ),
-              }),
-          ...(request.tools.length === 0 && request.toolChoice === undefined
-            ? {}
-            : {
-                tool_choice:
-                  typeof request.toolChoice === "object"
-                    ? request.tools.some(
-                        (tool) =>
-                          tool.kind === "custom" &&
-                          tool.customInputFallbackKey === undefined &&
-                          typeof request.toolChoice === "object" &&
-                          tool.name === request.toolChoice.name,
-                      )
-                      ? {
-                          type: "custom" as const,
-                          custom: { name: request.toolChoice.name },
-                        }
-                      : {
-                          type: "function" as const,
-                          function: { name: request.toolChoice.name },
-                        }
-                    : (request.toolChoice ?? "auto"),
-              }),
-          // The configured model owns its supported effort values. Omit the
-          // field entirely when that model has no explicit effort selection.
-          ...(request.target.effort === undefined
-            ? {}
-            : { reasoning_effort: request.target.effort as ReasoningEffort }),
-        }),
+        body,
         request.signal === undefined ? undefined : { signal: request.signal },
       )
       .withResponse()
