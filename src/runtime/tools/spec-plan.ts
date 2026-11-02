@@ -1,3 +1,7 @@
+import {
+  openAIImageTokenEstimator,
+  type ImageTokenEstimator,
+} from "../openai-image-budget.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
@@ -29,6 +33,7 @@ export type StepContext = Readonly<{
   executionPolicy: ReturnType<typeof stepExecutionLimits>
   toolRouter: ToolRouter
   toolWireProtocol: ToolWireProtocol
+  imageTokenEstimator: ImageTokenEstimator | undefined
   deferImagePreparation: boolean
   documentReading: DocumentReadingCapabilities
   userDocumentReading: DocumentReadingCapabilities
@@ -190,6 +195,11 @@ export function captureStepContext(
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
+    imageTokenEstimator: openAIImageTokenEstimator({
+      serviceId: input.serviceId,
+      wireApi: input.wireApi,
+      model,
+    }),
     deferImagePreparation:
       (input.serviceId === "anthropic" &&
         input.wireApi === "anthropic_messages") ||
