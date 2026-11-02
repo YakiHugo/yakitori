@@ -15,6 +15,11 @@ import {
   JsonRequestBudgetError,
   jsonRequestByteLength,
 } from "./json-request-budget.ts"
+import {
+  prepareGrokImage,
+  GROK_IMAGE_REQUEST_SAFETY_BYTES,
+  GrokImageRequestSizeError,
+} from "./grok-image-policy.ts"
 import { prepareKimiImageBytes } from "./kimi-image-policy.ts"
 import {
   requireChatGPTPlanNamespace,
@@ -354,6 +359,13 @@ async function* streamOpenAI(
           (message.role === "user" || message.role === "tool") &&
           message.content.some((block) => block.type === "image"),
       )
+    const nativeGrokImages =
+      responseProfile === "grok" &&
+      requestProfile === undefined &&
+      (request.target.model || defaultModel) === "grok-4.7" &&
+      URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
+        "https://api.x.ai/v1"
+    let grokImageBytes = 0
     let preparedImageBytes = 0
     if (nativeKimiImages) {
       const placeholders = request.messages.map(
@@ -382,6 +394,16 @@ async function* streamOpenAI(
       preparedImageBytes = size
     }
     const media = await prepareProviderMedia(request, {
+      ...(nativeGrokImages
+        ? {
+            prepareImage: async (bytes: Buffer): Promise<ModelImageBlock> => {
+              grokImageBytes += 4 * Math.ceil(bytes.length / 3)
+              if (grokImageBytes > GROK_IMAGE_REQUEST_SAFETY_BYTES)
+                throw new GrokImageRequestSizeError()
+              return prepareGrokImage(bytes, request.signal)
+            },
+          }
+        : {}),
       ...(nativeKimiImages
         ? {
             prepareImage: async (
@@ -501,6 +523,11 @@ async function* streamOpenAI(
       jsonRequestByteLength(body, KIMI_IMAGE_REQUEST_SAFETY_BYTES) === undefined
     )
       throw new KimiImageRequestSizeError()
+    if (
+      nativeGrokImages &&
+      jsonRequestByteLength(body, GROK_IMAGE_REQUEST_SAFETY_BYTES) === undefined
+    )
+      throw new GrokImageRequestSizeError()
     if (requestProfile === "chatgpt-plan") {
       const allowed = new Set([
         "reasoning",
