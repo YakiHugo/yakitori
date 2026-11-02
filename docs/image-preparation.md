@@ -111,3 +111,51 @@ Bedrock, Google-hosted Claude, Kimi-compatible Messages, or any other endpoint.
 The vision reference currently distinguishes direct Claude's 10 MB encoded
 image allowance from Bedrock's 5 MB allowance; those transports require their
 own implementation and tests rather than inheriting this direct-API policy.
+
+## Direct Gemini GenerateContent images
+
+The registered direct `https://generativelanguage.googleapis.com/v1beta`
+GenerateContent endpoint now delegates image sizing to Gemini: in requests with
+images and **no native document blocks**, validated local image bytes are sent
+unchanged, with their sniffed MIME type. This applies to user and tool images,
+including stored file references and inline data. No local 2048 resize, JPEG
+quality change, or `media_resolution` override is introduced. Unknown model IDs
+at this confirmed endpoint use the same protocol policy, not a guessed model
+resolution or token budget. This can send more pixels/bytes than the previous
+2048 preparation; it does not promise lower cost or better model understanding.
+
+This slice uses a **20,000,000-byte Yakitori application request budget**. It is
+not a claim that Gemini universally rejects larger requests: the image guide
+says 20 MB while the newer file-input table says 100 MB; that documentation
+conflict remains unresolved. The conservative local guard bounds preparation
+and reports how to reduce the request, retaining originals and the draft.
+The existing 3,600-image GenerateContent count limit is checked before reads.
+
+The budget includes actual request JSON structure, text, tools and controls,
+not just decoded image bytes. A plain-JSON UTF-8 counter first measures the
+serializer's image-empty shape without allocating a complete JSON string.
+Image base64 lengths and actual MIME differences are then added incrementally,
+before encoding each image; a failing image stops further asset reads. The
+final body is checked again before serialization and the model call. This
+bounds wire preparation, not total process RSS or the decoder's existing pixel
+limit. There are no uploads on this selected no-document route.
+
+User GIF input is preserved: the GenerateContent Blob API schema explicitly
+lists GIF. This does not promise animation-frame interpretation. Yakitori's
+existing Gemini 3 native function-response route still supports only PNG,
+JPEG and WebP; other formats now produce a clear local error with an export
+suggestion instead of an unrelated streaming-response error. No silent first-
+frame conversion or OCR fallback is added.
+
+Requests containing native documents, Interactions, unregistered v1
+GenerateContent and proxy endpoints retain their existing preparation. PDF
+raster pixels already prepared at 2048 cannot be recovered here; when the final
+request has no document blocks, other ordinary images can still use the new
+policy. Switching models/providers reprojects available
+stored resources; historical derived bytes are not magically restored originals.
+
+References (verified 2026-11-02):
+[image guide](https://ai.google.dev/gemini-api/docs/generate-content/image-understanding),
+[file input methods](https://ai.google.dev/gemini-api/docs/file-input-methods),
+[Blob schema](https://ai.google.dev/api/generate-content#Blob),
+[media resolution](https://ai.google.dev/gemini-api/docs/generate-content/media-resolution).

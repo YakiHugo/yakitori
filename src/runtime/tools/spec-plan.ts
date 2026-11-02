@@ -29,7 +29,7 @@ export type StepContext = Readonly<{
   executionPolicy: ReturnType<typeof stepExecutionLimits>
   toolRouter: ToolRouter
   toolWireProtocol: ToolWireProtocol
-  nativeAnthropicImages: boolean
+  deferImagePreparation: boolean
   documentReading: DocumentReadingCapabilities
   userDocumentReading: DocumentReadingCapabilities
 }>
@@ -190,8 +190,11 @@ export function captureStepContext(
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
-    nativeAnthropicImages:
-      input.serviceId === "anthropic" && input.wireApi === "anthropic_messages",
+    deferImagePreparation:
+      (input.serviceId === "anthropic" &&
+        input.wireApi === "anthropic_messages") ||
+      (input.serviceId === "gemini" &&
+        input.wireApi === "gemini_generate_content"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,

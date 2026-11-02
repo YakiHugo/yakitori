@@ -779,3 +779,84 @@ it.each([
     await new Promise<void>((resolve) => endpoint.close(() => resolve()))
   }
 })
+
+it.each([
+  [
+    "gemini",
+    "gemini_generate_content",
+    "https://generativelanguage.googleapis.com/v1beta",
+    "gemini",
+    true,
+  ],
+  [
+    "gemini",
+    "gemini_generate_content",
+    "https://relay.example/v1beta",
+    undefined,
+    false,
+  ],
+  [
+    "gemini",
+    "gemini_generate_content",
+    "https://generativelanguage.googleapis.com/v1",
+    undefined,
+    false,
+  ],
+  [
+    "gemini",
+    "gemini_interactions",
+    "https://generativelanguage.googleapis.com/v1beta",
+    "gemini",
+    false,
+  ],
+  [
+    "anthropic",
+    "anthropic_messages",
+    "https://api.anthropic.com",
+    "anthropic",
+    true,
+  ],
+  [
+    "anthropic",
+    "anthropic_messages",
+    "https://relay.example",
+    undefined,
+    false,
+  ],
+] as const)("defers image projection only for confirmed service/protocol %s %s %s", async (service, wireApi, baseURL, expectedService, deferred) => {
+  const provider = createConfiguredProvider(
+    "editable-account",
+    {
+      name: "Arbitrary account label",
+      service,
+      wireApi,
+      baseURL,
+      models: [{ id: "unknown-model", inputModalities: ["text", "image"] }],
+    },
+    "test-key",
+  )
+  const turn = createProviderRegistry({ "editable-account": provider })
+    .createClient()
+    .startTurn("editable-account")
+  const selection = { provider: "editable-account", model: "unknown-model" }
+  const configuration = SessionConfiguration.create(
+    {
+      selection,
+      workspaceRoot: "/tmp",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+      promptCacheKey: "image-endpoint",
+    },
+    provider.models,
+  ).resolveStep(selection, provider.models)
+  expect(turn.serviceId).toBe(expectedService)
+  const step = captureStepContext({
+    registry: createToolRegistry([]),
+    configuration,
+    ...(turn.serviceId === undefined ? {} : { serviceId: turn.serviceId }),
+    ...(turn.wireApi === undefined ? {} : { wireApi: turn.wireApi }),
+  })
+  expect(step.deferImagePreparation).toBe(deferred)
+  await turn.close()
+  await provider.close?.()
+})

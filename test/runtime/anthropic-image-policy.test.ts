@@ -479,7 +479,7 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
       images: true,
     })
     const projected = await prepareModelMedia(input.messages, {
-      nativeAnthropicImages: true,
+      deferImagePreparation: true,
       target: input.target,
       imageCapabilities: {
         inputModalities: ["text", "image"],
@@ -513,7 +513,7 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
           : message,
       ),
       {
-        nativeAnthropicImages: false,
+        deferImagePreparation: false,
         target: input.target,
         imageCapabilities: {
           inputModalities: ["text", "image"],

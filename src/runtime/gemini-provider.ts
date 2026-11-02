@@ -1,3 +1,9 @@
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
+import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
+import {
+  JsonRequestBudgetError,
+  jsonRequestByteLength,
+} from "./json-request-budget.ts"
 import { randomUUID } from "node:crypto"
 import {
   isJsonObject,
@@ -14,6 +20,7 @@ import {
 import {
   flattenModelSystem,
   type ModelContentBlock,
+  type ModelImageBlock,
   type ModelFailureStage,
   type ModelMessage,
   type ModelRequest,
@@ -58,6 +65,17 @@ export type GeminiProviderOptions = Readonly<{
 }>
 
 type GeminiContent = { role: "user" | "model"; parts: JsonObject[] }
+// Local resource policy, not a claim resolving Google's conflicting 20 MB image
+// guide and 100 MB general file-input guidance. Other protocols are unchanged.
+const GEMINI_IMAGE_REQUEST_SAFETY_BYTES = 20_000_000
+class GeminiImageRequestSizeError extends AssetMediaError {
+  constructor() {
+    super(
+      "Image request was not sent: exceeds Yakitori's conservative 20 MB local request budget. Send fewer images, crop or export a smaller copy, or reduce other request content; originals have not been changed.",
+    )
+  }
+}
+
 class GeminiInlineRequestSizeError extends Error {
   constructor() {
     super(
@@ -98,16 +116,29 @@ async function* streamGemini(
     const modelId = model.replace(/^models\//, "")
     if (!/^[a-zA-Z0-9._-]+$/.test(modelId))
       throw new GeminiProtocolError("Invalid Gemini model ID.")
-    const media = await prepareProviderMedia(request, {
-      inlineImageUrls: true,
-      inlineDocumentUrls: true,
-    })
-    const contents = toGeminiContents(
-      media.messages,
-      request.target.provider,
-      request.continuationScope,
-      model,
+    const nativeImagePreparation =
+      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
+      "https://generativelanguage.googleapis.com/v1beta"
+    const imageCount = request.messages.reduce(
+      (count, message) =>
+        count +
+        (message.role === "user" || message.role === "tool"
+          ? message.content.filter((block) => block.type === "image").length
+          : 0),
+      0,
     )
+    const preserveImages =
+      nativeImagePreparation &&
+      imageCount > 0 &&
+      !request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some((block) => block.type === "document"),
+      )
+    if (preserveImages && imageCount > 3600)
+      throw new AssetMediaError(
+        "Images were not sent: GenerateContent supports at most 3600 image occurrences per request. Send fewer images; originals have not been changed.",
+      )
     const system = flattenModelSystem(request.system)
     const customKeys = new Map(
       request.tools.flatMap((tool) => {
@@ -137,9 +168,14 @@ async function* streamGemini(
       generationConfig.responseMimeType = "application/json"
       generationConfig.responseJsonSchema = request.outputFormat.schema
     }
-    const body = JSON.stringify(
+    const buildBody = (messages: readonly ModelMessage[]) =>
       applyModelRequestControls(request, "gemini_generate_content", {
-        contents,
+        contents: toGeminiContents(
+          messages,
+          request.target.provider,
+          request.continuationScope,
+          model,
+        ),
         ...(request.toolChoice === undefined
           ? {}
           : {
@@ -175,8 +211,73 @@ async function* streamGemini(
                 },
               ],
             }),
-      }),
+      })
+    let preparedBytes = 0
+    if (preserveImages) {
+      // Use the actual serializer with empty PNG placeholders. Every image
+      // occurrence contributes its base64 bytes and MIME-length delta later.
+      // This rejects large text/tools before reading assets or encoding images.
+      const placeholders = request.messages.map(
+        (message): ModelMessage =>
+          message.role === "user" || message.role === "tool"
+            ? {
+                ...message,
+                content: message.content.map((block) =>
+                  block.type === "image"
+                    ? { type: "image", mediaType: "image/png", data: "" }
+                    : block,
+                ),
+              }
+            : message,
+      )
+      const size = jsonRequestByteLength(
+        buildBody(placeholders),
+        GEMINI_IMAGE_REQUEST_SAFETY_BYTES,
+      )
+      if (size === undefined) throw new GeminiImageRequestSizeError()
+      preparedBytes = size
+    }
+    const media = await prepareProviderMedia(request, {
+      inlineImageUrls: true,
+      inlineDocumentUrls: true,
+      ...(nativeImagePreparation
+        ? {
+            prepareImage: async (
+              bytes: Buffer,
+              image: ModelImageBlock,
+            ): Promise<ModelImageBlock> => {
+              if (!preserveImages)
+                return prepareModelImage(
+                  bytes,
+                  image.detail ?? "high",
+                  request.signal,
+                )
+              const metadata = inspectImageBytes(bytes)
+              preparedBytes +=
+                4 * Math.ceil(bytes.length / 3) +
+                metadata.mediaType.length -
+                "image/png".length
+              if (preparedBytes > GEMINI_IMAGE_REQUEST_SAFETY_BYTES)
+                throw new GeminiImageRequestSizeError()
+              await validateModelImage(bytes, request.signal)
+              return {
+                type: "image",
+                mediaType: metadata.mediaType,
+                detail: image.detail ?? "high",
+                data: bytes.toString("base64"),
+              }
+            },
+          }
+        : {}),
+    })
+    const requestBody = buildBody(media.messages)
+    if (
+      preserveImages &&
+      jsonRequestByteLength(requestBody, GEMINI_IMAGE_REQUEST_SAFETY_BYTES) ===
+        undefined
     )
+      throw new GeminiImageRequestSizeError()
+    const body = JSON.stringify(requestBody)
     // Check the complete serialized UTF-8 request, including text, tools and
     // base64 expansion. Per-document raw limits alone do not bound this body.
     if (
@@ -505,6 +606,7 @@ async function* streamGemini(
       return
     }
     if (
+      error instanceof JsonRequestBudgetError ||
       error instanceof GeminiInlineRequestSizeError ||
       error instanceof ModelRequestControlsError ||
       error instanceof ModelHistoryScopeError ||
@@ -627,8 +729,8 @@ export function toGeminiContents(
           block.mediaType !== "image/jpeg" &&
           block.mediaType !== "image/webp"
         )
-          throw new GeminiProtocolError(
-            `Gemini 3 function responses do not support ${block.mediaType}; use PNG, JPEG or WebP.`,
+          throw new AssetMediaError(
+            `Image was not sent: Yakitori's Gemini 3 function-response route accepts PNG, JPEG or WebP, not ${block.mediaType}. Export a supported copy; the original has not been changed.`,
           )
         const displayName = `tool_${resultIndex}_image_${imageIndex++}`
         media.push({

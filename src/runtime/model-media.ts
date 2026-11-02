@@ -15,7 +15,7 @@ import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
 export async function prepareModelMedia(
   messages: readonly ModelMessage[],
   input: Readonly<{
-    nativeAnthropicImages?: boolean
+    deferImagePreparation?: boolean
     target: ModelTarget
     imageCapabilities: Pick<
       ModelCapabilities,
@@ -50,7 +50,7 @@ export async function prepareModelMedia(
       0,
     ),
   )
-  const delegateImages = input.nativeAnthropicImages === true
+  const delegateImages = input.deferImagePreparation === true
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
   // rasterization worker per message concurrently.

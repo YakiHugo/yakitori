@@ -647,6 +647,9 @@ it.each([
   ["anthropic", "openai_chat_completions", false],
   [undefined, "anthropic_messages", false],
   ["kimi-code", "anthropic_messages", false],
+  ["gemini", "gemini_generate_content", true],
+  ["gemini", "gemini_interactions", false],
+  ["gemini", "openai_chat_completions", false],
 ] as const)("captures native image delegation from service and protocol, not provider label (%s, %s)", (serviceId, wireApi, expected) => {
   const step = captureStepContext({
     registry: createToolRegistry([]),
@@ -657,5 +660,5 @@ it.each([
     ...(serviceId === undefined ? {} : { serviceId }),
     wireApi,
   })
-  expect(step.nativeAnthropicImages).toBe(expected)
+  expect(step.deferImagePreparation).toBe(expected)
 })
