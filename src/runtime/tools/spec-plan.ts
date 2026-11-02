@@ -1,7 +1,3 @@
-import {
-  openAIImageTokenEstimator,
-  type ImageTokenEstimator,
-} from "../openai-image-budget.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
@@ -14,6 +10,10 @@ import {
   supportsOpenAIChatToolPdf,
   supportsOpenAIChatUserPdf,
 } from "../native-pdf-capabilities.ts"
+import {
+  type ImageTokenEstimator,
+  openAIImageTokenEstimator,
+} from "../openai-image-budget.ts"
 import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   type ResolvedStepConfiguration,
@@ -195,11 +195,19 @@ export function captureStepContext(
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
-    imageTokenEstimator: openAIImageTokenEstimator({
-      serviceId: input.serviceId,
-      wireApi: input.wireApi,
-      model,
-    }),
+    // Seed 2.0+ high detail has a fixed documented 1280-token image cost.
+    // The Doubao adapter always sends high; never apply this to relay profiles.
+    // https://console.volcengine.com/ark/region:cn-beijing/docs/image-understanding
+    imageTokenEstimator:
+      input.serviceId === "doubao" &&
+      input.wireApi === "openai_chat_completions" &&
+      model.model === "doubao-seed-2-1-pro-260915"
+        ? () => 1280
+        : openAIImageTokenEstimator({
+            serviceId: input.serviceId,
+            wireApi: input.wireApi,
+            model,
+          }),
     deferImagePreparation:
       (input.serviceId === "anthropic" &&
         input.wireApi === "anthropic_messages") ||
@@ -209,6 +217,9 @@ export function captureStepContext(
         input.wireApi === "openai_responses") ||
       (input.serviceId === "minimax" &&
         input.wireApi === "openai_chat_completions") ||
+      (input.serviceId === "doubao" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "doubao-seed-2-1-pro-260915") ||
       (input.serviceId === "qwen" &&
         input.wireApi === "openai_chat_completions" &&
         target.model === "qwen3.8-max") ||
