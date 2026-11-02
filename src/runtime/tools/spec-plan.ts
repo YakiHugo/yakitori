@@ -208,7 +208,10 @@ export function captureStepContext(
       (input.serviceId === "moonshot" &&
         input.wireApi === "openai_responses") ||
       (input.serviceId === "minimax" &&
-        input.wireApi === "openai_chat_completions"),
+        input.wireApi === "openai_chat_completions") ||
+      (input.serviceId === "qwen" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "qwen3.8-max"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,

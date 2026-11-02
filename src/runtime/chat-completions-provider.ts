@@ -1,6 +1,9 @@
 import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
-import { jsonRequestByteLength } from "./json-request-budget.ts"
+import {
+  jsonRequestByteLength,
+  JsonRequestBudgetError,
+} from "./json-request-budget.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -16,6 +19,7 @@ import { chatCompletionsIncompatibility } from "./chat-completions-compatibility
 import {
   flattenModelSystem,
   type ModelContentBlock,
+  type ModelImageBlock,
   type ModelMessage,
   type ModelRequest,
   ModelStopReason,
@@ -45,6 +49,10 @@ import {
   ModelRequestControlsError,
   validateModelRequestControls,
 } from "./model-request-controls.ts"
+import {
+  prepareQwenImage,
+  validateQwenImageRequest,
+} from "./qwen-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
@@ -140,8 +148,25 @@ async function* streamChatCompletions(
     // image estimate can undercount them. Do not invent a local token ceiling
     // or silently reduce detail: provider context rejection remains visible.
     let imageBytes = 0
+    const nativeQwenImages =
+      options.flavor === "qwen" &&
+      (request.target.model || options.model) === "qwen3.8-max"
+    let qwenImageBytes = 0
     const media = await prepareProviderMedia(request, {
       inlineDocumentUrls: true,
+      ...(nativeQwenImages
+        ? {
+            prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
+              // Bound inline accumulation before allocating each base64 copy.
+              qwenImageBytes += 4 * Math.ceil(bytes.length / 3)
+              if (qwenImageBytes > 16 * 1024 * 1024)
+                throw new AssetMediaError(
+                  "Qwen images were not sent: image data alone exceeds the 16 MiB DashScope request limit. Send fewer images; originals have not been changed.",
+                )
+              return prepareQwenImage(bytes, image, request.signal)
+            },
+          }
+        : {}),
       ...(minimax
         ? {
             inlineImageUrls: true,
@@ -275,6 +300,7 @@ async function* streamChatCompletions(
       throw new AssetMediaError(
         "MiniMax request exceeds 64 MB including text, tools and encoded images.",
       )
+    if (nativeQwenImages) validateQwenImageRequest(body)
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
@@ -787,6 +813,7 @@ async function* streamChatCompletions(
     }
     if (
       error instanceof AssetMediaError ||
+      error instanceof JsonRequestBudgetError ||
       error instanceof ModelRequestControlsError ||
       error instanceof ModelHistoryScopeError
     ) {
@@ -893,7 +920,7 @@ export function toChatCompletionsMessages(
                     block.file && "url" in block.file
                       ? block.file.url
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  detail: "high" as const,
+                  ...(flavor === "qwen" ? {} : { detail: "high" as const }),
                 },
               }
             }),
@@ -931,7 +958,7 @@ export function toChatCompletionsMessages(
                   block.file && "url" in block.file
                     ? block.file.url
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                detail: "high",
+                ...(flavor === "qwen" ? {} : { detail: "high" as const }),
               },
             },
           )
