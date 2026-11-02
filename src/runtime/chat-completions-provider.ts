@@ -15,6 +15,7 @@ import type {
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
+import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
   flattenModelSystem,
@@ -152,8 +153,15 @@ async function* streamChatCompletions(
       options.flavor === "qwen" &&
       (request.target.model || options.model) === "qwen3.8-max"
     let qwenImageBytes = 0
+    const imagePolicy =
+      options.flavor === "deepseek"
+        ? deepseekImagePolicy(options.baseURL, model, request)
+        : undefined
     const media = await prepareProviderMedia(request, {
       inlineDocumentUrls: true,
+      ...(imagePolicy === undefined
+        ? {}
+        : { prepareImage: imagePolicy.prepareImage }),
       ...(nativeQwenImages
         ? {
             prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
@@ -301,6 +309,7 @@ async function* streamChatCompletions(
         "MiniMax request exceeds 64 MB including text, tools and encoded images.",
       )
     if (nativeQwenImages) validateQwenImageRequest(body)
+    imagePolicy?.validateBody(body, media.messages)
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
