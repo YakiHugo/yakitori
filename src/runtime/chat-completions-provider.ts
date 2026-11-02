@@ -63,6 +63,10 @@ import {
   MetaImageRequestSizeError,
 } from "./meta-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+import {
+  createStepfunImagePolicy,
+  isStepfunEndpoint,
+} from "./stepfun-image-policy.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
@@ -79,6 +83,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "doubao"
     | "glm"
     | "meta"
+    | "stepfun"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -143,6 +148,8 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
+    const stepfun =
+      options.flavor === "stepfun" && isStepfunEndpoint(options.baseURL)
     const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
@@ -206,8 +213,12 @@ async function* streamChatCompletions(
       options.flavor === "deepseek"
         ? deepseekImagePolicy(options.baseURL, model, request)
         : undefined
+    const stepfunImages = stepfun
+      ? createStepfunImagePolicy(request, model)
+      : undefined
     const media = await prepareProviderMedia(request, {
       inlineDocumentUrls: true,
+      ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
       ...(imagePolicy === undefined
         ? {}
         : { prepareImage: imagePolicy.prepareImage }),
@@ -318,7 +329,8 @@ async function* streamChatCompletions(
       model: request.target.model || options.model,
       messages,
       stream: true as const,
-      stream_options: { include_usage: true },
+      // StepFun reports usage in streaming chunks without OpenAI stream_options.
+      ...(stepfun ? {} : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
         ? {}
         : { parallel_tool_calls: request.parallelToolCalls }),
@@ -414,6 +426,7 @@ async function* streamChatCompletions(
     imagePolicy?.validateBody(body, media.messages)
     glmImages?.validateBody(body)
     if (meta) validateMetaImageRequest(body)
+    stepfunImages?.validateBody(body)
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
@@ -458,7 +471,7 @@ async function* streamChatCompletions(
         completionId = chunk.id
       }
       if (chunk.usage != null) {
-        usage = fromChatUsage(chunk.usage)
+        usage = fromChatUsage(chunk.usage, stepfun)
         request.onUsageSnapshot?.(usage)
       }
       const { choices: _choices, ...metadata } = chunk
@@ -726,7 +739,12 @@ async function* streamChatCompletions(
             calls.set(tool.index, call)
           }
         }
-        if (choice.finish_reason != null) finishReason = choice.finish_reason
+        // StepFun documents an empty string on unfinished SSE chunks.
+        if (
+          choice.finish_reason != null &&
+          !(stepfun && (choice.finish_reason as string) === "")
+        )
+          finishReason = choice.finish_reason
       }
     }
     if (request.signal?.aborted) {
@@ -1273,6 +1291,7 @@ function geminiThoughtSignature(delta: JsonObject): string | undefined {
 
 function fromChatUsage(
   usage: NonNullable<ChatCompletionChunk["usage"]>,
+  stepfun: boolean,
 ): ModelUsage {
   if (
     ![usage.prompt_tokens, usage.completion_tokens, usage.total_tokens].every(
@@ -1285,8 +1304,11 @@ function fromChatUsage(
   const deepseekCache = isJsonObject(extended)
     ? extended.prompt_cache_hit_tokens
     : undefined
+  const stepfunCache =
+    stepfun && isJsonObject(extended) ? extended.cached_tokens : undefined
   const cached =
     usage.prompt_tokens_details?.cached_tokens ??
+    (typeof stepfunCache === "number" ? stepfunCache : undefined) ??
     (typeof deepseekCache === "number" ? deepseekCache : undefined)
   return {
     inputTokens: usage.prompt_tokens,

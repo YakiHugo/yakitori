@@ -112,6 +112,7 @@ export type ProviderPreset = Readonly<{
     | "doubao"
     | "glm"
     | "meta"
+    | "stepfun"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string

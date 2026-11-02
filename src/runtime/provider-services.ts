@@ -224,6 +224,30 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.mistral.ai/vibe/code/cli/configuration",
   },
   {
+    id: "stepfun",
+    name: "StepFun",
+    baseURL: "https://api.stepfun.com/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "STEPFUN_API_KEY",
+    flavor: "stepfun",
+    models: [
+      {
+        id: "step-5-preview",
+        displayName: "Step 5 Preview",
+        contextWindowTokens: 1_000_000,
+        contextWindowScope: "total",
+        maxOutputTokens: 64_000,
+        // Only still-image input is adapted here, not the model's video API.
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        efforts: ["low", "medium", "high"],
+        defaultEffort: "medium",
+      },
+    ],
+    documentationURL:
+      "https://platform.stepfun.ai/docs/en/guides/models/step-5-preview",
+  },
+  {
     id: "openrouter",
     name: "OpenRouter",
     kind: "relay",
@@ -304,6 +328,12 @@ export function providerServiceForEndpoint(
 const serviceEndpointVariants: Readonly<
   Record<string, readonly Pick<ProviderConfiguration, "baseURL" | "wireApi">[]>
 > = {
+  stepfun: [
+    {
+      baseURL: "https://api.stepfun.ai/v1",
+      wireApi: "openai_chat_completions",
+    },
+  ],
   openai: [
     {
       baseURL: "https://api.openai.com/v1",
