@@ -1184,12 +1184,6 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
           "inputModalities must contain text, image or video.",
         )
       if (
-        requirements.imageDetail !== undefined &&
-        requirements.imageDetail !== "high" &&
-        requirements.imageDetail !== "original"
-      )
-        throw invalidParams("imageDetail must be high or original.")
-      if (
         requirements.contextWindowTokens !== undefined &&
         (typeof requirements.contextWindowTokens !== "number" ||
           !Number.isSafeInteger(requirements.contextWindowTokens) ||
@@ -1220,10 +1214,6 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
                     | "video"
                   )[],
                 }
-              : {}),
-            ...(requirements.imageDetail === "high" ||
-            requirements.imageDetail === "original"
-              ? { imageDetail: requirements.imageDetail }
               : {}),
             ...(typeof requirements.contextWindowTokens === "number"
               ? { contextWindowTokens: requirements.contextWindowTokens }

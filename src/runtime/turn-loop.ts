@@ -159,7 +159,6 @@ export type TurnLoopOptions = Readonly<{
     context: Readonly<{
       preferredAccount?: string
       requiresImages: boolean
-      imageDetail?: "high" | "original"
       contextWindowTokens?: number
     }>,
   ): ModelSelection

@@ -90,12 +90,6 @@ export function SideChatPanel({
       )
         ? { inputModalities: ["image"] }
         : {}),
-      ...(draftAttachments.some(
-        (attachment) =>
-          "detail" in attachment && attachment.detail === "original",
-      )
-        ? { imageDetail: "original" }
-        : {}),
     },
     chat?.id,
     chat?.activeTurnId === undefined ? chat?.revision : undefined,
@@ -702,13 +696,6 @@ export function SideChatPanel({
             ((
               route?.preview?.inputModalities ?? modelEntry.inputModalities
             )?.includes("image") ??
-              false)
-          }
-          supportsOriginal={
-            modelEntry === undefined ||
-            ((
-              route?.preview?.imageDetailModes ?? modelEntry.imageDetailModes
-            )?.includes("original") ??
               false)
           }
           historyParts={

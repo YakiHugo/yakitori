@@ -148,14 +148,10 @@ export function Composer() {
   const requiresImages = draftAttachments.some((attachment) =>
     attachment.mediaType.startsWith("image/"),
   )
-  const requiresOriginal = draftAttachments.some(
-    (attachment) => "detail" in attachment && attachment.detail === "original",
-  )
   const route = useModelRoutePreview(
     effectiveModel,
     {
       ...(requiresImages ? { inputModalities: ["image"] } : {}),
-      ...(requiresOriginal ? { imageDetail: "original" } : {}),
     },
     sessionId,
   )
@@ -173,12 +169,6 @@ export function Composer() {
       : ((
           route?.preview?.inputModalities ?? modelEntry.inputModalities
         )?.includes("image") ?? false)
-  const supportsOriginal =
-    modelEntry === undefined
-      ? true
-      : ((
-          route?.preview?.imageDetailModes ?? modelEntry.imageDetailModes
-        )?.includes("original") ?? false)
   const contextTokens = view.contextTokens
   // The snapshot pairs tokens with the window of the model that produced
   // them. Records written before capacity was persisted fall back to the
@@ -290,7 +280,6 @@ export function Composer() {
       }
       activeTurnId={activeTurnId}
       supportsImages={supportsImages}
-      supportsOriginal={supportsOriginal}
       historyParts={view.entries.flatMap((entry) =>
         entry.kind === "user_input" ? [entry.content] : [],
       )}

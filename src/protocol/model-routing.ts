@@ -2,7 +2,6 @@ import type { ModelSelection } from "./events.ts"
 
 export type ModelRouteRequirements = Readonly<{
   inputModalities?: readonly ("text" | "image" | "video")[]
-  imageDetail?: "high" | "original"
   contextWindowTokens?: number
 }>
 
@@ -12,7 +11,6 @@ export type ModelRouteRejection = Readonly<{
   code:
     | "model_unavailable"
     | "unsupported_modality"
-    | "unsupported_image_detail"
     | "unsupported_effort"
     | "unsupported_speed"
     | "budget_exceeded"

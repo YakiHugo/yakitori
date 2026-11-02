@@ -156,7 +156,6 @@ export function ComposerSurface({
   stopping = false,
   activeTurnId,
   supportsImages = true,
-  supportsOriginal = true,
   historyParts,
   setPromptDraft,
   removePromptExcerpt,
@@ -196,7 +195,6 @@ export function ComposerSurface({
   stopping?: boolean
   activeTurnId?: string | undefined
   supportsImages?: boolean
-  supportsOriginal?: boolean
   historyParts: readonly InputDraft[]
   setPromptDraft(parts: InputDraft): void
   removePromptExcerpt(id: string): void
@@ -538,7 +536,7 @@ export function ComposerSurface({
   const submit = (mode?: "auto" | "queue") => {
     if (!canSend) return
     setHistoryNavigation(undefined)
-    // Preserve authored detail in durable history and admission identity.
+    // Preserve source metadata in durable history and admission identity.
     // Runtime projects it to the selected model before preparing image bytes.
     onSubmit(trimInputDraft(parts), mode)
   }
@@ -857,37 +855,6 @@ export function ComposerSurface({
                   >
                     <X className="size-3" />
                   </button>
-                  {attachment.mediaType !== "application/pdf" ? (
-                    <button
-                      type="button"
-                      aria-label={
-                        supportsOriginal || attachment.detail === "original"
-                          ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
-                          : `Original detail unavailable for ${attachment.name}`
-                      }
-                      disabled={
-                        (!supportsOriginal &&
-                          attachment.detail !== "original") ||
-                        sending
-                      }
-                      onClick={() =>
-                        editorRef.current?.setImageDetail(
-                          index,
-                          attachment.detail === "original"
-                            ? "high"
-                            : "original",
-                        )
-                      }
-                      title={
-                        supportsOriginal || attachment.detail === "original"
-                          ? "Toggle image detail"
-                          : "Original detail unavailable"
-                      }
-                      className="absolute bottom-1 left-1 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] leading-none font-medium text-white opacity-0 backdrop-blur-sm transition-opacity group-hover/image:opacity-100 hover:bg-black focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      {attachment.detail === "original" ? "Original" : "High"}
-                    </button>
-                  ) : null}
                 </div>
               ))}
             </div>
@@ -899,14 +866,6 @@ export function ComposerSurface({
               {submissionBlocked
                 ? "No connected account supports these images with the current model options. Change the model options or remove the images."
                 : "The selected model does not support images. Attachments will be omitted and the model will receive a notice."}
-            </p>
-          ) : attachments.some(
-              (attachment) => attachment.mediaType !== "application/pdf",
-            ) && !supportsOriginal ? (
-            <p className="px-3 pt-2 text-xs text-muted-foreground">
-              {submissionBlocked
-                ? "Original detail is unavailable with the current model options. Switch images to High detail or choose another model."
-                : "Original detail is unavailable for the selected model. Images will use High detail."}
             </p>
           ) : null}
 

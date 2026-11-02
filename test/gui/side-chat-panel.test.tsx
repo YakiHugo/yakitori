@@ -304,7 +304,6 @@ describe("side chat panel", () => {
         selection: { ...modelA, effort: "low" },
         requirements: {
           inputModalities: ["image"],
-          imageDetail: "original",
         },
         sessionId: "side-chat",
       }),
