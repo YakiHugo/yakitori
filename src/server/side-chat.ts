@@ -40,6 +40,7 @@ import {
   type UserAttachment,
 } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
+import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type { PermissionGate } from "../runtime/permission-gate.ts"
 
 export const sideChatInstructions =
@@ -632,6 +633,10 @@ export function createSideChatService(options: {
       chat.importing.add(operation)
       try {
         return await operation
+      } catch (error) {
+        if (error instanceof InvalidImageDataError)
+          throw new SideChatError(error.message)
+        throw error
       } finally {
         chat.importing.delete(operation)
       }

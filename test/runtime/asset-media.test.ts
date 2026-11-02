@@ -101,3 +101,135 @@ describe("request asset access", () => {
     expect(input.messages[0]?.content[0]).toMatchObject({ file: source })
   })
 })
+
+it.each([
+  "inline",
+  "file",
+] as const)("rejects a later corrupt %s image before uploading any preceding PDF", async (source) => {
+  const corrupt = Buffer.alloc(24)
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(corrupt)
+  corrupt.writeUInt32BE(100, 16)
+  corrupt.writeUInt32BE(100, 20)
+  let uploads = 0
+  const request: ModelRequest = {
+    target: {
+      provider: "test",
+      model: "vision",
+      instructionProfileId: "default",
+    },
+    system: [],
+    tools: [],
+    toolWireProtocol: "eager",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            name: "first.pdf",
+            mediaType: "application/pdf",
+            sizeBytes: 6,
+            file: { rolloutId: "rollout_one", path: "first.pdf" },
+          },
+          {
+            type: "image",
+            mediaType: "image/png",
+            detail: "original",
+            ...(source === "inline"
+              ? { data: corrupt.toString("base64") }
+              : {
+                  sizeBytes: corrupt.length,
+                  file: { rolloutId: "rollout_one", path: "bad.png" },
+                }),
+          },
+        ],
+      },
+    ],
+    assets: {
+      async read(file) {
+        return "path" in file && file.path === "first.pdf"
+          ? Buffer.from("%PDF-1")
+          : corrupt
+      },
+    },
+  }
+  const original = JSON.stringify(request.messages)
+  await expect(
+    prepareProviderMedia(request, {
+      async uploadDocument() {
+        uploads += 1
+        return "uploaded_pdf"
+      },
+    }),
+  ).rejects.toThrow("Image was not sent: unable to decode image")
+  expect(uploads).toBe(0)
+  expect(JSON.stringify(request.messages)).toBe(original)
+})
+
+it("keeps external image URLs provider-owned rather than fetching them in preflight", async () => {
+  const input: ModelRequest = {
+    target: {
+      provider: "test",
+      model: "vision",
+      instructionProfileId: "default",
+    },
+    system: [],
+    tools: [],
+    toolWireProtocol: "eager",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            mediaType: "image/png",
+            sizeBytes: 0,
+            file: { url: "https://example.invalid/image.png" },
+          },
+        ],
+      },
+    ],
+    assets: {
+      async read() {
+        throw new Error("Unexpected URL fetch")
+      },
+    },
+  }
+  expect((await prepareProviderMedia(input)).messages).toEqual(input.messages)
+})
+
+it("keeps provider-addressable owned image URLs independent of local readability", async () => {
+  const source = { rolloutId: "rollout_one", path: "image.png" }
+  const input: ModelRequest = {
+    target: {
+      provider: "test",
+      model: "vision",
+      instructionProfileId: "default",
+    },
+    system: [],
+    tools: [],
+    toolWireProtocol: "eager",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", mediaType: "image/png", sizeBytes: 1, file: source },
+        ],
+      },
+    ],
+    assets: {
+      async read() {
+        throw new Error("Hosted asset should not require local bytes")
+      },
+      url() {
+        return "https://example.invalid/hosted.png"
+      },
+    },
+  }
+  expect(
+    (await prepareProviderMedia(input)).messages[0]?.content[0],
+  ).toMatchObject({
+    file: { url: "https://example.invalid/hosted.png" },
+  })
+  expect(input.messages[0]?.content[0]).toMatchObject({ file: source })
+})

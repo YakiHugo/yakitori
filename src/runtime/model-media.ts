@@ -1,3 +1,4 @@
+import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type { RolloutAssets } from "../core/rollout-assets.ts"
 import { formatInputContext } from "./input-context.ts"
 import type {
@@ -51,7 +52,7 @@ export async function prepareModelMedia(
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
   // rasterization worker per message concurrently.
-  for (const message of adapted) {
+  for (const [messageIndex, message] of adapted.entries()) {
     if (message.role !== "user" && message.role !== "tool") {
       resolved.push(message)
       continue
@@ -61,15 +62,26 @@ export async function prepareModelMedia(
         return prepareModelImage(
           Buffer.from(image.data, "base64"),
           image.detail ?? "high",
+          input.signal,
         )
       return image
     }
     const content: ModelToolContentBlock[] = []
     // PDF raster/text fallback expands at its source slot, not after later text
     // or other assets. Keep the existing sequential PDF cache/budget boundary.
-    for (const block of message.content) {
-      if (block.type === "image") content.push(await resolveImage(block))
-      else if (block.type === "text") content.push(block)
+    for (const [contentIndex, block] of message.content.entries()) {
+      if (block.type === "image") {
+        try {
+          content.push(await resolveImage(block))
+        } catch (cause) {
+          if (cause instanceof InvalidImageDataError)
+            throw new InvalidImageDataError(
+              `Image in ${message.role} message ${messageIndex + 1}, part ${contentIndex + 1}: ${cause.message}`,
+              { cause },
+            )
+          throw cause
+        }
+      } else if (block.type === "text") content.push(block)
       else {
         const projected = await prepareModelDocuments(
           [block],

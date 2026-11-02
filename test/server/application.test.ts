@@ -1,3 +1,4 @@
+import { pngImageBytes } from "../fixtures/images.ts"
 import {
   chmod,
   mkdir,
@@ -2210,7 +2211,7 @@ describe("application composition", () => {
           sessionId,
           PersistContext.TurnStart,
         )
-        const imageBytes = pngBuffer(128)
+        const imageBytes = pngImageBytes(128)
         const draftRolloutId = "draft_application_test"
         const attachments =
           await application.rolloutAssets.importAttachmentBytes(
@@ -2319,7 +2320,7 @@ describe("application composition", () => {
         expect(logRoute.status).toBe(404)
 
         const replacementBytes = Buffer.from(imageBytes)
-        replacementBytes[12] = 1
+        replacementBytes[replacementBytes.length - 1] = 1
         const replacementDraft =
           await application.rolloutAssets.importAttachmentBytes(
             sessionId,
@@ -2515,7 +2516,7 @@ describe("application composition", () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const options = testApplicationOptions({ rootDir, workspace })
       const first = await createYakitoriApplication(options)
-      const bytes = pngBuffer(128)
+      const bytes = pngImageBytes(128)
       let existingSessionId: string
       let existingAttachment:
         | Awaited<
@@ -2630,7 +2631,7 @@ describe("application composition", () => {
           await application.rolloutAssets.importAttachmentBytes(
             sessionId,
             "text_only_draft",
-            [{ name: "screen.png", data: pngBuffer(128) }],
+            [{ name: "screen.png", data: pngImageBytes(128) }],
           )
         const read = vi.spyOn(application.rolloutAssets, "read")
         const admitted = await application.handlers.admitInput({
@@ -2679,7 +2680,7 @@ describe("application composition", () => {
           created.value.session.id,
           PersistContext.TurnStart,
         )
-        const imageBytes = pngBuffer(128 * 1024 + 17)
+        const imageBytes = pngImageBytes(128 * 1024 + 17)
         const sourcePath = join(rootDir, "large.png")
         await writeFile(sourcePath, imageBytes)
         const [attachment] =
@@ -5748,14 +5749,6 @@ async function closeServer(server: HttpServer): Promise<void> {
     })
     server.closeAllConnections()
   })
-}
-
-function pngBuffer(size: number): Buffer {
-  const bytes = Buffer.alloc(Math.max(size, 24))
-  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
-  bytes.writeUInt32BE(1, 16)
-  bytes.writeUInt32BE(1, 20)
-  return bytes
 }
 
 function expectOk<T>(

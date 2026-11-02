@@ -1,3 +1,4 @@
+import { pngImageBytes } from "../fixtures/images.ts"
 import {
   mkdir,
   mkdtemp,
@@ -96,7 +97,7 @@ describe("rollout asset lineage", () => {
         stat(join(sessionStoreRoot, "rollouts", "rollout_orphan")),
       ).rejects.toMatchObject({ code: "ENOENT" })
 
-      const imageBytes = pngBuffer(128)
+      const imageBytes = pngImageBytes(128)
       const attachments = await application.rolloutAssets.importAttachmentBytes(
         rolloutId,
         "draft_physical_integration",
@@ -164,7 +165,7 @@ describe("rollout asset lineage", () => {
       await rm(rootDir, { recursive: true, force: true })
       await rm(workspace, { recursive: true, force: true })
     })
-    const imageBytes = pngBuffer(128)
+    const imageBytes = pngImageBytes(128)
     let inspected: Buffer | undefined
     const provider = createFauxProvider([
       { content: [{ type: "text", text: "source image" }] },
@@ -481,14 +482,6 @@ async function waitForThreadIdle(
       resolve()
     })
   })
-}
-
-function pngBuffer(size: number): Buffer {
-  const bytes = Buffer.alloc(Math.max(size, 24))
-  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
-  bytes.writeUInt32BE(1, 16)
-  bytes.writeUInt32BE(1, 20)
-  return bytes
 }
 
 function expectOk<T>(

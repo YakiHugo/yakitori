@@ -1,3 +1,4 @@
+import { pngImageBase64 } from "../fixtures/images.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -9,10 +10,7 @@ import { runYakitoriServerProcess } from "../../src/server/server-process.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
 
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6jYAAAAAASUVORK5CYII=",
-  "base64",
-)
+const png = Buffer.from(pngImageBase64, "base64")
 
 describe("WebSocket admissions during graceful shutdown", () => {
   it("drains an admitted attachment input and its turn before stopping the application", async () => {

@@ -42,6 +42,7 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
@@ -3178,6 +3179,11 @@ function fail(
 }
 
 function mapError(error: unknown): ApiBoundaryError {
+  if (error instanceof InvalidImageDataError)
+    return invalidInput(error.message, {
+      field: "attachments",
+      reason: "invalid_image",
+    })
   if (error instanceof ModelRouteError)
     return invalidInput(error.message, { field: "modelSelection" })
   if (error instanceof ApiBoundaryError) return error

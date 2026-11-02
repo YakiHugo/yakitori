@@ -8,7 +8,7 @@ import type {
   ModelRequest,
   ModelToolContentBlock,
 } from "./model.ts"
-import { prepareModelImage } from "./prepare-model-image.ts"
+import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
 
 // Match local attachment snapshot safety: remote reads must not allocate an
 // unbounded body merely because a backend needs inline media.
@@ -78,6 +78,59 @@ export async function prepareProviderMedia(
   uploadedFiles: ReadonlyMap<ModelDocumentBlock, string>
 }> {
   const uploadedFiles = new Map<ModelDocumentBlock, string>()
+  const preparedImages = new Map<ModelImageBlock, ModelImageBlock>()
+  // Validate every locally available image before any document upload. This
+  // includes inline images passed directly to a provider, outside the Turn
+  // projection. External URLs retain their provider-owned fetch semantics.
+  for (const [messageIndex, message] of request.messages.entries()) {
+    if (message.role !== "user" && message.role !== "tool") continue
+    for (const [contentIndex, block] of message.content.entries()) {
+      request.signal?.throwIfAborted()
+      if (block.type !== "image") continue
+      try {
+        if (block.data !== undefined) {
+          await validateModelImage(
+            Buffer.from(block.data, "base64"),
+            request.signal,
+          )
+          continue
+        }
+        const source = block.file
+        const url = "url" in source ? source.url : request.assets?.url?.(source)
+        if (url !== undefined && !options.inlineImageUrls) {
+          preparedImages.set(block, { ...block, file: { url } })
+          continue
+        }
+        const bytes = request.assets
+          ? await request.assets.read(source, request.signal)
+          : await readAssetSource(source, undefined, request.signal)
+        if (block.sizeBytes > 0 && bytes.length !== block.sizeBytes)
+          throw new AssetMediaError(
+            "Asset size does not match its recorded size.",
+          )
+        preparedImages.set(
+          block,
+          await prepareModelImage(
+            bytes,
+            block.detail ?? "high",
+            request.signal,
+          ),
+        )
+      } catch (cause) {
+        if (cause instanceof InvalidImageDataError) {
+          const source =
+            block.data === undefined && "path" in block.file
+              ? ` (${block.file.path})`
+              : ""
+          throw new AssetMediaError(
+            `Image in ${message.role} message ${messageIndex + 1}, part ${contentIndex + 1}${source}: ${cause.message}`,
+            { cause },
+          )
+        }
+        throw cause
+      }
+    }
+  }
   const messages: ModelMessage[] = []
   for (const message of request.messages) {
     if (message.role !== "user" && message.role !== "tool") {
@@ -86,18 +139,18 @@ export async function prepareProviderMedia(
     }
     const content: ModelToolContentBlock[] = []
     for (const block of message.content) {
+      request.signal?.throwIfAborted()
+      if (block.type === "image") {
+        content.push(preparedImages.get(block) ?? block)
+        continue
+      }
       if (block.type === "text" || block.data !== undefined) {
         content.push(block)
         continue
       }
       const source = block.file
       const url = "url" in source ? source.url : request.assets?.url?.(source)
-      if (
-        url !== undefined &&
-        !(block.type === "image"
-          ? options.inlineImageUrls
-          : options.inlineDocumentUrls)
-      ) {
+      if (url !== undefined && !options.inlineDocumentUrls) {
         content.push({ ...block, file: { url } })
         continue
       }
@@ -111,19 +164,6 @@ export async function prepareProviderMedia(
       if (block.type === "document" && options.uploadDocument) {
         uploadedFiles.set(block, await options.uploadDocument(block, bytes))
         content.push(block)
-      } else if (block.type === "image") {
-        const prepared: ModelImageBlock = await prepareModelImage(
-          bytes,
-          block.detail ?? "high",
-        ).catch((cause: unknown) => {
-          // Byte reads happen above this boundary. Only an explicit decoder
-          // rejection is invalid input; IO, abort and unexpected errors retain
-          // their existing failure and retry behavior.
-          if (cause instanceof InvalidImageDataError)
-            throw new AssetMediaError(cause.message, { cause })
-          throw cause
-        })
-        content.push(prepared)
       } else content.push({ ...block, data: bytes.toString("base64") })
     }
     messages.push({ ...message, content })

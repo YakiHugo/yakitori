@@ -1,3 +1,4 @@
+import { pngImageBase64 } from "../fixtures/images.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
@@ -552,7 +553,7 @@ it.each([
                   {
                     type: "image" as const,
                     mediaType: "image/png" as const,
-                    data: "aW1hZ2U=",
+                    data: pngImageBase64,
                   },
                 ],
               },
@@ -604,7 +605,7 @@ it.each([
               {
                 type: "image_url",
                 image_url: {
-                  url: "data:image/png;base64,aW1hZ2U=",
+                  url: `data:image/png;base64,${pngImageBase64}`,
                   detail: "high",
                 },
               },
