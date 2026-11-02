@@ -218,6 +218,10 @@ export async function discoverProviderModels(
           : {}
       const kind = discoveredModelKind(entry, nativeProvider)
       models.set(entry.id, {
+        // Exact first-party model facts fill catalog omissions, never relay aliases.
+        ...(officialPreset?.id === "minimax"
+          ? officialPreset.models.find((model) => model.id === entry.id)
+          : {}),
         id: entry.id,
         defaultVisible,
         ...(name ? { displayName: name } : {}),

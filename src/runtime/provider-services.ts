@@ -130,7 +130,24 @@ export const providerServices: readonly ProviderPreset[] = [
     baseURL: "https://api.minimax.io/v1",
     wireApi: "openai_chat_completions",
     envKey: "MINIMAX_API_KEY",
-    models: [{ id: "MiniMax-M2.7", contextWindowTokens: 204_800 }],
+    flavor: "minimax",
+    models: [
+      {
+        id: "MiniMax-M3.1-Flash",
+        contextWindowTokens: 1_000_000,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "max",
+      },
+      {
+        id: "MiniMax-M3",
+        contextWindowTokens: 1_000_000,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+      { id: "MiniMax-M2.7", contextWindowTokens: 204_800 },
+    ],
     documentationURL:
       "https://platform.minimax.io/docs/api-reference/text-openai-api",
   },
