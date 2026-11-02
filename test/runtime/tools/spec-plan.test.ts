@@ -81,8 +81,8 @@ describe("Step tool planning", () => {
       wireApi,
     })
     expect(step.imageTokenEstimator !== undefined).toBe(enabled)
-    // No new raw delegation or implicit auto accompanies this budget change.
-    expect(step.deferImagePreparation).toBe(false)
+    // Raw delegation is limited to the verified native Astra transport.
+    expect(step.deferImagePreparation).toBe(enabled)
     const plan = prepareModelRequestPlan(
       {
         target: step.target,

@@ -81,6 +81,7 @@ describe("native OpenAI Responses image estimates", () => {
         model: "gpt-6-astra",
         instructionProfileId: "generic",
       },
+      deferImagePreparation: true,
       imageCapabilities: facts,
       rolloutAssets: undefined,
       documentReading: { nativePdf: false, images: true },
@@ -93,8 +94,8 @@ describe("native OpenAI Responses image estimates", () => {
         : undefined
     expect(prepared).toBeDefined()
     if (prepared === undefined) throw new Error("Missing projected image")
-    expect(estimate(raw, "history")).toBe(615)
-    expect(estimate(prepared, "prepared")).toBe(615)
+    expect(estimate(raw, "history")).toBe(2458)
+    expect(estimate(prepared, "prepared")).toBe(2458)
     expect(raw.data).toBe(bytes.toString("base64"))
     expect(raw.detail).toBe(detail)
   })
@@ -111,8 +112,8 @@ describe("native OpenAI Responses image estimates", () => {
   })
   it("estimates raw history using the same high-detail projection as the wire", () => {
     const estimate = estimator("gpt-6-astra")
-    expect(estimate(image(4096, 512), "history")).toBe(615)
-    expect(estimate(image(2048, 256), "prepared")).toBe(615)
+    expect(estimate(image(4096, 512), "history")).toBe(2458)
+    expect(estimate(image(4096, 512), "prepared")).toBe(2458)
     const downgraded = openAIImageTokenEstimator({
       ...context,
       model: {
@@ -123,12 +124,10 @@ describe("native OpenAI Responses image estimates", () => {
     })
     if (downgraded === undefined)
       throw new Error("Missing known-model estimate")
-    expect(downgraded(image(4096, 512, "original"), "history")).toBe(615)
+    expect(downgraded(image(4096, 512, "original"), "history")).toBe(2458)
   })
   it("distinguishes original resize budgets from newer original rejection ceilings", () => {
-    expect(
-      estimator("gpt-5.5")(image(6400, 3200, "original")),
-    ).toBe(11760)
+    expect(estimator("gpt-5.5")(image(6400, 3200, "original"))).toBe(11760)
     expect(estimator()(image(6400, 3200, "original"))).toBe(24000)
     // This input would be rejected by the API. The estimate must not pretend
     // the server resizes it to 10k or 30k patches, or admit/modify it itself.
