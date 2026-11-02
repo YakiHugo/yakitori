@@ -1,3 +1,9 @@
+import {
+  anthropicImageCount,
+  isStandardAnthropicImageModel,
+  prepareAnthropicImage,
+} from "./anthropic-image-policy.ts"
+import { prepareModelImage } from "./prepare-model-image.ts"
 import Anthropic, { toFile } from "@anthropic-ai/sdk"
 import type {
   BetaContentBlockParam,
@@ -53,6 +59,8 @@ import {
 import { ANTHROPIC_REQUEST_MAX_BYTES } from "./native-pdf-capabilities.ts"
 import { createFileUploadCache } from "./provider-file-cache.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+
+class AnthropicImageBudgetFallback extends Error {}
 
 export type AnthropicProviderOptions = Readonly<{
   apiKey: string
@@ -184,15 +192,87 @@ async function* streamAnthropic(
             supportsAdaptiveThinking(request.target.model || defaultModel)
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
-    const media = await prepareProviderMedia(
-      request,
-      upload === undefined
+    const nativeImagePolicy =
+      URL.parse(client.baseURL ?? fallbackBaseURL)?.href ===
+      "https://api.anthropic.com/"
+    // Native hosted tools have different screenshot limits; legacy SDK controls
+    // can rewrite the JSON body. Keep these advanced requests on their existing
+    // image preparation instead of guessing their resize or serialization rules.
+    const controls = request.providerOptions?.body
+    const checkNativeImageLimits =
+      nativeImagePolicy &&
+      anthropicImageCount(request.messages) > 0 &&
+      !request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some((block) => block.type === "document"),
+      ) &&
+      controls?.tools === undefined &&
+      controls?.user_profile_id === undefined &&
+      controls?.output_format === undefined &&
+      controls?.betas === undefined
+    const delegateImages =
+      checkNativeImageLimits &&
+      isStandardAnthropicImageModel(request.target.model || defaultModel)
+    const imageCount = anthropicImageCount(request.messages)
+    if (
+      checkNativeImageLimits &&
+      imageCount >
+        ((request.target.model || defaultModel) === "claude-haiku-4-5"
+          ? 100
+          : 600)
+    )
+      throw new AssetMediaError(
+        "Images were not sent: the request exceeds the applicable Claude image-count guard (the documented model allowance when known, otherwise the shared API maximum). Send fewer attachments; originals have not been changed.",
+      )
+    let preferSmallerImages = !delegateImages
+    let preparedImageBytes = 0
+    const prepareImage = async (
+      bytes: Buffer,
+      image: import("./model.ts").ModelImageBlock,
+    ) => {
+      if (!checkNativeImageLimits)
+        return prepareModelImage(bytes, image.detail ?? "high", request.signal)
+      const prepared = await prepareAnthropicImage(
+        bytes,
+        image,
+        imageCount,
+        request.signal,
+        preferSmallerImages,
+        delegateImages,
+      )
+      preparedImageBytes += prepared.data?.length ?? 0
+      // A lower bound catches large file-backed batches before retaining every
+      // image. Abandon this no-document pass and rebuild once with smaller
+      // candidates; no upload or model request has happened yet.
+      if (preparedImageBytes > ANTHROPIC_REQUEST_MAX_BYTES) {
+        if (!preferSmallerImages) throw new AnthropicImageBudgetFallback()
+        throw new AssetMediaError(
+          "Images were not sent: image data alone exceeds the 32 MB Yakitori request budget after bounded preparation. Send fewer attachments; originals have not been changed.",
+        )
+      }
+      return prepared
+    }
+    const mediaOptions = {
+      ...(nativeImagePolicy ? { prepareImage } : {}),
+      ...(upload === undefined
         ? {}
         : {
-            uploadDocument: (document, bytes) =>
-              upload(document, bytes, request.signal),
-          },
-    )
+            uploadDocument: (
+              document: import("./model.ts").ModelDocumentBlock,
+              bytes: Buffer,
+            ) => upload(document, bytes, request.signal),
+          }),
+    }
+    let media: Awaited<ReturnType<typeof prepareProviderMedia>>
+    try {
+      media = await prepareProviderMedia(request, mediaOptions)
+    } catch (cause) {
+      if (!(cause instanceof AnthropicImageBudgetFallback)) throw cause
+      preferSmallerImages = true
+      preparedImageBytes = 0
+      media = await prepareProviderMedia(request, mediaOptions)
+    }
     let body: import("@anthropic-ai/sdk/resources/beta/messages/messages").MessageCreateParamsStreaming =
       {
         stream: true,
@@ -247,8 +327,40 @@ async function* streamAnthropic(
         format: { type: "json_schema", schema: request.outputFormat.schema },
       }
     body = applyModelRequestControls(request, "anthropic_messages", body)
-    // Only PDFs sent to the direct API use Anthropic's documented whole-body
-    // limit. Compatible endpoints own their limits, regardless of provider ID.
+    // This opt-in slice excludes documents, so budgeting and the single model-tier
+    // fallback happen before any upload or model call. Count the real serializer,
+    // including tools, system content and provider controls, not just image data.
+    if (
+      checkNativeImageLimits &&
+      Buffer.byteLength(JSON.stringify(body), "utf8") >
+        ANTHROPIC_REQUEST_MAX_BYTES
+    ) {
+      if (!preferSmallerImages) {
+        preferSmallerImages = true
+        preparedImageBytes = 0
+        const fallback = await prepareProviderMedia(
+          { ...request, messages: media.messages },
+          { prepareImage },
+        )
+        body.messages = toAnthropicRequestMessages(
+          fallback.messages,
+          request.tools,
+          explicitPromptCaching,
+          nativeDeferredLoading,
+          request.target.provider,
+          request.continuationScope,
+          fallback.uploadedFiles,
+          request.target.model || defaultModel,
+        )
+      }
+      const requestBytes = Buffer.byteLength(JSON.stringify(body), "utf8")
+      if (requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
+        throw new AssetMediaError(
+          `Images were not sent: the Anthropic request is ${requestBytes} bytes after bounded preparation, exceeding the 32 MB Yakitori whole-request budget. Send fewer attachments or reduce other request content; originals have not been changed.`,
+        )
+    }
+    // Retain the existing local PDF-bearing request budget. It is not the
+    // current official API ceiling; compatible endpoints own their limits.
     if (
       URL.parse(client.baseURL ?? fallbackBaseURL)?.href ===
         "https://api.anthropic.com/" &&
@@ -273,7 +385,7 @@ async function* streamAnthropic(
             stage: "request_build",
             provider: request.target.provider,
             wireApi: "anthropic_messages",
-            message: `PDF-bearing Anthropic request is ${requestBytes} bytes, exceeding the ${ANTHROPIC_REQUEST_MAX_BYTES}-byte (32 MB) request limit. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.`,
+            message: `PDF-bearing Anthropic request is ${requestBytes} bytes, exceeding Yakitori's ${ANTHROPIC_REQUEST_MAX_BYTES}-byte (32 MB) request budget. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.`,
           },
         }
         return
