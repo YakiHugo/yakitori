@@ -66,6 +66,10 @@ export async function readAssetSource(
 export async function prepareProviderMedia(
   request: ModelRequest,
   options: Readonly<{
+    prepareImage?(
+      bytes: Buffer,
+      image: ModelImageBlock,
+    ): Promise<ModelImageBlock>
     inlineImageUrls?: boolean
     inlineDocumentUrls?: boolean
     uploadDocument?(
@@ -89,10 +93,10 @@ export async function prepareProviderMedia(
       if (block.type !== "image") continue
       try {
         if (block.data !== undefined) {
-          await validateModelImage(
-            Buffer.from(block.data, "base64"),
-            request.signal,
-          )
+          const bytes = Buffer.from(block.data, "base64")
+          if (options.prepareImage !== undefined)
+            preparedImages.set(block, await options.prepareImage(bytes, block))
+          else await validateModelImage(bytes, request.signal)
           continue
         }
         const source = block.file
@@ -110,11 +114,13 @@ export async function prepareProviderMedia(
           )
         preparedImages.set(
           block,
-          await prepareModelImage(
-            bytes,
-            block.detail ?? "high",
-            request.signal,
-          ),
+          options.prepareImage !== undefined
+            ? await options.prepareImage(bytes, block)
+            : await prepareModelImage(
+                bytes,
+                block.detail ?? "high",
+                request.signal,
+              ),
         )
       } catch (cause) {
         if (cause instanceof InvalidImageDataError) {

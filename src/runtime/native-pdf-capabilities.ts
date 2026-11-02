@@ -44,9 +44,9 @@ export function supportsOpenAIChatUserPdf(model: string): boolean {
 // https://ai.google.dev/gemini-api/docs/file-input-methods#input-method-comparison
 export const GEMINI_INLINE_REQUEST_MAX_BYTES = 100_000_000
 
-// Messages limits the whole JSON request, not raw bytes per PDF. Decimal MB is
-// a conservative interpretation of the documented unit; the final wire guard
-// also includes system text, tools, images and serialization overhead.
+// Retained Yakitori local whole-request safety budget, not the current official
+// Claude API maximum (128 MB as verified 2026-11-02). Keep this resource policy
+// separate from provider admission limits; includes all JSON body overhead.
 // https://platform.claude.com/docs/en/api/errors#request-size-limits
 export const ANTHROPIC_REQUEST_MAX_BYTES = 32_000_000
 

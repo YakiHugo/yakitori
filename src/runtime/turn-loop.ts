@@ -849,6 +849,9 @@ async function executeTurnModelLoop(
         configuration: turn.requestSettings,
         ...(wireApi === undefined ? {} : { wireApi }),
         nativePdf,
+        ...(modelSession?.serviceId === undefined
+          ? {}
+          : { serviceId: modelSession.serviceId }),
         ...(modelSession?.toolCapabilities === undefined
           ? {}
           : { toolCapabilities: modelSession.toolCapabilities }),
@@ -1160,6 +1163,9 @@ async function executeTurnModelLoop(
                   ? {}
                   : { wireApi: sourceSession.wireApi }),
                 nativePdf: sourceSession?.nativePdf === true,
+                ...(sourceSession?.serviceId === undefined
+                  ? {}
+                  : { serviceId: sourceSession.serviceId }),
                 ...(sourceSession?.toolCapabilities === undefined
                   ? {}
                   : { toolCapabilities: sourceSession.toolCapabilities }),
@@ -1383,6 +1389,7 @@ async function executeTurnModelLoop(
           return prepareModelMedia(history, {
             target: executionStep.target,
             imageCapabilities: executionStep.modelInfo,
+            nativeAnthropicImages: executionStep.nativeAnthropicImages,
             rolloutAssets: input.options.rolloutAssets,
             documentReading: executionStep.documentReading,
             userDocumentReading: executionStep.userDocumentReading,
@@ -1400,6 +1407,7 @@ async function executeTurnModelLoop(
         messages: await prepareModelMedia(messages, {
           target: step.target,
           imageCapabilities: step.modelInfo,
+          nativeAnthropicImages: step.nativeAnthropicImages,
           rolloutAssets: input.options.rolloutAssets,
           documentReading: step.documentReading,
           userDocumentReading: step.userDocumentReading,
@@ -1962,6 +1970,7 @@ async function executeTurnModelLoop(
               {
                 target: step.target,
                 imageCapabilities: step.modelInfo,
+                nativeAnthropicImages: step.nativeAnthropicImages,
                 rolloutAssets: input.options.rolloutAssets,
                 documentReading: step.documentReading,
                 userDocumentReading: step.userDocumentReading,
@@ -2755,6 +2764,7 @@ async function compactLiveHistory(
         {
           target: compactionStep.target,
           imageCapabilities: compactionStep.modelInfo,
+          nativeAnthropicImages: compactionStep.nativeAnthropicImages,
           rolloutAssets: input.rolloutAssets,
           documentReading: compactionStep.documentReading,
           userDocumentReading: compactionStep.userDocumentReading,

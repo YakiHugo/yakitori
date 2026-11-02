@@ -10,11 +10,12 @@ import type {
 import type { ModelCapabilities } from "./model-catalog.ts"
 import { adaptImagesForModel } from "./model-images.ts"
 import type { DocumentReadingCapabilities } from "./prepare-model-document.ts"
-import { prepareModelImage } from "./prepare-model-image.ts"
+import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
 
 export async function prepareModelMedia(
   messages: readonly ModelMessage[],
   input: Readonly<{
+    nativeAnthropicImages?: boolean
     target: ModelTarget
     imageCapabilities: Pick<
       ModelCapabilities,
@@ -49,6 +50,7 @@ export async function prepareModelMedia(
       0,
     ),
   )
+  const delegateImages = input.nativeAnthropicImages === true
   const resolved: ModelMessage[] = []
   // Project messages in order so a history full of PDFs cannot launch one
   // rasterization worker per message concurrently.
@@ -58,12 +60,20 @@ export async function prepareModelMedia(
       continue
     }
     const resolveImage = async (image: ModelImageBlock) => {
-      if ("data" in image && image.data !== undefined)
+      if ("data" in image && image.data !== undefined) {
+        if (delegateImages) {
+          await validateModelImage(
+            Buffer.from(image.data, "base64"),
+            input.signal,
+          )
+          return image
+        }
         return prepareModelImage(
           Buffer.from(image.data, "base64"),
           image.detail ?? "high",
           input.signal,
         )
+      }
       return image
     }
     const content: ModelToolContentBlock[] = []

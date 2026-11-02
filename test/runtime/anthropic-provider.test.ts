@@ -1651,7 +1651,7 @@ describe("anthropic PDF request size", () => {
             provider: "anthropic",
             wireApi: "anthropic_messages",
             message:
-              "PDF-bearing Anthropic request is 32000001 bytes, exceeding the 32000000-byte (32 MB) request limit. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.",
+              "PDF-bearing Anthropic request is 32000001 bytes, exceeding Yakitori's 32000000-byte (32 MB) request budget. Send fewer PDF pages or attachments, reduce other request content, or use read_document with selected pages.",
           },
         },
       ])
@@ -1743,7 +1743,7 @@ describe("anthropic PDF request size", () => {
   it.each([
     "text",
     "image",
-  ] as const)("preserves oversized %s-only requests", async (type) => {
+  ] as const)("keeps text-only compatibility but rejects oversized known-model images", async (type) => {
     let createCalls = 0
     const client = withSDKResponse({
       baseURL: "https://api.anthropic.com",
@@ -1754,10 +1754,15 @@ describe("anthropic PDF request size", () => {
         },
       },
     } as unknown as Anthropic)
+    const { default: sharp } = await import("sharp")
+    const profiled = await sharp(pngImageBytes())
+      .withMetadata()
+      .png()
+      .toBuffer()
     const data =
       type === "text"
         ? "A".repeat(32_000_000)
-        : pngImageBytes(24_000_000).toString("base64")
+        : Buffer.concat([profiled, Buffer.alloc(24_000_000)]).toString("base64")
     const events = await collect(
       {
         ...request,
@@ -1774,8 +1779,8 @@ describe("anthropic PDF request size", () => {
       },
       client,
     )
-    expect(events.at(-1)?.type).toBe("response")
-    expect(createCalls).toBe(1)
+    expect(events.at(-1)?.type).toBe(type === "text" ? "response" : "failure")
+    expect(createCalls).toBe(type === "text" ? 1 : 0)
   })
 })
 

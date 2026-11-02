@@ -641,3 +641,21 @@ function externalDeferredTool(name = "search_events"): RuntimeTool {
     },
   }
 }
+
+it.each([
+  ["anthropic", "anthropic_messages", true],
+  ["anthropic", "openai_chat_completions", false],
+  [undefined, "anthropic_messages", false],
+  ["kimi-code", "anthropic_messages", false],
+] as const)("captures native image delegation from service and protocol, not provider label (%s, %s)", (serviceId, wireApi, expected) => {
+  const step = captureStepContext({
+    registry: createToolRegistry([]),
+    configuration: configuration(
+      target("anthropic", "claude-sonnet-4-6", "anthropic"),
+      [],
+    ),
+    ...(serviceId === undefined ? {} : { serviceId }),
+    wireApi,
+  })
+  expect(step.nativeAnthropicImages).toBe(expected)
+})
