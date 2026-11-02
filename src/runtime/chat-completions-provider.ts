@@ -55,6 +55,13 @@ import {
   prepareQwenImage,
   validateQwenImageRequest,
 } from "./qwen-image-policy.ts"
+import {
+  isMetaVisionModel,
+  prepareMetaImage,
+  validateMetaImageRequest,
+  META_REQUEST_SAFETY_BYTES,
+  MetaImageRequestSizeError,
+} from "./meta-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
@@ -71,6 +78,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "minimax"
     | "doubao"
     | "glm"
+    | "meta"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -155,6 +163,29 @@ async function* streamChatCompletions(
       throw new AssetMediaError(
         "Doubao image input is only supported for the documented Seed 2.1 Pro model.",
       )
+    const meta =
+      options.flavor === "meta" &&
+      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
+        "https://api.meta.ai/v1"
+    if (meta && hasImages && !isMetaVisionModel(model))
+      throw new AssetMediaError(
+        "Meta image input is enabled only for muse-spark-1.3 and muse-wonder-1.0, not aliases or subscription-only variants.",
+      )
+    if (
+      meta &&
+      request.messages.reduce(
+        (count, message) =>
+          count +
+          (message.role === "user" || message.role === "tool"
+            ? message.content.filter((block) => block.type === "image").length
+            : 0),
+        0,
+      ) > 50
+    )
+      throw new AssetMediaError(
+        "Meta accepts at most 50 images per request. Send fewer images; originals have not been changed.",
+      )
+    let metaImageBytes = 0
     // MiniMax OpenAI API: 10 MB/image, 64 MB/body. Preserve source pixels;
     // detail high delegates visual processing to the service (not OpenAI auto).
     // https://platform.minimax.io/docs/api-reference/text-openai-api
@@ -181,6 +212,16 @@ async function* streamChatCompletions(
         ? {}
         : { prepareImage: imagePolicy.prepareImage }),
       ...(glmImages ? { prepareImage: glmImages.prepareImage } : {}),
+      ...(meta && isMetaVisionModel(model)
+        ? {
+            prepareImage: (bytes: Buffer) => {
+              metaImageBytes += 4 * Math.ceil(bytes.length / 3)
+              if (metaImageBytes > META_REQUEST_SAFETY_BYTES)
+                throw new MetaImageRequestSizeError()
+              return prepareMetaImage(bytes, request.signal)
+            },
+          }
+        : {}),
       ...(nativeQwenImages
         ? {
             prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
@@ -372,6 +413,7 @@ async function* streamChatCompletions(
     if (nativeQwenImages) validateQwenImageRequest(body)
     imagePolicy?.validateBody(body, media.messages)
     glmImages?.validateBody(body)
+    if (meta) validateMetaImageRequest(body)
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
