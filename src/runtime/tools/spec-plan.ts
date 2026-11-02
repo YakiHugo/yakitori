@@ -225,7 +225,10 @@ export function captureStepContext(
         target.model === "qwen3.8-max") ||
       (input.serviceId === "deepseek" &&
         input.wireApi === "openai_chat_completions" &&
-        model.model === "deepseek-flash"),
+        model.model === "deepseek-flash") ||
+      (input.serviceId === "glm" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "glm-5.3-flash"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,

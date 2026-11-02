@@ -10,8 +10,9 @@ import type { ReasoningEffort } from "openai/resources/shared"
 import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
-import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
+import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
+import { createGlmImagePolicy } from "./glm-image-policy.ts"
 import {
   JsonRequestBudgetError,
   jsonRequestByteLength,
@@ -69,6 +70,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "mistral"
     | "minimax"
     | "doubao"
+    | "glm"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -164,6 +166,10 @@ async function* streamChatCompletions(
     const nativeQwenImages =
       options.flavor === "qwen" &&
       (request.target.model || options.model) === "qwen3.8-max"
+    const glmImages =
+      options.flavor === "glm" && model === "glm-5.3-flash"
+        ? createGlmImagePolicy(request)
+        : undefined
     let qwenImageBytes = 0
     const imagePolicy =
       options.flavor === "deepseek"
@@ -174,6 +180,7 @@ async function* streamChatCompletions(
       ...(imagePolicy === undefined
         ? {}
         : { prepareImage: imagePolicy.prepareImage }),
+      ...(glmImages ? { prepareImage: glmImages.prepareImage } : {}),
       ...(nativeQwenImages
         ? {
             prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
@@ -364,6 +371,7 @@ async function* streamChatCompletions(
       )
     if (nativeQwenImages) validateQwenImageRequest(body)
     imagePolicy?.validateBody(body, media.messages)
+    glmImages?.validateBody(body)
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
@@ -994,7 +1002,9 @@ export function toChatCompletionsMessages(
                     block.file && "url" in block.file
                       ? block.file.url
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  ...(flavor === "qwen" ? {} : { detail: "high" as const }),
+                  ...(flavor === "qwen" || flavor === "glm"
+                    ? {}
+                    : { detail: "high" as const }),
                 },
               }
             }),
@@ -1032,7 +1042,9 @@ export function toChatCompletionsMessages(
                   block.file && "url" in block.file
                     ? block.file.url
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                ...(flavor === "qwen" ? {} : { detail: "high" as const }),
+                ...(flavor === "qwen" || flavor === "glm"
+                  ? {}
+                  : { detail: "high" as const }),
               },
             },
           )
