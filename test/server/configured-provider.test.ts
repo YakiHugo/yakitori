@@ -782,6 +782,34 @@ it.each([
 
 it.each([
   [
+    "moonshot",
+    "openai_responses",
+    "https://api.moonshot.ai/v1",
+    "moonshot",
+    true,
+  ],
+  [
+    "moonshot",
+    "openai_responses",
+    "https://relay.example/v1",
+    undefined,
+    false,
+  ],
+  [
+    "moonshot",
+    "openai_chat_completions",
+    "https://api.moonshot.ai/v1",
+    undefined,
+    false,
+  ],
+  [
+    "kimi-code",
+    "anthropic_messages",
+    "https://api.kimi.com/coding",
+    "kimi-code",
+    false,
+  ],
+  [
     "gemini",
     "gemini_generate_content",
     "https://generativelanguage.googleapis.com/v1beta",

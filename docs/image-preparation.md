@@ -159,3 +159,48 @@ References (verified 2026-11-02):
 [file input methods](https://ai.google.dev/gemini-api/docs/file-input-methods),
 [Blob schema](https://ai.google.dev/api/generate-content#Blob),
 [media resolution](https://ai.google.dev/gemini-api/docs/generate-content/media-resolution).
+
+## Direct Moonshot Responses images
+
+The existing `kimi-k3` Responses profile at `https://api.moonshot.ai/v1`
+uses a separate static-image policy. Static PNG, JPEG and WebP retain their
+source bytes up to a 4096-pixel long edge and 2160-pixel short edge. Above that,
+safe static 8-bit sRGB/grayscale images without embedded color metadata can be
+oriented and proportionally reduced once to PNG, without enlargement and with
+alpha preserved, only when this reduces bytes. This adopts Moonshot's **recommended** 4K envelope, including
+portrait orientation; it is not an API image-size rejection threshold.
+If conversion would lose color-profile/high-bit-depth/gamma semantics, or the
+PNG derivative is not smaller than the source, the original bytes are retained
+and the provider owns sizing. The stored source is never overwritten. For
+example, a generated 5000×2800 JPEG was 8.57 MB but its 4K PNG derivative was
+23.30 MB: retaining the JPEG avoids an artificial local-budget failure. This is
+why the recommendation is not enforced as a mandatory size cap.
+
+Moonshot documents dynamic image token consumption: retaining more pixels than
+the previous 2048 preparation can increase visual tokens, cost and latency.
+No exact billing estimate or cost reduction is promised. Validated single-frame
+GIF retains its palette and transparent pixels as original bytes. Animated GIF,
+APNG and WebP are not silently flattened or sent as videos by this static-only slice;
+exporting a static PNG/JPEG/WebP copy is the explicit remedy. Moonshot documents
+that animated GIF/WebP can be interpreted and charged as video, which is why
+raw animation passthrough is not interchangeable with still-image support.
+
+The complete request has a **20,000,000-byte Yakitori resource guard**, using the
+same incremental JSON/base64 accounting as the Gemini slice. This deliberately
+smaller application boundary is not Moonshot's documented 100M request limit.
+Oversize failures preserve originals and drafts and suggest fewer images,
+smaller exported copies or shorter other content. There is no file-upload
+fallback. Kimi Responses already rejects native PDF input before preparation;
+previously rasterized PDF pixels cannot be restored. Its existing URL inlining
+remains necessary because the provider does not support external image URLs.
+
+This policy does not apply to Kimi Code subscriptions, other Responses-compatible
+endpoints, or new model IDs. Current Kimi Code CLI documentation specifies a
+2000-pixel maximum edge across image entry points; its separate 256 KiB default
+read budget applies to agent image reads, not all user attachments. Neither is
+an API-wide image limit, and neither is applied to Moonshot Responses here.
+
+References (verified 2026-11-02):
+[Moonshot vision and limits](https://platform.kimi.ai/docs/guide/use-kimi-vision-model),
+[Responses contract](https://platform.kimi.ai/docs/api/responses),
+[Kimi Code image configuration](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html#image).
