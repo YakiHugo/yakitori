@@ -1,9 +1,3 @@
-import { inspectImageBytes } from "../kernel/image-metadata.ts"
-import { validateModelImage } from "./prepare-model-image.ts"
-import {
-  jsonRequestByteLength,
-  JsonRequestBudgetError,
-} from "./json-request-budget.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -13,10 +7,15 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
+import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
+import {
+  JsonRequestBudgetError,
+  jsonRequestByteLength,
+} from "./json-request-budget.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -50,6 +49,7 @@ import {
   ModelRequestControlsError,
   validateModelRequestControls,
 } from "./model-request-controls.ts"
+import { validateModelImage } from "./prepare-model-image.ts"
 import {
   prepareQwenImage,
   validateQwenImageRequest,
@@ -61,7 +61,14 @@ export type ChatCompletionsProviderOptions = Readonly<{
   model: string
   baseURL: string
   defaultHeaders?: Record<string, string | null>
-  flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral" | "minimax"
+  flavor?:
+    | "generic"
+    | "deepseek"
+    | "gemini"
+    | "qwen"
+    | "mistral"
+    | "minimax"
+    | "doubao"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -126,6 +133,7 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
       )
+    const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
     const hasImages = request.messages.some(
@@ -140,6 +148,10 @@ async function* streamChatCompletions(
     )
       throw new AssetMediaError(
         "Image input is only supported for documented MiniMax M3 and M3.1-Flash models.",
+      )
+    if (doubao && hasImages && model !== "doubao-seed-2-1-pro-260915")
+      throw new AssetMediaError(
+        "Doubao image input is only supported for the documented Seed 2.1 Pro model.",
       )
     // MiniMax OpenAI API: 10 MB/image, 64 MB/body. Preserve source pixels;
     // detail high delegates visual processing to the service (not OpenAI auto).
@@ -172,6 +184,44 @@ async function* streamChatCompletions(
                   "Qwen images were not sent: image data alone exceeds the 16 MiB DashScope request limit. Send fewer images; originals have not been changed.",
                 )
               return prepareQwenImage(bytes, image, request.signal)
+            },
+          }
+        : {}),
+      ...(doubao
+        ? {
+            // Remote image URLs stay provider-owned; do not fetch them locally.
+            prepareImage: async (bytes: Buffer, image: ModelImageBlock) => {
+              // Ark base64 contract, checked 2026-11-02:
+              // https://docs.volcengine.com/docs/ark/image-understanding?lang=zh
+              // Preserve originals: Ark owns visual resizing/tokenization.
+              if (bytes.length >= 10_000_000)
+                throw new AssetMediaError(
+                  "Doubao image must be smaller than 10 MB. Resize a copy; the original has not been changed.",
+                )
+              imageBytes += 4 * Math.ceil(bytes.length / 3)
+              if (imageBytes > 64_000_000)
+                throw new AssetMediaError(
+                  "Doubao request exceeds 64 MB including encoded images.",
+                )
+              const metadata = inspectImageBytes(bytes)
+              if (
+                metadata.width <= 14 ||
+                metadata.height <= 14 ||
+                metadata.width * metadata.height > 36_000_000 ||
+                Math.max(metadata.width, metadata.height) /
+                  Math.min(metadata.width, metadata.height) >
+                  150
+              )
+                throw new AssetMediaError(
+                  "Doubao images require sides above 14 pixels, at most 36 million pixels and aspect ratio at most 150:1. Resize a copy; the original has not been changed.",
+                )
+              await validateModelImage(bytes, request.signal)
+              return {
+                type: "image" as const,
+                mediaType: metadata.mediaType,
+                detail: image.detail ?? "high",
+                data: bytes.toString("base64"),
+              }
             },
           }
         : {}),
@@ -308,6 +358,10 @@ async function* streamChatCompletions(
       throw new AssetMediaError(
         "MiniMax request exceeds 64 MB including text, tools and encoded images.",
       )
+    if (doubao && jsonRequestByteLength(body, 64_000_000) === undefined)
+      throw new AssetMediaError(
+        "Doubao request exceeds 64 MB including text, tools and encoded images.",
+      )
     if (nativeQwenImages) validateQwenImageRequest(body)
     imagePolicy?.validateBody(body, media.messages)
     stage = "connect"
@@ -374,6 +428,17 @@ async function* streamChatCompletions(
             throw new ChatCompletionsProtocolError(
               `Unsupported completion output: ${field}.`,
             )
+        }
+        // Ark thinking summaries require the opaque original on tool turns.
+        // Ark sends one complete encrypted block, not incremental text.
+        // Keep it in provider-scoped native history, never visible reasoning.
+        // https://docs.volcengine.com/docs/ark/chat-api?lang=zh
+        if (doubao && delta.encrypted_content != null) {
+          if (typeof delta.encrypted_content !== "string")
+            throw new ChatCompletionsProtocolError(
+              "Invalid encrypted_content delta.",
+            )
+          nativeReasoning.encrypted_content = delta.encrypted_content
         }
         if (delta.annotations != null) {
           if (

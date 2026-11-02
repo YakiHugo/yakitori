@@ -102,7 +102,14 @@ export type ProviderPreset = Readonly<{
   envKey?: string
   kind?: "vendor" | "relay" | "local" | "subscription"
   noKey?: boolean
-  flavor?: "generic" | "deepseek" | "gemini" | "qwen" | "mistral" | "minimax"
+  flavor?:
+    | "generic"
+    | "deepseek"
+    | "gemini"
+    | "qwen"
+    | "mistral"
+    | "minimax"
+    | "doubao"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string

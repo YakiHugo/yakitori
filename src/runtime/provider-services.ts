@@ -105,6 +105,27 @@ export const providerServices: readonly ProviderPreset[] = [
       "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
   },
   {
+    id: "doubao",
+    name: "Doubao (Volcengine Ark)",
+    // Standard Ark API credentials, not the separate Coding Plan endpoint.
+    baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+    wireApi: "openai_chat_completions",
+    envKey: "ARK_API_KEY",
+    flavor: "doubao",
+    models: [
+      {
+        id: "doubao-seed-2-1-pro-260915",
+        displayName: "Doubao Seed 2.1 Pro",
+        contextWindowTokens: 1_048_576,
+        maxOutputTokens: 262_144,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+    ],
+    documentationURL:
+      "https://console.volcengine.com/ark/region:cn-beijing/docs/model-list",
+  },
+  {
     id: "moonshot",
     name: "Kimi API",
     baseURL: "https://api.moonshot.ai/v1",
