@@ -137,6 +137,9 @@ export function createModelRouter(input: {
         const speeds = [...new Set(rows.flatMap((row) => row.speeds ?? []))]
         return {
           id,
+          ...(rows.every((row) => row.toolPolicy === "chat_only")
+            ? { toolPolicy: "chat_only" as const }
+            : {}),
           ...(rows.every((row) => row.visible === false)
             ? { visible: false }
             : {}),
@@ -283,6 +286,9 @@ export function createModelRouter(input: {
       (result) => (result.model ? [result.model] : []),
     )
     return {
+      ...(selected?.model?.toolPolicy === undefined
+        ? {}
+        : { toolPolicy: selected.model.toolPolicy }),
       available: selected !== undefined,
       ...(selected === undefined ? {} : { target: selected.target }),
       ...(selected?.model?.defaultEffort === undefined

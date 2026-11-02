@@ -173,6 +173,7 @@ export type ApiUpdateProjectResponse = {
 }
 
 export type ApiProviderModel = {
+  readonly toolPolicy?: "chat_only"
   readonly visible?: boolean
   readonly id: string
   readonly effectiveContextWindowTokens?: number

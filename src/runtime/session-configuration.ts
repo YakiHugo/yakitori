@@ -210,8 +210,15 @@ export class SessionConfiguration {
       promptCacheKey: this.snapshot.promptCacheKey,
       baseInstructions: {
         id: "base.instructions",
-        revision: this.snapshot.baseInstructions.revision,
-        text: this.snapshot.baseInstructions.text,
+        // A model-owned coding prompt from a previous selection must not claim
+        // tools are available in chat-only mode. The stored original is retained.
+        ...(model.toolPolicy === "chat_only" &&
+        this.snapshot.baseInstructions.provenance.type === "model"
+          ? { revision: prompt.revision, text: prompt.text }
+          : {
+              revision: this.snapshot.baseInstructions.revision,
+              text: this.snapshot.baseInstructions.text,
+            }),
       },
       modelInstructions: {
         id: "model.instructions",

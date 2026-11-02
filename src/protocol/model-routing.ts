@@ -26,6 +26,7 @@ export type ModelRoutePreviewRequest = Readonly<{
 // These options describe executable alternatives for the other selected
 // parameters and input requirements, rather than independent capability unions.
 export type ModelRoutePreview = Readonly<{
+  readonly toolPolicy?: "chat_only"
   available: boolean
   target?: ModelSelection
   defaultEffort?: string

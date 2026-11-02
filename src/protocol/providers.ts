@@ -113,6 +113,7 @@ export type ProviderPreset = Readonly<{
     | "glm"
     | "meta"
     | "stepfun"
+    | "tencent"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string

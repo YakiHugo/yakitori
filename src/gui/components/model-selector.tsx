@@ -164,6 +164,10 @@ export function ModelSelector({
               provider.availability !== "requires_login",
           )
           ?.models.find((model) => model.id === effective.model)
+  const chatOnly =
+    (preview === undefined
+      ? effectiveEntry?.toolPolicy
+      : preview.toolPolicy) === "chat_only"
   const modelLabel =
     effectiveEntry?.displayName ?? effectiveEntry?.id ?? "Select model"
   const hasAvailableModels = availableProviders.some(
@@ -267,6 +271,11 @@ export function ModelSelector({
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2">
+      {chatOnly ? (
+        <span role="status" className="text-xs text-muted-foreground">
+          Text/image chat only — no tools or file access
+        </span>
+      ) : null}
       <div ref={selectorRef} className="relative flex min-w-0 items-center">
         {menu !== undefined ? (
           <div
@@ -424,6 +433,9 @@ export function ModelSelector({
                           >
                             <span className="min-w-0 flex-1 truncate">
                               {model.displayName ?? model.id}
+                              {model.toolPolicy === "chat_only"
+                                ? " · Chat only (no tools)"
+                                : ""}
                             </span>
                             {effective?.provider === provider.name &&
                             effective.model === model.id ? (

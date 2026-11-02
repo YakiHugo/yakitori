@@ -4,6 +4,8 @@ import instructionManifest from "./prompts/manifest.json" with { type: "json" }
 export type InstructionProfileId = keyof typeof instructionManifest
 
 export type ResolvedModel = Readonly<{
+  // Opt-in execution restriction, not a claim about vendor tool capabilities.
+  toolPolicy?: "chat_only"
   toolOutputTruncation?: ModelToolOutputTruncation
   instructions?: string
   autoCompactTokenLimit?: number
@@ -30,6 +32,7 @@ export type ResolvedModel = Readonly<{
 }>
 
 export type CatalogModel = Readonly<{
+  readonly toolPolicy?: "chat_only"
   visible?: boolean
   contextWindowTokens?: number
   maxContextWindowTokens?: number
@@ -85,6 +88,9 @@ export type ModelCapabilities = Readonly<{
 }>
 
 export type ModelCapacity = Readonly<{
+  // Carry the execution restriction with the capacity snapshot so settings can
+  // preserve its input/total scope without resolving a directory-only model.
+  toolPolicy?: "chat_only"
   contextWindowTokens: number
   maxContextWindowTokens: number
   effectiveContextWindowPercent: number

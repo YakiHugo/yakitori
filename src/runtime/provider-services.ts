@@ -187,6 +187,26 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.z.ai/guides/overview/quick-start",
   },
   {
+    id: "tencent",
+    name: "Tencent TokenHub",
+    baseURL: "https://tokenhub.tencentmaas.com/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "TOKENHUB_API_KEY",
+    flavor: "tencent",
+    models: [
+      {
+        id: "hy-vision-2.0-instruct",
+        displayName: "HY Vision 2.0 Instruct",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        contextWindowTokens: 24_000,
+        contextWindowScope: "input",
+        maxOutputTokens: 16_000,
+      },
+    ],
+    documentationURL: "https://cloud.tencent.com/document/product/1823/130078",
+  },
+  {
     id: "minimax",
     name: "MiniMax",
     baseURL: "https://api.minimax.io/v1",
@@ -331,6 +351,21 @@ const serviceEndpointVariants: Readonly<
   stepfun: [
     {
       baseURL: "https://api.stepfun.ai/v1",
+      wireApi: "openai_chat_completions",
+    },
+  ],
+  tencent: [
+    // Keys and service activation must match the selected region.
+    {
+      baseURL: "https://tokenhub-intl.tencentmaas.com/v1",
+      wireApi: "openai_chat_completions",
+    },
+    {
+      baseURL: "https://tokenhub.tencentmaas.cn/v1",
+      wireApi: "openai_chat_completions",
+    },
+    {
+      baseURL: "https://tokenhub-intl.tencentmaas.cn/v1",
       wireApi: "openai_chat_completions",
     },
   ],

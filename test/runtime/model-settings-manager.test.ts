@@ -417,3 +417,40 @@ it("does not turn a generation model into a chat model through a visibility over
     "not a chat model",
   )
 })
+
+it.each([
+  false,
+  true,
+])("projects capacity without resolving directory-only models (chat-only: %s)", (chatOnly) => {
+  const source = createConfiguredModelsManager({
+    provider: "directory",
+    models: [{ id: "model" }],
+  })
+  const manager = createModelSettingsManager(
+    {
+      ...source,
+      resolve() {
+        throw new Error(
+          "Directory-only models do not support execution resolution",
+        )
+      },
+      capacity: () => ({
+        contextWindowTokens: 24_000,
+        maxContextWindowTokens: 24_000,
+        effectiveContextWindowPercent: 100,
+        contextWindowScope: "input",
+        ...(chatOnly ? { toolPolicy: "chat_only" as const } : {}),
+      }),
+    },
+    () => ({
+      model: { contextWindowTokens: 8_000, contextWindowScope: "total" },
+    }),
+  )
+  expect(manager.capacity({ provider: "directory", model: "model" })).toEqual({
+    contextWindowTokens: 8_000,
+    maxContextWindowTokens: 8_000,
+    effectiveContextWindowPercent: 100,
+    contextWindowScope: chatOnly ? "input" : "total",
+    ...(chatOnly ? { toolPolicy: "chat_only" } : {}),
+  })
+})

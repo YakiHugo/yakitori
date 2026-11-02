@@ -1,3 +1,9 @@
+import { createTencentImagePolicy } from "./tencent-image-policy.ts"
+import { tencentVisionModel } from "./tencent-chat-only.ts"
+import {
+  ModelRequestPlanError,
+  validateChatOnlyRequest,
+} from "./model-request-plan.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -84,6 +90,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "glm"
     | "meta"
     | "stepfun"
+    | "tencent"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -153,6 +160,12 @@ async function* streamChatCompletions(
     const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
+    const tencentVision =
+      options.flavor === "tencent" && model === tencentVisionModel
+    if (tencentVision) validateChatOnlyRequest(request)
+    const tencentImages = tencentVision
+      ? createTencentImagePolicy(request.signal)
+      : undefined
     const hasImages = request.messages.some(
       (message) =>
         (message.role === "user" || message.role === "tool") &&
@@ -193,6 +206,10 @@ async function* streamChatCompletions(
         "Meta accepts at most 50 images per request. Send fewer images; originals have not been changed.",
       )
     let metaImageBytes = 0
+    if (options.flavor === "tencent" && hasImages && !tencentVision)
+      throw new AssetMediaError(
+        "TokenHub image input is only enabled for the documented HY Vision 2.0 Instruct model.",
+      )
     // MiniMax OpenAI API: 10 MB/image, 64 MB/body. Preserve source pixels;
     // detail high delegates visual processing to the service (not OpenAI auto).
     // https://platform.minimax.io/docs/api-reference/text-openai-api
@@ -219,6 +236,9 @@ async function* streamChatCompletions(
     const media = await prepareProviderMedia(request, {
       inlineDocumentUrls: true,
       ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
+      ...(tencentImages === undefined
+        ? {}
+        : { inlineImageUrls: true, prepareImage: tencentImages.prepareImage }),
       ...(imagePolicy === undefined
         ? {}
         : { prepareImage: imagePolicy.prepareImage }),
@@ -422,6 +442,7 @@ async function* streamChatCompletions(
       throw new AssetMediaError(
         "Doubao request exceeds 64 MB including text, tools and encoded images.",
       )
+    tencentImages?.validateBody(body)
     if (nativeQwenImages) validateQwenImageRequest(body)
     imagePolicy?.validateBody(body, media.messages)
     glmImages?.validateBody(body)
@@ -957,7 +978,8 @@ async function* streamChatCompletions(
       error instanceof AssetMediaError ||
       error instanceof JsonRequestBudgetError ||
       error instanceof ModelRequestControlsError ||
-      error instanceof ModelHistoryScopeError
+      error instanceof ModelHistoryScopeError ||
+      error instanceof ModelRequestPlanError
     ) {
       yield {
         type: "failure",
@@ -1062,7 +1084,9 @@ export function toChatCompletionsMessages(
                     block.file && "url" in block.file
                       ? block.file.url
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  ...(flavor === "qwen" || flavor === "glm"
+                  ...(flavor === "qwen" ||
+                  flavor === "glm" ||
+                  flavor === "tencent"
                     ? {}
                     : { detail: "high" as const }),
                 },
@@ -1102,7 +1126,9 @@ export function toChatCompletionsMessages(
                   block.file && "url" in block.file
                     ? block.file.url
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                ...(flavor === "qwen" || flavor === "glm"
+                ...(flavor === "qwen" ||
+                flavor === "glm" ||
+                flavor === "tencent"
                   ? {}
                   : { detail: "high" as const }),
               },

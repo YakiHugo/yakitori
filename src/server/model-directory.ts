@@ -6,6 +6,7 @@ import {
 } from "../runtime/index.ts"
 
 export type DirectoryModel = {
+  readonly toolPolicy?: "chat_only"
   readonly visible?: boolean
   readonly id: string
   readonly displayName: string
@@ -60,6 +61,9 @@ export function createModelDirectory(
             ? {}
             : { defaultEffort: entry.defaultEffort }),
           ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
+          ...(entry.toolPolicy === undefined
+            ? {}
+            : { toolPolicy: entry.toolPolicy }),
           inputModalities: entry.inputModalities,
           imageDetailModes: entry.imageDetailModes,
         }

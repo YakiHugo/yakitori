@@ -31,6 +31,7 @@ export function createConfiguredProvider(
   const buildModels = (configured: readonly ConfiguredModel[]) =>
     createConfiguredModelsManager({
       provider: id,
+      ...(service === undefined ? {} : { serviceId: service.id }),
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
       models: configured.map((model) => ({
         ...service?.models.find((known) => known.id === model.id),

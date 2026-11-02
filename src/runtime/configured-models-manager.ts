@@ -1,3 +1,4 @@
+import { restrictTencentVision } from "./tencent-chat-only.ts"
 import {
   type EffectiveModel,
   effectiveModelCapacity,
@@ -29,6 +30,7 @@ export class ModelNotConfiguredError extends Error {
 // metadata without replacing the connection ID used to route requests.
 export function createConfiguredModelsManager(input: {
   provider: string
+  serviceId?: string
   catalogProvider?: string
   wireApi?: ProviderPreset["wireApi"]
   models: readonly ConfiguredModel[]
@@ -139,7 +141,12 @@ export function createConfiguredModelsManager(input: {
       },
       configured,
     )
-    models.set(configured.id, effective)
+    models.set(
+      configured.id,
+      input.serviceId === "tencent"
+        ? restrictTencentVision(effective)
+        : effective,
+    )
   }
 
   const requireModel = (selection: ModelSelectionInput) => {

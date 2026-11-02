@@ -42,6 +42,7 @@ import {
   canCompactPrefix,
   createBackgroundCompaction,
 } from "./background-compaction.ts"
+import { isPortableChatOnlyNative } from "./chat-only-native.ts"
 import {
   buildCompactionRequest,
   canRetryCompactionWithCurrentModel,
@@ -84,7 +85,10 @@ import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
 } from "./model-request-budget.ts"
-import { prepareModelRequestPlan } from "./model-request-plan.ts"
+import {
+  prepareModelRequestPlan,
+  validateChatOnlyRequest,
+} from "./model-request-plan.ts"
 import { modelRoutingRequirements } from "./model-routing-requirements.ts"
 import { consumeModelWarmup } from "./model-warmup.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
@@ -1984,6 +1988,7 @@ async function executeTurnModelLoop(
             )
             requestStartedAt = Date.now()
             const result = await consumeModelStream({
+              toolPolicy: step.modelInfo.toolPolicy,
               request: buildCompactionRequest({
                 assets: {
                   read: (source, signal) =>
@@ -2312,6 +2317,7 @@ async function executeTurnModelLoop(
 
 async function consumeModelStream(input: {
   readonly request: ModelRequest
+  readonly toolPolicy?: "chat_only" | undefined
   readonly stream: StreamFn
   readonly threadId: string
   readonly turnId: string
@@ -2346,6 +2352,9 @@ async function consumeModelStream(input: {
           input.request.target,
           input.wireApi,
         ))
+  const chatOnly =
+    input.toolPolicy === "chat_only" || input.request.toolPolicy === "chat_only"
+  if (chatOnly) validateChatOnlyRequest(input.request)
   const iterator = input.stream(input.request)[Symbol.asyncIterator]()
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
@@ -2366,6 +2375,31 @@ async function consumeModelStream(input: {
         break
       }
       const event = next.value
+      if (
+        chatOnly &&
+        (event.type === "output_item" || event.type === "response")
+      ) {
+        const output = event.type === "response" ? event.response : event
+        if (
+          output.content.some(
+            (block) =>
+              block.type === "tool_call" || block.type === "compaction",
+          ) ||
+          !isPortableChatOnlyNative(output.content, output.native) ||
+          (event.type === "response" &&
+            (event.response.stopReason === "tool_use" ||
+              event.response.incompleteToolCalls === true))
+        ) {
+          throw new ModelFailureError({
+            kind: "protocol_error",
+            stage: "sse_decode",
+            provider: input.request.target.provider,
+            wireApi: input.wireApi ?? "unknown",
+            message:
+              "Chat-only execution received tool or opaque native output; no tool was executed.",
+          })
+        }
+      }
       if (event.type === "retry") {
         const discardedResponseItemIds = [...provisionalItems]
         provisionalItems.clear()
@@ -2692,6 +2726,7 @@ async function compactLiveHistory(
       const response = await consumeModelStream({
         request,
         stream: compactionStream,
+        toolPolicy: compactionStep.modelInfo.toolPolicy,
         recordModelAttempt: (attempt) =>
           input.session.recordModelAttempt(input.execution, attempt),
         wireApi: input.wireApi,
