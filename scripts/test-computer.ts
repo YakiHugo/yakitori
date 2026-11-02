@@ -48,6 +48,7 @@ await run("swiftc", [
     .map((name) => join(core, name)),
   "native/computer/Tests/Contracts.swift",
   "native/computer/Tests/ClipboardContracts.swift",
+  "native/computer/Tests/SnapshotContracts.swift",
   "-o",
   executable,
 ])
