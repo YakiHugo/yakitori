@@ -10,12 +10,13 @@ describe("model directory", () => {
     const directory = createModelDirectory()
 
     const kimi = await directory.listModels("KIMI-CODE")
-    expect(kimi).toHaveLength(4)
-    expect(kimi.map((model) => model.effortStyle)).toEqual([
-      "levels",
-      "none",
-      "levels",
-      "levels",
+    expect(kimi.map(({ id, effortStyle }) => ({ id, effortStyle }))).toEqual([
+      { id: "k3.1-pro", effortStyle: "levels" },
+      { id: "k3.1-pro-highspeed", effortStyle: "levels" },
+      { id: "kimi-for-coding", effortStyle: "levels" },
+      { id: "kimi-for-coding-highspeed", effortStyle: "none" },
+      { id: "k3", effortStyle: "levels" },
+      { id: "k3-256k", effortStyle: "levels" },
     ])
     expect(await directory.listModels("unknown")).toEqual([])
   })

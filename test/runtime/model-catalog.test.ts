@@ -224,8 +224,8 @@ describe("model catalog context windows", () => {
 
   it("uses Kimi Code's shared agent profile without borrowing another model's capabilities", () => {
     for (const model of [
-      "k3.1-pro",
-      "k3.1-pro-highspeed",
+      "k3.1-pro-alias",
+      "k3.1-pro-highspeed-alias",
       "future-code-model",
     ]) {
       const selection = { provider: "kimi-code", model }

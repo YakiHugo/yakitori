@@ -484,7 +484,7 @@ describe("Kimi Responses profile", () => {
           instructionProfileId: "default",
         },
       },
-      message: "kimi-k3 only",
+      message: "use an exact public API model ID",
     },
     {
       name: "forced tools",

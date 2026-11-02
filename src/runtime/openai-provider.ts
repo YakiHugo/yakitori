@@ -224,9 +224,15 @@ async function* streamOpenAI(
     validateModelHistoryScope(request, "openai_responses")
     validateModelRequestControls(request, "openai_responses")
     if (responseProfile === "kimi") {
-      if ((request.target.model || defaultModel) !== "kimi-k3")
+      // Exact public Responses IDs, not Kimi Code subscription aliases.
+      // https://platform.kimi.ai/docs/api/responses
+      if (
+        !["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"].includes(
+          request.target.model || defaultModel,
+        )
+      )
         throw new ModelRequestControlsError(
-          "The Kimi Responses profile currently supports kimi-k3 only.",
+          "The Kimi Responses profile supports kimi-k3, kimi-k3.1-pro and kimi-k3.1-pro-highspeed only; use an exact public API model ID.",
         )
       if (
         request.compaction === "responses_compact" ||
