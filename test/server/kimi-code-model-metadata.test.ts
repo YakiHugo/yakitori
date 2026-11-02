@@ -84,7 +84,7 @@ it.each([
     supportsNativeToolSearch: false,
   })
   expect(step.modelCapacity).toMatchObject({ contextWindowTokens: capacity })
-  expect(step.target.effort).toBeUndefined()
+  expect(step.target.effort).toBe(model === "k3.1-pro" ? "high" : undefined)
   expect(step.modelInstructions.text).toContain("You are Kimi Code CLI")
   const thread = await manager.createThread({
     workingDirectory: root,
@@ -117,7 +117,9 @@ it.each([
     expect(body.tools).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "write_file" })]),
     )
-    expect(body.output_config).toBeUndefined()
+    expect(body.output_config).toEqual(
+      model === "k3.1-pro" ? { effort: "high" } : undefined,
+    )
   }
   expect(JSON.stringify(fixture.requests[1]?.messages)).toContain(
     '"type":"tool_result"',

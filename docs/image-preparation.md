@@ -162,8 +162,10 @@ References (verified 2026-11-02):
 
 ## Direct Moonshot Responses images
 
-The existing `kimi-k3` Responses profile at `https://api.moonshot.ai/v1`
-uses a separate static-image policy. Static PNG, JPEG and WebP retain their
+The exact public API models `kimi-k3`, `kimi-k3.1-pro` and
+`kimi-k3.1-pro-highspeed` at `https://api.moonshot.ai/v1` use the same
+documented Responses contract and separate static-image policy. Static PNG, JPEG
+and WebP retain their
 source bytes up to a 4096-pixel long edge and 2160-pixel short edge. Above that,
 safe static 8-bit sRGB/grayscale images without embedded color metadata can be
 oriented and proportionally reduced once to PNG, without enlargement and with
@@ -195,7 +197,7 @@ previously rasterized PDF pixels cannot be restored. Its existing URL inlining
 remains necessary because the provider does not support external image URLs.
 
 This policy does not apply to Kimi Code subscriptions, other Responses-compatible
-endpoints, or new model IDs. Current Kimi Code CLI documentation specifies a
+endpoints, or unverified model IDs. Current Kimi Code CLI documentation specifies a
 2000-pixel maximum edge across image entry points; its separate 256 KiB default
 read budget applies to agent image reads, not all user attachments. Neither is
 an API-wide image limit, and neither is applied to Moonshot Responses here.
@@ -204,3 +206,29 @@ References (verified 2026-11-02):
 [Moonshot vision and limits](https://platform.kimi.ai/docs/guide/use-kimi-vision-model),
 [Responses contract](https://platform.kimi.ai/docs/api/responses),
 [Kimi Code image configuration](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html#image).
+
+### Kimi API and Kimi Code model identities
+
+Public API IDs `kimi-k3.1-pro` / `kimi-k3.1-pro-highspeed` are not aliases for
+subscription IDs `k3.1-pro` / `k3.1-pro-highspeed`. The latter use the existing
+Kimi Code Messages endpoint/profile and retain its existing image preparation;
+they do not inherit Moonshot's image budget or Claude's admission limits.
+Their known visual capabilities now permit ordinary attachments and image tool
+results instead of treating these exact IDs as unknown text-only models.
+Unrecognized names still do not inherit another model's capabilities.
+
+The model picker's `High` is reasoning effort, not image detail. Kimi Code
+K3.1 defaults to `high`; the public API's K3.1 default is `max`. Both expose
+`low` / `high` / `max`, without inventing an `off` level. These additions do not
+rewrite an existing account's configured models, saved selections or images.
+
+Kimi Code regular K3.1 has plan-dependent context access. Yakitori's curated
+normal-model default conservatively reserves 256K; its known maximum is 1M,
+which an entitled account may explicitly configure. Highspeed requires the
+higher plan and has a documented maximum of 1M. These are context-planning
+facts, not proof of an individual account's entitlement.
+
+References (verified 2026-11-02):
+[public Responses model IDs](https://platform.kimi.ai/docs/api/responses),
+[public model parameters](https://platform.kimi.ai/docs/api/models-overview),
+[Kimi Code model capabilities and plans](https://www.kimi.com/code/docs/en/kimi-code/models.html).

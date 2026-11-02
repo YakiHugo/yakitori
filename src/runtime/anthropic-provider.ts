@@ -138,11 +138,12 @@ async function* streamAnthropic(
     return
   }
 
-  const thinking = request.providerOptions?.body.thinking
+  const nativeThinking = request.providerOptions?.body.thinking
   const thinkingDisplay =
-    isJsonObject(thinking) &&
-    (thinking.display === "updates" || thinking.display === "summarized")
-      ? thinking.display
+    isJsonObject(nativeThinking) &&
+    (nativeThinking.display === "updates" ||
+      nativeThinking.display === "summarized")
+      ? nativeThinking.display
       : undefined
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let providerRequestId: string | undefined
@@ -157,6 +158,19 @@ async function* streamAnthropic(
   try {
     validateModelHistoryScope(request, "anthropic_messages")
     validateModelRequestControls(request, "anthropic_messages")
+    // K3.1 subscription models require thinking; older Code models retain
+    // their existing boolean-thinking controls. Do not alias public API IDs.
+    if (
+      profile === "kimi-code" &&
+      ["k3.1-pro", "k3.1-pro-highspeed"].includes(
+        request.target.model || defaultModel,
+      ) &&
+      (request.target.effort === "off" ||
+        (isJsonObject(nativeThinking) && nativeThinking.type === "disabled"))
+    )
+      throw new ModelRequestControlsError(
+        "Kimi Code K3.1 Pro requires thinking; select low, high or max effort instead of off.",
+      )
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "anthropic"
     const explicitPromptCaching = profile !== "generic"

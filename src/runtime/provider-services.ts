@@ -176,6 +176,24 @@ export const providerServices: readonly ProviderPreset[] = [
     envKey: "MOONSHOT_API_KEY",
     models: [
       {
+        id: "kimi-k3.1-pro",
+        displayName: "Kimi K3.1 Pro",
+        contextWindowTokens: 1_048_576,
+        // The Responses adapter currently sends still images only.
+        inputModalities: ["text", "image"],
+        efforts: ["low", "high", "max"],
+        defaultEffort: "max",
+      },
+      {
+        id: "kimi-k3.1-pro-highspeed",
+        displayName: "Kimi K3.1 Pro Highspeed",
+        contextWindowTokens: 1_048_576,
+        // The Responses adapter currently sends still images only.
+        inputModalities: ["text", "image"],
+        efforts: ["low", "high", "max"],
+        defaultEffort: "max",
+      },
+      {
         id: "kimi-k3",
         contextWindowTokens: 1_048_576,
         // The Responses adapter currently sends still images only.
@@ -375,7 +393,12 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "anthropic_messages",
     envKey: "KIMI_API_KEY",
     catalogProvider: "kimi-code",
-    models: [{ id: "kimi-for-coding" }],
+    // Subscription IDs are intentionally different from public API IDs.
+    models: [
+      { id: "k3.1-pro" },
+      { id: "k3.1-pro-highspeed" },
+      { id: "kimi-for-coding" },
+    ],
     documentationURL: "https://www.kimi.com/code/docs/en/",
   },
 ]

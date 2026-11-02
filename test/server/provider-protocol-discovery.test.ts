@@ -93,6 +93,16 @@ it("keeps a new Kimi Responses connection usable when the catalog endpoint is ab
 
   expect(preset.wireApi).toBe("openai_responses")
   expect(models).toMatchObject([
+    {
+      id: "kimi-k3.1-pro",
+      efforts: ["low", "high", "max"],
+      defaultEffort: "max",
+    },
+    {
+      id: "kimi-k3.1-pro-highspeed",
+      efforts: ["low", "high", "max"],
+      defaultEffort: "max",
+    },
     { id: "kimi-k3", efforts: ["low", "high", "max"], defaultEffort: "max" },
   ])
   expect(requests).toEqual([
