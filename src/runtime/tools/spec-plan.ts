@@ -235,7 +235,10 @@ export function captureStepContext(
         model.model === "deepseek-flash") ||
       (input.serviceId === "glm" &&
         input.wireApi === "openai_chat_completions" &&
-        target.model === "glm-5.3-flash"),
+        target.model === "glm-5.3-flash") ||
+      (input.serviceId === "stepfun" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "step-5-preview"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,
