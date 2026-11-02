@@ -105,6 +105,7 @@ extension Computer {
             addressedText = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
         }
         let axAction = elementAction || action == "invoke_menu" || addressedText
+        if target.applicationUI, !foreground, let window { try confirmMenuTarget(window) }
         let alternateHover = try updateHover(target, reveal: action == "hover")
         var backgroundRelease: CGEvent?
         defer {
@@ -181,7 +182,9 @@ extension Computer {
                 }
             }
         } else if axAction, let element {
-            evidence = try await accessibilityInput(action, args: args, element: element)
+            evidence = try await accessibilityInput(action, args: args, element: element) {
+                if target.applicationUI, let window { try confirmMenuTarget(window) }
+            }
         } else {
             if ["type", "key", "keys", "paste"].contains(action) {
                 if let element {

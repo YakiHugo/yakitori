@@ -18,6 +18,11 @@ final class FixtureApplication: NSApplication {
     }
 }
 
+final class FixtureWindow: NSWindow {
+    var menuInvoked: ((Int) -> Void)?
+    @objc func incrementDocument(_ sender: Any?) { menuInvoked?(windowNumber) }
+}
+
 final class DragTarget: NSView {
     var dragging = false
     var downCount = 0
@@ -81,7 +86,7 @@ final class HoverTarget: NSView {
 }
 
 final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicationDelegate {
-    let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 500, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let window = FixtureWindow(contentRect: NSRect(x: 120, y: 120, width: 500, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let first = NSTextField(frame: NSRect(x: 30, y: 230, width: 420, height: 28))
     let second = NSTextField(frame: NSRect(x: 30, y: 185, width: 420, height: 28))
     let label = NSTextField(labelWithString: "0")
@@ -93,12 +98,14 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
     var pointerUp = 0
     var count = 0
     var moves = 0
-    var secondary: NSWindow?
-    var interaction: NSWindow?
+    var secondary: FixtureWindow?
+    var interaction: FixtureWindow?
     let hover = HoverTarget(frame: NSRect(x: 20, y: 60, width: 180, height: 160))
     let pointerHover = HoverTarget(frame: NSRect(x: 230, y: 140, width: 160, height: 100))
     var menuCount = 0
     var menusOpen = 0
+    var menuWindowID = 0
+    var switchWindowOnMenuOpen = false
     var events: [[String: Any]] = []
     var openedURLs: [String] = []
     var reopens = 0
@@ -143,7 +150,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
         window.contentView!.addSubview(canvas)
         window.orderBack(nil)
         if CommandLine.arguments.contains("--multi-window") {
-            let extra = NSWindow(contentRect: NSRect(x: 700, y: 180, width: 220, height: 160), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            let extra = FixtureWindow(contentRect: NSRect(x: 700, y: 180, width: 220, height: 160), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             extra.title = "Yakitori Secondary Fixture"
             extra.isReleasedWhenClosed = false
             let control = NSButton(title: "Secondary increment", target: self, action: #selector(increment))
@@ -159,7 +166,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
             secondary = extra
         }
         if CommandLine.arguments.contains("--interaction-fixture") {
-            let extra = NSWindow(contentRect: NSRect(x: 950, y: 120, width: 420, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let extra = FixtureWindow(contentRect: NSRect(x: 950, y: 120, width: 420, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             extra.title = "Yakitori Interaction Fixture"
             extra.isReleasedWhenClosed = false
             extra.acceptsMouseMovedEvents = true
@@ -184,11 +191,20 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
             interaction = extra
             extra.orderBack(nil)
         }
+        for target in [window, secondary, interaction].compactMap({ $0 }) {
+            target.menuInvoked = { [weak self] id in
+                self?.menuWindowID = id; self?.menuCount += 1; self?.save()
+            }
+        }
         save()
     }
 
     @objc func menuIncrement() { menuCount += 1; save() }
-    func menuWillOpen(_ menu: NSMenu) { menusOpen += 1; save() }
+    func menuWillOpen(_ menu: NSMenu) {
+        menusOpen += 1
+        if switchWindowOnMenuOpen { switchWindowOnMenuOpen = false; window.makeKey() }
+        save()
+    }
     func menuDidClose(_ menu: NSMenu) { menusOpen = max(0, menusOpen - 1); save() }
     @objc func increment() { count += 1; label.stringValue = String(count); save() }
     @objc func changeLater() {
@@ -222,6 +238,7 @@ final class Fixture: NSObject, NSTextFieldDelegate, NSMenuDelegate, NSApplicatio
                 "window_spaces": NSApp.windows.map { ["id": $0.windowNumber, "visible": $0.isVisible, "active_space": $0.isOnActiveSpace, "spaces": fixtureSpaces($0.windowNumber)] as [String: Any] },
                 "interaction_window_id": interaction?.windowNumber ?? 0, "hover_alternate": hover.alternate,
                 "hover_moves": pointerHover.moves, "hover_transitions": hover.transitions, "menu_count": menuCount, "menus_open": menusOpen,
+                "menu_window_id": menuWindowID, "switch_window_on_menu_open": switchWindowOnMenuOpen,
                 "rich": rich.string, "changes": changes, "hidden": NSApp.isHidden,
                 "rich_selection": ["location": rich.selectedRange().location, "length": rich.selectedRange().length],
                 "pointer_down": pointerDown, "pointer_up": pointerUp,
@@ -270,6 +287,7 @@ if CommandLine.arguments.contains("--interaction-fixture") {
     automation.addItem(nested)
     let increment = actions.addItem(withTitle: "Increment", action: #selector(Fixture.menuIncrement), keyEquivalent: "")
     increment.target = fixture
+    actions.addItem(withTitle: "Document increment", action: #selector(FixtureWindow.incrementDocument(_:)), keyEquivalent: "")
     for _ in 0..<2 { automation.addItem(withTitle: "Ambiguous", action: #selector(Fixture.menuIncrement), keyEquivalent: "").target = fixture }
     let disabled = automation.addItem(withTitle: "Disabled", action: #selector(Fixture.menuIncrement), keyEquivalent: "")
     disabled.target = fixture
@@ -281,6 +299,9 @@ let activityObservers = [NSApplication.didBecomeActiveNotification, NSApplicatio
 }
 let stateTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in fixture.save() }
 let signals = [(SIGUSR1, { fixture.move() }), (SIGUSR2, { fixture.closeWindow() }), (SIGHUP, { fixture.changeLater() }),
+    (SIGURG, { (fixture.interaction ?? fixture.secondary ?? fixture.window).makeKeyAndOrderFront(nil); fixture.save() }),
+    (SIGIO, { fixture.window.makeKey(); fixture.save() }),
+    (SIGXCPU, { fixture.switchWindowOnMenuOpen = true; fixture.save() }),
     (SIGWINCH, { app.setActivationPolicy(.regular); fixture.save() })].map { code, action -> DispatchSourceSignal in
     signal(code, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: code, queue: .main)

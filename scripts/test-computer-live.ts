@@ -164,6 +164,9 @@ try {
         hover_transitions: number
         menu_count: number
         menus_open: number
+        menu_window_id: number
+        key_window: number
+        switch_window_on_menu_open: boolean
         active: boolean
         rich: string
         rich_bold: boolean
