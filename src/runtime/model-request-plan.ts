@@ -1,3 +1,4 @@
+import type { ImageTokenEstimator } from "./openai-image-budget.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import type { ModelRequest, ModelWireApi } from "./model.ts"
 import type { ResolvedModel } from "./model-catalog.ts"
@@ -40,6 +41,7 @@ export function prepareModelRequestPlan(
   request: ModelRequest,
   input: Readonly<{
     model: ResolvedModel
+    imageTokenEstimator?: ImageTokenEstimator | undefined
     wireApi: ModelWireApi
     toolCapabilities?: ProviderToolCapabilities
     inputLimitTokens?: number
@@ -190,7 +192,7 @@ export function prepareModelRequestPlan(
         `Tool choice ${name} is absent from the captured tool plan.`,
       )
   }
-  const budget = estimateModelRequestBudget(prepared)
+  const budget = estimateModelRequestBudget(prepared, input.imageTokenEstimator)
   return {
     request: prepared,
     budget,

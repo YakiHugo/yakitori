@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest"
+import { prepareModelRequestPlan } from "../../../src/runtime/model-request-plan.ts"
+import { pngImageBase64 } from "../../fixtures/images.ts"
 import { createConfiguredModelsManager } from "../../../src/runtime/configured-models-manager.ts"
 import type { ModelTarget } from "../../../src/runtime/model.ts"
 import { createModelProvider } from "../../../src/runtime/model-provider.ts"
@@ -9,6 +11,104 @@ import { captureStepContext } from "../../../src/runtime/tools/spec-plan.ts"
 import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
 describe("Step tool planning", () => {
+  it.each([
+    {
+      model: "gpt-6-astra",
+      serviceId: "openai",
+      wireApi: "openai_responses",
+      enabled: true,
+    },
+    {
+      model: "gpt-6-astra",
+      serviceId: "codex",
+      wireApi: "openai_responses",
+      enabled: false,
+    },
+    {
+      model: "gpt-6-astra",
+      serviceId: "generic",
+      wireApi: "openai_responses",
+      enabled: false,
+    },
+    {
+      model: "gpt-6-astra",
+      serviceId: "openai",
+      wireApi: "openai_chat_completions",
+      enabled: false,
+    },
+    {
+      model: "gpt-6-sol",
+      serviceId: "openai",
+      wireApi: "openai_responses",
+      enabled: false,
+    },
+    // Documented public image rules alone do not promote fallback catalog metadata.
+    {
+      model: "gpt-5.6-sol",
+      serviceId: "openai",
+      wireApi: "openai_responses",
+      enabled: false,
+    },
+  ] as const)("captures only verified native image estimation into the request plan: $serviceId/$model/$wireApi", async ({
+    model,
+    serviceId,
+    wireApi,
+    enabled,
+  }) => {
+    const provider = "renamed-account"
+    const models = createConfiguredModelsManager({
+      provider,
+      catalogProvider: "openai",
+      wireApi,
+      models: [{ id: model, inputModalities: ["text", "image"] }],
+    })
+    const selection = { provider, model }
+    const registry = createToolRegistry([])
+    const configuration = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "image-budget",
+      },
+      models,
+    ).resolveStep(selection, models)
+    const step = captureStepContext({
+      registry,
+      configuration,
+      serviceId,
+      wireApi,
+    })
+    expect(step.imageTokenEstimator !== undefined).toBe(enabled)
+    // No new raw delegation or implicit auto accompanies this budget change.
+    expect(step.deferImagePreparation).toBe(false)
+    const plan = prepareModelRequestPlan(
+      {
+        target: step.target,
+        system: [],
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", mediaType: "image/png", data: pngImageBase64 },
+            ],
+          },
+        ],
+        tools: [],
+        toolWireProtocol: "eager",
+      },
+      {
+        model: step.modelInfo,
+        wireApi,
+        imageTokenEstimator: step.imageTokenEstimator,
+      },
+    )
+    expect(plan.budget.imageTokens).toBe(enabled ? 2 : 2000)
+    await step.toolRouter.release()
+    await registry.dispose()
+  })
+
   it.each([
     {
       wireApi: "gemini_generate_content",
