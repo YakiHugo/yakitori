@@ -1,3 +1,8 @@
+import {
+  isSenseNovaEndpoint,
+  prepareSenseNovaImage,
+  sensenovaVisionModel,
+} from "./sensenova-vision.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -91,6 +96,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "glm"
     | "meta"
     | "stepfun"
+    | "sensenova"
     | "tencent"
     | "mimo"
 }>
@@ -173,6 +179,19 @@ async function* streamChatCompletions(
     const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
+    const sensenova =
+      options.flavor === "sensenova" && isSenseNovaEndpoint(options.baseURL)
+    if (sensenova) {
+      validateChatOnlyRequest(request)
+      if (
+        model !== sensenovaVisionModel ||
+        request.outputFormat !== undefined ||
+        request.target.effort !== undefined
+      )
+        throw new AssetMediaError(
+          "SenseNova chat currently supports sensenova-6.8-flash-lite without output-format or reasoning-effort overrides only.",
+        )
+    }
     const tencentVision =
       options.flavor === "tencent" && model === tencentVisionModel
     if (tencentVision) validateChatOnlyRequest(request)
@@ -248,6 +267,13 @@ async function* streamChatCompletions(
       : undefined
     const mimoImages = mimo ? createMimoImagePolicy(request, model) : undefined
     const media = await prepareProviderMedia(request, {
+      ...(sensenova
+        ? {
+            inlineImageUrls: true,
+            prepareImage: (bytes, image) =>
+              prepareSenseNovaImage(bytes, image, request.signal),
+          }
+        : {}),
       ...(mimoImages ? { prepareImage: mimoImages.prepareImage } : {}),
       inlineDocumentUrls: true,
       ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
@@ -348,7 +374,8 @@ async function* streamChatCompletions(
       media.messages,
       request.target.provider,
       request.continuationScope,
-      options.flavor === "mimo" && !mimo
+      (options.flavor === "mimo" && !mimo) ||
+        (options.flavor === "sensenova" && !sensenova)
         ? "generic"
         : (options.flavor ?? "generic"),
       request.target.model || options.model,
@@ -367,7 +394,9 @@ async function* streamChatCompletions(
       messages,
       stream: true as const,
       // StepFun reports usage in streaming chunks without OpenAI stream_options.
-      ...(stepfun || mimo ? {} : { stream_options: { include_usage: true } }),
+      ...(stepfun || mimo || sensenova
+        ? {}
+        : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
         ? {}
         : { parallel_tool_calls: request.parallelToolCalls }),
@@ -575,6 +604,15 @@ async function* streamChatCompletions(
             )
           nativeReasoning.encrypted_content = delta.encrypted_content
         }
+        if (
+          sensenova &&
+          (delta.tool_calls != null ||
+            delta.reasoning_details != null ||
+            Array.isArray(delta.content))
+        )
+          throw new ChatCompletionsProtocolError(
+            "SenseNova chat returned unsupported tool or structured continuation state.",
+          )
         if (delta.annotations != null) {
           if (
             !Array.isArray(delta.annotations) ||
@@ -811,10 +849,10 @@ async function* streamChatCompletions(
             calls.set(tool.index, call)
           }
         }
-        // StepFun documents an empty string on unfinished SSE chunks.
+        // StepFun and SenseNova document empty strings on unfinished SSE chunks.
         if (
           choice.finish_reason != null &&
-          !(stepfun && (choice.finish_reason as string) === "")
+          !((stepfun || sensenova) && (choice.finish_reason as string) === "")
         )
           finishReason = choice.finish_reason
       }
@@ -842,11 +880,15 @@ async function* streamChatCompletions(
       content.push({
         type: "reasoning",
         text: reasoning,
-        providerMetadata: {
-          chatCompletions: continuationMetadata(request, {
-            reasoningContent: true,
-          }),
-        },
+        ...(sensenova
+          ? {}
+          : {
+              providerMetadata: {
+                chatCompletions: continuationMetadata(request, {
+                  reasoningContent: true,
+                }),
+              },
+            }),
       })
     if (text.length > 0 || annotations.length > 0)
       content.push({
@@ -939,6 +981,8 @@ async function* streamChatCompletions(
       throw new ChatCompletionsProtocolError(
         "Invalid completion finish reason.",
       )
+    // SenseNova says not to echo reasoning. Keep it in portable history for
+    // display, without continuation metadata or a replayable native envelope.
     const native = modelNativeItems(request, "openai_chat_completions", [
       {
         role: "assistant",
@@ -1000,7 +1044,7 @@ async function* streamChatCompletions(
         type: "output_item",
         itemId: `${completionId ?? "completion"}_0`,
         content,
-        native,
+        native: sensenova ? [] : native,
       }
     const requestId = providerRequestId
     yield {
@@ -1009,7 +1053,7 @@ async function* streamChatCompletions(
         stopReason,
         rawStopReason: finishReason,
         content,
-        native,
+        native: sensenova ? [] : native,
         nativeMetadata: modelNativeResponseMetadata(
           request,
           "openai_chat_completions",
@@ -1147,6 +1191,7 @@ export function toChatCompletionsMessages(
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                   ...(flavor === "qwen" ||
                   flavor === "glm" ||
+                  flavor === "sensenova" ||
                   flavor === "tencent" ||
                   flavor === "mimo"
                     ? {}
@@ -1284,7 +1329,7 @@ export function toChatCompletionsMessages(
         role: "assistant",
         content: text,
         ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
-        ...(reasoning.length === 0
+        ...(flavor === "sensenova" || reasoning.length === 0
           ? {}
           : { reasoning_content: reasoning.join("\n") }),
       }

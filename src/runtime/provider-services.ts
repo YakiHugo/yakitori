@@ -207,6 +207,24 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.z.ai/guides/overview/quick-start",
   },
   {
+    id: "sensenova",
+    name: "SenseNova",
+    baseURL: "https://token.sensenova.cn/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "SENSENOVA_API_KEY",
+    flavor: "sensenova",
+    models: [
+      {
+        id: "sensenova-6.8-flash-lite",
+        displayName: "SenseNova 6.8 Flash Lite Preview (chat only)",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+    ],
+    documentationURL:
+      "https://github.com/OpenSenseNova/SenseNova6.8/blob/main/API.md",
+  },
+  {
     id: "tencent",
     name: "Tencent TokenHub",
     baseURL: "https://tokenhub.tencentmaas.com/v1",
@@ -393,6 +411,14 @@ const serviceEndpointVariants: Readonly<
   stepfun: [
     {
       baseURL: "https://api.stepfun.ai/v1",
+      wireApi: "openai_chat_completions",
+    },
+  ],
+  // Official regional setup; credentials must belong to the selected region.
+  // https://github.com/OpenSenseNova/SenseNova-Skills/blob/main/INSTALL.md
+  sensenova: [
+    {
+      baseURL: "https://token.sensenova.ai/v1",
       wireApi: "openai_chat_completions",
     },
   ],
