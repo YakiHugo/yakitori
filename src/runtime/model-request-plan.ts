@@ -1,4 +1,4 @@
-import type { ImageTokenEstimator } from "./openai-image-budget.ts"
+import { isPortableChatOnlyNative } from "./chat-only-native.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import type { ModelRequest, ModelWireApi } from "./model.ts"
 import type { ResolvedModel } from "./model-catalog.ts"
@@ -8,6 +8,7 @@ import {
   type ModelRequestBudget,
 } from "./model-request-budget.ts"
 import { validateModelRequestControls } from "./model-request-controls.ts"
+import type { ImageTokenEstimator } from "./openai-image-budget.ts"
 
 export type ModelRequestPlanFailureCode =
   | "invalid_request"
@@ -48,6 +49,9 @@ export function prepareModelRequestPlan(
   }>,
 ): ModelRequestPlan {
   const model = input.model
+  const toolPolicy = model.toolPolicy ?? request.toolPolicy
+  const rebuildMessagesAfterOutput = request.rebuildMessagesAfterOutput
+  if (toolPolicy === "chat_only") validateChatOnlyRequest(request)
   if (
     request.target.provider !== model.provider ||
     request.target.model !== model.model
@@ -155,6 +159,16 @@ export function prepareModelRequestPlan(
     )
   const prepared: ModelRequest = {
     ...request,
+    ...(toolPolicy === undefined ? {} : { toolPolicy }),
+    ...(toolPolicy !== "chat_only" || rebuildMessagesAfterOutput === undefined
+      ? {}
+      : {
+          rebuildMessagesAfterOutput: async () => {
+            const messages = await rebuildMessagesAfterOutput()
+            validateChatOnlyRequest({ ...request, messages })
+            return messages
+          },
+        }),
     target: {
       ...request.target,
       ...(effort === undefined ? {} : { effort }),
@@ -200,4 +214,32 @@ export function prepareModelRequestPlan(
       input.inputLimitTokens !== undefined &&
       budget.estimatedInputTokens >= input.inputLimitTokens,
   }
+}
+
+// Foundation only: do not convert historical tool/native state into ordinary
+// user instructions. A later portable-history projection can relax this fence.
+export function validateChatOnlyRequest(request: ModelRequest): void {
+  if (
+    request.tools.length > 0 ||
+    request.toolChoice !== undefined ||
+    request.parallelToolCalls !== undefined ||
+    // Vendor controls are open-ended and may activate hosted tools without
+    // a tools array. This portable-only foundation admits none of them.
+    request.providerOptions !== undefined ||
+    request.compaction !== undefined ||
+    request.messages.some(
+      (message) =>
+        message.role === "tool" ||
+        (message.role === "assistant" &&
+          (!isPortableChatOnlyNative(message.content, message.native) ||
+            message.content.some(
+              (block) =>
+                block.type === "tool_call" || block.type === "compaction",
+            ))),
+    )
+  )
+    throw new ModelRequestPlanError(
+      "unsupported_tool_protocol",
+      "Chat-only execution rejects tools, tool controls, and tool/native history. The original history has not been changed. Start a new conversation for text/image chat, or switch back to a tool-enabled model to continue this history.",
+    )
 }

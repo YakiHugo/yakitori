@@ -65,6 +65,7 @@ const RESERVED_EXTERNAL_DEFAULT_NAMES = new Set([
 ])
 
 export type ToolFinalizeOptions = Readonly<{
+  toolPolicy?: "chat_only"
   threadModelOverrides?: AgentModelOverrides
   agentModelOverrides?: AgentModelOverrides
   enabledTrustedTools: ReadonlySet<string>
@@ -230,8 +231,9 @@ export function createToolRegistry(
         throw new Error("Tool registry is disposed.")
       const eligible = [...registered.entries()].filter(
         ([name, entry]) =>
-          entry.source.kind === "external" ||
-          options.enabledTrustedTools.has(name),
+          options.toolPolicy !== "chat_only" &&
+          (entry.source.kind === "external" ||
+            options.enabledTrustedTools.has(name)),
       )
       for (let index = 0; index < eligible.length; index++) {
         const entry = eligible[index]

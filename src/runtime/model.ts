@@ -89,6 +89,8 @@ export type ModelSystemSection = {
 }
 
 export type ModelRequest = Readonly<{
+  // Captured execution restriction; absent preserves existing tool behavior.
+  toolPolicy?: "chat_only"
   // Request-only access; neither HTTP deployment addresses nor provider file
   // handles are written into the durable conversation.
   assets?: Readonly<{

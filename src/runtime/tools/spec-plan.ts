@@ -182,6 +182,9 @@ export function captureStepContext(
     modelInfo: model,
     executionPolicy: stepExecutionLimits(input.configuration),
     toolRouter: input.registry.finalize({
+      ...(model.toolPolicy === undefined
+        ? {}
+        : { toolPolicy: model.toolPolicy }),
       enabledTrustedTools,
       ...(input.threadModelOverrides === undefined
         ? {}
@@ -222,6 +225,9 @@ export function captureStepContext(
         input.wireApi === "gemini_generate_content") ||
       (input.serviceId === "moonshot" &&
         input.wireApi === "openai_responses") ||
+      (input.serviceId === "tencent" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "hy-vision-2.0-instruct") ||
       (input.serviceId === "minimax" &&
         input.wireApi === "openai_chat_completions") ||
       (input.serviceId === "doubao" &&

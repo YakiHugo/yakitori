@@ -425,6 +425,9 @@ export function createProviderService(
         ...(model.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: model.maxOutputTokens }),
+        ...(model.toolPolicy === undefined
+          ? {}
+          : { toolPolicy: model.toolPolicy }),
         inputModalities: model.inputModalities,
         imageDetailModes: model.imageDetailModes,
         ...(model.efforts === undefined ? {} : { efforts: model.efforts }),

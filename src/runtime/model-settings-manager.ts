@@ -152,7 +152,10 @@ export function createModelSettingsManager(
       }
       return effectiveModelCapacity(
         applySettings(
-          { ...resolveFallbackModel(selection), ...capacity },
+          {
+            ...resolveFallbackModel(selection),
+            ...capacity,
+          },
           configured,
         ),
       )

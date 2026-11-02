@@ -98,6 +98,32 @@ export function mergeEffectiveModel(
       result.defaultOutputTokens,
       result.maxOutputTokens,
     )
+  if (base.toolPolicy === "chat_only") {
+    // A backend execution restriction is not an editable model capability.
+    // Settings may narrow budgets or rename/hide the model, but cannot replace
+    // its chat-only instructions or advertise unsupported request controls.
+    const protectedKeys = [
+      "instructions",
+      "instructionProfileId",
+      "inputModalities",
+      "imageDetailModes",
+      "efforts",
+      "defaultEffort",
+      "multiAgentReasoningEffort",
+      "speeds",
+      "contextWindowScope",
+      "shellToolType",
+      "fileEditingToolType",
+      "applyPatchToolType",
+      "supportsCustomTools",
+      "supportsNativeToolSearch",
+    ] as const
+    for (const key of protectedKeys) {
+      // Delete absent optional fields too: an override must not introduce them.
+      Reflect.deleteProperty(result, key)
+      if (base[key] !== undefined) Reflect.set(result, key, base[key])
+    }
+  }
   return result
 }
 
@@ -122,6 +148,7 @@ export function effectiveModelCapacity(
 ): ModelCapacity | undefined {
   if (model.contextWindowTokens === undefined) return undefined
   return {
+    ...(model.toolPolicy === undefined ? {} : { toolPolicy: model.toolPolicy }),
     contextWindowTokens: model.contextWindowTokens,
     maxContextWindowTokens:
       model.maxContextWindowTokens ?? model.contextWindowTokens,

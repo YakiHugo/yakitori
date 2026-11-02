@@ -533,3 +533,40 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
   expect(pageErrors).toEqual([])
   expect(page.url()).toBe(originalURL)
 })
+
+test("chat-only model restrictions remain visible across dismissal and model changes", async ({
+  page,
+}, testInfo) => {
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  await page.goto(url.replace("chatgpt-settings.html", "chat-only.html"))
+  const warning = page.getByRole("status")
+  await expect(warning).toHaveText(
+    "Text/image chat only — no tools or file access",
+  )
+  const selector = page.getByRole("button", { name: "Select model and effort" })
+  await selector.click()
+  await expect(
+    page.getByRole("button", { name: "HY Vision · Chat only (no tools)" }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(selector).toHaveAttribute("aria-expanded", "false")
+  await expect(warning).toBeVisible()
+  await selector.click()
+  await page.getByRole("button", { name: "Tool model", exact: true }).click()
+  await expect(warning).toHaveCount(0)
+  await selector.click()
+  await page
+    .getByRole("button", { name: "HY Vision · Chat only (no tools)" })
+    .click()
+  await expect(warning).toBeVisible()
+  await selector.click()
+  await selector.click()
+  await expect(selector).toHaveAttribute("aria-expanded", "false")
+  await expect(warning).toBeVisible()
+  await page.screenshot({
+    path: testInfo.outputPath("chat-only.png"),
+    fullPage: true,
+  })
+  expect(errors).toEqual([])
+})
