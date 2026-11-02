@@ -1,4 +1,10 @@
 import {
+  CODEX_IMAGE_REQUEST_SAFETY_BYTES,
+  CodexImageRequestSizeError,
+  prepareCodexImage,
+  validateCodexImageRequest,
+} from "./codex-image-policy.ts"
+import {
   OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
   OpenAIImageRequestSizeError,
   prepareOpenAIAstraImage,
@@ -386,10 +392,36 @@ async function* streamOpenAI(
       (request.target.model || defaultModel) === "grok-4.7" &&
       URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
         "https://api.x.ai/v1"
+    const codexImages =
+      requestProfile === "codex" &&
+      request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some((block) => block.type === "image"),
+      )
+    // First-party Codex rejects remote image URLs. Do not turn a previously
+    // provider-owned URL into an arbitrary local network fetch. Owned rollout
+    // paths are resolved below even when deployment exposes a public asset URL.
+    if (
+      codexImages &&
+      request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some(
+            (block) =>
+              block.type === "image" &&
+              block.data === undefined &&
+              "url" in block.file,
+          ),
+      )
+    )
+      throw new AssetMediaError(
+        "Codex image URLs are not supported. Import the image as an attachment before sending; no remote image was fetched.",
+      )
     let astraImageBytes = 0
     let grokImageBytes = 0
     let preparedImageBytes = 0
-    if (nativeKimiImages || nativeAstraImages) {
+    if (nativeKimiImages || nativeAstraImages || codexImages) {
       const placeholders = request.messages.map(
         (message): ModelMessage =>
           message.role === "user" || message.role === "tool"
@@ -417,10 +449,13 @@ async function* streamOpenAI(
         buildBody(placeholders, new Map()),
         nativeAstraImages
           ? OPENAI_IMAGE_REQUEST_SAFETY_BYTES
-          : KIMI_IMAGE_REQUEST_SAFETY_BYTES,
+          : codexImages
+            ? CODEX_IMAGE_REQUEST_SAFETY_BYTES
+            : KIMI_IMAGE_REQUEST_SAFETY_BYTES,
       )
       if (size === undefined) {
         if (nativeAstraImages) throw new OpenAIImageRequestSizeError()
+        if (codexImages) throw new CodexImageRequestSizeError()
         throw new KimiImageRequestSizeError()
       }
       if (nativeAstraImages) {
@@ -440,6 +475,26 @@ async function* streamOpenAI(
       } else preparedImageBytes = size
     }
     const media = await prepareProviderMedia(request, {
+      ...(requestProfile === "codex"
+        ? {
+            inlineImageUrls: true,
+            prepareImage: async (bytes: Buffer, image: ModelImageBlock) => {
+              const prepared = await prepareCodexImage(
+                bytes,
+                image,
+                request.signal,
+              )
+              preparedImageBytes +=
+                (prepared.data?.length ?? 0) +
+                prepared.mediaType.length -
+                "image/png".length
+              if (preparedImageBytes > CODEX_IMAGE_REQUEST_SAFETY_BYTES)
+                throw new CodexImageRequestSizeError()
+              return prepared
+            },
+          }
+        : {}),
+
       ...(nativeAstraImages
         ? {
             prepareImage: async (
@@ -583,6 +638,7 @@ async function* streamOpenAI(
         "compaction_trigger belongs to the Codex backend, not the public Responses API.",
       )
     let body = buildBody(media.messages, media.uploadedFiles)
+    if (codexImages) validateCodexImageRequest(body)
     if (
       nativeKimiImages &&
       jsonRequestByteLength(body, KIMI_IMAGE_REQUEST_SAFETY_BYTES) === undefined

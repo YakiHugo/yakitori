@@ -216,6 +216,7 @@ export function captureStepContext(
               model,
             }),
     deferImagePreparation:
+      (input.serviceId === "codex" && input.wireApi === "openai_responses") ||
       (input.serviceId === "openai" &&
         input.wireApi === "openai_responses" &&
         target.model === "gpt-6-astra") ||
