@@ -209,6 +209,9 @@ export function captureStepContext(
             model,
           }),
     deferImagePreparation:
+      (input.serviceId === "xai" &&
+        input.wireApi === "openai_responses" &&
+        target.model === "grok-4.7") ||
       (input.serviceId === "anthropic" &&
         input.wireApi === "anthropic_messages") ||
       (input.serviceId === "gemini" &&
