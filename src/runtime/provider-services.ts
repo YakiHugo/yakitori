@@ -77,6 +77,8 @@ export const providerServices: readonly ProviderPreset[] = [
     models: [
       {
         id: "deepseek-flash",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
         efforts: ["low", "high", "max"],
         defaultEffort: "high",
       },
