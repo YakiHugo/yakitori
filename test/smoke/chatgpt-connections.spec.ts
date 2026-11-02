@@ -561,7 +561,10 @@ test("chat-only model restrictions remain visible across dismissal and model cha
     .click()
   await expect(warning).toBeVisible()
   await selector.click()
-  await selector.click()
+  await expect(selector).toHaveAttribute("aria-expanded", "true")
+  // The existing dismissal backdrop intentionally covers the selector while
+  // open. Exercise a real outside click, not a forced click through the overlay.
+  await page.mouse.click(8, 8)
   await expect(selector).toHaveAttribute("aria-expanded", "false")
   await expect(warning).toBeVisible()
   await page.screenshot({
