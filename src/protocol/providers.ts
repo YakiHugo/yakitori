@@ -6,6 +6,7 @@ export type ProviderConfiguration = Readonly<{
     | "anthropic_messages"
     | "gemini_generate_content"
     | "gemini_interactions"
+    | "bedrock_converse"
   baseURL: string
   // Stable service identity; vendor models share this namespace across accounts.
   // `preset` below records only the creation template.
@@ -99,6 +100,7 @@ export type ProviderPreset = Readonly<{
     | "anthropic_messages"
     | "gemini_generate_content"
     | "gemini_interactions"
+    | "bedrock_converse"
   envKey?: string
   kind?: "vendor" | "relay" | "local" | "subscription"
   noKey?: boolean

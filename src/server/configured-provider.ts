@@ -1,3 +1,4 @@
+import { createBedrockConverseProvider } from "../runtime/bedrock-converse-provider.ts"
 import {
   createAnthropicTurnTransport,
   createChatCompletionsProvider,
@@ -74,6 +75,9 @@ export function createConfiguredProvider(
         : { serviceId: backend.serviceId }),
       wireApi: configuration.wireApi,
       capabilities: backend.capabilities,
+      ...(configuration.wireApi === "bedrock_converse"
+        ? { streamIdleTimeoutMs: 3_600_000 }
+        : {}),
     },
     models,
     continuationScope: createProviderContinuationScope(
@@ -117,14 +121,16 @@ export function createConfiguredProvider(
             : undefined
       const stream =
         transport?.stream ??
-        (configuration.wireApi === "gemini_generate_content"
-          ? createGeminiProvider(options)
-          : configuration.wireApi === "gemini_interactions"
-            ? createGeminiInteractionsProvider(options)
-            : createChatCompletionsProvider({
-                ...options,
-                flavor: backend.chatCompletionsFlavor,
-              }))
+        (configuration.wireApi === "bedrock_converse"
+          ? createBedrockConverseProvider(options)
+          : configuration.wireApi === "gemini_generate_content"
+            ? createGeminiProvider(options)
+            : configuration.wireApi === "gemini_interactions"
+              ? createGeminiInteractionsProvider(options)
+              : createChatCompletionsProvider({
+                  ...options,
+                  flavor: backend.chatCompletionsFlavor,
+                }))
       const configureStream = (stream: StreamFn): StreamFn =>
         async function* (request) {
           if (

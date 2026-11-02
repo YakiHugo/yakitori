@@ -208,12 +208,15 @@ export function captureStepContext(
       input.wireApi === "openai_chat_completions" &&
       model.model === "doubao-seed-2-1-pro-260915"
         ? () => 1280
-        : openAIImageTokenEstimator({
-            serviceId: input.serviceId,
-            wireApi: input.wireApi,
-            model,
-          }),
+        : input.wireApi === "bedrock_converse"
+          ? () => 230
+          : openAIImageTokenEstimator({
+              serviceId: input.serviceId,
+              wireApi: input.wireApi,
+              model,
+            }),
     deferImagePreparation:
+      input.wireApi === "bedrock_converse" ||
       (input.serviceId === "xai" &&
         input.wireApi === "openai_responses" &&
         target.model === "grok-4.7") ||

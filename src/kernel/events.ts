@@ -862,6 +862,7 @@ function isModelNativeItem(value: unknown): boolean {
       "anthropic_messages",
       "gemini_generate_content",
       "gemini_interactions",
+      "bedrock_converse",
     ].includes(String(value.wireApi)) &&
     isJsonObject(value.value)
   )
