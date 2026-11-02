@@ -111,6 +111,7 @@ export type ProviderPreset = Readonly<{
     | "minimax"
     | "doubao"
     | "glm"
+    | "meta"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string

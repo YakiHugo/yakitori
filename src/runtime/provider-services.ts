@@ -68,6 +68,29 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.x.ai/developers/quickstart",
   },
   {
+    id: "meta",
+    name: "Meta",
+    baseURL: "https://api.meta.ai/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "MODEL_API_KEY",
+    flavor: "meta",
+    models: [
+      {
+        id: "muse-spark-1.3",
+        contextWindowTokens: 1_048_576,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+      {
+        id: "muse-wonder-1.0",
+        contextWindowTokens: 1_048_576,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+    ],
+    documentationURL: "https://dev.meta.ai/docs/image-understanding",
+  },
+  {
     id: "deepseek",
     name: "DeepSeek",
     baseURL: "https://api.deepseek.com",

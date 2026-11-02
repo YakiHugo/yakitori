@@ -1,3 +1,4 @@
+import { isMetaVisionModel } from "../meta-image-policy.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
@@ -212,6 +213,9 @@ export function captureStepContext(
       (input.serviceId === "xai" &&
         input.wireApi === "openai_responses" &&
         target.model === "grok-4.7") ||
+      (input.serviceId === "meta" &&
+        input.wireApi === "openai_chat_completions" &&
+        isMetaVisionModel(target.model)) ||
       (input.serviceId === "anthropic" &&
         input.wireApi === "anthropic_messages") ||
       (input.serviceId === "gemini" &&
