@@ -87,6 +87,7 @@ export function createRolloutAssets(
   options: Readonly<{
     withMutationLease: RolloutAssetMutationLease
     validatePdf?: (bytes: Uint8Array) => Promise<void>
+    validateImage?: (bytes: Uint8Array) => Promise<void>
   }>,
 ): RolloutAssets {
   const storageRootPath = resolve(storageRoot)
@@ -125,6 +126,7 @@ export function createRolloutAssets(
             requireAttachmentName(name)
             const snapshot = await copyAttachmentSnapshot({
               validatePdf: options.validatePdf,
+              validateImage: options.validateImage,
               root: join(root, rolloutId),
               sourcePath,
               stagingDirectory: stagingOwnerDirectory(
@@ -187,10 +189,7 @@ export function createRolloutAssets(
             requireAttachmentName(item.name)
             requireAttachmentSize(item.data.byteLength)
             const bytes = Buffer.from(item.data)
-            const { mediaType } = await inspectAttachmentBytes(
-              bytes,
-              options.validatePdf,
-            )
+            const { mediaType } = await inspectAttachmentBytes(bytes, options)
             const reference = attachmentReference(
               rolloutId,
               "staging",
@@ -251,14 +250,14 @@ export function createRolloutAssets(
             await requireMatchingAttachmentSlot(targetPath)
             const existing = await inspectStoredAttachmentIfPresent(
               targetPath,
-              options.validatePdf,
+              options,
             )
             if (existing !== undefined) {
               requireMatchingAttachmentMetadata(existing, attachment, true)
               const sourcePath = resolveReference(attachment.file)
               const source = await inspectStoredAttachmentIfPresent(
                 sourcePath,
-                options.validatePdf,
+                options,
               )
               if (source !== undefined) {
                 requireMatchingAttachmentMetadata(source, attachment)
@@ -276,10 +275,7 @@ export function createRolloutAssets(
               continue
             }
             const sourcePath = resolveReference(attachment.file)
-            const source = await inspectStoredAttachment(
-              sourcePath,
-              options.validatePdf,
-            )
+            const source = await inspectStoredAttachment(sourcePath, options)
             requireMatchingAttachmentMetadata(source, attachment)
             if (
               await linkOnce(
@@ -330,17 +326,14 @@ export function createRolloutAssets(
             await requireMatchingAttachmentSlot(targetPath)
             const existing = await inspectStoredAttachmentIfPresent(
               targetPath,
-              options.validatePdf,
+              options,
             )
             if (existing !== undefined)
               requireMatchingAttachmentMetadata(existing, attachment, true)
             const source =
               existing === undefined
-                ? await inspectStoredAttachment(sourcePath, options.validatePdf)
-                : await inspectStoredAttachmentIfPresent(
-                    sourcePath,
-                    options.validatePdf,
-                  )
+                ? await inspectStoredAttachment(sourcePath, options)
+                : await inspectStoredAttachmentIfPresent(sourcePath, options)
             // Like promotion, a copied request snapshot survives cleanup of
             // its original draft and remains available for lost-response retries.
             if (source === undefined) {
@@ -493,23 +486,29 @@ function stagingOwnerDirectory(
   )
 }
 
-type PdfValidator = (bytes: Uint8Array) => Promise<void>
+type AttachmentValidators = Readonly<{
+  validatePdf?: ((bytes: Uint8Array) => Promise<void>) | undefined
+  validateImage?: ((bytes: Uint8Array) => Promise<void>) | undefined
+}>
 
 async function inspectAttachmentBytes(
   bytes: Buffer,
-  validatePdf: PdfValidator | undefined,
+  validators: AttachmentValidators = {},
 ): Promise<{ mediaType: UserAttachment["mediaType"] }> {
-  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-")
-    return inspectImageBytes(bytes)
-  if (validatePdf === undefined)
+  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    const metadata = inspectImageBytes(bytes)
+    await validators.validateImage?.(bytes)
+    return metadata
+  }
+  if (validators.validatePdf === undefined)
     throw new Error("PDF attachment validation is unavailable.")
-  await validatePdf(Uint8Array.from(bytes))
+  await validators.validatePdf(Uint8Array.from(bytes))
   return { mediaType: "application/pdf" }
 }
 
 async function inspectStoredAttachment(
   path: string,
-  validatePdf?: PdfValidator,
+  validators: AttachmentValidators = {},
 ) {
   const handle = await open(
     path,
@@ -525,11 +524,12 @@ async function inspectStoredAttachment(
     if (bytesRead !== header.byteLength)
       throw new Error("Attachment changed while its metadata was being read.")
     const bytes =
+      validators.validateImage !== undefined ||
       header.subarray(0, 5).toString("ascii") === "%PDF-"
         ? await readBoundedAttachment(handle, file.size)
         : header
     return {
-      mediaType: (await inspectAttachmentBytes(bytes, validatePdf)).mediaType,
+      mediaType: (await inspectAttachmentBytes(bytes, validators)).mediaType,
       sizeBytes: file.size,
     }
   } finally {
@@ -563,10 +563,10 @@ async function readBoundedAttachment(
 
 async function inspectStoredAttachmentIfPresent(
   path: string,
-  validatePdf?: PdfValidator,
+  validators: AttachmentValidators = {},
 ) {
   try {
-    return await inspectStoredAttachment(path, validatePdf)
+    return await inspectStoredAttachment(path, validators)
   } catch (error) {
     if (isNotFound(error)) return undefined
     throw error
@@ -641,7 +641,8 @@ async function copyAttachmentSnapshot(input: {
   readonly root: string
   readonly sourcePath: string
   readonly stagingDirectory: string
-  readonly validatePdf: PdfValidator | undefined
+  readonly validatePdf: AttachmentValidators["validatePdf"]
+  readonly validateImage: AttachmentValidators["validateImage"]
 }) {
   // Open and bound the source before creating a snapshot; copyFile would copy an
   // arbitrarily large file, or a file growing during import, before validation.
@@ -679,10 +680,7 @@ async function copyAttachmentSnapshot(input: {
     } finally {
       await target.close()
     }
-    const metadata = await inspectStoredAttachment(
-      temporaryPath,
-      input.validatePdf,
-    )
+    const metadata = await inspectStoredAttachment(temporaryPath, input)
     return { ...metadata, path: temporaryPath }
   } catch (error) {
     if (temporaryPath !== undefined) await rm(temporaryPath, { force: true })

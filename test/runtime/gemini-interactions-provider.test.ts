@@ -1,3 +1,4 @@
+import { pngImageBase64 } from "../fixtures/images.ts"
 import { describe, expect, it, vi } from "vitest"
 import { toGeminiInteractionInput } from "../../src/runtime/gemini-interactions-input.ts"
 import { createGeminiInteractionsProvider } from "../../src/runtime/gemini-interactions-provider.ts"
@@ -68,7 +69,7 @@ describe("Gemini Interactions wire boundary", () => {
               role: "user",
               content: [
                 { type: "text", text: "Look" },
-                { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
+                { type: "image", mediaType: "image/png", data: pngImageBase64 },
                 {
                   type: "document",
                   name: "report.pdf",
@@ -108,7 +109,7 @@ describe("Gemini Interactions wire boundary", () => {
           type: "user_input",
           content: [
             { type: "text", text: "Look" },
-            { type: "image", mime_type: "image/png", data: "aW1hZ2U=" },
+            { type: "image", mime_type: "image/png", data: pngImageBase64 },
             {
               type: "document",
               mime_type: "application/pdf",
@@ -196,7 +197,7 @@ describe("Gemini Interactions wire boundary", () => {
         toolCallId: "custom-1",
         content: [
           { type: "text", text: "Failed" },
-          { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
+          { type: "image", mediaType: "image/png", data: pngImageBase64 },
         ],
         isError: true,
       },
@@ -213,7 +214,7 @@ describe("Gemini Interactions wire boundary", () => {
         is_error: true,
         result: [
           { type: "text", text: "Failed" },
-          { type: "image", mime_type: "image/png", data: "aW1hZ2U=" },
+          { type: "image", mime_type: "image/png", data: pngImageBase64 },
         ],
       },
     ])

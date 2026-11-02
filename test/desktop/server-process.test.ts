@@ -1,3 +1,4 @@
+import { pngImageBase64 } from "../fixtures/images.ts"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -92,10 +93,7 @@ describe("spawnServerProcess", () => {
     let server: Awaited<ReturnType<typeof spawnServerProcess>> | undefined
     const storage = join(workspace, ".yakitori")
     const pdf = pdfFixture(["First page", "Second page"])
-    const png = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=",
-      "base64",
-    )
+    const png = Buffer.from(pngImageBase64, "base64")
     try {
       server = await spawnServerProcess({
         command: node,

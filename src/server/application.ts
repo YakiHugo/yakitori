@@ -905,6 +905,12 @@ export async function createYakitoriApplication(
       }
     }
     const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
+      validateImage: async (bytes) => {
+        const { validateModelImage } = await import(
+          "../runtime/prepare-model-image.ts"
+        )
+        await validateModelImage(bytes)
+      },
       validatePdf: async (bytes) => {
         const result = await readPdf({ bytes, format: "native" })
         if (!result.ok) throw new Error(result.message)

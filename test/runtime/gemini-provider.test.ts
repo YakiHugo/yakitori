@@ -1,3 +1,9 @@
+import {
+  pngImageBase64,
+  webpImageBase64,
+  jpegImageBase64,
+  gifImageBase64,
+} from "../fixtures/images.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import {
   createServer,
@@ -107,7 +113,11 @@ describe("native Gemini provider", () => {
                   role: "user",
                   content: [
                     { type: "text", text: "Look" },
-                    { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
+                    {
+                      type: "image",
+                      mediaType: "image/png",
+                      data: pngImageBase64,
+                    },
                   ],
                 },
               ],
@@ -177,7 +187,7 @@ describe("native Gemini provider", () => {
               role: "user",
               parts: [
                 { text: "Look" },
-                { inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } },
+                { inlineData: { mimeType: "image/png", data: pngImageBase64 } },
               ],
             },
           ],
@@ -383,7 +393,7 @@ describe("native Gemini provider", () => {
       "generated image",
       [
         chunk(
-          [{ inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } }],
+          [{ inlineData: { mimeType: "image/png", data: pngImageBase64 } }],
           "STOP",
         ),
       ],
@@ -625,7 +635,7 @@ describe("native Gemini provider", () => {
               toolCallId: call.id,
               content: [
                 { type: "text", text: "2" },
-                { type: "image", mediaType: "image/png", data: "aW1hZ2U=" },
+                { type: "image", mediaType: "image/png", data: pngImageBase64 },
               ],
             },
           ],
@@ -658,7 +668,7 @@ describe("native Gemini provider", () => {
             {
               text: `[Image from tool evaluate, call ${call.id}, content part 2]`,
             },
-            { inlineData: { mimeType: "image/png", data: "aW1hZ2U=" } },
+            { inlineData: { mimeType: "image/png", data: pngImageBase64 } },
           ],
         })
       },
@@ -722,14 +732,14 @@ describe("native Gemini provider", () => {
                 {
                   inlineData: {
                     mimeType: "image/png",
-                    data: "YWJj",
+                    data: pngImageBase64,
                     displayName: "tool_0_image_0",
                   },
                 },
                 {
                   inlineData: {
                     mimeType: "image/webp",
-                    data: "ZGVm",
+                    data: webpImageBase64,
                     displayName: "tool_0_image_1",
                   },
                 },
@@ -747,7 +757,7 @@ describe("native Gemini provider", () => {
                 {
                   inlineData: {
                     mimeType: "image/jpeg",
-                    data: "Z2hp",
+                    data: jpegImageBase64,
                     displayName: "tool_1_image_0",
                   },
                 },
@@ -842,7 +852,7 @@ describe("native Gemini provider", () => {
                   inlineData: {
                     mimeType: "image/png",
                     displayName: "tool_0_image_0",
-                    data: "YWJj",
+                    data: pngImageBase64,
                   },
                 },
                 {
@@ -881,7 +891,7 @@ describe("native Gemini provider", () => {
                   inlineData: {
                     mimeType: "image/png",
                     displayName: "tool_1_image_0",
-                    data: "YWJj",
+                    data: pngImageBase64,
                   },
                 },
                 {
@@ -1102,7 +1112,9 @@ describe("native Gemini provider", () => {
       message.role === "tool"
         ? {
             ...message,
-            content: [{ type: "image", mediaType: "image/gif", data: "R0lG" }],
+            content: [
+              { type: "image", mediaType: "image/gif", data: gifImageBase64 },
+            ],
           }
         : message,
     )
@@ -1227,8 +1239,8 @@ function imageToolHistory(model: string): ModelMessage[] {
       toolCallId: "call_a",
       content: [
         { type: "text", text: "Partial first result" },
-        { type: "image", mediaType: "image/png", data: "YWJj" },
-        { type: "image", mediaType: "image/webp", data: "ZGVm" },
+        { type: "image", mediaType: "image/png", data: pngImageBase64 },
+        { type: "image", mediaType: "image/webp", data: webpImageBase64 },
       ],
       isError: true,
     },
@@ -1237,7 +1249,7 @@ function imageToolHistory(model: string): ModelMessage[] {
       toolCallId: "call_b",
       content: [
         { type: "text", text: "Second result" },
-        { type: "image", mediaType: "image/jpeg", data: "Z2hp" },
+        { type: "image", mediaType: "image/jpeg", data: jpegImageBase64 },
       ],
     },
   ]
@@ -1261,7 +1273,7 @@ function pdfToolHistory(model: string): ModelMessage[] {
             { type: "text", text: "Before" },
             pdf,
             { type: "text", text: "Between" },
-            { type: "image", mediaType: "image/png", data: "YWJj" },
+            { type: "image", mediaType: "image/png", data: pngImageBase64 },
             { type: "text", text: "After" },
             { ...pdf, data: "JVBERi0y" },
           ],

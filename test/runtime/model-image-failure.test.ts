@@ -1,12 +1,10 @@
+import { pngImageBase64 } from "../fixtures/images.ts"
 import { describe, expect, it } from "vitest"
 import { createGeminiProvider } from "../../src/runtime/gemini-provider.ts"
 import type { ModelRequest, ModelStreamEvent } from "../../src/runtime/model.ts"
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z1S8AAAAASUVORK5CYII=",
-  "base64",
-)
+const png = Buffer.from(pngImageBase64, "base64")
 
 function request(
   read: NonNullable<ModelRequest["assets"]>["read"],
@@ -74,6 +72,11 @@ describe("model image failures", () => {
       "Only PNG, JPEG, GIF, and WebP images can be attached.",
     ],
     [
+      "corrupt pixel data with valid dimensions",
+      png.subarray(0, 24),
+      "Image was not sent: unable to decode image",
+    ],
+    [
       "truncated dimensions",
       png.subarray(0, 12),
       "Image data is truncated or has invalid dimensions.",
@@ -98,7 +101,7 @@ describe("model image failures", () => {
         failure: {
           kind: "invalid_request",
           stage: "request_build",
-          message,
+          message: expect.stringContaining(message),
           attempt: 1,
           retryDecision: "fail",
         },

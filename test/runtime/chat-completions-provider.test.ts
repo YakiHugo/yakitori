@@ -1,3 +1,4 @@
+import { pngImageBase64, secondPngImageBase64 } from "../fixtures/images.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import {
   createServer,
@@ -817,7 +818,7 @@ describe("Chat Completions provider", () => {
     const image = {
       type: "image" as const,
       mediaType: "image/png" as const,
-      data: "YWJj",
+      data: pngImageBase64,
       detail: "original" as const,
     }
     const messages: ModelMessage[] = [
@@ -848,7 +849,7 @@ describe("Chat Completions provider", () => {
         toolCallId: "last",
         content: [
           { type: "text", text: "Partial result" },
-          { ...image, data: "ZGVm" },
+          { ...image, data: secondPngImageBase64 },
           {
             type: "document",
             name: "report.pdf",
@@ -873,7 +874,10 @@ describe("Chat Completions provider", () => {
     const converted = toChatCompletionsMessages(messages, "custom_1")
     const wireImage = {
       type: "image_url",
-      image_url: { url: "data:image/png;base64,YWJj", detail: "high" },
+      image_url: {
+        url: `data:image/png;base64,${pngImageBase64}`,
+        detail: "high",
+      },
     }
     expect(converted[0]).toEqual({
       role: "user",
@@ -912,7 +916,10 @@ describe("Chat Completions provider", () => {
           },
           {
             type: "image_url",
-            image_url: { url: "data:image/png;base64,ZGVm", detail: "high" },
+            image_url: {
+              url: `data:image/png;base64,${secondPngImageBase64}`,
+              detail: "high",
+            },
           },
           {
             type: "text",
@@ -964,7 +971,7 @@ describe("Chat Completions provider", () => {
           { type: "text", text: "Before" },
           pdf,
           { type: "text", text: "Between" },
-          { type: "image", mediaType: "image/png", data: "YWJj" },
+          { type: "image", mediaType: "image/png", data: pngImageBase64 },
           { type: "text", text: "After" },
         ],
       },
@@ -1021,7 +1028,10 @@ describe("Chat Completions provider", () => {
           { type: "text", text: 'Image from tool result "a", content part 4:' },
           {
             type: "image_url",
-            image_url: { url: "data:image/png;base64,YWJj", detail: "high" },
+            image_url: {
+              url: `data:image/png;base64,${pngImageBase64}`,
+              detail: "high",
+            },
           },
           { type: "text", text: 'PDF from tool result "b", content part 1:' },
           {
@@ -1050,7 +1060,7 @@ describe("Chat Completions provider", () => {
     const image = {
       type: "image" as const,
       mediaType: "image/png" as const,
-      data: "YWJj",
+      data: pngImageBase64,
     }
     const messages = toChatCompletionsMessages(
       [

@@ -1,3 +1,4 @@
+import { pngImageBytes } from "../fixtures/images.ts"
 import { createAnthropicTestStream } from "./anthropic-test-stream.ts"
 import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
@@ -1753,7 +1754,10 @@ describe("anthropic PDF request size", () => {
         },
       },
     } as unknown as Anthropic)
-    const data = "A".repeat(32_000_000)
+    const data =
+      type === "text"
+        ? "A".repeat(32_000_000)
+        : pngImageBytes(24_000_000).toString("base64")
     const events = await collect(
       {
         ...request,
