@@ -1,9 +1,3 @@
-import { createTencentImagePolicy } from "./tencent-image-policy.ts"
-import { tencentVisionModel } from "./tencent-chat-only.ts"
-import {
-  ModelRequestPlanError,
-  validateChatOnlyRequest,
-} from "./model-request-plan.ts"
 import OpenAI from "openai"
 import type {
   ChatCompletionAssistantMessageParam,
@@ -23,6 +17,14 @@ import {
   JsonRequestBudgetError,
   jsonRequestByteLength,
 } from "./json-request-budget.ts"
+import {
+  isMetaVisionModel,
+  META_REQUEST_SAFETY_BYTES,
+  MetaImageRequestSizeError,
+  prepareMetaImage,
+  validateMetaImageRequest,
+} from "./meta-image-policy.ts"
+import { createMimoImagePolicy, isMimoEndpoint } from "./mimo-image-policy.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
@@ -56,23 +58,22 @@ import {
   ModelRequestControlsError,
   validateModelRequestControls,
 } from "./model-request-controls.ts"
+import {
+  ModelRequestPlanError,
+  validateChatOnlyRequest,
+} from "./model-request-plan.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 import {
   prepareQwenImage,
   validateQwenImageRequest,
 } from "./qwen-image-policy.ts"
-import {
-  isMetaVisionModel,
-  prepareMetaImage,
-  validateMetaImageRequest,
-  META_REQUEST_SAFETY_BYTES,
-  MetaImageRequestSizeError,
-} from "./meta-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 import {
   createStepfunImagePolicy,
   isStepfunEndpoint,
 } from "./stepfun-image-policy.ts"
+import { tencentVisionModel } from "./tencent-chat-only.ts"
+import { createTencentImagePolicy } from "./tencent-image-policy.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
@@ -91,6 +92,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "meta"
     | "stepfun"
     | "tencent"
+    | "mimo"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -154,6 +156,17 @@ async function* streamChatCompletions(
     if (request.compaction !== undefined && request.compaction !== "local")
       throw new ChatCompletionsProtocolError(
         "Chat Completions does not support native remote compaction.",
+      )
+    const mimo = options.flavor === "mimo" && isMimoEndpoint(options.baseURL)
+    if (
+      mimo &&
+      ((request.toolChoice !== undefined && request.toolChoice !== "auto") ||
+        request.parallelToolCalls !== undefined ||
+        request.target.effort !== undefined ||
+        request.outputFormat !== undefined)
+    )
+      throw new AssetMediaError(
+        "MiMo Chat supports only auto tool choice and does not document parallel-tool, reasoning-effort or JSON-schema controls. Remove those overrides; the request was not sent.",
       )
     const stepfun =
       options.flavor === "stepfun" && isStepfunEndpoint(options.baseURL)
@@ -233,7 +246,9 @@ async function* streamChatCompletions(
     const stepfunImages = stepfun
       ? createStepfunImagePolicy(request, model)
       : undefined
+    const mimoImages = mimo ? createMimoImagePolicy(request, model) : undefined
     const media = await prepareProviderMedia(request, {
+      ...(mimoImages ? { prepareImage: mimoImages.prepareImage } : {}),
       inlineDocumentUrls: true,
       ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
       ...(tencentImages === undefined
@@ -333,7 +348,9 @@ async function* streamChatCompletions(
       media.messages,
       request.target.provider,
       request.continuationScope,
-      options.flavor ?? "generic",
+      options.flavor === "mimo" && !mimo
+        ? "generic"
+        : (options.flavor ?? "generic"),
       request.target.model || options.model,
     )
     const system = flattenModelSystem(request.system)
@@ -350,7 +367,7 @@ async function* streamChatCompletions(
       messages,
       stream: true as const,
       // StepFun reports usage in streaming chunks without OpenAI stream_options.
-      ...(stepfun ? {} : { stream_options: { include_usage: true } }),
+      ...(stepfun || mimo ? {} : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
         ? {}
         : { parallel_tool_calls: request.parallelToolCalls }),
@@ -368,7 +385,9 @@ async function* streamChatCompletions(
           }),
       ...(request.maxOutputTokens === undefined
         ? {}
-        : { max_tokens: request.maxOutputTokens }),
+        : mimo
+          ? { max_completion_tokens: request.maxOutputTokens }
+          : { max_tokens: request.maxOutputTokens }),
       ...(request.tools.length === 0
         ? {}
         : {
@@ -448,6 +467,38 @@ async function* streamChatCompletions(
     glmImages?.validateBody(body)
     if (meta) validateMetaImageRequest(body)
     stepfunImages?.validateBody(body)
+    mimoImages?.validateBody(body)
+    if (mimo) {
+      const thinking = (body as { thinking?: { type?: string } }).thinking
+      if (
+        thinking?.type !== "disabled" &&
+        messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.tool_calls?.length &&
+            typeof (message as unknown as { reasoning_content?: unknown })
+              .reasoning_content !== "string",
+        )
+      )
+        throw new AssetMediaError(
+          "MiMo thinking-mode tool history requires its original reasoning_content. Start a new conversation, disable thinking explicitly, or use the original provider; history has not been changed.",
+        )
+      if (
+        request.tools.some(
+          (tool) =>
+            tool.kind === "custom" && tool.customInputFallbackKey === undefined,
+        ) ||
+        messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.tool_calls?.some((call) => call.type !== "function"),
+        )
+      )
+        throw new AssetMediaError(
+          "MiMo Chat supports function tools, not native custom tools. Configure a function fallback or start a new conversation for incompatible tool history; history has not been changed.",
+        )
+    }
+
     stage = "connect"
     const { data: stream, response } = await client.chat.completions
       .create(
@@ -776,6 +827,10 @@ async function* streamChatCompletions(
       throw new ChatCompletionsIncompleteStreamError(
         "Completion ended without a finish reason.",
       )
+    if (mimo && finishReason === "repetition_truncation")
+      throw new MimoRepetitionTruncationError(
+        "MiMo stopped with repetition_truncation: output is incomplete and tool calls were not executed. Reduce repetitive context and retry.",
+      )
     if (
       !["stop", "length", "tool_calls", "content_filter"].includes(finishReason)
     )
@@ -1028,7 +1083,13 @@ async function* streamChatCompletions(
         ...(typeof apiError?.code === "string"
           ? { providerCode: apiError.code }
           : {}),
-        providerMessage: providerErrorMessage({ error: apiError?.error }),
+        providerMessage:
+          error instanceof MimoRepetitionTruncationError
+            ? error.message
+            : providerErrorMessage({ error: apiError?.error }),
+        ...(error instanceof MimoRepetitionTruncationError
+          ? { providerCode: "repetition_truncation", serverShouldRetry: false }
+          : {}),
         ...(requestId === undefined ? {} : { providerRequestId: requestId }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
@@ -1086,7 +1147,8 @@ export function toChatCompletionsMessages(
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                   ...(flavor === "qwen" ||
                   flavor === "glm" ||
-                  flavor === "tencent"
+                  flavor === "tencent" ||
+                  flavor === "mimo"
                     ? {}
                     : { detail: "high" as const }),
                 },
@@ -1128,7 +1190,8 @@ export function toChatCompletionsMessages(
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
                 ...(flavor === "qwen" ||
                 flavor === "glm" ||
-                flavor === "tencent"
+                flavor === "tencent" ||
+                flavor === "mimo"
                   ? {}
                   : { detail: "high" as const }),
               },
@@ -1345,4 +1408,5 @@ function fromChatUsage(
 }
 
 class ChatCompletionsProtocolError extends Error {}
+class MimoRepetitionTruncationError extends ChatCompletionsProtocolError {}
 class ChatCompletionsIncompleteStreamError extends Error {}
