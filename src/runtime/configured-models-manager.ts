@@ -1,3 +1,4 @@
+import { restrictSenseNovaVision } from "./sensenova-vision.ts"
 import { restrictTencentVision } from "./tencent-chat-only.ts"
 import {
   type EffectiveModel,
@@ -143,9 +144,11 @@ export function createConfiguredModelsManager(input: {
     )
     models.set(
       configured.id,
-      input.serviceId === "tencent"
-        ? restrictTencentVision(effective)
-        : effective,
+      input.serviceId === "sensenova"
+        ? restrictSenseNovaVision(effective)
+        : input.serviceId === "tencent"
+          ? restrictTencentVision(effective)
+          : effective,
     )
   }
 
