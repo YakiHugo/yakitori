@@ -208,7 +208,12 @@ func windowElement(_ window: WindowIdentity, deadline: Date = Date().addingTimeI
     return matches.count == 1 ? matches[0] : nil
 }
 
-func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], applicationRoots: [(WindowIdentity, AXUIElement)] = [], deadline: Date = Date().addingTimeInterval(1)) -> (rows: [[String: Any]], elements: [ObservedElement], truncated: Bool) {
+func accessibilityTree(
+    _ roots: [(WindowIdentity, AXUIElement)],
+    applicationRoots: [(WindowIdentity, AXUIElement)] = [],
+    deadline: Date = Date().addingTimeInterval(1),
+    copyAttribute: (AXUIElement, CFString, UnsafeMutablePointer<CFTypeRef?>) -> AXError = AXUIElementCopyAttributeValue
+) -> (rows: [[String: Any]], elements: [ObservedElement], truncated: Bool) {
     var queue = roots.map { ($0.0, $0.1, Optional<Int>.none, false) } + applicationRoots.map { ($0.0, $0.1, Optional<Int>.none, true) }
     var elements: [ObservedElement] = []
     var rows: [[String: Any]] = []
@@ -219,6 +224,19 @@ func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], applicationRoot
     var index = 0
     var bytes = 0
     var truncated = false
+    // Missing optional attributes/leaf children are not read failures. Other AX
+    // errors (or a success without a value) leave unknown matches/descendants,
+    // so the retained rows cannot prove uniqueness, absence or a complete diff.
+    func read(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        switch copyAttribute(element, name as CFString, &value) {
+        case .success:
+            if value == nil { truncated = true }
+            return value
+        case .attributeUnsupported, .noValue: return nil
+        default: truncated = true; return nil
+        }
+    }
     while index < queue.count, elements.count < nodeBudget {
         let (window, element, parent, applicationUI) = queue[index]
         index += 1
@@ -233,14 +251,15 @@ func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], applicationRoot
             if let value = attribute(element, name) as? Bool { row[key] = value }
         }
         for (key, name) in [("role", kAXRoleAttribute), ("title", kAXTitleAttribute), ("description", kAXDescriptionAttribute)] {
-            if let value = attribute(element, name) as? String {
+            if let raw = read(element, name) {
+                guard let value = raw as? String else { truncated = true; continue }
                 row[key] = String(value.prefix(1000))
                 if value.count > 1000 { row["truncated_attributes"] = (row["truncated_attributes"] as? [String] ?? []) + [key] }
             }
         }
         // Secure fields must never be included in the text observation.
         let secure = attribute(element, kAXSubroleAttribute) as? String == kAXSecureTextFieldSubrole
-        if !secure, let value = attribute(element, kAXValueAttribute) {
+        if !secure, let value = read(element, kAXValueAttribute) {
             if let string = value as? String {
                 row["value"] = String(string.prefix(1000))
                 if string.count > 1000 { row["truncated_attributes"] = (row["truncated_attributes"] as? [String] ?? []) + ["value"] }
@@ -254,9 +273,13 @@ func accessibilityTree(_ roots: [(WindowIdentity, AXUIElement)], applicationRoot
         bytes += rowBytes
         rows.append(row)
         elements.append(ObservedElement(value: element, window: window, applicationUI: applicationUI))
-        let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        guard let value = read(element, kAXChildrenAttribute) else { continue }
+        guard CFGetTypeID(value) == CFArrayGetTypeID(), let children = value as? [AnyObject],
+              children.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else {
+            truncated = true; continue
+        }
         let parentIndex = elements.count - 1
-        queue.append(contentsOf: children.prefix(max(0, nodeBudget - queue.count)).map { (window, $0, Optional(parentIndex), applicationUI) })
+        queue.append(contentsOf: children.prefix(max(0, nodeBudget - queue.count)).map { (window, $0 as! AXUIElement, Optional(parentIndex), applicationUI) })
     }
     return (rows, elements, truncated || index < queue.count || queue.count >= nodeBudget)
 }
