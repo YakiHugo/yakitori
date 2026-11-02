@@ -198,6 +198,17 @@ export function ProviderEditor({
       >
         <fieldset disabled={pending} className="provider-editor-fields">
           <FieldGroup>
+            {draft.configuration.wireApi === "bedrock_converse" ? (
+              <p className="provider-field-hint">
+                Nova 2 Lite only: static catalog, buffered responses, reasoning
+                off. Requires a Bedrock bearer API key for us-east-1 (not an AWS
+                access key). No IAM/SigV4 or automatic key refresh. The US
+                inference profile can process data across US regions. Keys
+                expire; refresh them yourself. Requests can take up to 60
+                minutes and are not automatically retried. Catalog loading does
+                not verify the key.
+              </p>
+            ) : null}
             <Field>
               <FieldLabel htmlFor="provider-name">Account name</FieldLabel>
               <Input
@@ -541,6 +552,10 @@ function ProtocolField({
           },
           { value: "openai_responses", label: "OpenAI Responses" },
           { value: "anthropic_messages", label: "Anthropic Messages" },
+          {
+            value: "bedrock_converse",
+            label: "Bedrock Converse (Nova API key)",
+          },
           { value: "gemini_generate_content", label: "Gemini GenerateContent" },
           { value: "gemini_interactions", label: "Gemini Interactions" },
         ]}

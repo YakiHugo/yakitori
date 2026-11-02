@@ -9,6 +9,26 @@ export type { ConfiguredModel, ProviderPreset } from "../protocol/providers.ts"
 // labels and UI templates do not select a runtime protocol profile.
 export const providerServices: readonly ProviderPreset[] = [
   {
+    id: "amazon-nova",
+    name: "Amazon Nova (Bedrock API key)",
+    baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com",
+    wireApi: "bedrock_converse",
+    envKey: "AWS_BEARER_TOKEN_BEDROCK",
+    models: [
+      {
+        id: "us.amazon.nova-2-lite-v1:0",
+        displayName: "Nova 2 Lite (US inference profile)",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        maxOutputTokens: 65_000,
+        efforts: ["none"],
+        defaultEffort: "none",
+      },
+    ],
+    documentationURL:
+      "https://docs.aws.amazon.com/nova/latest/nova2-userguide/using-converse-api.html",
+  },
+  {
     id: "openai",
     name: "OpenAI",
     baseURL: "https://api.openai.com/v1",

@@ -124,6 +124,7 @@ export type ModelNativeItem = Readonly<{
     | "anthropic_messages"
     | "gemini_generate_content"
     | "gemini_interactions"
+    | "bedrock_converse"
   value: JsonObject
 }>
 export type FileObservation = Readonly<{

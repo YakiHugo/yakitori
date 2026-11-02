@@ -314,12 +314,16 @@ async function* runModelRequest(
       failureEvent.failure.status === undefined &&
       failureEvent.failure.serverShouldRetry !== false
     if (!waitingForConnection) budgetUsed += 1
+    // Buffered Converse has no resumable stream or idempotency key. A retry
+    // after an unknown outcome may duplicate billable inference. This also
+    // fences the local-compaction and interactive connection retry paths.
     const retry =
-      waitingForConnection ||
-      (canRebuild &&
-        (compactionTruncated
-          ? budgetUsed < options.maxAttempts
-          : shouldRetry(failureEvent.failure, budgetUsed, options)))
+      options.wireApi !== "bedrock_converse" &&
+      (waitingForConnection ||
+        (canRebuild &&
+          (compactionTruncated
+            ? budgetUsed < options.maxAttempts
+            : shouldRetry(failureEvent.failure, budgetUsed, options))))
     const budget =
       failureEvent.failure.kind === "rate_limited"
         ? Math.min(options.maxAttempts, options.rateLimitMaxAttempts)

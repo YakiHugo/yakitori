@@ -72,6 +72,7 @@ export type ModelWireApi =
   | "faux"
   | "gemini_generate_content"
   | "gemini_interactions"
+  | "bedrock_converse"
   | "openai_chat_completions"
   | "openai_responses"
   | "unknown"

@@ -51,6 +51,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
             "messages",
             "generate_content",
             "interactions",
+            "bedrock_converse",
           ],
         },
         api_key: {
@@ -174,6 +175,7 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
               "chat_completions",
               "generate_content",
               "interactions",
+              "bedrock_converse",
             ].includes(String(backend))
           )
             throw new ConfigurationError("Unknown API backend.")
@@ -192,9 +194,11 @@ export function createModelSourceTool(service: ProviderService): RuntimeTool {
                       ? "gemini_generate_content"
                       : backend === "interactions"
                         ? "gemini_interactions"
-                        : (previous?.wireApi ??
-                          preset?.wireApi ??
-                          "openai_chat_completions"),
+                        : backend === "bedrock_converse"
+                          ? "bedrock_converse"
+                          : (previous?.wireApi ??
+                            preset?.wireApi ??
+                            "openai_chat_completions"),
             preset: preset?.id ?? previous?.preset,
             service: preset?.id ?? previous?.service ?? "generic",
             authentication:

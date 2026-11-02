@@ -62,10 +62,11 @@ export function requireProviderConfiguration(
     wireApi !== "openai_chat_completions" &&
     wireApi !== "anthropic_messages" &&
     wireApi !== "gemini_generate_content" &&
-    wireApi !== "gemini_interactions"
+    wireApi !== "gemini_interactions" &&
+    wireApi !== "bedrock_converse"
   ) {
     throw new ConfigurationError(
-      "wireApi must be openai_responses, openai_chat_completions, anthropic_messages, gemini_generate_content or gemini_interactions.",
+      "wireApi must be openai_responses, openai_chat_completions, anthropic_messages, gemini_generate_content, gemini_interactions or bedrock_converse.",
     )
   }
   const envKey =
@@ -83,6 +84,19 @@ export function requireProviderConfiguration(
     throw new ConfigurationError("Unknown account authentication source.")
   if (authentication === "environment" && envKey === undefined)
     throw new ConfigurationError("Environment authentication requires envKey.")
+  if (wireApi === "bedrock_converse") {
+    if (!["stored", "environment"].includes(String(authentication)))
+      throw new ConfigurationError(
+        "Bedrock Converse requires a Bedrock bearer API key.",
+      )
+    if (
+      url.href.replace(/\/$/, "") !==
+      "https://bedrock-runtime.us-east-1.amazonaws.com"
+    )
+      throw new ConfigurationError(
+        "This Nova adapter requires the us-east-1 Bedrock Runtime endpoint.",
+      )
+  }
   const external =
     authentication === "codex_cli" || authentication === "grok_cli"
   const credentialPath = external
@@ -450,7 +464,9 @@ export function providerConfigValue(
             ? "generate_content"
             : configuration.wireApi === "gemini_interactions"
               ? "interactions"
-              : "chat_completions",
+              : configuration.wireApi === "bedrock_converse"
+                ? "bedrock_converse"
+                : "chat_completions",
     models: configuration.models,
     ...(configuration.enabled === undefined
       ? {}

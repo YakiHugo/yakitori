@@ -1540,3 +1540,55 @@ test("window history restores sessions and drafts without creating duplicate con
     }
   }
 })
+
+test("Nova setup discloses buffered API-key limitations without making a paid request", async ({
+  page,
+}, testInfo) => {
+  const environment = await createSmokeEnvironment()
+  const env = { ...environment.env }
+  delete env.AWS_BEARER_TOKEN_BEDROCK
+  let server: ServerProcess | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "Settings", exact: true }).click()
+    await page.getByRole("button", { name: "Providers", exact: true }).click()
+    await page.getByRole("button", { name: "Add account", exact: true }).click()
+    await page
+      .getByRole("button", {
+        name: "Amazon Nova (Bedrock API key)",
+        exact: true,
+      })
+      .click()
+    const note = page.getByText(/Nova 2 Lite only:/)
+    await expect(note).toBeVisible()
+    await expect(note).toContainText("static catalog")
+    await expect(note).toContainText("not an AWS access key")
+    await expect(note).toContainText("across US regions")
+    await expect(note).toContainText("60 minutes")
+    await expect(note).toContainText("not automatically retried")
+    await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
+    await page.screenshot({
+      path: testInfo.outputPath("nova-api-key-disclosure.png"),
+      animations: "disabled",
+    })
+    await page.keyboard.press("Escape")
+    await expect(note).toHaveCount(0)
+    await page
+      .getByRole("button", {
+        name: "Amazon Nova (Bedrock API key)",
+        exact: true,
+      })
+      .click()
+    await expect(note).toBeVisible()
+    await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})

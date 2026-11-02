@@ -16,6 +16,15 @@ export async function discoverProviderModels(
     configuration.wireApi === "gemini_generate_content" ||
     configuration.wireApi === "gemini_interactions"
   const officialPreset = providerServiceForEndpoint(configuration)
+  // Bedrock Runtime has no GET /models. Return only the documented static
+  // preset; this is catalog availability, not authentication verification.
+  if (configuration.wireApi === "bedrock_converse") {
+    if (officialPreset?.id !== "amazon-nova")
+      throw new ConfigurationError(
+        "No static catalog for this Bedrock endpoint.",
+      )
+    return officialPreset.models
+  }
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)
