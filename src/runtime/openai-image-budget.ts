@@ -68,11 +68,11 @@ export function openAIImageTokenEstimator(input: {
     // known detail's maximum admitted patch count; do not fetch during budgeting.
     if (dimensions === undefined)
       return Math.ceil((patchBudget ?? 30_000) * 1.2)
-    // Inline raw history still goes through Yakitori's current 2048-edge high
+    // Except native Astra, inline raw history still goes through the 2048-edge high
     // preparation before transport. Account for that projection without
     // rewriting history. Prepared inline bytes already have their wire size.
     const projectedMaxDimension =
-      stage === "history" && !original
+      stage === "history" && !original && model !== "gpt-6-astra"
         ? Math.min(maxDimension, 2048)
         : maxDimension
     const edgeScale = Math.min(
