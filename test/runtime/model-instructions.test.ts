@@ -158,6 +158,7 @@ it.each([
     const {
       signal: _signal,
       onUsageSnapshot: _usage,
+      onWarning: _warning,
       assets: _assets,
       ...stableRequest
     } = request

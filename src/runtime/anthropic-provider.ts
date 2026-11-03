@@ -1,6 +1,12 @@
 import {
+  prepareAnthropicThinkingHistory,
+  reportAnthropicThinkingChanges,
+  thinkingBindingBeta,
+} from "./anthropic-thinking-policy.ts"
+import { anthropicModel } from "./anthropic-models.ts"
+import {
   anthropicImageCount,
-  isStandardAnthropicImageModel,
+  anthropicImageTier,
   prepareAnthropicImage,
 } from "./anthropic-image-policy.ts"
 import { prepareModelImage } from "./prepare-model-image.ts"
@@ -172,6 +178,8 @@ async function* streamAnthropic(
       throw new ModelRequestControlsError(
         "Kimi Code K3.1 Pro requires thinking; select low, high or max effort instead of off.",
       )
+    if (profile === "anthropic")
+      validateAnthropicModelRequest(request, defaultModel)
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "anthropic"
     const explicitPromptCaching = profile !== "generic"
@@ -200,11 +208,17 @@ async function* streamAnthropic(
       effort === undefined || effort === "on" || effort === "off"
         ? undefined
         : effort
+    // Top-level effort is GA on Anthropic; Kimi retains its own beta contract.
+    // https://platform.claude.com/docs/en/build-with-claude/effort
+    const effortBeta = profile === "kimi-code" && effortLevel !== undefined
+    const modelContract =
+      profile === "anthropic"
+        ? anthropicModel(request.target.model || defaultModel)
+        : undefined
     const thinking =
       effort === "off"
         ? ({ type: "disabled" } as const)
-        : profile === "anthropic" &&
-            supportsAdaptiveThinking(request.target.model || defaultModel)
+        : profile === "anthropic" && modelContract?.thinking === "adaptive"
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
     const nativeImagePolicy =
@@ -234,14 +248,14 @@ async function* streamAnthropic(
       controls?.user_profile_id === undefined &&
       controls?.output_format === undefined &&
       controls?.betas === undefined
-    const delegateImages =
-      checkNativeImageLimits &&
-      isStandardAnthropicImageModel(request.target.model || defaultModel)
+    const imageTier = anthropicImageTier(request.target.model || defaultModel)
+    const delegateImages = checkNativeImageLimits && imageTier !== undefined
     const imageCount = anthropicImageCount(request.messages)
     if (
       checkNativeImageLimits &&
       imageCount >
-        ((request.target.model || defaultModel) === "claude-haiku-4-5"
+        (anthropicModel(request.target.model || defaultModel)?.configuration
+          .contextWindowTokens === 200_000
           ? 100
           : 600)
     )
@@ -264,7 +278,7 @@ async function* streamAnthropic(
         imageCount,
         request.signal,
         preferSmallerImages,
-        delegateImages,
+        imageTier ?? null,
       )
       preparedImageBytes += prepared.data?.length ?? 0
       // A lower bound catches large file-backed batches before retaining every
@@ -347,6 +361,12 @@ async function* streamAnthropic(
               },
             }),
       }
+    if (effort === "off" && modelContract?.off === "between_tools") {
+      // SDK 0.112 predates this documented Sonnet 5.5 wire value.
+      body.thinking = { type: "between_tools" } as unknown as NonNullable<
+        typeof body.thinking
+      >
+    }
     if (request.outputFormat !== undefined)
       body.output_config = {
         ...body.output_config,
@@ -417,7 +437,27 @@ async function* streamAnthropic(
         return
       }
     }
+    const bindingBeta =
+      profile === "anthropic" &&
+      nativeImagePolicy &&
+      prepareAnthropicThinkingHistory(request, body)
+    if (
+      bindingBeta &&
+      request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some(
+            (block) => block.type === "image" || block.type === "document",
+          ),
+      ) &&
+      Buffer.byteLength(JSON.stringify(body), "utf8") >
+        ANTHROPIC_REQUEST_MAX_BYTES
+    )
+      throw new AssetMediaError(
+        "Media was not sent: thinking controls exceed the 32 MB Yakitori whole-request budget. Reduce other content; originals have not been changed.",
+      )
     const pendingRequest =
+      bindingBeta ||
       media.uploadedFiles.size > 0 ||
       request.providerOptions?.betas !== undefined
         ? client.beta.messages.create(
@@ -428,7 +468,8 @@ async function* streamAnthropic(
                   ? ["files-api-2025-04-14"]
                   : []),
                 ...(request.providerOptions?.betas ?? []),
-                ...(effortLevel === undefined ? [] : ["effort-2025-11-24"]),
+                ...(bindingBeta ? [thinkingBindingBeta] : []),
+                ...(effortBeta ? ["effort-2025-11-24"] : []),
               ],
             },
             request.signal === undefined
@@ -437,15 +478,15 @@ async function* streamAnthropic(
           )
         : client.messages.create(
             body as MessageCreateParamsStreaming,
-            request.signal === undefined && effortLevel === undefined
+            request.signal === undefined && !effortBeta
               ? undefined
               : {
                   ...(request.signal === undefined
                     ? {}
                     : { signal: request.signal }),
-                  ...(effortLevel === undefined
-                    ? {}
-                    : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
+                  ...(effortBeta
+                    ? { headers: { "anthropic-beta": "effort-2025-11-24" } }
+                    : {}),
                 },
           )
     const wireResponse = await pendingRequest.withResponse()
@@ -503,6 +544,7 @@ async function* streamAnthropic(
       }
     | undefined
   let nativeMetadata: Record<string, unknown> = {}
+  const thinkingChanges = new Set<string>()
   let observedUsage: ModelResponse["usage"]
   const usageFields = () =>
     observedUsage === undefined ? {} : { usage: observedUsage }
@@ -523,6 +565,11 @@ async function* streamAnthropic(
           throw new AnthropicProtocolError("Anthropic repeated message_start.")
         const { content: _content, ...metadata } = event.message
         nativeMetadata = metadata
+        reportAnthropicThinkingChanges(
+          nativeMetadata.input_transformations,
+          request,
+          thinkingChanges,
+        )
         message = {
           id: event.message.id,
           stop_reason: event.message.stop_reason,
@@ -693,11 +740,23 @@ async function* streamAnthropic(
                   event.usage.cache_creation_input_tokens,
               }),
         }
+        const transformations =
+          "input_transformations" in event
+            ? event.input_transformations
+            : undefined
         nativeMetadata = {
           ...nativeMetadata,
           ...event.delta,
           usage: message.usage,
+          ...(transformations === undefined
+            ? {}
+            : { input_transformations: transformations }),
         }
+        reportAnthropicThinkingChanges(
+          transformations,
+          request,
+          thinkingChanges,
+        )
         observedUsage = fromAnthropicUsage(message.usage)
         request.onUsageSnapshot?.(observedUsage)
         continue
@@ -1361,12 +1420,6 @@ function toAnthropicAssistantBlock(
   }
 }
 
-function supportsAdaptiveThinking(model: string): boolean {
-  return /^claude-(?:opus|sonnet)-(?:[5-9](?:-|$)|4-(?:[6-9]|\d{2})(?:-|$))/.test(
-    model,
-  )
-}
-
 function mapStopReason(
   stopReason: string | null,
   content: ModelResponse["content"],
@@ -1466,4 +1519,70 @@ const RETRYABLE_ERROR_TYPES: ReadonlySet<string> = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function validateAnthropicModelRequest(
+  request: ModelRequest,
+  defaultModel: string,
+): void {
+  const model = request.target.model || defaultModel
+  const contract = anthropicModel(model)
+  if (contract === undefined) return
+  const effort = request.target.effort
+  if (
+    effort !== undefined &&
+    !(effort === "off" && contract.off) &&
+    !contract.configuration.efforts?.includes(effort)
+  )
+    throw new ModelRequestControlsError(
+      `${model} does not support effort ${effort}.`,
+    )
+  const thinking = request.providerOptions?.body.thinking
+  if (
+    effort === "off" &&
+    isJsonObject(thinking) &&
+    Object.keys(thinking).length > 0
+  )
+    throw new ModelRequestControlsError(
+      "Thinking off cannot be combined with native thinking fields.",
+    )
+  if (isJsonObject(thinking) && thinking.type !== undefined) {
+    const mode = thinking.type
+    if (
+      (mode === "disabled" && contract.off !== "disabled") ||
+      (mode === "between_tools" && contract.off !== "between_tools") ||
+      (mode === "adaptive" && contract.thinking !== "adaptive") ||
+      (mode === "enabled" &&
+        contract.thinking !== "extended" &&
+        !["claude-sonnet-4-6", "claude-opus-4-6"].includes(model))
+    )
+      throw new ModelRequestControlsError(
+        `${model} does not support thinking mode ${String(mode)}.`,
+      )
+    if (
+      mode === "between_tools" &&
+      Object.keys(thinking).some((key) => key !== "type")
+    )
+      throw new ModelRequestControlsError(
+        "Claude Sonnet 5.5 between_tools accepts no other thinking fields.",
+      )
+  }
+  if (
+    !contract.forcedTools &&
+    (request.toolChoice === "required" ||
+      typeof request.toolChoice === "object")
+  )
+    throw new ModelRequestControlsError(
+      `${model} does not support forced tool choice; select auto instead.`,
+    )
+  if (
+    request.maxOutputTokens !== undefined &&
+    (!Number.isInteger(request.maxOutputTokens) ||
+      request.maxOutputTokens < 1 ||
+      request.maxOutputTokens >
+        (contract.configuration.maxOutputTokens ?? Infinity))
+  )
+    throw new ModelRequestControlsError(
+      `${model} maxOutputTokens must be between 1 and ${contract.configuration.maxOutputTokens}.`,
+    )
 }

@@ -1,3 +1,4 @@
+import { anthropicCodeModels } from "./anthropic-models.ts"
 import type {
   ProviderConfiguration,
   ProviderPreset,
@@ -55,17 +56,8 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "anthropic_messages",
     envKey: "ANTHROPIC_API_KEY",
     catalogProvider: "anthropic",
-    models: [
-      {
-        id: "claude-sonnet-4-6",
-        displayName: "Claude Sonnet 4.6",
-        contextWindowTokens: 1_000_000,
-        maxOutputTokens: 128_000,
-        inputModalities: ["text", "image"],
-      },
-    ],
-    documentationURL:
-      "https://platform.claude.com/docs/en/models/sonnet-4-6/overview",
+    models: anthropicCodeModels,
+    documentationURL: "https://code.claude.com/docs/en/model-config",
   },
   {
     id: "gemini",

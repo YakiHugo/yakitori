@@ -5,18 +5,14 @@ import {
 import type { ModelImageBlock, ModelMessage } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
-// These catalog models use Claude's standard vision tier. Do not automatically
-// opt future high-resolution models into a higher visual-token default.
-// https://platform.claude.com/docs/en/build-with-claude/vision
-const standardVisionModels = new Set([
-  "claude-sonnet-4-6",
-  "claude-opus-4-6",
-  "claude-haiku-4-5",
-])
+import { anthropicModel } from "./anthropic-models.ts"
+
 const MAX_BASE64_BYTES = 10_000_000
 
-export function isStandardAnthropicImageModel(model: string): boolean {
-  return standardVisionModels.has(model)
+export function anthropicImageTier(
+  model: string,
+): "standard" | "high" | undefined {
+  return anthropicModel(model)?.visionTier
 }
 
 export function anthropicImageCount(messages: readonly ModelMessage[]): number {
@@ -39,7 +35,7 @@ export async function prepareAnthropicImage(
   imageCount: number,
   signal?: AbortSignal,
   preferSmaller = false,
-  allowStandardResize = true,
+  tier: "standard" | "high" | null = "standard",
 ): Promise<ModelImageBlock> {
   await validateModelImage(bytes, signal)
   const metadata = inspectImageBytes(bytes)
@@ -54,8 +50,8 @@ export async function prepareAnthropicImage(
       detail: image.detail ?? "high",
       data: bytes.toString("base64"),
     }
-    if (preferSmaller && allowStandardResize) {
-      const smaller = await prepareStandardTierImage(bytes, signal)
+    if (preferSmaller && tier !== null) {
+      const smaller = await prepareTierImage(bytes, tier, signal)
       if (
         smaller?.data !== undefined &&
         smaller.data.length < original.data.length
@@ -64,11 +60,11 @@ export async function prepareAnthropicImage(
     }
     return original
   }
-  if (!allowStandardResize)
+  if (tier === null)
     throw new InvalidImageDataError(
       `Image was not sent: exceeds the direct Claude image admission bounds used by Yakitori (${maxDimension} pixels per side${imageCount > 20 ? ", conservatively for many-image requests," : ""} and 10 MB base64). Automatic resizing is not configured for this model. Resize or compress a copy and retry; the original has not been changed.`,
     )
-  const prepared = await prepareStandardTierImage(bytes, signal)
+  const prepared = await prepareTierImage(bytes, tier, signal)
   if (prepared === undefined)
     throw new InvalidImageDataError(
       "Image was not sent: it exceeds Claude image limits and automatic conversion is not enabled for animated, high-bit-depth, or color-metadata-bearing images. Export a static 8-bit sRGB copy and retry; the original has not been changed.",
@@ -80,20 +76,23 @@ export async function prepareAnthropicImage(
   return prepared
 }
 
-// Largest aspect-preserving dimensions fitting Claude's documented standard
+// Largest aspect-preserving dimensions fitting Claude's documented model
 // tier. The limits apply to padded 28px patches, not just the longest edge.
 // https://platform.claude.com/docs/en/build-with-claude/vision-coordinates
-export function anthropicStandardImageSize(
+export function anthropicImageSize(
   width: number,
   height: number,
+  tier: "standard" | "high" = "standard",
 ): { width: number; height: number } {
+  const longEdge = tier === "high" ? 2576 : 1568
+  const tokens = tier === "high" ? 4784 : 1568
   const fits = (w: number, h: number) =>
-    Math.ceil(w / 28) * 28 <= 1568 &&
-    Math.ceil(h / 28) * 28 <= 1568 &&
-    Math.ceil(w / 28) * Math.ceil(h / 28) <= 1568
+    Math.ceil(w / 28) * 28 <= longEdge &&
+    Math.ceil(h / 28) * 28 <= longEdge &&
+    Math.ceil(w / 28) * Math.ceil(h / 28) <= tokens
   if (fits(width, height)) return { width, height }
   if (height > width) {
-    const rotated = anthropicStandardImageSize(height, width)
+    const rotated = anthropicImageSize(height, width, tier)
     return { width: rotated.height, height: rotated.width }
   }
   const ratio = width / height
@@ -107,8 +106,9 @@ export function anthropicStandardImageSize(
   return { width: low, height: Math.max(1, Math.round(low / ratio)) }
 }
 
-async function prepareStandardTierImage(
+async function prepareTierImage(
   bytes: Buffer,
+  tier: "standard" | "high",
   signal?: AbortSignal,
 ): Promise<ModelImageBlock | undefined> {
   signal?.throwIfAborted()
@@ -127,9 +127,10 @@ async function prepareStandardTierImage(
     metadata.orientation !== undefined &&
     metadata.orientation >= 5 &&
     metadata.orientation <= 8
-  const size = anthropicStandardImageSize(
+  const size = anthropicImageSize(
     swapped ? metadata.height : metadata.width,
     swapped ? metadata.width : metadata.height,
+    tier,
   )
   const converted = await sharp(bytes)
     .rotate()

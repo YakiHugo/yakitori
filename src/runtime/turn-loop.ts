@@ -2355,7 +2355,15 @@ async function consumeModelStream(input: {
   const chatOnly =
     input.toolPolicy === "chat_only" || input.request.toolPolicy === "chat_only"
   if (chatOnly) validateChatOnlyRequest(input.request)
-  const iterator = input.stream(input.request)[Symbol.asyncIterator]()
+  const iterator = input
+    .stream({
+      ...input.request,
+      onWarning(warning) {
+        input.request.onWarning?.(warning)
+        input.emitWarning?.(warning.message, warning)
+      },
+    })
+    [Symbol.asyncIterator]()
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
   let exhausted = false

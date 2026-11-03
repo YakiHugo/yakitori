@@ -1,3 +1,4 @@
+import { anthropicModel } from "../runtime/anthropic-models.ts"
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import { rekaVisionModel } from "../runtime/reka-vision.ts"
@@ -168,6 +169,16 @@ export async function discoverProviderModels(
         !officialPreset.models.some((model) => model.id === entry.id)
       )
         continue
+      if (officialPreset?.id === "anthropic" && messages) {
+        if (entry.lifecycle !== "retired")
+          models.set(
+            entry.id,
+            parseAnthropicModel(
+              entry as Record<string, unknown> & { id: string },
+            ),
+          )
+        continue
+      }
       const capabilities = isRecord(entry.capabilities)
         ? entry.capabilities
         : undefined
@@ -319,4 +330,66 @@ export async function discoverProviderModels(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// Native Models API fields are not OpenAI-compatible context_length metadata.
+// Use published capabilities for new IDs without guessing from their names.
+// https://platform.claude.com/docs/en/api/models/list
+function parseAnthropicModel(
+  entry: Record<string, unknown> & { id: string },
+): ConfiguredModel {
+  const known = anthropicModel(entry.id)?.configuration
+  const capabilities = isRecord(entry.capabilities)
+    ? entry.capabilities
+    : undefined
+  const image = isRecord(capabilities?.image_input)
+    ? capabilities.image_input.supported
+    : undefined
+  const effort = isRecord(capabilities?.effort)
+    ? capabilities.effort
+    : undefined
+  const thinking = isRecord(capabilities?.thinking)
+    ? capabilities.thinking
+    : undefined
+  const types = isRecord(thinking?.types) ? thinking.types : undefined
+  const supports = (value: unknown) =>
+    isRecord(value) && value.supported === true
+  const efforts =
+    effort === undefined
+      ? known?.efforts
+      : [
+          ...(supports(types?.disabled) || supports(types?.between_tools)
+            ? ["off"]
+            : []),
+          ...["low", "medium", "high", "xhigh", "max"].filter(
+            (level) => effort.supported !== false && supports(effort[level]),
+          ),
+        ]
+  const { defaultEffort, ...facts } = known ?? {}
+  const positive = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0
+  return {
+    ...facts,
+    id: entry.id,
+    defaultVisible: true,
+    ...(typeof entry.display_name === "string" && entry.display_name.trim()
+      ? { displayName: entry.display_name }
+      : {}),
+    ...(positive(entry.max_input_tokens)
+      ? {
+          contextWindowTokens: entry.max_input_tokens,
+          contextWindowScope: "input",
+        }
+      : {}),
+    ...(positive(entry.max_tokens)
+      ? { maxOutputTokens: entry.max_tokens }
+      : {}),
+    ...(typeof image === "boolean"
+      ? { inputModalities: image ? ["text", "image"] : ["text"] }
+      : {}),
+    ...(efforts === undefined ? {} : { efforts }),
+    ...(defaultEffort !== undefined && efforts?.includes(defaultEffort)
+      ? { defaultEffort }
+      : {}),
+  }
 }
