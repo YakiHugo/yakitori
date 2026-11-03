@@ -31,6 +31,7 @@ import { chatCompletionsIncompatibility } from "./chat-completions-compatibility
 import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
 import { isDoubaoVisionModel } from "./doubao-models.ts"
 import { createGlmImagePolicy } from "./glm-image-policy.ts"
+import { glmTextModel } from "./glm-models.ts"
 import {
   JsonRequestBudgetError,
   jsonRequestByteLength,
@@ -206,6 +207,46 @@ async function* streamChatCompletions(
     const spark =
       options.flavor === "spark" && isSparkChatEndpoint(options.baseURL)
     if (spark) validateSparkChatRequest(request, model)
+    const deepseekPro =
+      options.flavor === "deepseek" &&
+      model === "deepseek-v4-pro" &&
+      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
+        "https://api.deepseek.com"
+    const glmText =
+      options.flavor === "glm" &&
+      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
+        "https://api.z.ai/api/paas/v4"
+        ? glmTextModel(model)
+        : undefined
+    if (
+      (deepseekPro || glmText) &&
+      request.messages.some(
+        (message) =>
+          (message.role === "user" || message.role === "tool") &&
+          message.content.some(
+            (block) => block.type === "image" || block.type === "document",
+          ),
+      )
+    )
+      throw new AssetMediaError(
+        `${model} accepts text only. Choose a verified vision model or provide extracted text; media was not sent.`,
+      )
+    // These public APIs document JSON-object output, not our JSON-schema
+    // control. GLM additionally documents only auto tool choice here.
+    if ((deepseekPro || glmText) && request.outputFormat !== undefined)
+      throw new AssetMediaError(
+        `${model} does not document JSON-schema output. Remove the output-format override; the request was not sent.`,
+      )
+    if (
+      glmText &&
+      ((request.toolChoice !== undefined && request.toolChoice !== "auto") ||
+        request.parallelToolCalls !== undefined ||
+        (request.target.effort !== undefined &&
+          !glmText.efforts?.includes(request.target.effort)))
+    )
+      throw new AssetMediaError(
+        `${model} requires auto tool choice and a documented reasoning control, without a parallel-tool override. The request was not sent.`,
+      )
     const nvidia =
       options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
     if (nvidia) validateNvidiaRequest(request, model)
@@ -466,7 +507,7 @@ async function* streamChatCompletions(
       messages,
       stream: true as const,
       // These providers report streaming usage without OpenAI stream_options.
-      ...(stepfun || mimo || portableChat || reka || spark
+      ...(stepfun || mimo || portableChat || reka || spark || glmText
         ? {}
         : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
@@ -554,6 +595,17 @@ async function* streamChatCompletions(
         ? {}
         : { reasoning_effort: request.target.effort as ReasoningEffort }),
     })
+    if (glmText) {
+      // Standard Z.AI clears prior reasoning by default. Coding/agent turns
+      // need the complete native blocks plus this explicit preservation flag.
+      // Caller values that pass the captured-effort guard still win. Never
+      // rewrite durable history or attach another account's thinking blocks.
+      // https://docs.z.ai/guides/capabilities/thinking-mode
+      const thinking = (body as { thinking?: JsonObject }).thinking
+      Object.assign(body, {
+        thinking: { type: "enabled", clear_thinking: false, ...thinking },
+      })
+    }
     if (minimax && jsonRequestByteLength(body, 64_000_000) === undefined)
       throw new AssetMediaError(
         "MiniMax request exceeds 64 MB including text, tools and encoded images.",
