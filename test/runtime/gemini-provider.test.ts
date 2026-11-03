@@ -738,8 +738,8 @@ describe("native Gemini provider", () => {
                 },
                 {
                   inlineData: {
-                    mimeType: "image/webp",
-                    data: webpImageBase64,
+                    mimeType: "image/png",
+                    data: expect.any(String),
                     displayName: "tool_0_image_1",
                   },
                 },
@@ -772,6 +772,17 @@ describe("native Gemini provider", () => {
     }>
     expect(contents).toHaveLength(2)
     expect(contents[1]?.parts).toHaveLength(2)
+    const response = contents[1]?.parts[0]?.functionResponse as {
+      parts: Array<{ inlineData: { data: string } }>
+    }
+    const converted = Buffer.from(
+      response.parts[1]?.inlineData.data ?? "",
+      "base64",
+    )
+    const { default: sharp } = await import("sharp")
+    expect(await sharp(converted).raw().toBuffer()).toEqual(
+      await sharp(Buffer.from(webpImageBase64, "base64")).raw().toBuffer(),
+    )
     expect(
       contents[1]?.parts.every(
         (part) => Object.keys(part).join() === "functionResponse",

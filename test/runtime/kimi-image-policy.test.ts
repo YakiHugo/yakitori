@@ -230,10 +230,10 @@ describe("native Moonshot Responses image preparation", () => {
   it.each([
     ["https://proxy.example/v1", "kimi"],
     [endpoint, "openai"],
-  ] as const)("keeps legacy file behavior for %s profile %s", async (baseURL, profile) => {
+  ] as const)("preserves compatibility image resolution for %s profile %s", async (baseURL, profile) => {
     const source = await png()
     const result = await run(assetRequest(source), baseURL, profile)
-    expect((await sharp(sent(result)).metadata()).width).toBe(2048)
+    expect((await sharp(sent(result)).metadata()).width).toBe(2400)
   })
 
   it("projects the same owned history separately on a provider switch", async () => {
@@ -246,7 +246,7 @@ describe("native Moonshot Responses image preparation", () => {
           sent(await run(input, "https://proxy.example/v1")),
         ).metadata()
       ).width,
-    ).toBe(2048)
+    ).toBe(2400)
     expect(sent(await run(input))).toEqual(source)
     expect(input.messages).toEqual(before)
   })

@@ -22,42 +22,42 @@ it.each([
     url: "https://api.reka.ai/v1",
     model: "reka-edge-2603",
     detail: "high",
-    width: 3000,
+    native: true,
   },
   {
     service: "reka",
     url: "https://api.reka.ai/v1",
     model: "reka-edge-2603",
     detail: "original",
-    width: 3000,
+    native: true,
   },
   {
     service: undefined,
     url: "https://api.reka.ai/v1",
     model: "reka-edge-2603",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "reka",
     url: "https://relay.example",
     model: "reka-edge-2603",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "reka",
     url: "https://api.reka.ai/v1/",
     model: "reka-edge-2603",
     detail: "high",
-    width: 3000,
+    native: true,
   },
 ] as const)("prepares tool image through real Turn for $service $url $model $detail", async ({
   service,
   url,
   model,
   detail,
-  width,
+  native,
 }) => {
   const source = await sharp({
     create: {
@@ -142,7 +142,7 @@ it.each([
       models: [
         {
           id: model,
-          ...(width === 3000
+          ...(native
             ? {}
             : {
                 inputModalities: ["text", "image"],
@@ -194,7 +194,7 @@ it.each([
         content: expect.any(String),
       }),
     )
-    if (width === 3000) {
+    if (native) {
       expect(second).not.toHaveProperty("reasoning_effort")
       expect(second).not.toHaveProperty("stream_options")
     }
@@ -212,8 +212,8 @@ it.each([
       sentImage.image_url.url.split(",")[1] ?? "",
       "base64",
     )
-    expect((await sharp(bytes).metadata()).width).toBe(width)
-    if (width === 3000) {
+    expect((await sharp(bytes).metadata()).width).toBe(3000)
+    if (native) {
       expect(bytes).toEqual(source)
       expect(sentImage.image_url).not.toHaveProperty("detail")
     } else expect(sentImage.image_url).toHaveProperty("detail", "high")

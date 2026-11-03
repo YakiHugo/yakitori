@@ -99,12 +99,11 @@ describe("direct Doubao images", () => {
   })
 
   it.each([
-    { native: true, model: "doubao-seed-2-1-pro-260915", preserved: true },
-    { native: false, model: "doubao-seed-2-1-pro-260915", preserved: false },
+    { native: true, model: "doubao-seed-2-1-pro-260915" },
+    { native: false, model: "doubao-seed-2-1-pro-260915" },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
     native,
     model,
-    preserved,
   }) => {
     const bodies: string[] = []
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
@@ -205,8 +204,8 @@ describe("direct Doubao images", () => {
         const data = url.split(",")[1] ?? ""
         expect(
           (await sharp(Buffer.from(data, "base64")).metadata()).width,
-        ).toBe(preserved ? 3000 : 2048)
-        if (preserved) expect(data).toBe(block.data)
+        ).toBe(3000)
+        expect(data).toBe(block.data)
       }
       expect(history[0]?.content).toEqual([block])
     } finally {

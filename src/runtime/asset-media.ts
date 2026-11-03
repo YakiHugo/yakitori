@@ -8,7 +8,7 @@ import type {
   ModelRequest,
   ModelToolContentBlock,
 } from "./model.ts"
-import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
+import { prepareModelImage } from "./prepare-model-image.ts"
 
 // Match local attachment snapshot safety: remote reads must not allocate an
 // unbounded body merely because a backend needs inline media.
@@ -81,8 +81,43 @@ export async function prepareProviderMedia(
   messages: readonly ModelMessage[]
   uploadedFiles: ReadonlyMap<ModelDocumentBlock, string>
 }> {
+  request.signal?.throwIfAborted()
   const uploadedFiles = new Map<ModelDocumentBlock, string>()
   const preparedImages = new Map<ModelImageBlock, ModelImageBlock>()
+  // A compatibility endpoint has no verified API budget. Bound only our local
+  // retained base64 image data, including repeat occurrences in history. This
+  // allows one 50 MB attachment, not an unbounded batch, and is NOT a wire quota.
+  const genericImageSafetyBytes = 80 * 1024 * 1024
+  let genericImageBytes = 0
+  const prepareImage =
+    options.prepareImage ??
+    (async (bytes, image) => {
+      const prepared = await prepareModelImage(
+        bytes,
+        image.detail ?? "high",
+        request.signal,
+      )
+      genericImageBytes += prepared.data?.length ?? 0
+      if (genericImageBytes > genericImageSafetyBytes)
+        throw new AssetMediaError(
+          "Images were not sent: exceeds Yakitori's 80 MiB local compatibility image-data budget. Send fewer images or export smaller copies; originals have not been changed.",
+        )
+      return prepared
+    })
+  if (options.prepareImage === undefined) {
+    let inlineBytes = 0
+    for (const message of request.messages) {
+      if (message.role !== "user" && message.role !== "tool") continue
+      for (const block of message.content) {
+        if (block.type === "image" && block.data !== undefined)
+          inlineBytes += block.data.length
+        if (inlineBytes > genericImageSafetyBytes)
+          throw new AssetMediaError(
+            "Images were not sent: exceeds Yakitori's 80 MiB local compatibility image-data budget. Send fewer images or export smaller copies; originals have not been changed.",
+          )
+      }
+    }
+  }
   // Validate every locally available image before any document upload. This
   // includes inline images passed directly to a provider, outside the Turn
   // projection. External URLs retain their provider-owned fetch semantics.
@@ -94,9 +129,7 @@ export async function prepareProviderMedia(
       try {
         if (block.data !== undefined) {
           const bytes = Buffer.from(block.data, "base64")
-          if (options.prepareImage !== undefined)
-            preparedImages.set(block, await options.prepareImage(bytes, block))
-          else await validateModelImage(bytes, request.signal)
+          preparedImages.set(block, await prepareImage(bytes, block))
           continue
         }
         const source = block.file
@@ -112,16 +145,7 @@ export async function prepareProviderMedia(
           throw new AssetMediaError(
             "Asset size does not match its recorded size.",
           )
-        preparedImages.set(
-          block,
-          options.prepareImage !== undefined
-            ? await options.prepareImage(bytes, block)
-            : await prepareModelImage(
-                bytes,
-                block.detail ?? "high",
-                request.signal,
-              ),
-        )
+        preparedImages.set(block, await prepareImage(bytes, block))
       } catch (cause) {
         if (cause instanceof InvalidImageDataError) {
           const source =

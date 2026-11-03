@@ -34,8 +34,8 @@ describe("direct Grok image policy", () => {
   })
   it.each([
     { native: true, model: "grok-4.7", width: 3000 },
-    { native: false, model: "grok-4.7", width: 2048 },
-    { native: true, model: "grok-4.7-unverified", width: 2048 },
+    { native: false, model: "grok-4.7", width: 3000 },
+    { native: true, model: "grok-4.7-unverified", width: 3000 },
   ])("projects history and tool images only for captured direct model ($native, $model)", async ({
     native,
     model,

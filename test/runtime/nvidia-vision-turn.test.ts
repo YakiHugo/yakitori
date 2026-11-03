@@ -22,42 +22,42 @@ it.each([
     url: "https://integrate.api.nvidia.com/v1",
     model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     detail: "high",
-    width: 3000,
+    native: true,
   },
   {
     service: "nvidia",
     url: "https://integrate.api.nvidia.com/v1",
     model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     detail: "original",
-    width: 3000,
+    native: true,
   },
   {
     service: undefined,
     url: "https://integrate.api.nvidia.com/v1",
     model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "nvidia",
     url: "https://relay.example",
     model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "nvidia",
     url: "https://integrate.api.nvidia.com/v1/",
     model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     detail: "high",
-    width: 3000,
+    native: true,
   },
 ] as const)("prepares tool image through real Turn for $service $url $model $detail", async ({
   service,
   url,
   model,
   detail,
-  width,
+  native,
 }) => {
   const source = await sharp({
     create: {
@@ -142,7 +142,7 @@ it.each([
       models: [
         {
           id: model,
-          ...(width === 3000
+          ...(native
             ? {}
             : {
                 inputModalities: ["text", "image"],
@@ -195,7 +195,7 @@ it.each([
         content: expect.any(String),
       }),
     )
-    if (width === 3000) {
+    if (native) {
       expect(second).toHaveProperty("reasoning_effort", "high")
       expect(second).toHaveProperty("stream_options", { include_usage: true })
     }
@@ -213,8 +213,8 @@ it.each([
       sentImage.image_url.url.split(",")[1] ?? "",
       "base64",
     )
-    expect((await sharp(bytes).metadata()).width).toBe(width)
-    if (width === 3000) {
+    expect((await sharp(bytes).metadata()).width).toBe(3000)
+    if (native) {
       expect(bytes).toEqual(source)
     }
     expect(sentImage.image_url).toHaveProperty("detail", "high")

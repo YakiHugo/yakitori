@@ -129,13 +129,12 @@ describe("direct Meta images", () => {
   })
 
   it.each([
-    { native: true, model: "muse-spark-1.3", preserved: true },
-    { native: true, model: "muse-wonder-1.0", preserved: true },
-    { native: false, model: "muse-spark-1.3", preserved: false },
+    { native: true, model: "muse-spark-1.3" },
+    { native: true, model: "muse-wonder-1.0" },
+    { native: false, model: "muse-spark-1.3" },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
     native,
     model,
-    preserved,
   }) => {
     const bodies: string[] = []
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
@@ -236,8 +235,8 @@ describe("direct Meta images", () => {
         const data = url.split(",")[1] ?? ""
         expect(
           (await sharp(Buffer.from(data, "base64")).metadata()).width,
-        ).toBe(preserved ? 3000 : 2048)
-        if (preserved) expect(data).toBe(block.data)
+        ).toBe(3000)
+        expect(data).toBe(block.data)
       }
       expect(history[0]?.content).toEqual([block])
     } finally {

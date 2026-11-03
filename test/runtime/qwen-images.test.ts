@@ -117,13 +117,12 @@ describe("direct Qwen images", () => {
       "qwen3.6-plus",
       "qwen3.6-flash",
       "qwen3.5-plus",
-    ].map((model) => ({ native: true, model, preserved: true })),
-    { native: false, model: "qwen3.8-max", preserved: false },
-    { native: true, model: "qwen3.8-max-unverified", preserved: false },
+    ].map((model) => ({ native: true, model })),
+    { native: false, model: "qwen3.8-max" },
+    { native: true, model: "qwen3.8-max-unverified" },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
     native,
     model,
-    preserved,
   }) => {
     const bodies: string[] = []
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
@@ -221,8 +220,8 @@ describe("direct Qwen images", () => {
         const data = url.split(",")[1] ?? ""
         expect(
           (await sharp(Buffer.from(data, "base64")).metadata()).width,
-        ).toBe(preserved ? 3000 : 2048)
-        if (preserved) expect(data).toBe(block.data)
+        ).toBe(3000)
+        expect(data).toBe(block.data)
       }
       expect(history[0]?.content).toEqual([block])
     } finally {

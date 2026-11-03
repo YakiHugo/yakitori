@@ -274,11 +274,11 @@ describe("native Responses Astra image preparation", () => {
 
 it.each([
   { native: true, model: "gpt-6-astra", width: 4096 },
-  { native: false, model: "gpt-6-astra", width: 2048 },
-  { native: false, model: "gpt-5.5", width: 2048 },
-  { native: false, model: "gpt-5.6-sol", width: 2048 },
-  { native: true, model: "gpt-6-sol", width: 2048 },
-  { native: true, model: "gpt-6-luna", width: 2048 },
+  { native: false, model: "gpt-6-astra", width: 4096 },
+  { native: false, model: "gpt-5.5", width: 4096 },
+  { native: false, model: "gpt-5.6-sol", width: 4096 },
+  { native: true, model: "gpt-6-sol", width: 4096 },
+  { native: true, model: "gpt-6-luna", width: 4096 },
   ...[
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -288,7 +288,7 @@ it.each([
     "gpt-5.6-terra",
     "gpt-5.6-luna",
   ].map((model) => ({ native: true, model, width: 4096 })),
-])("captures real Turn projection and repeat user/tool replay only for verified native models ($native/$model)", async ({
+])("preserves resolution through real Turn projection and repeated user/tool replay ($native/$model)", async ({
   native,
   model,
   width,
@@ -423,7 +423,7 @@ it.each([
   expect(
     (await sharp(Buffer.from(url.split(",")[1] ?? "", "base64")).metadata())
       .width,
-  ).toBe(2048)
+  ).toBe(options.requestProfile === "codex" ? 2048 : 4096)
 })
 
 it("bounds retained native images even without portable image blocks", async () => {

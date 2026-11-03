@@ -1,6 +1,7 @@
 import { once } from "node:events"
 import { createServer } from "node:http"
 import { describe, expect, it } from "vitest"
+import sharp from "sharp"
 import {
   prepareProviderMedia,
   readAssetSource,
@@ -232,4 +233,107 @@ it("keeps provider-addressable owned image URLs independent of local readability
     file: { url: "https://example.invalid/hosted.png" },
   })
   expect(input.messages[0]?.content[0]).toMatchObject({ file: source })
+})
+
+it.each([
+  "inline",
+  "file",
+] as const)("uses the same resolution-preserving fallback and actual MIME for %s images", async (source) => {
+  const bytes = await sharp({
+    create: {
+      width: 4096,
+      height: 1024,
+      channels: 4,
+      background: { r: 90, g: 20, b: 40, alpha: 0.25 },
+    },
+  })
+    .png()
+    .toBuffer()
+  const input: ModelRequest = {
+    target: {
+      provider: "custom",
+      model: "vision",
+      instructionProfileId: "default",
+    },
+    system: [],
+    tools: [],
+    toolWireProtocol: "eager",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            mediaType: "image/jpeg",
+            detail: "high",
+            ...(source === "inline"
+              ? { data: bytes.toString("base64") }
+              : {
+                  file: { rolloutId: "rollout_one", path: "image.png" },
+                  sizeBytes: bytes.length,
+                }),
+          },
+        ],
+      },
+    ],
+    assets: { read: async () => bytes },
+  }
+  const before = structuredClone(input.messages)
+  const media = await prepareProviderMedia(input)
+  expect(media.messages[0]?.content[0]).toEqual({
+    type: "image",
+    mediaType: "image/png",
+    detail: "high",
+    data: bytes.toString("base64"),
+  })
+  expect(input.messages).toEqual(before)
+})
+
+it("rejects excessive inline image history before decoding data or uploading documents", async () => {
+  let uploads = 0
+  const repeatedImage = {
+    type: "image" as const,
+    mediaType: "image/png" as const,
+    data: "A".repeat(40 * 1024 * 1024 + 1),
+  }
+  const input: ModelRequest = {
+    target: {
+      provider: "custom",
+      model: "vision",
+      instructionProfileId: "default",
+    },
+    system: [],
+    tools: [],
+    toolWireProtocol: "eager",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            name: "report.pdf",
+            mediaType: "application/pdf",
+            sizeBytes: 6,
+            file: { rolloutId: "rollout_one", path: "report.pdf" },
+          },
+          repeatedImage,
+          repeatedImage,
+        ],
+      },
+    ],
+    assets: {
+      read: async () => {
+        throw new Error("Must not read before admission")
+      },
+    },
+  }
+  await expect(
+    prepareProviderMedia(input, {
+      uploadDocument: async () => {
+        uploads += 1
+        return "file_one"
+      },
+    }),
+  ).rejects.toThrow("80 MiB local compatibility image-data budget")
+  expect(uploads).toBe(0)
 })

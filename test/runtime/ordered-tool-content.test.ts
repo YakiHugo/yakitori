@@ -183,7 +183,7 @@ describe("ordered tool content", () => {
       { type: "text", text: "before" },
       {
         type: "text",
-        text: expect.stringContaining("does not support image input"),
+        text: expect.stringContaining("does not have image input enabled"),
       },
       { type: "text", text: "after" },
     ])

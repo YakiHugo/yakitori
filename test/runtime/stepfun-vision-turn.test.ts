@@ -22,42 +22,42 @@ it.each([
     url: "https://api.stepfun.com/v1",
     model: "step-5-preview",
     detail: "high",
-    width: 3000,
+    native: true,
   },
   {
     service: "stepfun",
     url: "https://api.stepfun.com/v1",
     model: "step-5-preview",
     detail: "original",
-    width: 3000,
+    native: true,
   },
   {
     service: undefined,
     url: "https://api.stepfun.com/v1",
     model: "step-5-preview",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "stepfun",
     url: "https://relay.example",
     model: "step-5-preview",
     detail: "high",
-    width: 2048,
+    native: false,
   },
   {
     service: "stepfun",
     url: "https://api.stepfun.ai/v1",
     model: "step-5-preview",
     detail: "high",
-    width: 3000,
+    native: true,
   },
 ] as const)("prepares tool image through real Turn for $service $url $model $detail", async ({
   service,
   url,
   model,
   detail,
-  width,
+  native,
 }) => {
   const source = await sharp({
     create: {
@@ -144,7 +144,7 @@ it.each([
       models: [
         {
           id: model,
-          ...(width === 3000
+          ...(native
             ? {}
             : {
                 inputModalities: ["text", "image"],
@@ -197,7 +197,7 @@ it.each([
         content: expect.any(String),
       }),
     )
-    if (width === 3000) {
+    if (native) {
       expect(second.reasoning_effort).toBe("medium")
       expect(second).not.toHaveProperty("stream_options")
     }
@@ -215,8 +215,8 @@ it.each([
       sentImage.image_url.url.split(",")[1] ?? "",
       "base64",
     )
-    expect((await sharp(bytes).metadata()).width).toBe(width)
-    if (width === 3000) expect(bytes).toEqual(source)
+    expect((await sharp(bytes).metadata()).width).toBe(3000)
+    if (native) expect(bytes).toEqual(source)
     const tool = thread
       .snapshot()
       .context.history.map((entry) => entry.item)
