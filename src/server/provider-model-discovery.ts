@@ -1,5 +1,6 @@
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
+import { rekaVisionModel } from "../runtime/reka-vision.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { providerServiceForEndpoint } from "../runtime/provider-services.ts"
 import { ConfigurationError } from "./config-errors.ts"
@@ -66,6 +67,7 @@ export async function discoverProviderModels(
         pages.size === 1 &&
         !gemini &&
         [404, 405].includes(response.status) &&
+        officialPreset?.id !== "reka" &&
         configuration.wireApi === officialPreset?.wireApi &&
         officialPreset?.models.length
       )
@@ -140,6 +142,17 @@ export async function discoverProviderModels(
       }
       if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim())
         throw new ConfigurationError("A model catalog entry has no model ID.")
+      // Reka serves third-party models too. Only this exact first-party model
+      // has a complete coding/vision contract adapted here; Flash 3 lacks tools.
+      // GET /models is authoritative for account availability.
+      if (
+        officialPreset?.id === "reka" &&
+        (entry.id !== rekaVisionModel ||
+          entry.is_ready === false ||
+          (Array.isArray(entry.supported_features) &&
+            !entry.supported_features.includes("tools")))
+      )
+        continue
       // Kimi's shared catalog also lists models outside this adapted protocol.
       // Keep unsupported models out of the selectable directory, not just hidden.
       if (
@@ -186,7 +199,9 @@ export async function discoverProviderModels(
         ? entry.top_provider
         : undefined
       const output =
-        entry.max_output_tokens ?? topProvider?.max_completion_tokens
+        entry.max_output_tokens ??
+        (officialPreset?.id === "reka" ? entry.max_output_length : undefined) ??
+        topProvider?.max_completion_tokens
       const modalities =
         architecture?.input_modalities ?? entry.input_modalities
       const inputModalities = Array.isArray(modalities)

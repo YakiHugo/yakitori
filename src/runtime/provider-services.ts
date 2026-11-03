@@ -134,6 +134,28 @@ export const providerServices: readonly ProviderPreset[] = [
       "https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-super-vl-120b-a12b-infer",
   },
   {
+    id: "reka",
+    name: "Reka",
+    baseURL: "https://api.reka.ai/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "REKA_API_KEY",
+    flavor: "reka",
+    models: [
+      {
+        id: "reka-edge-2603",
+        displayName: "Reka Edge 2603",
+        contextWindowTokens: 16_384,
+        contextWindowScope: "total",
+        maxOutputTokens: 16_384,
+        // Only still images are adapted here, not the model's video input.
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        efforts: [],
+      },
+    ],
+    documentationURL: "https://docs.reka.ai/chat/models",
+  },
+  {
     id: "deepseek",
     name: "DeepSeek",
     baseURL: "https://api.deepseek.com",

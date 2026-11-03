@@ -83,6 +83,7 @@ import {
   validateQwenImageRequest,
 } from "./qwen-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
+import { createRekaVisionPolicy, isRekaEndpoint } from "./reka-vision.ts"
 import {
   createStepfunImagePolicy,
   isStepfunEndpoint,
@@ -111,6 +112,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "tencent"
     | "mimo"
     | "nvidia"
+    | "reka"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -194,6 +196,8 @@ async function* streamChatCompletions(
     const nvidia =
       options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
     if (nvidia) validateNvidiaRequest(request, model)
+    const reka = options.flavor === "reka" && isRekaEndpoint(options.baseURL)
+    const rekaImages = reka ? createRekaVisionPolicy(request, model) : undefined
     const sensenova =
       options.flavor === "sensenova" && isSenseNovaEndpoint(options.baseURL)
     if (sensenova) {
@@ -306,6 +310,7 @@ async function* streamChatCompletions(
     const nvidiaImages = nvidia ? createNvidiaImagePolicy(request) : undefined
     const media = await prepareProviderMedia(request, {
       ...(nvidiaImages ? { prepareImage: nvidiaImages.prepareImage } : {}),
+      ...(rekaImages ? { prepareImage: rekaImages.prepareImage } : {}),
       ...(sensenova
         ? {
             inlineImageUrls: true,
@@ -417,7 +422,8 @@ async function* streamChatCompletions(
       (options.flavor === "mimo" && !mimo) ||
         (options.flavor === "sensenova" && !sensenova) ||
         (options.flavor === "longcat" && !longcat) ||
-        (options.flavor === "nvidia" && !nvidia)
+        (options.flavor === "nvidia" && !nvidia) ||
+        (options.flavor === "reka" && !reka)
         ? "generic"
         : (options.flavor ?? "generic"),
       request.target.model || options.model,
@@ -435,8 +441,8 @@ async function* streamChatCompletions(
       model: request.target.model || options.model,
       messages,
       stream: true as const,
-      // StepFun reports usage in streaming chunks without OpenAI stream_options.
-      ...(stepfun || mimo || portableChat
+      // These providers report streaming usage without OpenAI stream_options.
+      ...(stepfun || mimo || portableChat || reka
         ? {}
         : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
@@ -541,6 +547,7 @@ async function* streamChatCompletions(
     mimoImages?.validateBody(body)
     longcatImages?.validateBody(body)
     nvidiaImages?.validateBody(body)
+    rekaImages?.validateBody(body, messages)
     if (mimo) {
       const thinking = (body as { thinking?: { type?: string } }).thinking
       if (
@@ -1238,6 +1245,7 @@ export function toChatCompletionsMessages(
                   flavor === "sensenova" ||
                   flavor === "longcat" ||
                   flavor === "tencent" ||
+                  flavor === "reka" ||
                   flavor === "mimo"
                     ? {}
                     : { detail: "high" as const }),
@@ -1281,6 +1289,7 @@ export function toChatCompletionsMessages(
                 ...(flavor === "qwen" ||
                 flavor === "glm" ||
                 flavor === "tencent" ||
+                flavor === "reka" ||
                 flavor === "mimo"
                   ? {}
                   : { detail: "high" as const }),
