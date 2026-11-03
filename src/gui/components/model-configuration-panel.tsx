@@ -1,5 +1,13 @@
 import { FileCode2, X } from "lucide-react"
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
 import { parse, stringify, TomlError, TomlDate } from "smol-toml"
 import type {
   ConfiguredModel,
@@ -57,7 +65,9 @@ export function ModelConfigurationPanel({
     [model, provider],
   )
   const [value, setValue] = useState(() => documentFor(settings))
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Reconcile settings during commit. A passive effect can mistake newer
+    // typing for an external change and replace the document with an older echo.
     if (
       Object.keys({ ...applied.current, ...settings }).every(
         (key) =>
