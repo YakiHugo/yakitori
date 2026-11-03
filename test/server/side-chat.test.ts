@@ -869,9 +869,13 @@ describe("temporary side conversations", () => {
       }),
     })
     const errors: unknown[] = []
+    const releasedDrafts: string[] = []
     const service = createSideChatService({
       defaultCwd: root,
       defaultModel: { provider: "openai", model: "gpt-6-astra" },
+      releaseDraftRolloutAssets: (ids) => {
+        releasedDrafts.push(...ids)
+      },
       mateId: "test-mate",
       mateRevisionId: "test-revision",
       readSource: async () => source,
@@ -903,11 +907,18 @@ describe("temporary side conversations", () => {
       await until(() => service.read(side.id).activeTurnId === undefined)
       const nested = await service.create({ sourceSessionId: side.id })
       await service.remove(side.id)
-      const [draft] = await service.importAttachmentBytes(
-        nested.id,
-        "followup_draft",
-        [{ name: "follow-up.pdf", data: bytes }],
-      )
+      // Browser uploads belong to an independent server-owned draft, while
+      // native imports can still stage in the side conversation's rollout.
+      const browserDraftId = "draft_upload_side_chat"
+      if (origin === "tool") owners.add(browserDraftId)
+      const [draft] =
+        origin === "user"
+          ? await service.importAttachmentBytes(nested.id, "followup_draft", [
+              { name: "follow-up.pdf", data: bytes },
+            ])
+          : await assets.importAttachmentBytes(browserDraftId, "upload", [
+              { name: "follow-up.pdf", data: bytes },
+            ])
       if (draft?.mediaType !== "application/pdf")
         throw new Error("Missing PDF draft")
       await service.send({
@@ -964,6 +975,43 @@ describe("temporary side conversations", () => {
         code: "ENOENT",
       })
       expect(errors).toEqual([])
+      if (origin === "tool") {
+        const recalled = service
+          .read(nested.id)
+          .messages.find((message) => message.id === "nested_pdf")
+        const stored =
+          recalled?.role === "user"
+            ? recalled.content.attachments[0]
+            : undefined
+        if (stored?.mediaType !== "application/pdf")
+          throw new Error("Missing admitted PDF")
+        const [fresh] = await assets.importAttachmentBytes(
+          browserDraftId,
+          "second_upload",
+          [{ name: "fresh.pdf", data: bytes }],
+        )
+        if (fresh?.mediaType !== "application/pdf")
+          throw new Error("Missing fresh PDF")
+        await service.send({
+          sideChatId: nested.id,
+          requestId: "mixed_history_upload",
+          content: inputFixture([
+            { type: "document", ...stored },
+            { type: "document", ...fresh },
+          ]),
+        })
+        await until(() => service.read(nested.id).activeTurnId === undefined)
+        await expect(assets.read(fresh.file)).rejects.toMatchObject({
+          code: "ENOENT",
+        })
+        expect(await assets.read(stored.file)).toEqual(bytes)
+        expect(
+          releasedDrafts.filter((id) => id === browserDraftId),
+        ).toHaveLength(2)
+        expect(errors).toEqual([])
+        await assets.discardEphemeralRolloutFiles(browserDraftId)
+        owners.delete(browserDraftId)
+      }
       await service.remove(nested.id)
       expect(owners).toEqual(new Set([parentId]))
       expect(await readdir(join(root, "rollouts"))).toEqual([])

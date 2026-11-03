@@ -112,6 +112,7 @@ export function createSideChatService(options: {
   ): SessionTaskRunner | Promise<SessionTaskRunner>
   readSource?(id: string): Promise<StoredThread | undefined>
   rolloutAssets?: RolloutAssets
+  releaseDraftRolloutAssets?(rolloutIds: readonly string[]): void
   releaseAssets?(id: string): Promise<void>
   resolvePermission?: PermissionGate["resolve"]
   now?: () => number
@@ -560,7 +561,7 @@ export function createSideChatService(options: {
         )
         const promotion = !ownsFiles
           ? undefined
-          : await options.rolloutAssets?.promoteAttachments(
+          : await options.rolloutAssets?.copyAttachments(
               chat.snapshot.id,
               input.requestId,
               attachments,
@@ -623,7 +624,17 @@ export function createSideChatService(options: {
         // not erase the accepted input or turn its idempotent reply into failure.
         if (promotion !== undefined) {
           try {
-            await options.rolloutAssets?.discardDraftAttachments(attachments)
+            const drafts = attachments.filter(
+              (attachment) =>
+                !("url" in attachment.file) &&
+                attachment.file.path.startsWith("attachments/staging/"),
+            )
+            await options.rolloutAssets?.discardDraftAttachments(drafts)
+            options.releaseDraftRolloutAssets?.(
+              drafts.flatMap((attachment) =>
+                "url" in attachment.file ? [] : [attachment.file.rolloutId],
+              ),
+            )
           } catch (error) {
             options.reportError(error)
           }
