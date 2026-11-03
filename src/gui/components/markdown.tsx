@@ -1,4 +1,5 @@
 import { Globe } from "lucide-react"
+import { defaultSchema, type Schema } from "hast-util-sanitize"
 import type { MouseEvent, ReactNode } from "react"
 import {
   createContext,
@@ -11,8 +12,13 @@ import {
 } from "react"
 import type { Components } from "react-markdown"
 import Markdown, { defaultUrlTransform } from "react-markdown"
-import remarkGfm from "remark-gfm"
+import rehypeKatex from "rehype-katex"
+import rehypeRaw from "rehype-raw"
+import rehypeSanitize from "rehype-sanitize"
 import type { HighlighterCore } from "shiki/core"
+import type { PluggableList } from "unified"
+import "katex/dist/katex.min.css"
+import { markdownRemarkPlugins } from "../../shared/markdown-plugins.ts"
 import { openFileTarget, openUrlTarget } from "../lib/open-resource.ts"
 import { createStreamingMarkdownPlugin } from "../lib/streaming-markdown.ts"
 import {
@@ -31,6 +37,13 @@ import { CopyIconButton } from "./response-actions.tsx"
 // Model streams commonly deliver several deltas within one animation window;
 // this brief quiet period coalesces them while keeping completed blocks prompt.
 const highlightSettleMs = 120
+const trustedHtmlSchema: Schema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] ?? []), "className", "data*"],
+  },
+}
 const MarkdownStreamingContext = createContext(false)
 
 function highlight(
@@ -331,6 +344,7 @@ export const MarkdownView = memo(function MarkdownView({
   documentPath,
   apiBase: apiBaseOverride,
   streaming = false,
+  allowRawHtml = false,
 }: Readonly<{
   text: string
   className?: string
@@ -338,6 +352,7 @@ export const MarkdownView = memo(function MarkdownView({
   documentPath?: string | undefined
   apiBase?: string | undefined
   streaming?: boolean
+  allowRawHtml?: boolean
 }>) {
   const defaultApiBase = useAppStore((state) => state.apiBase)
   const apiBase = apiBaseOverride ?? defaultApiBase
@@ -347,18 +362,26 @@ export const MarkdownView = memo(function MarkdownView({
   )
   const useIncrementalParser =
     streaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text)
-  const remarkPlugins = useMemo(
-    () =>
-      useIncrementalParser
-        ? [remarkGfm, createStreamingMarkdownPlugin()]
-        : [remarkGfm],
+  const remarkPlugins = useMemo<PluggableList>(
+    () => [
+      ...markdownRemarkPlugins,
+      ...(useIncrementalParser ? [createStreamingMarkdownPlugin()] : []),
+    ],
     [useIncrementalParser],
   )
+  const rehypePlugins = useMemo<PluggableList>(() => {
+    const plugins: PluggableList = []
+    if (allowRawHtml)
+      plugins.push(rehypeRaw, [rehypeSanitize, trustedHtmlSchema])
+    plugins.push([rehypeKatex, { trust: false, maxSize: 20, maxExpand: 1000 }])
+    return plugins
+  }, [allowRawHtml])
   return (
     <div className={cn("markdown", className)}>
       <MarkdownStreamingContext value={streaming}>
         <Markdown
           remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
           components={components}
           urlTransform={markdownUrlTransform}
         >

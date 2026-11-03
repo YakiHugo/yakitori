@@ -21,6 +21,17 @@ it("parses appended bold text after a cached code fence without changing earlier
   ).toEqual(["Intro", "Next bold"])
 })
 
+it("settles LaTeX math appended after a cached code fence", () => {
+  const prefix = "Intro\n\n```text\ncode\n```\n\n\\(x^2"
+  const { container, rerender } = render(
+    <MarkdownView text={prefix} streaming />,
+  )
+  expect(container.querySelector(".katex")).toBeNull()
+  rerender(<MarkdownView text={`${prefix}\\)`} streaming />)
+  expect(container.querySelector(".katex")).not.toBeNull()
+  expect(container.querySelectorAll("pre code")).toHaveLength(1)
+})
+
 it("resolves a definition added after a cached fenced block", () => {
   const first = "```text\ncode\n```\n\n[read][target]"
   const { container, rerender } = render(
@@ -42,6 +53,8 @@ it.each([
   "\n\n> quote\n>\n> second\n\n~~~text\nnext\n~~~\n\nTail",
   "\n\n[linked][target]\n\n[target]: https://example.com/reference",
   "\n\nFootnote[^a].\n\n[^a]: A **note**",
+  "\n\n~~中文。~~下一句",
+  "\n\n\\[\nx+y=z\n\\]",
   "\r\n\r\nChanged line endings\r\n",
 ])("renders appended Markdown identically to a completed parse: %j", (suffix) => {
   const prefix = "Intro\n\n```text\nliteral <&>\n```\n\nTail"
