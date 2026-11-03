@@ -1,9 +1,18 @@
 import { expect, it } from "vitest"
 import type { ProviderConfiguration } from "../../src/protocol/providers.ts"
+import type { ModelProviderCapabilities } from "../../src/runtime/model-provider.ts"
 import { createGrokProvider } from "../../src/runtime/grok-provider.ts"
 import { resolveProviderBackend } from "../../src/runtime/provider-backend.ts"
 import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
+
+type EndpointContract = Pick<
+  ProviderConfiguration,
+  "service" | "baseURL" | "wireApi"
+> & {
+  profile: Record<string, string>
+  capabilities: ModelProviderCapabilities
+}
 
 it.each([
   {
@@ -11,59 +20,132 @@ it.each([
     baseURL: "https://API.OPENAI.COM:443/v1/",
     wireApi: "openai_responses",
     profile: { responseProfile: "openai" },
-    nativePdf: true,
-    customTools: true,
+    capabilities: {
+      remoteCompaction: "responses_compact",
+      nativePdf: true,
+      tools: {
+        supportsCustomTools: true,
+        nativeDeferredProtocol: "openai_deferred",
+      },
+    },
   },
   {
     service: "openai",
     baseURL: "https://api.openai.com/v1",
     wireApi: "openai_chat_completions",
     profile: { chatCompletionsFlavor: "generic" },
-    nativePdf: true,
-    customTools: false,
+    capabilities: {
+      remoteCompaction: false,
+      nativePdf: true,
+      tools: { supportsCustomTools: false },
+    },
   },
   {
-    service: "gemini",
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/",
-    wireApi: "gemini_interactions",
-    profile: { chatCompletionsFlavor: "gemini" },
-    nativePdf: true,
-    customTools: false,
+    service: "codex",
+    baseURL: "https://CHATGPT.COM:443/backend-api/codex/",
+    wireApi: "openai_responses",
+    profile: { responseProfile: "openai" },
+    capabilities: {
+      remoteCompaction: "codex_remote",
+      nativePdf: false,
+      tools: {
+        supportsCustomTools: true,
+        nativeDeferredProtocol: "openai_deferred",
+      },
+    },
   },
   {
-    service: "gemini",
-    baseURL: "https://generativelanguage.googleapis.com/v1/",
-    wireApi: "gemini_interactions",
-    profile: { chatCompletionsFlavor: "gemini" },
-    nativePdf: true,
-    customTools: false,
+    service: "anthropic",
+    baseURL: "https://api.anthropic.com/",
+    wireApi: "anthropic_messages",
+    profile: { anthropicProfile: "anthropic" },
+    capabilities: {
+      remoteCompaction: false,
+      nativePdf: true,
+      tools: {
+        supportsCustomTools: false,
+        nativeDeferredProtocol: "anthropic_deferred",
+      },
+    },
   },
+  ...(
+    [
+      {
+        baseURL: "https://generativelanguage.googleapis.com/v1beta/",
+        wireApi: "gemini_generate_content",
+      },
+      {
+        baseURL: "https://generativelanguage.googleapis.com/v1beta/",
+        wireApi: "gemini_interactions",
+      },
+      {
+        baseURL: "https://generativelanguage.googleapis.com/v1/",
+        wireApi: "gemini_interactions",
+      },
+    ] as const
+  ).map((endpoint) => ({
+    ...endpoint,
+    service: "gemini",
+    profile: { chatCompletionsFlavor: "gemini" },
+    capabilities: {
+      remoteCompaction: false as const,
+      nativePdf: true,
+      tools: { supportsCustomTools: false },
+    },
+  })),
   {
     service: "gemini",
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
     wireApi: "openai_chat_completions",
     profile: { chatCompletionsFlavor: "gemini" },
-    nativePdf: false,
-    customTools: false,
+    capabilities: {
+      remoteCompaction: false,
+      nativePdf: false,
+      tools: { supportsCustomTools: false },
+    },
   },
   {
     service: "kimi-code",
     baseURL: "https://api.kimi.com/coding/v1/",
     wireApi: "anthropic_messages",
     profile: { anthropicProfile: "kimi-code" },
-    nativePdf: false,
-    customTools: false,
+    capabilities: {
+      remoteCompaction: false,
+      nativePdf: false,
+      tools: { supportsCustomTools: false },
+    },
   },
-] as const)("resolves the explicit $service $wireApi endpoint contract", (endpoint) => {
+  {
+    service: "moonshot",
+    baseURL: "https://api.moonshot.ai/v1/",
+    wireApi: "openai_responses",
+    profile: { responseProfile: "kimi" },
+    capabilities: {
+      remoteCompaction: false,
+      nativePdf: false,
+      tools: { supportsCustomTools: false },
+    },
+  },
+  ...(["openai_responses", "openai_chat_completions"] as const).map(
+    (wireApi) => ({
+      service: "xai",
+      baseURL: "https://api.x.ai/v1/",
+      wireApi,
+      profile: { responseProfile: "grok" },
+      capabilities: {
+        remoteCompaction: false as const,
+        nativePdf: false,
+        tools: { supportsCustomTools: false },
+      },
+    }),
+  ),
+] satisfies EndpointContract[])("resolves the explicit $service $wireApi endpoint contract", (endpoint) => {
   const backend = resolveProviderBackend(endpoint)
   expect(backend).toMatchObject({
     serviceId: endpoint.service,
     ...endpoint.profile,
-    capabilities: {
-      nativePdf: endpoint.nativePdf,
-      tools: { supportsCustomTools: endpoint.customTools },
-    },
   })
+  expect(backend.capabilities).toEqual(endpoint.capabilities)
 })
 
 it.each([
@@ -103,6 +185,55 @@ it.each([
     nativePdf: false,
     tools: { supportsCustomTools: false },
   })
+})
+
+it.each([
+  {
+    service: "codex",
+    baseURL: "https://chatgpt.com/backend-api/codex",
+    wireApi: "openai_chat_completions",
+  },
+  {
+    service: "codex",
+    baseURL: "https://relay.example/backend-api/codex",
+    wireApi: "openai_responses",
+  },
+  {
+    service: "openai",
+    baseURL: "https://api.openai.com/v1",
+    wireApi: "anthropic_messages",
+  },
+  {
+    service: "anthropic",
+    baseURL: "https://api.anthropic.com",
+    wireApi: "openai_responses",
+  },
+  {
+    service: "gemini",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    wireApi: "openai_chat_completions",
+  },
+  {
+    service: "xai",
+    baseURL: "https://relay.example/v1",
+    wireApi: "openai_responses",
+  },
+  {
+    service: "moonshot",
+    baseURL: "https://api.moonshot.ai/v1",
+    wireApi: "openai_chat_completions",
+  },
+] as const)("does not grant features or vendor profiles to a mismatched endpoint: %j", (configuration) => {
+  const backend = resolveProviderBackend(configuration)
+  expect(backend.serviceId).toBeUndefined()
+  expect(backend.capabilities).toEqual({
+    remoteCompaction: false,
+    nativePdf: false,
+    tools: { supportsCustomTools: false },
+  })
+  expect(backend.responseProfile).toBe("openai")
+  expect(backend.anthropicProfile).toBe("generic")
+  expect(backend.chatCompletionsFlavor).toBe("generic")
 })
 
 it("shares the Grok backend contract across API keys and CLI credentials", () => {
