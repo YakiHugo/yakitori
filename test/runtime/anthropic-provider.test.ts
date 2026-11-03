@@ -1283,7 +1283,7 @@ describe("anthropic provider conversion", () => {
     ])
   })
 
-  it("adds output_config and the effort beta header for official anthropic", async () => {
+  it("adds GA output_config without the obsolete effort beta for official anthropic", async () => {
     let body: Record<string, unknown> | undefined
     let options: Record<string, unknown> | undefined
     const client = withSDKResponse({
@@ -1312,9 +1312,7 @@ describe("anthropic provider conversion", () => {
       model: "claude-test",
       output_config: { effort: "high" },
     })
-    expect(options).toMatchObject({
-      headers: { "anthropic-beta": "effort-2025-11-24" },
-    })
+    expect(options).toBeUndefined()
   })
 
   it("omits output_config and the beta header without an effort", async () => {
@@ -1365,6 +1363,7 @@ describe("anthropic provider conversion", () => {
     const stream = createAnthropicTestStream({
       apiKey: "test",
       model: "kimi-for-coding",
+      profile: "kimi-code",
       client,
     })
 

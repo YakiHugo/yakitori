@@ -152,6 +152,8 @@ export type ModelRequest = Readonly<{
   // Providers report synchronously before awaiting more data, so cancellation
   // cannot discard already received usage. This is not an accounting event.
   onUsageSnapshot?: (usage: ModelUsage) => void
+  // Runtime diagnostics are UI notices, never model messages or durable input.
+  onWarning?: (warning: Readonly<{ code: string; message: string }>) => void
   signal?: AbortSignal
 }>
 
