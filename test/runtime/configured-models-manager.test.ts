@@ -420,3 +420,41 @@ it.each([
   }).resolve({ provider: "personal", model })
   expect(chat.inputModalities).toEqual(["text"])
 })
+
+it.each([
+  { serviceId: "longcat", chatOnly: true },
+  { serviceId: "sensenova", chatOnly: true },
+  { serviceId: "tencent", chatOnly: false },
+])("preserves $serviceId restriction scope for an unverified configured model", async ({
+  serviceId,
+  chatOnly,
+}) => {
+  const manager = createConfiguredModelsManager({
+    provider: "personal",
+    serviceId,
+    wireApi: "openai_chat_completions",
+    models: [
+      {
+        id: "unverified-model",
+        inputModalities: ["text", "image"],
+        efforts: ["high"],
+        defaultEffort: "high",
+        speeds: ["fast"],
+        contextWindowTokens: 9_000,
+        maxOutputTokens: 2_000,
+      },
+    ],
+  })
+  const target = { provider: "personal", model: "unverified-model" }
+  const model = manager.resolve(target)
+  expect(model.toolPolicy).toBe(chatOnly ? "chat_only" : undefined)
+  expect(model.inputModalities).toEqual(chatOnly ? ["text"] : ["text", "image"])
+  expect(model.shellToolType).toBe(chatOnly ? "disabled" : "unified_exec")
+  expect(model.fileEditingToolType).toBe(chatOnly ? "none" : "edit_write")
+  expect(model.efforts).toEqual(chatOnly ? [] : ["high"])
+  expect(model.defaultEffort).toBe(chatOnly ? undefined : "high")
+  expect(model.speeds).toEqual(chatOnly ? [] : ["fast"])
+  expect(model.maxOutputTokens).toBe(2_000)
+  expect(manager.capacity(target)?.contextWindowTokens).toBe(9_000)
+  expect((await manager.listModels())[0]?.toolPolicy).toBe(model.toolPolicy)
+})

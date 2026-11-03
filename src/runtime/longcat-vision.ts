@@ -1,3 +1,4 @@
+import { restrictChatOnlyModel } from "./chat-only-model-policy.ts"
 import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { AssetMediaError } from "./asset-media.ts"
 import type { EffectiveModel } from "./effective-model.ts"
@@ -20,27 +21,10 @@ export function isLongCatEndpoint(baseURL: string): boolean {
 // https://longcat.chat/platform/docs/api/chat
 // https://longcat.chat/platform/docs/api/responses
 export function restrictLongCatVision(model: EffectiveModel): EffectiveModel {
-  const {
-    applyPatchToolType: _,
-    defaultEffort: __,
-    multiAgentReasoningEffort: ___,
-    ...rest
-  } = model
-  return {
-    ...rest,
-    toolPolicy: "chat_only",
-    instructions:
-      "You are a text and image conversation assistant. Analyze only content supplied in this conversation. You cannot call tools, access workspace files, run commands, browse, or perform actions. Do not claim to have inspected, edited, or executed anything. You may explain code as text. Ask the user to provide missing content. If an action is needed, explain this limitation and ask them to switch to a tool-enabled model.",
-    shellToolType: "disabled",
-    fileEditingToolType: "none",
-    supportsCustomTools: false,
-    supportsNativeToolSearch: false,
-    inputModalities:
-      model.model === longcatVisionModel ? ["text", "image"] : ["text"],
-    imageDetailModes: ["high"],
-    efforts: [],
-    speeds: [],
-  }
+  return restrictChatOnlyModel(
+    model,
+    model.model === longcatVisionModel ? ["text", "image"] : ["text"],
+  )
 }
 
 // Official image limits, checked 2026-11-03:
