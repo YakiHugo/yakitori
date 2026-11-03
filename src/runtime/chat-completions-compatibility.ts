@@ -29,7 +29,11 @@ export function chatCompletionsIncompatibility(
     )
   if (!usesTools) return undefined
 
-  if (model === "gpt-6-astra" || model === "gpt-6.1-sol")
+  if (
+    model === "gpt-6-astra" ||
+    model === "gpt-6.1-sol" ||
+    model === "gpt-6.1-terra"
+  )
     return `OpenAI model ${model} requires the Responses API for tool calls and tool history. Select the OpenAI Responses API for this model.`
 
   if (

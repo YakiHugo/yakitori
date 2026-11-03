@@ -52,6 +52,11 @@ export const providerServices: readonly ProviderPreset[] = [
         efforts: ["none", "low", "medium", "high", "xhigh", "max"],
         defaultEffort: "medium",
       },
+      // Public API limits/efforts, not the Codex subscription catalog.
+      // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+      { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol" },
+      // https://developers.openai.com/api/docs/models/gpt-6.1-terra
+      { id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra" },
     ],
     documentationURL: "https://developers.openai.com/api/docs/models/gpt-6-sol",
   },

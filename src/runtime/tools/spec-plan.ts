@@ -1,7 +1,7 @@
 import { isQwenVisionModel } from "../qwen-models.ts"
 import { isDoubaoVisionModel } from "../doubao-models.ts"
 import { isStepfunVisionModel } from "../stepfun-models.ts"
-import { openAIVisionPolicy } from "../openai-vision-models.ts"
+import { hasOpenAIImagePreparation } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
 import { isMimoVisionModel } from "../mimo-image-policy.ts"
@@ -228,7 +228,7 @@ export function captureStepContext(
       (input.serviceId === "codex" && input.wireApi === "openai_responses") ||
       (input.serviceId === "openai" &&
         input.wireApi === "openai_responses" &&
-        openAIVisionPolicy(target.model) !== undefined) ||
+        hasOpenAIImagePreparation(target.model)) ||
       input.wireApi === "bedrock_converse" ||
       (input.serviceId === "xai" &&
         input.wireApi === "openai_responses" &&

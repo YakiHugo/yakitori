@@ -277,6 +277,8 @@ it.each([
   { native: false, model: "gpt-6-astra", width: 4096 },
   { native: false, model: "gpt-5.5", width: 4096 },
   { native: false, model: "gpt-5.6-sol", width: 4096 },
+  { native: true, model: "gpt-6.1-sol", width: 4096 },
+  { native: true, model: "gpt-6.1-terra", width: 4096 },
   { native: true, model: "gpt-6-sol", width: 4096 },
   { native: true, model: "gpt-6-luna", width: 4096 },
   ...[
@@ -308,7 +310,7 @@ it.each([
         ? "https://api.openai.com/v1"
         : "https://relay.example/v1",
       models: [
-        native && model.startsWith("gpt-5.")
+        native && (model.startsWith("gpt-5.") || model.startsWith("gpt-6.1-"))
           ? { id: model }
           : { id: model, inputModalities: ["text", "image"] },
       ],
@@ -336,7 +338,11 @@ it.each([
     ...(turn.serviceId === undefined ? {} : { serviceId: turn.serviceId }),
     ...(turn.wireApi === undefined ? {} : { wireApi: turn.wireApi }),
   })
-  const bytes = await png()
+  const bytes = model.startsWith("gpt-6.1-")
+    ? await sharp(await png())
+        .webp()
+        .toBuffer()
+    : await png()
   const raw = block(bytes)
   const history: ModelMessage[] = [
     { role: "user", content: [raw] },
@@ -379,6 +385,10 @@ it.each([
       expect(events.at(-1), JSON.stringify(events)).toMatchObject({
         type: "response",
       })
+      if (model.startsWith("gpt-6.1-"))
+        expect(JSON.parse(bodies[replay] ?? "{}").reasoning.effort).toBe(
+          "medium",
+        )
       const urls = imageUrls(JSON.parse(bodies[replay] ?? "{}"))
       expect(urls).toHaveLength(2)
       if (native && model.startsWith("gpt-5.")) {
@@ -535,5 +545,78 @@ it.each([
   expect(result.events.at(-1)).toMatchObject({
     type: "failure",
     failure: { message: expect.stringContaining("30000-patch") },
+  })
+})
+
+it.each([
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
+])("preserves native %s WebP and rejects unverified original including remote URLs", async (model) => {
+  const bytes = await sharp(await png())
+    .webp()
+    .toBuffer()
+  const input = request([block(bytes)])
+  const result = await send({ ...input, target: { ...input.target, model } })
+  expect(result.events.at(-1)).toMatchObject({ type: "response" })
+  expect(imageUrls(JSON.parse(result.bodies[0] ?? "{}"))).toEqual([
+    `data:image/webp;base64,${bytes.toString("base64")}`,
+  ])
+  const remote = request([
+    {
+      type: "image",
+      mediaType: "image/png",
+      sizeBytes: 0,
+      detail: "original",
+      file: { url: "https://example.com/a.png" },
+    },
+  ])
+  const rejected = await send({
+    ...remote,
+    target: { ...remote.target, model },
+  })
+  expect(rejected.bodies).toHaveLength(0)
+  expect(rejected.events.at(-1)).toMatchObject({
+    type: "failure",
+    failure: { message: expect.stringContaining("not verified") },
+  })
+})
+
+it("rejects unverified native original retained inside a compaction replay", async () => {
+  const input = request([])
+  const model = "gpt-6.1-terra"
+  const result = await send({
+    ...input,
+    target: { ...input.target, model },
+    continuationScope: "account",
+    messages: [
+      {
+        role: "assistant",
+        content: [],
+        native: [
+          {
+            provider: "personal",
+            model,
+            wireApi: "openai_responses",
+            scope: "account",
+            value: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_image",
+                  detail: "original",
+                  image_url: "https://example.com/a.png",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  })
+  expect(result.bodies).toHaveLength(0)
+  expect(result.events.at(-1)).toMatchObject({
+    type: "failure",
+    failure: { message: expect.stringContaining("not verified") },
   })
 })

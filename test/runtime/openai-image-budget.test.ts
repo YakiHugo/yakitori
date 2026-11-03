@@ -151,6 +151,7 @@ describe("native OpenAI Responses image estimates", () => {
     { ...context, wireApi: "openai_chat_completions" as const },
     { ...context, model: { ...context.model, model: "gpt-5.6-sol-custom" } },
     { ...context, model: { ...context.model, model: "gpt-6.1-sol" } },
+    { ...context, model: { ...context.model, model: "gpt-6.1-terra" } },
   ])("does not apply public API facts to unverified transport/model facts: %j", (input) => {
     expect(openAIImageTokenEstimator(input)).toBeUndefined()
   })
