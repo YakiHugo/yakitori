@@ -22,6 +22,11 @@ import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
+import {
+  chatCompletionsImageFields,
+  chatCompletionsRequestFields,
+  isGlmStandardEndpoint,
+} from "./chat-completions-wire-policy.ts"
 import { glmTextModel } from "./glm-models.ts"
 import { JsonRequestBudgetError } from "./json-request-budget.ts"
 import { isMetaEndpoint } from "./meta-image-policy.ts"
@@ -183,9 +188,7 @@ async function* streamChatCompletions(
       URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
         "https://api.deepseek.com"
     const glmText =
-      options.flavor === "glm" &&
-      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.z.ai/api/paas/v4"
+      options.flavor === "glm" && isGlmStandardEndpoint(options.baseURL)
         ? glmTextModel(model)
         : undefined
     if (
@@ -302,10 +305,10 @@ async function* streamChatCompletions(
       model: request.target.model || options.model,
       messages,
       stream: true as const,
-      // These providers report streaming usage without OpenAI stream_options.
-      ...(stepfun || mimo || portableChat || reka || spark || glmText
-        ? {}
-        : { stream_options: { include_usage: true } }),
+      ...chatCompletionsRequestFields(
+        { flavor: options.flavor, baseURL: options.baseURL, model },
+        request.maxOutputTokens,
+      ),
       ...(request.parallelToolCalls === undefined
         ? {}
         : { parallel_tool_calls: request.parallelToolCalls }),
@@ -321,11 +324,6 @@ async function* streamChatCompletions(
               },
             },
           }),
-      ...(request.maxOutputTokens === undefined
-        ? {}
-        : mimo || spark
-          ? { max_completion_tokens: request.maxOutputTokens }
-          : { max_tokens: request.maxOutputTokens }),
       ...(request.tools.length === 0
         ? {}
         : {
@@ -1110,15 +1108,7 @@ export function toChatCompletionsMessages(
                     block.file && "url" in block.file
                       ? block.file.url
                       : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                  ...(flavor === "qwen" ||
-                  flavor === "glm" ||
-                  flavor === "sensenova" ||
-                  flavor === "longcat" ||
-                  flavor === "tencent" ||
-                  flavor === "reka" ||
-                  flavor === "mimo"
-                    ? {}
-                    : { detail: "high" as const }),
+                  ...chatCompletionsImageFields(flavor, "user"),
                 },
               }
             }),
@@ -1156,13 +1146,7 @@ export function toChatCompletionsMessages(
                   block.file && "url" in block.file
                     ? block.file.url
                     : `data:${block.mediaType};base64,${requireModelImageData(block)}`,
-                ...(flavor === "qwen" ||
-                flavor === "glm" ||
-                flavor === "tencent" ||
-                flavor === "reka" ||
-                flavor === "mimo"
-                  ? {}
-                  : { detail: "high" as const }),
+                ...chatCompletionsImageFields(flavor, "tool"),
               },
             },
           )
