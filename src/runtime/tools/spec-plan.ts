@@ -2,6 +2,7 @@ import { openAIVisionPolicy } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
 import { isMimoVisionModel } from "../mimo-image-policy.ts"
+import { nvidiaVisionModel } from "../nvidia-image-policy.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
 import type { ProviderToolCapabilities } from "../model-provider.ts"
@@ -217,6 +218,9 @@ export function captureStepContext(
               model,
             }),
     deferImagePreparation:
+      (input.serviceId === "nvidia" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === nvidiaVisionModel) ||
       (input.serviceId === "codex" && input.wireApi === "openai_responses") ||
       (input.serviceId === "openai" &&
         input.wireApi === "openai_responses" &&

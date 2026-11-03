@@ -119,6 +119,7 @@ export type ProviderPreset = Readonly<{
     | "longcat"
     | "tencent"
     | "mimo"
+    | "nvidia"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string
