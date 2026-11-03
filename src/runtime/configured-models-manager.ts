@@ -1,3 +1,4 @@
+import { geminiModelMetadata } from "./gemini-models.ts"
 import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import { restrictLongCatVision } from "./longcat-vision.ts"
 import { restrictSenseNovaVision } from "./sensenova-vision.ts"
@@ -80,6 +81,13 @@ export function createConfiguredModelsManager(input: {
         imageDetailModes: ["high", "original"],
       }
     }
+    const gemini =
+      input.serviceId === "gemini" &&
+      (input.wireApi === "gemini_generate_content" ||
+        input.wireApi === "gemini_interactions")
+        ? geminiModelMetadata(configured.id)
+        : undefined
+    if (gemini !== undefined) resolved = mergeEffectiveModel(resolved, gemini)
     resolved = mergeEffectiveModel(resolved, configured)
     if (input.wireApi !== undefined) {
       // Native schemas need both the wire protocol and the vendor's confirmed
@@ -152,7 +160,9 @@ export function createConfiguredModelsManager(input: {
           modelVisibleByDefault(
             input.catalogProvider ?? input.provider,
             configured.id,
-            configured.defaultVisible,
+            gemini?.defaultVisible === false
+              ? false
+              : configured.defaultVisible,
           ),
       },
       configured,

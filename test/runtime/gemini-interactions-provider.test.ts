@@ -214,6 +214,19 @@ describe("Gemini Interactions wire boundary", () => {
         is_error: true,
         result: [
           { type: "text", text: "Failed" },
+          {
+            type: "text",
+            text: "[Image from tool edit, call custom-1, content part 2; image follows the function-result batch.]",
+          },
+        ],
+      },
+      {
+        type: "user_input",
+        content: [
+          {
+            type: "text",
+            text: "[Image from tool edit, call custom-1, content part 2]",
+          },
           { type: "image", mime_type: "image/png", data: pngImageBase64 },
         ],
       },
@@ -229,7 +242,7 @@ describe("Gemini Interactions wire boundary", () => {
         scope,
         model ?? "",
       )
-      expect(input).toHaveLength(2)
+      expect(input).toHaveLength(3)
       expect(input[0]).toEqual(customCall)
       expect(JSON.stringify(input)).not.toContain("opaque-signature")
     }

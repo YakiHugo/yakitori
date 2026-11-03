@@ -1,6 +1,7 @@
 import { anthropicCodeModels } from "./anthropic-models.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { qwenModels } from "./qwen-models.ts"
+import { geminiPresetModels } from "./gemini-models.ts"
 import type {
   ProviderConfiguration,
   ProviderPreset,
@@ -68,7 +69,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "gemini_generate_content",
     envKey: "GEMINI_API_KEY",
     flavor: "gemini",
-    models: [{ id: "gemini-3.8-flash", inputModalities: ["text", "image"] }],
+    models: geminiPresetModels,
     documentationURL: "https://ai.google.dev/gemini-api/docs/text-generation",
   },
   {

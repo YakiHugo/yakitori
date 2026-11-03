@@ -1,3 +1,4 @@
+import { supportsGeminiToolImages } from "./gemini-models.ts"
 import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { prepareModelImage, validateModelImage } from "./prepare-model-image.ts"
 import {
@@ -148,7 +149,9 @@ async function* streamGemini(
         return [[tool.name, tool.customInputFallbackKey] as const]
       }),
     )
-    const generationConfig: Record<string, JsonValue> = { candidateCount: 1 }
+    // One candidate is the API default; Gemini 3+ rejects candidateCount.
+    // https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.6
+    const generationConfig: Record<string, JsonValue> = {}
     if (request.maxOutputTokens !== undefined)
       generationConfig.maxOutputTokens = request.maxOutputTokens
     if (request.target.effort !== undefined) {
@@ -676,7 +679,7 @@ export function toGeminiContents(
   // GenerateContent documents nested multimodal function responses for Gemini 3.
   // Do not infer this capability for aliases or older/future model families.
   // https://ai.google.dev/gemini-api/docs/generate-content/function-calling#multimodal
-  const nativeToolImages = /^(?:models\/)?gemini-3(?:[.-]|$)/.test(model ?? "")
+  const nativeToolImages = supportsGeminiToolImages(model ?? "")
   const nativeToolPdfs = supportsGeminiToolPdf(model ?? "")
   let toolResultIndex = 0
   for (const message of groupModelResponses(messages)) {

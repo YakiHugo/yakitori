@@ -235,6 +235,7 @@ it("keeps only confirmed image metadata and does not invent native effort levels
     {
       id: "gemini-3.8-flash",
       inputModalities: ["text", "image"],
+      imageDetailModes: ["high"],
       defaultVisible: true,
     },
     { id: "unknown-model", defaultVisible: true },

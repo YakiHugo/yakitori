@@ -132,9 +132,7 @@ describe("native GenerateContent image preparation", () => {
       { mimeType: `image/${format}`, data: source.toString("base64") },
     ])
     expect(input).toEqual(before)
-    expect(JSON.parse(result.bodies[0] ?? "{}").generationConfig).toEqual({
-      candidateCount: 1,
-    })
+    expect(JSON.parse(result.bodies[0] ?? "{}").generationConfig).toEqual({})
   })
 
   it("reprojects stored history from its available bytes after an endpoint switch", async () => {
@@ -175,6 +173,7 @@ describe("native GenerateContent image preparation", () => {
   it.each([
     "gemini-3.8-flash",
     "gemini-2.5-flash",
+    "gemini-3-future-text",
     "future-model",
   ])("preserves tool source pixels with the established %s schema", async (model) => {
     const source = await png()
