@@ -116,6 +116,7 @@ export type ProviderPreset = Readonly<{
     | "meta"
     | "stepfun"
     | "sensenova"
+    | "longcat"
     | "tencent"
     | "mimo"
   catalogProvider?: string

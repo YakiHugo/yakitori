@@ -1,4 +1,5 @@
 import { openAIVisionPolicy } from "./openai-vision-models.ts"
+import { restrictLongCatVision } from "./longcat-vision.ts"
 import { restrictSenseNovaVision } from "./sensenova-vision.ts"
 import { restrictTencentVision } from "./tencent-chat-only.ts"
 import {
@@ -160,9 +161,11 @@ export function createConfiguredModelsManager(input: {
       configured.id,
       input.serviceId === "sensenova"
         ? restrictSenseNovaVision(effective)
-        : input.serviceId === "tencent"
-          ? restrictTencentVision(effective)
-          : effective,
+        : input.serviceId === "longcat"
+          ? restrictLongCatVision(effective)
+          : input.serviceId === "tencent"
+            ? restrictTencentVision(effective)
+            : effective,
     )
   }
 

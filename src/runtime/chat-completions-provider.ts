@@ -1,4 +1,9 @@
 import {
+  createLongCatImagePolicy,
+  isLongCatEndpoint,
+  longcatVisionModel,
+} from "./longcat-vision.ts"
+import {
   isSenseNovaEndpoint,
   prepareSenseNovaImage,
   sensenovaVisionModel,
@@ -97,6 +102,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "meta"
     | "stepfun"
     | "sensenova"
+    | "longcat"
     | "tencent"
     | "mimo"
 }>
@@ -192,6 +198,28 @@ async function* streamChatCompletions(
           "SenseNova chat currently supports sensenova-6.8-flash-lite without output-format or reasoning-effort overrides only.",
         )
     }
+    const longcat =
+      options.flavor === "longcat" && isLongCatEndpoint(options.baseURL)
+    if (longcat) {
+      validateChatOnlyRequest(request)
+      if (
+        model !== longcatVisionModel ||
+        request.outputFormat !== undefined ||
+        request.target.effort !== undefined ||
+        request.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content.some((block) => block.type === "document"),
+        )
+      )
+        throw new AssetMediaError(
+          "LongCat image chat supports LongCat-2.5 text/images only, without native documents, output-format or reasoning-effort overrides.",
+        )
+    }
+    const portableChat = sensenova || longcat
+    const longcatImages = longcat
+      ? createLongCatImagePolicy(request)
+      : undefined
     const tencentVision =
       options.flavor === "tencent" && model === tencentVisionModel
     if (tencentVision) validateChatOnlyRequest(request)
@@ -274,6 +302,7 @@ async function* streamChatCompletions(
               prepareSenseNovaImage(bytes, image, request.signal),
           }
         : {}),
+      ...(longcatImages ? { prepareImage: longcatImages.prepareImage } : {}),
       ...(mimoImages ? { prepareImage: mimoImages.prepareImage } : {}),
       inlineDocumentUrls: true,
       ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
@@ -375,7 +404,8 @@ async function* streamChatCompletions(
       request.target.provider,
       request.continuationScope,
       (options.flavor === "mimo" && !mimo) ||
-        (options.flavor === "sensenova" && !sensenova)
+        (options.flavor === "sensenova" && !sensenova) ||
+        (options.flavor === "longcat" && !longcat)
         ? "generic"
         : (options.flavor ?? "generic"),
       request.target.model || options.model,
@@ -394,7 +424,7 @@ async function* streamChatCompletions(
       messages,
       stream: true as const,
       // StepFun reports usage in streaming chunks without OpenAI stream_options.
-      ...(stepfun || mimo || sensenova
+      ...(stepfun || mimo || portableChat
         ? {}
         : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
@@ -497,6 +527,7 @@ async function* streamChatCompletions(
     if (meta) validateMetaImageRequest(body)
     stepfunImages?.validateBody(body)
     mimoImages?.validateBody(body)
+    longcatImages?.validateBody(body)
     if (mimo) {
       const thinking = (body as { thinking?: { type?: string } }).thinking
       if (
@@ -605,13 +636,13 @@ async function* streamChatCompletions(
           nativeReasoning.encrypted_content = delta.encrypted_content
         }
         if (
-          sensenova &&
+          portableChat &&
           (delta.tool_calls != null ||
             delta.reasoning_details != null ||
             Array.isArray(delta.content))
         )
           throw new ChatCompletionsProtocolError(
-            "SenseNova chat returned unsupported tool or structured continuation state.",
+            "Image chat returned unsupported tool or structured continuation state.",
           )
         if (delta.annotations != null) {
           if (
@@ -880,7 +911,7 @@ async function* streamChatCompletions(
       content.push({
         type: "reasoning",
         text: reasoning,
-        ...(sensenova
+        ...(portableChat
           ? {}
           : {
               providerMetadata: {
@@ -1044,7 +1075,7 @@ async function* streamChatCompletions(
         type: "output_item",
         itemId: `${completionId ?? "completion"}_0`,
         content,
-        native: sensenova ? [] : native,
+        native: portableChat ? [] : native,
       }
     const requestId = providerRequestId
     yield {
@@ -1053,7 +1084,7 @@ async function* streamChatCompletions(
         stopReason,
         rawStopReason: finishReason,
         content,
-        native: sensenova ? [] : native,
+        native: portableChat ? [] : native,
         nativeMetadata: modelNativeResponseMetadata(
           request,
           "openai_chat_completions",
@@ -1192,6 +1223,7 @@ export function toChatCompletionsMessages(
                   ...(flavor === "qwen" ||
                   flavor === "glm" ||
                   flavor === "sensenova" ||
+                  flavor === "longcat" ||
                   flavor === "tencent" ||
                   flavor === "mimo"
                     ? {}
@@ -1329,7 +1361,9 @@ export function toChatCompletionsMessages(
         role: "assistant",
         content: text,
         ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
-        ...(flavor === "sensenova" || reasoning.length === 0
+        ...(flavor === "sensenova" ||
+        flavor === "longcat" ||
+        reasoning.length === 0
           ? {}
           : { reasoning_content: reasoning.join("\n") }),
       }

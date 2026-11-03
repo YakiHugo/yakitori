@@ -225,6 +225,28 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://docs.z.ai/guides/overview/quick-start",
   },
   {
+    id: "longcat",
+    name: "LongCat (Meituan)",
+    baseURL: "https://api.longcat.chat/openai/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "LONGCAT_API_KEY",
+    flavor: "longcat",
+    models: [
+      {
+        id: "LongCat-2.5",
+        displayName: "LongCat 2.5 (image chat only)",
+        contextWindowTokens: 1_048_576,
+        // The dedicated model-params page specifies 256K; Quick Start still
+        // says 128K. Use the endpoint's linked parameter reference.
+        maxOutputTokens: 262_144,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
+    ],
+    documentationURL:
+      "https://longcat.chat/platform/docs/image-video-understanding",
+  },
+  {
     id: "sensenova",
     name: "SenseNova",
     baseURL: "https://token.sensenova.cn/v1",
