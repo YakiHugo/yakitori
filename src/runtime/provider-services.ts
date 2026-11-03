@@ -1,3 +1,4 @@
+import { sparkChatEndpoint, sparkTextModel } from "./spark-chat-policy.ts"
 import { anthropicCodeModels } from "./anthropic-models.ts"
 import { doubaoModels } from "./doubao-models.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
@@ -144,6 +145,27 @@ export const providerServices: readonly ProviderPreset[] = [
       },
     ],
     documentationURL: "https://docs.reka.ai/chat/models",
+  },
+  {
+    id: "spark",
+    name: "iFLYTEK Spark (MaaS)",
+    baseURL: sparkChatEndpoint,
+    wireApi: "openai_chat_completions",
+    envKey: "SPARK_API_KEY",
+    flavor: "spark",
+    models: [
+      {
+        id: sparkTextModel,
+        displayName: "Spark-X2.5",
+        contextWindowTokens: 256_000,
+        contextWindowScope: "total",
+        inputModalities: ["text"],
+        imageDetailModes: [],
+        efforts: [],
+      },
+    ],
+    documentationURL:
+      "https://maas.xfyun.cn/doc/guide/3、API%20接口/3.1%20星火模型%20API/3.1.1%20Chat.html",
   },
   {
     id: "deepseek",
