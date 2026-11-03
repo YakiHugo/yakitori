@@ -36,6 +36,11 @@ import {
 } from "./meta-image-policy.ts"
 import { createMimoImagePolicy, isMimoEndpoint } from "./mimo-image-policy.ts"
 import {
+  createNvidiaImagePolicy,
+  isNvidiaEndpoint,
+  validateNvidiaRequest,
+} from "./nvidia-image-policy.ts"
+import {
   flattenModelSystem,
   type ModelContentBlock,
   type ModelImageBlock,
@@ -105,6 +110,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "longcat"
     | "tencent"
     | "mimo"
+    | "nvidia"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -185,6 +191,9 @@ async function* streamChatCompletions(
     const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
+    const nvidia =
+      options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
+    if (nvidia) validateNvidiaRequest(request, model)
     const sensenova =
       options.flavor === "sensenova" && isSenseNovaEndpoint(options.baseURL)
     if (sensenova) {
@@ -294,7 +303,9 @@ async function* streamChatCompletions(
       ? createStepfunImagePolicy(request, model)
       : undefined
     const mimoImages = mimo ? createMimoImagePolicy(request, model) : undefined
+    const nvidiaImages = nvidia ? createNvidiaImagePolicy(request) : undefined
     const media = await prepareProviderMedia(request, {
+      ...(nvidiaImages ? { prepareImage: nvidiaImages.prepareImage } : {}),
       ...(sensenova
         ? {
             inlineImageUrls: true,
@@ -405,7 +416,8 @@ async function* streamChatCompletions(
       request.continuationScope,
       (options.flavor === "mimo" && !mimo) ||
         (options.flavor === "sensenova" && !sensenova) ||
-        (options.flavor === "longcat" && !longcat)
+        (options.flavor === "longcat" && !longcat) ||
+        (options.flavor === "nvidia" && !nvidia)
         ? "generic"
         : (options.flavor ?? "generic"),
       request.target.model || options.model,
@@ -528,6 +540,7 @@ async function* streamChatCompletions(
     stepfunImages?.validateBody(body)
     mimoImages?.validateBody(body)
     longcatImages?.validateBody(body)
+    nvidiaImages?.validateBody(body)
     if (mimo) {
       const thinking = (body as { thinking?: { type?: string } }).thinking
       if (

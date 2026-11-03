@@ -111,6 +111,29 @@ export const providerServices: readonly ProviderPreset[] = [
     documentationURL: "https://dev.meta.ai/docs/image-understanding",
   },
   {
+    id: "nvidia",
+    name: "NVIDIA Nemotron",
+    baseURL: "https://integrate.api.nvidia.com/v1",
+    wireApi: "openai_chat_completions",
+    envKey: "NVIDIA_API_KEY",
+    flavor: "nvidia",
+    models: [
+      {
+        id: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        displayName: "Nemotron 3.5 Super VL",
+        // Build's hosted configuration advertises 262144, not the weights' 1M.
+        contextWindowTokens: 262_144,
+        maxOutputTokens: 131_072,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+        efforts: ["none", "low", "high"],
+        defaultEffort: "high",
+      },
+    ],
+    documentationURL:
+      "https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-super-vl-120b-a12b-infer",
+  },
+  {
     id: "deepseek",
     name: "DeepSeek",
     baseURL: "https://api.deepseek.com",

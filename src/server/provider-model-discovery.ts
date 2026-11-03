@@ -148,6 +148,13 @@ export async function discoverProviderModels(
         entry.id !== "kimi-k3"
       )
         continue
+      // NVIDIA's shared catalog includes third-party and specialized models.
+      // This native profile currently adapts only the documented Super VL API.
+      if (
+        officialPreset?.id === "nvidia" &&
+        !officialPreset.models.some((model) => model.id === entry.id)
+      )
+        continue
       const capabilities = isRecord(entry.capabilities)
         ? entry.capabilities
         : undefined
