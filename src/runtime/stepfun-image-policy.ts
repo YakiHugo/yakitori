@@ -6,19 +6,23 @@ import { AssetMediaError } from "./asset-media.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
 import type { ModelImageBlock, ModelRequest } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
+import { isStepfunVisionModel } from "./stepfun-models.ts"
 
-// Current Step 5 contract, checked 2026-11-02:
+// Current Step 5 / 3.7 contract, checked 2026-11-03:
 // https://platform.stepfun.ai/docs/en/guides/models/step-5-preview
 // https://platform.stepfun.ai/docs/en/guides/developer/image-chat
-// Step 5 documents 60 images, static GIF, and high/low (not original).
+// Both document 60 images, static GIF, and high/low (not original).
 // It does not publish image/body byte quotas. Bound encoded history + text +
 // tools at 32 MB as a LOCAL allocation safety policy, not a provider limit.
 const REQUEST_SAFETY_BYTES = 32_000_000
 
 export function isStepfunEndpoint(baseURL: string): boolean {
-  return ["https://api.stepfun.com/v1", "https://api.stepfun.ai/v1"].includes(
-    URL.parse(baseURL)?.href.replace(/\/$/, "") ?? "",
-  )
+  return [
+    "https://api.stepfun.com/v1",
+    "https://api.stepfun.ai/v1",
+    "https://api.stepfun.com/step_plan/v1",
+    "https://api.stepfun.ai/step_plan/v1",
+  ].includes(URL.parse(baseURL)?.href.replace(/\/$/, "") ?? "")
 }
 
 export function createStepfunImagePolicy(request: ModelRequest, model: string) {
@@ -31,13 +35,13 @@ export function createStepfunImagePolicy(request: ModelRequest, model: string) {
     0,
   )
   if (count === 0) return undefined
-  if (model !== "step-5-preview")
+  if (!isStepfunVisionModel(model))
     throw new AssetMediaError(
-      "StepFun images were not sent: this adapter supports image input only for the documented step-5-preview model. Select that model; originals have not been changed.",
+      "StepFun images were not sent: this adapter supports image input only for the documented step-5-preview and step-3.7-flash models. Select one of these models; originals have not been changed.",
     )
   if (count > 60)
     throw new AssetMediaError(
-      "StepFun images were not sent: Step 5 Preview supports at most 60 images per request. Send fewer images; originals have not been changed.",
+      "StepFun images were not sent: Step 5 Preview and Step 3.7 Flash support at most 60 images per request. Send fewer images; originals have not been changed.",
     )
   let encodedBytes = 0
   return {
@@ -56,7 +60,7 @@ export function createStepfunImagePolicy(request: ModelRequest, model: string) {
         request.signal?.throwIfAborted()
         if ((gif.pages ?? 1) !== 1)
           throw new InvalidImageDataError(
-            "Step 5 Preview accepts static GIF only. Export a static image copy; the animation was not flattened and the original has not been changed.",
+            "StepFun accepts static GIF only. Export a static image copy; the animation was not flattened and the original has not been changed.",
           )
       }
       return {

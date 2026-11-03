@@ -131,6 +131,7 @@ describe("direct Meta images", () => {
   it.each([
     { native: true, model: "muse-spark-1.3" },
     { native: true, model: "muse-wonder-1.0" },
+    { native: true, model: "muse-spark-1.2" },
     { native: false, model: "muse-spark-1.3" },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
     native,

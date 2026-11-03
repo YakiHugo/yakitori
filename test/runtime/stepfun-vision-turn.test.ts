@@ -19,6 +19,34 @@ afterEach(() => vi.restoreAllMocks())
 it.each([
   {
     service: "stepfun",
+    url: "https://api.stepfun.com/step_plan/v1",
+    model: "step-3.7-flash",
+    detail: "high",
+    native: true,
+  },
+  {
+    service: "stepfun",
+    url: "https://api.stepfun.ai/step_plan/v1",
+    model: "step-3.7-flash",
+    detail: "high",
+    native: true,
+  },
+  {
+    service: "stepfun",
+    url: "https://api.stepfun.com/v1",
+    model: "step-3.7-flash",
+    detail: "high",
+    native: true,
+  },
+  {
+    service: "stepfun",
+    url: "https://api.stepfun.ai/v1",
+    model: "step-3.7-flash",
+    detail: "original",
+    native: true,
+  },
+  {
+    service: "stepfun",
     url: "https://api.stepfun.com/v1",
     model: "step-5-preview",
     detail: "high",

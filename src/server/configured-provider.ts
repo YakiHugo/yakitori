@@ -34,10 +34,18 @@ export function createConfiguredProvider(
       provider: id,
       ...(service === undefined ? {} : { serviceId: service.id }),
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
-      models: configured.map((model) => ({
-        ...service?.models.find((known) => known.id === model.id),
-        ...model,
-      })),
+      models: configured.map((model) => {
+        const { defaultEffort, ...known } =
+          service?.models.find((known) => known.id === model.id) ?? {}
+        return {
+          ...known,
+          ...(defaultEffort !== undefined &&
+          (model.efforts === undefined || model.efforts.includes(defaultEffort))
+            ? { defaultEffort }
+            : {}),
+          ...model,
+        }
+      }),
       wireApi: configuration.wireApi,
     })
   const listeners = new Set<() => void>()

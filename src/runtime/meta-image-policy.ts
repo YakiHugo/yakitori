@@ -12,9 +12,7 @@ import { validateModelImage } from "./prepare-model-image.ts"
 // https://dev.meta.ai/docs/models
 // https://dev.meta.ai/docs/image-understanding
 // https://dev.meta.ai/docs/api-reference/chat-completions/schemas
-export function isMetaVisionModel(model: string): boolean {
-  return model === "muse-spark-1.3" || model === "muse-wonder-1.0"
-}
+export { isMetaVisionModel } from "./meta-models.ts"
 
 // Local serialization/allocation guard, not a Meta quota. Fits a documented
 // maximum 50 MB image after base64 with framing, while bounding image history.

@@ -1,5 +1,6 @@
 import { isQwenVisionModel } from "../qwen-models.ts"
 import { isDoubaoVisionModel } from "../doubao-models.ts"
+import { isStepfunVisionModel } from "../stepfun-models.ts"
 import { openAIVisionPolicy } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
@@ -266,7 +267,7 @@ export function captureStepContext(
         target.model === "glm-5.3-flash") ||
       (input.serviceId === "stepfun" &&
         input.wireApi === "openai_chat_completions" &&
-        target.model === "step-5-preview") ||
+        isStepfunVisionModel(target.model)) ||
       (input.serviceId === "mimo" &&
         input.wireApi === "openai_chat_completions" &&
         isMimoVisionModel(target.model)) ||

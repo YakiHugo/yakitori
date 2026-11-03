@@ -1,4 +1,5 @@
 import { geminiModelMetadata } from "./gemini-models.ts"
+import { isMetaContributorModel } from "./meta-models.ts"
 import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import { restrictLongCatVision } from "./longcat-vision.ts"
 import { restrictSenseNovaVision } from "./sensenova-vision.ts"
@@ -48,6 +49,9 @@ export function createConfiguredModelsManager(input: {
   )
   const models = new Map<string, EffectiveModel>()
   for (const configured of configuredModels) {
+    // Stored/manual visibility overrides are not informed data-training consent.
+    if (input.serviceId === "meta" && isMetaContributorModel(configured.id))
+      continue
     if (!isChatModel(configured)) continue
     if (configured.id.trim() === "" || models.has(configured.id)) {
       throw new Error(

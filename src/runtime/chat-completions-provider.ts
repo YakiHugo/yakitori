@@ -38,6 +38,7 @@ import {
   validateMetaImageRequest,
 } from "./meta-image-policy.ts"
 import { createMimoImagePolicy, isMimoEndpoint } from "./mimo-image-policy.ts"
+import { isMetaContributorModel } from "./meta-models.ts"
 import {
   createNvidiaImagePolicy,
   isNvidiaEndpoint,
@@ -263,9 +264,13 @@ async function* streamChatCompletions(
       options.flavor === "meta" &&
       URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
         "https://api.meta.ai/v1"
+    if (meta && isMetaContributorModel(model))
+      throw new AssetMediaError(
+        "Meta Contributor models are not enabled: they allow Meta to train on prompts, code, files and responses. Yakitori has no informed data-sharing opt-in for these models yet. Choose the Standard model ID without -contributor; nothing was sent.",
+      )
     if (meta && hasImages && !isMetaVisionModel(model))
       throw new AssetMediaError(
-        "Meta image input is enabled only for muse-spark-1.3 and muse-wonder-1.0, not aliases or subscription-only variants.",
+        "Meta image input is enabled only for muse-spark-1.3, muse-spark-1.2 and muse-wonder-1.0 Standard models, not aliases or subscription-only variants.",
       )
     if (
       meta &&
