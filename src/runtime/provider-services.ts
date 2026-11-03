@@ -1,5 +1,7 @@
 import { sparkChatEndpoint, sparkTextModel } from "./spark-chat-policy.ts"
 import { anthropicCodeModels } from "./anthropic-models.ts"
+import { deepseekModels } from "./deepseek-models.ts"
+import { glmModels } from "./glm-models.ts"
 import { doubaoModels } from "./doubao-models.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { qwenModels } from "./qwen-models.ts"
@@ -174,15 +176,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "DEEPSEEK_API_KEY",
     flavor: "deepseek",
-    models: [
-      {
-        id: "deepseek-flash",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high", "original"],
-        efforts: ["low", "high", "max"],
-        defaultEffort: "high",
-      },
-    ],
+    models: deepseekModels,
     documentationURL: "https://api-docs.deepseek.com/guides/thinking_mode/",
   },
   {
@@ -254,16 +248,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "ZAI_API_KEY",
     flavor: "glm",
-    models: [
-      { id: "glm-5.3" },
-      {
-        id: "glm-5.3-flash",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-        efforts: ["low", "high", "max"],
-        defaultEffort: "max",
-      },
-    ],
+    models: glmModels,
     documentationURL: "https://docs.z.ai/guides/overview/quick-start",
   },
   {
