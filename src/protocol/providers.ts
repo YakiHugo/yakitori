@@ -121,6 +121,7 @@ export type ProviderPreset = Readonly<{
     | "mimo"
     | "nvidia"
     | "reka"
+    | "spark"
   catalogProvider?: string
   models: readonly ConfiguredModel[]
   documentationURL: string

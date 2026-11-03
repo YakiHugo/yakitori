@@ -30,6 +30,10 @@ export async function discoverProviderModels(
       )
     return officialPreset.models
   }
+  // MaaS does not document GET /models. Keep the confirmed public API model
+  // separate from AStudio's private picker. Connection testing runs inference;
+  // a static catalog does not claim that credentials or account access work.
+  if (officialPreset?.id === "spark") return officialPreset.models
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)

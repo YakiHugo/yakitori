@@ -1,3 +1,8 @@
+import {
+  isSparkChatEndpoint,
+  validateSparkChatMessages,
+  validateSparkChatRequest,
+} from "./spark-chat-policy.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { isQwenTextModel, isQwenVisionModel } from "./qwen-models.ts"
 import {
@@ -117,6 +122,7 @@ export type ChatCompletionsProviderOptions = Readonly<{
     | "mimo"
     | "nvidia"
     | "reka"
+    | "spark"
 }>
 
 type Flavor = NonNullable<ChatCompletionsProviderOptions["flavor"]>
@@ -197,6 +203,9 @@ async function* streamChatCompletions(
     const doubao = options.flavor === "doubao"
     const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
+    const spark =
+      options.flavor === "spark" && isSparkChatEndpoint(options.baseURL)
+    if (spark) validateSparkChatRequest(request, model)
     const nvidia =
       options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
     if (nvidia) validateNvidiaRequest(request, model)
@@ -457,7 +466,7 @@ async function* streamChatCompletions(
       messages,
       stream: true as const,
       // These providers report streaming usage without OpenAI stream_options.
-      ...(stepfun || mimo || portableChat || reka
+      ...(stepfun || mimo || portableChat || reka || spark
         ? {}
         : { stream_options: { include_usage: true } }),
       ...(request.parallelToolCalls === undefined
@@ -477,7 +486,7 @@ async function* streamChatCompletions(
           }),
       ...(request.maxOutputTokens === undefined
         ? {}
-        : mimo
+        : mimo || spark
           ? { max_completion_tokens: request.maxOutputTokens }
           : { max_tokens: request.maxOutputTokens }),
       ...(request.tools.length === 0
@@ -563,6 +572,7 @@ async function* streamChatCompletions(
     longcatImages?.validateBody(body)
     nvidiaImages?.validateBody(body)
     rekaImages?.validateBody(body, messages)
+    if (spark) validateSparkChatMessages(messages)
     if (mimo) {
       const thinking = (body as { thinking?: { type?: string } }).thinking
       if (
@@ -628,6 +638,13 @@ async function* streamChatCompletions(
         yield { type: "cancelled", ...usageFields() }
         return
       }
+      if (spark && "code" in chunk && chunk.code !== 0)
+        throw new SparkBusinessError(
+          String(chunk.code),
+          "message" in chunk
+            ? String(chunk.message)
+            : "Spark MaaS request failed.",
+        )
       if (!Array.isArray(chunk.choices))
         throw new ChatCompletionsProtocolError("Missing completion choices.")
       if (typeof chunk.id === "string" && chunk.id.length > 0) {
@@ -842,6 +859,10 @@ async function* streamChatCompletions(
           if (!Array.isArray(delta.tool_calls))
             throw new ChatCompletionsProtocolError("Invalid tool call deltas.")
           for (const tool of delta.tool_calls) {
+            if (spark && isJsonObject(tool) && tool.type === "custom")
+              throw new ChatCompletionsProtocolError(
+                "Spark MaaS returned an unsupported native custom tool.",
+              )
             if (
               !isJsonObject(tool) ||
               typeof tool.index !== "number" ||
@@ -1194,12 +1215,15 @@ async function* streamChatCompletions(
           ? { providerCode: apiError.code }
           : {}),
         providerMessage:
-          error instanceof MimoRepetitionTruncationError
+          error instanceof MimoRepetitionTruncationError ||
+          error instanceof SparkBusinessError
             ? error.message
             : providerErrorMessage({ error: apiError?.error }),
         ...(error instanceof MimoRepetitionTruncationError
           ? { providerCode: "repetition_truncation", serverShouldRetry: false }
-          : {}),
+          : error instanceof SparkBusinessError
+            ? { providerCode: error.code }
+            : {}),
         ...(requestId === undefined ? {} : { providerRequestId: requestId }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
@@ -1524,5 +1548,13 @@ function fromChatUsage(
 }
 
 class ChatCompletionsProtocolError extends Error {}
+class SparkBusinessError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+}
 class MimoRepetitionTruncationError extends ChatCompletionsProtocolError {}
 class ChatCompletionsIncompleteStreamError extends Error {}
