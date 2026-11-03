@@ -1,14 +1,15 @@
 import { anthropicModel } from "../runtime/anthropic-models.ts"
+import { configuredModelWithDefaults } from "../runtime/configured-model-defaults.ts"
 import { geminiModelMetadata } from "../runtime/gemini-models.ts"
 import { isMetaContributorModel } from "../runtime/meta-models.ts"
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
-import { rekaVisionModel } from "../runtime/reka-vision.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { providerServiceForEndpoint } from "../runtime/provider-services.ts"
 import { stepfunDiscoveredMetadata } from "../runtime/stepfun-models.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
+import { providerDiscoveryPolicy } from "./provider-discovery-policy.ts"
 
 // Discovery is a read-only catalog request. The timeout bounds network work
 // during setup; it is an implementation safety boundary, not a model quota.
@@ -21,24 +22,17 @@ export async function discoverProviderModels(
     configuration.wireApi === "gemini_generate_content" ||
     configuration.wireApi === "gemini_interactions"
   const officialPreset = providerServiceForEndpoint(configuration)
-  // Bedrock Runtime has no GET /models. Return only the documented static
-  // preset; this is catalog availability, not authentication verification.
-  if (configuration.wireApi === "bedrock_converse") {
-    if (officialPreset?.id !== "amazon-nova")
-      throw new ConfigurationError(
-        "No static catalog for this Bedrock endpoint.",
-      )
+  const policy = providerDiscoveryPolicy(officialPreset)
+  // A documented static catalog does not verify credentials or account access.
+  if (policy.source === "preset" && officialPreset !== undefined)
     return officialPreset.models
-  }
-  // MaaS does not document GET /models. Keep the confirmed public API model
-  // separate from AStudio's private picker. Connection testing runs inference;
-  // a static catalog does not claim that credentials or account access work.
-  if (officialPreset?.id === "spark") return officialPreset.models
+  if (configuration.wireApi === "bedrock_converse")
+    throw new ConfigurationError("No static catalog for this Bedrock endpoint.")
   const path = messages ? "v1/models" : "models"
   const base = `${configuration.baseURL.replace(/\/+$/, "")}/`
   const url = new URL(messages && /\/v1\/$/.test(base) ? "models" : path, base)
-  if (officialPreset?.id === "siliconflow")
-    url.searchParams.set("sub_type", "chat")
+  for (const [key, value] of Object.entries(policy.query ?? {}))
+    url.searchParams.set(key, value)
   const headers: Record<string, string> = { accept: "application/json" }
   if (
     apiKey &&
@@ -75,8 +69,7 @@ export async function discoverProviderModels(
         pages.size === 1 &&
         !gemini &&
         [404, 405].includes(response.status) &&
-        officialPreset?.id !== "reka" &&
-        officialPreset?.id !== "stepfun" &&
+        policy.missingCatalog !== "error" &&
         configuration.wireApi === officialPreset?.wireApi &&
         officialPreset?.models.length
       )
@@ -164,6 +157,8 @@ export async function discoverProviderModels(
       }
       if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim())
         throw new ConfigurationError("A model catalog entry has no model ID.")
+      if (policy.allowedModels && !policy.allowedModels.includes(entry.id))
+        continue
       // Match Step Code's typed catalog: search, audio and generation entries
       // cannot enter the coding-model picker. Untyped catalogs stay usable.
       if (
@@ -179,25 +174,9 @@ export async function discoverProviderModels(
       // GET /models is authoritative for account availability.
       if (
         officialPreset?.id === "reka" &&
-        (entry.id !== rekaVisionModel ||
-          entry.is_ready === false ||
+        (entry.is_ready === false ||
           (Array.isArray(entry.supported_features) &&
             !entry.supported_features.includes("tools")))
-      )
-        continue
-      // Kimi's shared catalog also lists models outside this adapted protocol.
-      // Keep unsupported models out of the selectable directory, not just hidden.
-      if (
-        officialPreset?.id === "moonshot" &&
-        configuration.wireApi === "openai_responses" &&
-        entry.id !== "kimi-k3"
-      )
-        continue
-      // NVIDIA's shared catalog includes third-party and specialized models.
-      // This native profile currently adapts only the documented Super VL API.
-      if (
-        officialPreset?.id === "nvidia" &&
-        !officialPreset.models.some((model) => model.id === entry.id)
       )
         continue
       if (officialPreset?.id === "anthropic" && messages) {
@@ -242,7 +221,9 @@ export async function discoverProviderModels(
         : undefined
       const output =
         entry.max_output_tokens ??
-        (officialPreset?.id === "reka" ? entry.max_output_length : undefined) ??
+        (policy.maxOutputTokensField === undefined
+          ? undefined
+          : entry[policy.maxOutputTokensField]) ??
         topProvider?.max_completion_tokens
       const modalities =
         architecture?.input_modalities ?? entry.input_modalities
@@ -290,11 +271,7 @@ export async function discoverProviderModels(
             })
           : {}
       const kind = discoveredModelKind(entry, nativeProvider)
-      models.set(entry.id, {
-        // Exact first-party model facts fill catalog omissions, never relay aliases.
-        ...(officialPreset?.id === "minimax" || officialPreset?.id === "glm"
-          ? officialPreset.models.find((model) => model.id === entry.id)
-          : {}),
+      const discovered: ConfiguredModel = {
         id: entry.id,
         defaultVisible,
         ...(name ? { displayName: name } : {}),
@@ -329,7 +306,16 @@ export async function discoverProviderModels(
           ? stepfunDiscoveredMetadata({ ...entry, id: entry.id })
           : {}),
         ...(kind === undefined ? {} : { kind }),
-      })
+      }
+      models.set(
+        entry.id,
+        configuredModelWithDefaults(
+          discovered,
+          policy.fillPresetMetadata
+            ? officialPreset?.models.find((model) => model.id === entry.id)
+            : undefined,
+        ),
+      )
     }
     if (gemini) {
       if (body.nextPageToken === undefined || body.nextPageToken === "") break
