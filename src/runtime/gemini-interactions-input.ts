@@ -1,3 +1,4 @@
+import { supportsGeminiToolImages } from "./gemini-models.ts"
 import { isJsonObject, type JsonObject } from "../kernel/index.ts"
 import {
   type ModelMessage,
@@ -20,7 +21,13 @@ export function toGeminiInteractionInput(
 ): JsonObject[] {
   const input: JsonObject[] = []
   const calls = new Map<string, string>()
+  const nativeToolImages = supportsGeminiToolImages(model)
+  let pendingToolImages: JsonObject[] = []
   for (const message of groupModelResponses(messages)) {
+    if (pendingToolImages.length > 0 && message.role !== "tool")
+      throw new ModelRequestControlsError(
+        "Interactions tool images require the complete function-result batch.",
+      )
     if (message.role === "user" || message.role === "developer") {
       input.push({
         type: "user_input",
@@ -40,8 +47,9 @@ export function toGeminiInteractionInput(
           "Unmatched Interactions tool result.",
         )
       calls.delete(message.toolCallId)
-      // FunctionResult's content array accepts text/images, unlike UserInput.
-      // The tool plan must render PDF results before this wire boundary.
+      // Only confirmed Gemini 3 models accept images in FunctionResult.
+      // Other vision models receive attributed images after the complete tool
+      // result batch. The tool plan must render PDFs before this boundary.
       if (message.content.some((block) => block.type === "document"))
         throw new ModelRequestControlsError(
           "Interactions function results require PDF content to be rendered first.",
@@ -50,9 +58,25 @@ export function toGeminiInteractionInput(
         type: "function_result",
         call_id: message.toolCallId,
         name,
-        result: message.content.map(interactionContent),
+        result: message.content.map((block, index) => {
+          if (block.type !== "image" || nativeToolImages)
+            return interactionContent(block)
+          const label = `Image from tool ${name}, call ${message.toolCallId}, content part ${index + 1}`
+          pendingToolImages.push(
+            { type: "text", text: `[${label}]` },
+            interactionContent(block),
+          )
+          return {
+            type: "text",
+            text: `[${label}; image follows the function-result batch.]`,
+          }
+        }),
         ...(message.isError === undefined ? {} : { is_error: message.isError }),
       })
+      if (calls.size === 0 && pendingToolImages.length > 0) {
+        input.push({ type: "user_input", content: pendingToolImages })
+        pendingToolImages = []
+      }
       continue
     }
     const native = replayModelNativeItems(
@@ -113,6 +137,10 @@ export function toGeminiInteractionInput(
       input.push(step)
     }
   }
+  if (pendingToolImages.length > 0)
+    throw new ModelRequestControlsError(
+      "Interactions tool images require the complete function-result batch.",
+    )
   return input
 }
 

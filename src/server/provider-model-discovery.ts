@@ -1,4 +1,5 @@
 import { anthropicModel } from "../runtime/anthropic-models.ts"
+import { geminiModelMetadata } from "../runtime/gemini-models.ts"
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import { rekaVisionModel } from "../runtime/reka-vision.ts"
@@ -113,7 +114,8 @@ export async function discoverProviderModels(
           Array.isArray(entry.supportedGenerationMethods) &&
           entry.supportedGenerationMethods.includes("generateContent")
         const id = entry.name.slice("models/".length)
-        const known = officialPreset?.models.find((model) => model.id === id)
+        const known =
+          officialPreset?.id === "gemini" ? geminiModelMetadata(id) : undefined
         const capacity = entry.inputTokenLimit
         const output = entry.outputTokenLimit
         models.set(id, {
@@ -121,7 +123,7 @@ export async function discoverProviderModels(
           ...(Array.isArray(entry.supportedGenerationMethods) && !defaultVisible
             ? { kind: "other" as const }
             : {}),
-          defaultVisible,
+          defaultVisible: defaultVisible && known?.defaultVisible !== false,
           ...(typeof entry.displayName === "string" && entry.displayName.trim()
             ? { displayName: entry.displayName }
             : {}),
@@ -138,6 +140,10 @@ export async function discoverProviderModels(
           ...(known?.inputModalities
             ? { inputModalities: known.inputModalities }
             : {}),
+          ...(known?.imageDetailModes
+            ? { imageDetailModes: known.imageDetailModes }
+            : {}),
+          ...(known?.efforts ? { efforts: known.efforts } : {}),
         })
         continue
       }

@@ -170,7 +170,7 @@ describe("native Gemini provider", () => {
         }
         expect(body).toMatchObject({
           systemInstruction: { parts: [{ text: "System" }] },
-          generationConfig: { candidateCount: 1, maxOutputTokens: 100 },
+          generationConfig: { maxOutputTokens: 100 },
           tools: [
             {
               functionDeclarations: [

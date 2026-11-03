@@ -206,8 +206,7 @@ export function applyModelRequestControls<T extends object>(
       config !== undefined &&
       (typeof config !== "object" ||
         config === null ||
-        !("candidateCount" in config) ||
-        config.candidateCount !== 1)
+        ("candidateCount" in config && config.candidateCount !== 1))
     )
       throw new ModelRequestControlsError(
         "The coding agent requires exactly one Gemini candidate.",

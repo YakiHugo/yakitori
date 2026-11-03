@@ -195,7 +195,6 @@ it.each(
           },
         },
         generationConfig: {
-          candidateCount: 1,
           responseMimeType: "application/json",
           responseJsonSchema: schema,
           thinkingConfig: { thinkingLevel: "LOW" },
@@ -284,7 +283,6 @@ it.each([
     native: { generationConfig: { thinkingConfig: { includeThoughts: true } } },
     expected: {
       generationConfig: {
-        candidateCount: 1,
         thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
       },
     },
