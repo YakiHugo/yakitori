@@ -266,7 +266,10 @@ export function captureStepContext(
         target.model === "step-5-preview") ||
       (input.serviceId === "mimo" &&
         input.wireApi === "openai_chat_completions" &&
-        isMimoVisionModel(target.model)),
+        isMimoVisionModel(target.model)) ||
+      (input.serviceId === "reka" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "reka-edge-2603"),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,
