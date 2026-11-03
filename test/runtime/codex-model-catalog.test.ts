@@ -55,9 +55,10 @@ it.each([
     "xhigh",
   )
   expect(getModelInstructions(resolved).revision).toBe(revision)
-  expect(
-    resolveModel({ provider: "openai", model }).usedFallbackModelMetadata,
-  ).toBe(true)
+  expect(resolveModel({ provider: "openai", model })).toMatchObject({
+    defaultEffort: "medium",
+    imageDetailModes: ["high"],
+  })
   expect(
     resolveModel({ provider: "codex", model: `${model}-custom` })
       .usedFallbackModelMetadata,

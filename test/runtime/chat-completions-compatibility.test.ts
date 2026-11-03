@@ -22,6 +22,7 @@ describe("OpenAI Chat Completions compatibility", () => {
   it.each([
     "gpt-6-astra",
     "gpt-6.1-sol",
+    "gpt-6.1-terra",
   ])("%s permits plain chat but directs tools and tool history to Responses", (model) => {
     expect(chatCompletionsIncompatibility(official, request(model))).toBe(
       undefined,
@@ -36,6 +37,15 @@ describe("OpenAI Chat Completions compatibility", () => {
         `${model} requires the Responses API`,
       )
     }
+  })
+
+  it("Terra still requires Responses tools at none reasoning", () => {
+    expect(
+      chatCompletionsIncompatibility(
+        official,
+        request("gpt-6.1-terra", { tools }, "none"),
+      ),
+    ).toContain("requires the Responses API")
   })
 
   it.each([

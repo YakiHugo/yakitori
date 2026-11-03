@@ -2,9 +2,7 @@
 // https://developers.openai.com/api/docs/guides/images-vision (2026-11-03)
 // GPT-6 Sol/Luna are image-capable, but their patch/detail rules are not listed:
 // do not infer them from Astra or a shared model-name prefix.
-export function openAIVisionPolicy(
-  model: string,
-):
+export function openAIVisionPolicy(model: string):
   | {
       highMaxDimension: number
       originalMaxDimension: number
@@ -30,4 +28,16 @@ export function openAIVisionPolicy(
     default:
       return undefined
   }
+}
+
+// These model pages confirm image input but publish no original-detail or
+// patch accounting rule. Use the common native format/resource guard only.
+// https://developers.openai.com/api/docs/models/gpt-6.1-sol
+// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+export function hasOpenAIImagePreparation(model: string): boolean {
+  return (
+    openAIVisionPolicy(model) !== undefined ||
+    model === "gpt-6.1-sol" ||
+    model === "gpt-6.1-terra"
+  )
 }

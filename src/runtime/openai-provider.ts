@@ -1,4 +1,7 @@
-import { openAIVisionPolicy } from "./openai-vision-models.ts"
+import {
+  hasOpenAIImagePreparation,
+  openAIVisionPolicy,
+} from "./openai-vision-models.ts"
 import {
   CODEX_IMAGE_REQUEST_SAFETY_BYTES,
   CodexImageRequestSizeError,
@@ -366,7 +369,12 @@ async function* streamOpenAI(
             return reasoning
           })
       }
-      if (nativeOpenAIImages) validateOpenAIImageRequest(body)
+      if (nativeOpenAIImages)
+        validateOpenAIImageRequest(
+          body,
+          openAIVisionPolicy(request.target.model || defaultModel) !==
+            undefined,
+        )
       return body
     }
     // Native compaction can retain images outside portable content. Gate by
@@ -374,7 +382,7 @@ async function* streamOpenAI(
     const nativeOpenAIImages =
       responseProfile === "openai" &&
       requestProfile === undefined &&
-      openAIVisionPolicy(request.target.model || defaultModel) !== undefined &&
+      hasOpenAIImagePreparation(request.target.model || defaultModel) &&
       URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
         "https://api.openai.com/v1"
     const nativeKimiImages =
@@ -582,7 +590,12 @@ async function* streamOpenAI(
             : { prompt_cache_key: request.cacheKey }),
         },
       )
-      if (nativeOpenAIImages) validateOpenAIImageRequest(compactBody)
+      if (nativeOpenAIImages)
+        validateOpenAIImageRequest(
+          compactBody,
+          openAIVisionPolicy(request.target.model || defaultModel) !==
+            undefined,
+        )
       const { data: compacted, response: compactResponse } =
         await client.responses
           .compact(

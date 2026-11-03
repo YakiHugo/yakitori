@@ -1,4 +1,7 @@
-import { openAIVisionPolicy } from "./openai-vision-models.ts"
+import {
+  openAIVisionPolicy,
+  hasOpenAIImagePreparation,
+} from "./openai-vision-models.ts"
 import {
   inspectImageBytes,
   InvalidImageDataError,
@@ -23,7 +26,10 @@ export class OpenAIImageRequestSizeError extends AssetMediaError {
   }
 }
 
-export function validateOpenAIImageRequest(body: unknown): void {
+export function validateOpenAIImageRequest(
+  body: unknown,
+  originalSupported = true,
+): void {
   if (
     jsonRequestByteLength(body, OPENAI_IMAGE_REQUEST_SAFETY_BYTES) === undefined
   )
@@ -47,6 +53,16 @@ export function validateOpenAIImageRequest(body: unknown): void {
           : undefined
     for (const block of Array.isArray(content) ? content : []) {
       if (
+        !originalSupported &&
+        typeof block === "object" &&
+        block !== null &&
+        block.type === "input_image" &&
+        block.detail === "original"
+      )
+        throw new AssetMediaError(
+          "Original image detail is not verified for this native OpenAI model. Choose high detail; the original image has not been changed.",
+        )
+      if (
         typeof block === "object" &&
         block !== null &&
         block.type === "input_image" &&
@@ -67,16 +83,25 @@ export async function prepareOpenAIImage(
 ): Promise<ModelImageBlock> {
   signal?.throwIfAborted()
   const policy = openAIVisionPolicy(model)
-  if (policy === undefined)
+  if (!hasOpenAIImagePreparation(model))
     throw new Error("Unverified native OpenAI image policy.")
   const metadata = inspectImageBytes(bytes)
   const detail = image.detail ?? "high"
-  // High is reduced server-side to the model's edge/2500-patch budget.
+  if (detail === "original" && policy === undefined)
+    throw new InvalidImageDataError(
+      "Original image detail is not verified for this native OpenAI model. Choose high detail; the original image has not been changed.",
+    )
+  // Models with a verified patch policy use its server-side sizing rules.
+  // No patch size, budget or original mode is inferred for GPT-6.1.
   // GPT-5.4/5.5 original is also resized server-side (6000 edge/10000 patches).
   // Astra/GPT-5.6 original instead has
   // a hard 30000-patch rejection after the 65535-edge adjustment, not a resize
   // budget. Never secretly switch detail or shrink original to evade rejection.
-  if (detail === "original" && policy.originalPatchBudget === undefined) {
+  if (
+    detail === "original" &&
+    policy !== undefined &&
+    policy.originalPatchBudget === undefined
+  ) {
     const scale = Math.min(
       1,
       policy.originalMaxDimension / Math.max(metadata.width, metadata.height),
