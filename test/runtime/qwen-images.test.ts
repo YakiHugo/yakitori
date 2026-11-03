@@ -1,4 +1,5 @@
 import sharp from "sharp"
+import { qwenEndpointPolicy } from "../../src/runtime/qwen-endpoints.ts"
 import { prepareModelMedia } from "../../src/runtime/model-media.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
@@ -22,6 +23,11 @@ import {
 } from "../../src/runtime/qwen-image-policy.ts"
 
 afterEach(() => vi.restoreAllMocks())
+
+const dashscope = {
+  requestBytes: 16 * 1024 * 1024,
+  requestLimit: "16 MiB DashScope",
+}
 
 const image = async (
   width = 32,
@@ -103,7 +109,15 @@ describe("direct Qwen images", () => {
   })
 
   it.each([
-    { native: true, model: "qwen3.8-max", preserved: true },
+    ...[
+      "qwen3.8-max",
+      "qwen3.8-max-0902",
+      "qwen3.8-flash",
+      "qwen3.7-plus",
+      "qwen3.6-plus",
+      "qwen3.6-flash",
+      "qwen3.5-plus",
+    ].map((model) => ({ native: true, model, preserved: true })),
     { native: false, model: "qwen3.8-max", preserved: false },
     { native: true, model: "qwen3.8-max-unverified", preserved: false },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
@@ -259,26 +273,42 @@ describe("direct Qwen images", () => {
       image_url: { url: "https://example.com/a.png" },
     }
     expect(() =>
-      validateQwenImageRequest({
-        messages: [{ role: "user", content: Array(251).fill(part) }],
-      }),
+      validateQwenImageRequest(
+        {
+          messages: [
+            {
+              role: "user",
+              content: Array(251).fill({
+                ...part,
+                image_url: { url: "data:image/png;base64,AAAA" },
+              }),
+            },
+          ],
+        },
+        dashscope,
+        "qwen3.8-max",
+      ),
     ).toThrow("250-image")
     expect(() =>
-      validateQwenImageRequest({
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                ...part,
-                image_url: {
-                  url: `data:image/png;base64,${"A".repeat(20_000_000)}`,
+      validateQwenImageRequest(
+        {
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  ...part,
+                  image_url: {
+                    url: `data:image/png;base64,${"A".repeat(20_000_000)}`,
+                  },
                 },
-              },
-            ],
-          },
-        ],
-      }),
+              ],
+            },
+          ],
+        },
+        dashscope,
+        "qwen3.8-max",
+      ),
     ).toThrow("20 MB")
   })
 
@@ -304,9 +334,13 @@ describe("direct Qwen images", () => {
       limit - Buffer.byteLength(JSON.stringify(body), "utf8"),
     )
     expect(Buffer.byteLength(JSON.stringify(body), "utf8")).toBe(limit)
-    expect(() => validateQwenImageRequest(body)).not.toThrow()
+    expect(() =>
+      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
+    ).not.toThrow()
     body.padding += "a"
-    expect(() => validateQwenImageRequest(body)).toThrow("16 MiB")
+    expect(() =>
+      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
+    ).toThrow("16 MiB")
     body.padding += "overflow"
     let lateReads = 0
     Object.defineProperty(body, "later", {
@@ -316,7 +350,9 @@ describe("direct Qwen images", () => {
         throw new Error("Must not serialize after overflow")
       },
     })
-    expect(() => validateQwenImageRequest(body)).toThrow("16 MiB")
+    expect(() =>
+      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
+    ).toThrow("16 MiB")
     expect(lateReads).toBe(0)
   })
 
@@ -339,6 +375,139 @@ describe("direct Qwen images", () => {
           stage: "request_build",
           kind: "invalid_request",
           message: expect.stringContaining("16 MiB"),
+        }),
+      }),
+    ])
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["qwen3.8-max", 2048],
+    ["qwen3.8-max-0902", 2048],
+    ["qwen3.7-plus", 2048],
+    ["qwen3.6-plus", 256],
+    ["qwen3.6-flash", 256],
+    ["qwen3.5-plus", 256],
+  ])("uses %s URL allowance without treating it as base64", (model, count) => {
+    const endpoint = qwenEndpointPolicy(
+      "https://maas.qwencloudapi.com/compatible-mode/v1",
+    )
+    if (!endpoint) throw new Error("Missing Qwen endpoint")
+    const part = {
+      type: "image_url" as const,
+      image_url: { url: "https://example.com/image.png" },
+    }
+    const content = Array.from({ length: count }, () => part)
+    const body = { messages: [{ role: "user" as const, content }] }
+    expect(() => validateQwenImageRequest(body, endpoint, model)).not.toThrow()
+    content.push(part)
+    expect(() => validateQwenImageRequest(body, endpoint, model)).toThrow(
+      `${count}-image`,
+    )
+    content.splice(250)
+    content.push({
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,AAAA" },
+    })
+    expect(() => validateQwenImageRequest(body, endpoint, model)).toThrow(
+      "250-image",
+    )
+  })
+
+  it("enforces the full 64 MB body budget for QwenCloud", () => {
+    const endpoint = qwenEndpointPolicy(
+      "https://maas.qwencloudapi.com/compatible-mode/v1",
+    )
+    if (!endpoint) throw new Error("Missing Qwen endpoint")
+    const body = {
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            {
+              type: "image_url" as const,
+              image_url: { url: "https://example.com/image.png" },
+            },
+          ],
+        },
+      ],
+      tools: [{ description: '界\n"🙂', parameters: { type: "object" } }],
+      padding: "",
+    }
+    body.padding = "a".repeat(
+      64_000_000 - Buffer.byteLength(JSON.stringify(body), "utf8"),
+    )
+    expect(() =>
+      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
+    ).not.toThrow()
+    body.padding += "a"
+    expect(() =>
+      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
+    ).toThrow("64 MB")
+  })
+
+  it.each([
+    "https://maas.qwencloudapi.com/compatible-mode/v1",
+    "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  ])("uses %s budget instead of the DashScope limit on the wire", async (baseURL) => {
+    const bodies: string[] = []
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
+      bodies.push(String(options?.body))
+      return new Response(
+        'data: {"id":"reply","choices":[{"index":0,"delta":{"content":"Seen"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    })
+    const block = await image(3000, 20)
+    const events = []
+    for await (const event of createChatCompletionsProvider({
+      apiKey: "unused",
+      model: "qwen3.8-flash",
+      flavor: "qwen",
+      baseURL,
+    })({
+      ...request(block, "a".repeat(17_000_000)),
+      target: {
+        provider: "personal",
+        model: "qwen3.8-flash",
+        instructionProfileId: "default",
+      },
+    }))
+      events.push(event)
+    expect(events.at(-1), JSON.stringify(events)).toMatchObject({
+      type: "response",
+    })
+    expect(bodies[0]).toContain(block.data)
+    expect(bodies[0]).not.toContain('"detail"')
+  })
+
+  it.each([
+    "qwen3.7-max",
+    "qwen3-coder-plus",
+    "qwen3-coder-next",
+    "qwen3-max-2026-01-23",
+  ])("does not send images to text-only %s even for a direct caller", async (model) => {
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected fetch"))
+    const block = await image()
+    const events = []
+    for await (const event of createChatCompletionsProvider({
+      apiKey: "unused",
+      model,
+      flavor: "qwen",
+      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    })({
+      ...request(block),
+      target: { provider: "personal", model, instructionProfileId: "default" },
+    }))
+      events.push(event)
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          stage: "request_build",
+          message: expect.stringContaining("text-only"),
         }),
       }),
     ])
