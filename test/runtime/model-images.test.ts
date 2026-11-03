@@ -30,7 +30,7 @@ describe("model image adaptation", () => {
           { type: "text", text: "inspect" },
           {
             type: "text",
-            text: expect.stringContaining("does not support image input"),
+            text: expect.stringContaining("does not have image input enabled"),
           },
         ],
       },

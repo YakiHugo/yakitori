@@ -143,7 +143,7 @@ describe("native GenerateContent image preparation", () => {
     const legacyData = outgoing(legacy.bodies[0] ?? "{}")[0]?.data ?? ""
     expect(
       (await sharp(Buffer.from(legacyData, "base64")).metadata()).width,
-    ).toBe(2048)
+    ).toBe(3000)
     const native = await run(input)
     expect(outgoing(native.bodies[0] ?? "{}")[0]?.data).toBe(
       source.toString("base64"),
@@ -162,11 +162,11 @@ describe("native GenerateContent image preparation", () => {
   it.each([
     "https://compatible.example/v1beta",
     "https://generativelanguage.googleapis.com/v1",
-  ])("keeps legacy file preparation at %s", async (baseURL) => {
+  ])("does not guess a compatible endpoint resolution at %s", async (baseURL) => {
     const result = await run(assetRequest(await png()), baseURL)
     const data = outgoing(result.bodies[0] ?? "{}")[0]?.data ?? ""
     expect((await sharp(Buffer.from(data, "base64")).metadata()).width).toBe(
-      2048,
+      2400,
     )
   })
 
@@ -356,7 +356,7 @@ describe("native GenerateContent image preparation", () => {
     expect(JSON.stringify(result.events)).toContain("3600")
   })
 
-  it("keeps mixed PDF requests on existing bounded image preparation", async () => {
+  it("preserves image resolution in mixed PDF requests", async () => {
     const input = assetRequest(await png())
     const result = await run({
       ...input,
@@ -380,7 +380,7 @@ describe("native GenerateContent image preparation", () => {
     expect(result.events.at(-1)?.type).toBe("response")
     const data = outgoing(result.bodies[0] ?? "{}")[0]?.data ?? ""
     expect((await sharp(Buffer.from(data, "base64")).metadata()).width).toBe(
-      2048,
+      2400,
     )
   })
 })

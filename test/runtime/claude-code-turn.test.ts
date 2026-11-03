@@ -22,35 +22,35 @@ it.each([
     url: "https://api.anthropic.com",
     model: "claude-fable-5-1",
     detail: "high",
-    width: 3000,
+    native: true,
   },
   {
     service: "anthropic",
     url: "https://api.anthropic.com",
     model: "claude-sonnet-5-5",
     detail: "original",
-    width: 3000,
+    native: true,
   },
   {
     service: "anthropic",
     url: "https://api.anthropic.com",
     model: "claude-haiku-4-5-20251001",
     detail: "high",
-    width: 3000,
+    native: true,
   },
   {
     service: "anthropic",
     url: "https://relay.example",
     model: "claude-sonnet-5-5",
     detail: "high",
-    width: 2048,
+    native: false,
   },
 ] as const)("prepares tool images through real Turn for $url $model $detail", async ({
   service,
   url,
   model,
   detail,
-  width,
+  native,
 }) => {
   const source = await sharp({
     create: {
@@ -95,7 +95,7 @@ it.each([
           usage: { input_tokens: 5, output_tokens: 0 },
           stop_reason: null,
           ...(bodies.length === 2 &&
-          width === 3000 &&
+          native &&
           model !== "claude-haiku-4-5-20251001"
             ? {
                 input_transformations: [
@@ -163,7 +163,7 @@ it.each([
       models: [
         {
           id: model,
-          ...(width === 3000
+          ...(native
             ? {}
             : {
                 inputModalities: ["text", "image"],
@@ -212,7 +212,7 @@ it.each([
       if (event.type === "turn.completed") break
     }
     expect(warnings).toHaveLength(
-      width === 3000 && model !== "claude-haiku-4-5-20251001" ? 1 : 0,
+      native && model !== "claude-haiku-4-5-20251001" ? 1 : 0,
     )
     if (warnings.length) expect(warnings[0]?.message).toContain("extra tokens")
     expect(bodies).toHaveLength(2)
@@ -242,8 +242,8 @@ it.each([
       (block: { type: string }) => block.type === "image",
     )
     const bytes = Buffer.from(sentImage.source.data, "base64")
-    expect((await sharp(bytes).metadata()).width).toBe(width)
-    if (width === 3000) expect(bytes).toEqual(source)
+    expect((await sharp(bytes).metadata()).width).toBe(3000)
+    expect(bytes).toEqual(source)
     expect(JSON.stringify(second.system)).toContain("Inspect image")
     const tool = thread
       .snapshot()

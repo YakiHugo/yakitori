@@ -239,7 +239,7 @@ describe("native Z.AI GLM vision", () => {
         const data = image.url.split(",")[1] ?? ""
         expect(
           (await sharp(Buffer.from(data, "base64")).metadata()).width,
-        ).toBe(preserve ? 3000 : 2048)
+        ).toBe(3000)
         if (preserve) {
           expect(data).toBe(bytes.toString("base64"))
           expect(image).not.toHaveProperty("detail")

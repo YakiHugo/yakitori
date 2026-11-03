@@ -44,7 +44,7 @@ export function adaptImagesForModel(
         changed = true
         return {
           type: "text" as const,
-          text: `[Attached image was not sent because ${target.provider}/${target.model} does not support image input. The user should switch to a vision-capable model if visual inspection is required.]`,
+          text: `[Attached image was not sent because ${target.provider}/${target.model} does not have image input enabled. The user should select a verified vision-capable model if visual inspection is required.]`,
         }
       }
       if (!shouldDowngradeOriginal || block.detail !== "original") return block

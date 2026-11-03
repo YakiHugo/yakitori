@@ -8,8 +8,8 @@ import {
   anthropicImageCount,
   anthropicImageTier,
   prepareAnthropicImage,
+  validateAnthropicScreenshot,
 } from "./anthropic-image-policy.ts"
-import { prepareModelImage } from "./prepare-model-image.ts"
 import { prepareKimiCodeImage } from "./kimi-code-image-policy.ts"
 import Anthropic, { toFile } from "@anthropic-ai/sdk"
 import type {
@@ -232,13 +232,14 @@ async function* streamAnthropic(
       ].includes(
         new URL(client.baseURL ?? fallbackBaseURL).href.replace(/\/$/, ""),
       )
-    // Native hosted tools have different screenshot limits; legacy SDK controls
-    // can rewrite the JSON body. Keep these advanced requests on their existing
-    // image preparation instead of guessing their resize or serialization rules.
+    // Hard native admission and local request budgets apply even with PDFs or
+    // SDK controls. Only the ordinary image-only slice opts into automatic
+    // tier re-encoding: advanced controls may change screenshot/SDK semantics.
     const controls = request.providerOptions?.body
-    const checkNativeImageLimits =
-      nativeImagePolicy &&
-      anthropicImageCount(request.messages) > 0 &&
+    const imageCount = anthropicImageCount(request.messages)
+    const nativeImages = nativeImagePolicy && imageCount > 0
+    const allowTierImagePreparation =
+      nativeImages &&
       !request.messages.some(
         (message) =>
           (message.role === "user" || message.role === "tool") &&
@@ -249,10 +250,9 @@ async function* streamAnthropic(
       controls?.output_format === undefined &&
       controls?.betas === undefined
     const imageTier = anthropicImageTier(request.target.model || defaultModel)
-    const delegateImages = checkNativeImageLimits && imageTier !== undefined
-    const imageCount = anthropicImageCount(request.messages)
+    const delegateImages = allowTierImagePreparation && imageTier !== undefined
     if (
-      checkNativeImageLimits &&
+      nativeImages &&
       imageCount >
         (anthropicModel(request.target.model || defaultModel)?.configuration
           .contextWindowTokens === 200_000
@@ -262,6 +262,34 @@ async function* streamAnthropic(
       throw new AssetMediaError(
         "Images were not sent: the request exceeds the applicable Claude image-count guard (the documented model allowance when known, otherwise the shared API maximum). Send fewer attachments; originals have not been changed.",
       )
+    const screenshotTools = new Set(
+      (Array.isArray(controls?.tools) ? controls.tools : []).flatMap((tool) =>
+        isJsonObject(tool) &&
+        typeof tool.type === "string" &&
+        /^(computer|browser)_/.test(tool.type) &&
+        typeof tool.name === "string"
+          ? [tool.name]
+          : [],
+      ),
+    )
+    const screenshotCalls = new Set(
+      request.messages.flatMap((message) =>
+        message.role === "assistant"
+          ? message.content.flatMap((part) =>
+              part.type === "tool_call" && screenshotTools.has(part.name)
+                ? [part.id]
+                : [],
+            )
+          : [],
+      ),
+    )
+    const screenshots = new Set(
+      request.messages.flatMap((message) =>
+        message.role === "tool" && screenshotCalls.has(message.toolCallId)
+          ? message.content.filter((part) => part.type === "image")
+          : [],
+      ),
+    )
     let preferSmallerImages = !delegateImages
     let preparedImageBytes = 0
     const prepareImage = async (
@@ -270,15 +298,15 @@ async function* streamAnthropic(
     ) => {
       if (kimiCodeImages)
         return prepareKimiCodeImage(bytes, image, request.signal)
-      if (!checkNativeImageLimits)
-        return prepareModelImage(bytes, image.detail ?? "high", request.signal)
+      if (screenshots.has(image))
+        validateAnthropicScreenshot(bytes, request.target.model || defaultModel)
       const prepared = await prepareAnthropicImage(
         bytes,
         image,
         imageCount,
         request.signal,
         preferSmallerImages,
-        imageTier ?? null,
+        delegateImages ? (imageTier ?? null) : null,
       )
       preparedImageBytes += prepared.data?.length ?? 0
       // A lower bound catches large file-backed batches before retaining every
@@ -373,11 +401,11 @@ async function* streamAnthropic(
         format: { type: "json_schema", schema: request.outputFormat.schema },
       }
     body = applyModelRequestControls(request, "anthropic_messages", body)
-    // This opt-in slice excludes documents, so budgeting and the single model-tier
-    // fallback happen before any upload or model call. Count the real serializer,
-    // including tools, system content and provider controls, not just image data.
+    // Every native image request retains the whole-body budget. Only the
+    // image-only slice may retry with its known tier, before any upload. Do not
+    // rerun a document upload or guess screenshot resizing for advanced tools.
     if (
-      checkNativeImageLimits &&
+      nativeImages &&
       Buffer.byteLength(JSON.stringify(body), "utf8") >
         ANTHROPIC_REQUEST_MAX_BYTES
     ) {

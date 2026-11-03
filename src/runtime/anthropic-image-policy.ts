@@ -62,7 +62,7 @@ export async function prepareAnthropicImage(
   }
   if (tier === null)
     throw new InvalidImageDataError(
-      `Image was not sent: exceeds the direct Claude image admission bounds used by Yakitori (${maxDimension} pixels per side${imageCount > 20 ? ", conservatively for many-image requests," : ""} and 10 MB base64). Automatic resizing is not configured for this model. Resize or compress a copy and retry; the original has not been changed.`,
+      `Image was not sent: exceeds the direct Claude image admission bounds used by Yakitori (${maxDimension} pixels per side${imageCount > 20 ? ", conservatively for many-image requests," : ""} and 10 MB base64). Automatic resizing is not configured for this request. Resize or compress a copy and retry; the original has not been changed.`,
     )
   const prepared = await prepareTierImage(bytes, tier, signal)
   if (prepared === undefined)
@@ -74,6 +74,25 @@ export async function prepareAnthropicImage(
       "Image was not sent: it exceeds the Claude API's 10 MB base64 image limit even after bounded preparation. Resize or compress a copy and retry; the original has not been changed.",
     )
   return prepared
+}
+
+// Computer/browser tool screenshots are not server-downscaled like ordinary
+// images. Do not resize them implicitly: the tool's coordinate space must agree.
+export function validateAnthropicScreenshot(
+  bytes: Buffer,
+  model: string,
+): void {
+  const tier = anthropicImageTier(model)
+  if (tier === undefined)
+    throw new InvalidImageDataError(
+      "Native computer/browser screenshot limits are not configured for this model. Select a verified screenshot model; the original has not been changed.",
+    )
+  const { width, height } = inspectImageBytes(bytes)
+  const prepared = anthropicImageSize(width, height, tier)
+  if (prepared.width !== width || prepared.height !== height)
+    throw new InvalidImageDataError(
+      "Native computer/browser screenshot exceeds the selected model's visual resolution. Resize a copy and update the tool's coordinate mapping before retrying; the original has not been changed.",
+    )
 }
 
 // Largest aspect-preserving dimensions fitting Claude's documented model

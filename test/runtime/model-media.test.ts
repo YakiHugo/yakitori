@@ -42,9 +42,9 @@ it("identifies the earlier corrupt inline image without mutating history or the 
 
 it.each([
   [true, "claude-sonnet-4-6", 2400],
-  [false, "claude-sonnet-4-6", 2048],
+  [false, "claude-sonnet-4-6", 2400],
   [true, "claude-future", 2400],
-] as const)("defers resizing only for a captured native endpoint, leaving model-specific decisions to its adapter (%s, %s)", async (deferImagePreparation, model, width) => {
+] as const)("preserves source resolution before a model-specific adapter regardless of deferred preparation (%s, %s)", async (deferImagePreparation, model, width) => {
   const { default: sharp } = await import("sharp")
   const bytes = await sharp({
     create: { width: 2400, height: 1200, channels: 3, background: "red" },

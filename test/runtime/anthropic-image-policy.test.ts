@@ -155,7 +155,7 @@ describe("native Anthropic image preparation", () => {
   it.each([
     ["https://compatible.example/v1", "claude-sonnet-4-6"],
     ["https://api.anthropic.com/v1", "claude-sonnet-4-6"],
-  ])("keeps legacy file preparation for %s and %s", async (endpoint, model) => {
+  ])("preserves resolution on compatibility routes %s and %s", async (endpoint, model) => {
     const source = await png()
     const input = fileRequest(source)
     const result = await send(
@@ -164,8 +164,8 @@ describe("native Anthropic image preparation", () => {
     )
     expect(result.events.at(-1)?.type).toBe("response")
     const [outgoing] = sentImages(result.bodies)
-    expect(outgoing).not.toEqual(source)
-    expect((await sharp(outgoing).metadata()).width).toBe(2048)
+    expect(outgoing).toEqual(source)
+    expect((await sharp(outgoing).metadata()).width).toBe(2400)
   })
 
   it("preserves native images nested in tool results", async () => {
@@ -311,7 +311,7 @@ describe("native Anthropic image preparation", () => {
     expect(result.bodies).toHaveLength(1)
   })
 
-  it("retains legacy file-image preparation for a mixed PDF request", async () => {
+  it("preserves file-image resolution for a mixed PDF request", async () => {
     const input = fileRequest(await png())
     const result = await send({
       ...input,
@@ -334,7 +334,7 @@ describe("native Anthropic image preparation", () => {
     })
     expect(result.events.at(-1)?.type).toBe("response")
     expect((await sharp(sentImages(result.bodies)[0]).metadata()).width).toBe(
-      2048,
+      2400,
     )
   })
 })
@@ -352,7 +352,7 @@ it.each([
   },
   { user_profile_id: "profile-example" },
   { output_format: { type: "json_schema", schema: { type: "object" } } },
-])("keeps advanced native controls on legacy preparation", async (body) => {
+])("preserves image resolution with advanced native controls", async (body) => {
   const input = fileRequest(await png())
   const result = await send({
     ...input,
@@ -364,7 +364,7 @@ it.each([
   })
   expect(result.events.at(-1)?.type).toBe("response")
   expect((await sharp(sentImages(result.bodies)[0]).metadata()).width).toBe(
-    2048,
+    2400,
   )
 })
 
@@ -531,7 +531,7 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
       throw new Error("Missing inline image")
     expect(
       (await sharp(Buffer.from(block.data, "base64")).metadata()).width,
-    ).toBe(2048)
+    ).toBe(2400)
     expect(JSON.stringify(input.messages)).toBe(before)
   } finally {
     await rm(root, { recursive: true, force: true })
