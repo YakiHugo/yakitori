@@ -1,3 +1,5 @@
+import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
+import { isQwenTextModel, isQwenVisionModel } from "./qwen-models.ts"
 import {
   createLongCatImagePolicy,
   isLongCatEndpoint,
@@ -291,9 +293,15 @@ async function* streamChatCompletions(
     // image estimate can undercount them. Do not invent a local token ceiling
     // or silently reduce detail: provider context rejection remains visible.
     let imageBytes = 0
-    const nativeQwenImages =
-      options.flavor === "qwen" &&
-      (request.target.model || options.model) === "qwen3.8-max"
+    const qwen =
+      options.flavor === "qwen"
+        ? qwenEndpointPolicy(options.baseURL)
+        : undefined
+    const nativeQwenImages = qwen !== undefined && isQwenVisionModel(model)
+    if (qwen && hasImages && isQwenTextModel(model))
+      throw new AssetMediaError(
+        `Qwen ${model} is text-only. Choose a documented vision model; images were not sent and originals have not been changed.`,
+      )
     const glmImages =
       options.flavor === "glm" && model === "glm-5.3-flash"
         ? createGlmImagePolicy(request)
@@ -344,9 +352,9 @@ async function* streamChatCompletions(
             prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
               // Bound inline accumulation before allocating each base64 copy.
               qwenImageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (qwenImageBytes > 16 * 1024 * 1024)
+              if (qwenImageBytes > qwen.requestBytes)
                 throw new AssetMediaError(
-                  "Qwen images were not sent: image data alone exceeds the 16 MiB DashScope request limit. Send fewer images; originals have not been changed.",
+                  `Qwen images were not sent: image data alone exceeds the ${qwen.requestLimit} request limit. Send fewer images; originals have not been changed.`,
                 )
               return prepareQwenImage(bytes, image, request.signal)
             },
@@ -419,7 +427,8 @@ async function* streamChatCompletions(
       media.messages,
       request.target.provider,
       request.continuationScope,
-      (options.flavor === "mimo" && !mimo) ||
+      (options.flavor === "qwen" && !qwen) ||
+        (options.flavor === "mimo" && !mimo) ||
         (options.flavor === "sensenova" && !sensenova) ||
         (options.flavor === "longcat" && !longcat) ||
         (options.flavor === "nvidia" && !nvidia) ||
@@ -539,7 +548,7 @@ async function* streamChatCompletions(
         "Doubao request exceeds 64 MB including text, tools and encoded images.",
       )
     tencentImages?.validateBody(body)
-    if (nativeQwenImages) validateQwenImageRequest(body)
+    if (nativeQwenImages) validateQwenImageRequest(body, qwen, model)
     imagePolicy?.validateBody(body, media.messages)
     glmImages?.validateBody(body)
     if (meta) validateMetaImageRequest(body)

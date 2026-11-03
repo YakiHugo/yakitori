@@ -1,4 +1,6 @@
 import { anthropicCodeModels } from "./anthropic-models.ts"
+import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
+import { qwenModels } from "./qwen-models.ts"
 import type {
   ProviderConfiguration,
   ProviderPreset,
@@ -174,13 +176,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "DASHSCOPE_API_KEY",
     flavor: "qwen",
-    models: [
-      {
-        id: "qwen3.8-max",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-    ],
+    models: qwenModels,
     documentationURL:
       "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
   },
@@ -471,6 +467,11 @@ export function providerServiceForEndpoint(
     (entry) => entry.id === configuration.service,
   )
   if (service === undefined) return undefined
+  if (service.id === "qwen")
+    return configuration.wireApi === "openai_chat_completions" &&
+      qwenEndpointPolicy(configuration.baseURL) !== undefined
+      ? service
+      : undefined
   const endpoints = [
     { baseURL: service.baseURL, wireApi: service.wireApi },
     ...(serviceEndpointVariants[service.id] ?? []),

@@ -4,11 +4,12 @@ import {
   InvalidImageDataError,
 } from "../kernel/image-metadata.ts"
 import { AssetMediaError } from "./asset-media.ts"
+import type { QwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
 import type { ModelImageBlock } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
-// Direct DashScope OpenAI-compatible image contract, checked 2026-11-02:
+// Qwen OpenAI-compatible image contract, checked 2026-11-03:
 // https://docs.bailian.console.aliyun.com/en/model-studio/vision
 // Keep original bytes; Qwen owns visual tokenization/resizing, not Codex's
 // generic 2048px preparation. No OpenAI detail field is documented by Qwen.
@@ -17,8 +18,17 @@ export async function prepareQwenImage(
   image: ModelImageBlock,
   signal?: AbortSignal,
 ): Promise<ModelImageBlock> {
-  await validateModelImage(bytes, signal)
   const metadata = inspectImageBytes(bytes)
+  // Check the encoded URI before decoding or allocating a base64 copy.
+  if (
+    4 * Math.ceil(bytes.length / 3) +
+      `data:${metadata.mediaType};base64,`.length >
+    20_000_000
+  )
+    throw new AssetMediaError(
+      "Qwen image was not sent: its data URI exceeds 20 MB. Compress a copy; the original has not been changed.",
+    )
+  await validateModelImage(bytes, signal)
   const { width, height, mediaType } = metadata
   if (
     width <= 10 ||
@@ -43,9 +53,11 @@ export async function prepareQwenImage(
   }
 }
 
-export function validateQwenImageRequest(body: {
-  messages: readonly ChatCompletionMessageParam[]
-}): void {
+export function validateQwenImageRequest(
+  body: { messages: readonly ChatCompletionMessageParam[] },
+  endpoint: QwenEndpointPolicy,
+  model: string,
+): void {
   const images = body.messages.flatMap((message) =>
     Array.isArray(message.content)
       ? message.content.filter((part) => part.type === "image_url")
@@ -55,11 +67,22 @@ export function validateQwenImageRequest(body: {
   const inline = images.filter((image) =>
     image.image_url.url.startsWith("data:"),
   )
-  // 250 is the documented base64 count. Use it as a conservative local
-  // admission bound for mixed/URL requests too, rather than guessing a model.
-  if (images.length > 250)
+  // Mixed requests retain the documented base64 bound. URL-only requests
+  // use their exact model's larger allowance without fetching remote pixels.
+  const limit =
+    inline.length > 0
+      ? 250
+      : [
+            "qwen3.8-max",
+            "qwen3.8-max-0902",
+            "qwen3.8-flash",
+            "qwen3.7-plus",
+          ].includes(model)
+        ? 2048
+        : 256
+  if (images.length > limit)
     throw new AssetMediaError(
-      "Qwen images were not sent: exceeds Yakitori's conservative 250-image request bound. Send fewer images; originals have not been changed.",
+      `Qwen images were not sent: exceeds the ${limit}-image request bound. Send fewer images; originals have not been changed.`,
     )
   if (
     inline.some(
@@ -69,10 +92,9 @@ export function validateQwenImageRequest(body: {
     throw new AssetMediaError(
       "Qwen image was not sent: its data URI exceeds 20 MB. Compress a copy; the original has not been changed.",
     )
-  // The currently registered Qwen endpoint is DashScope, not a workspace
-  // domain. Count final JSON, including text, tools, escaping and base64.
-  if (jsonRequestByteLength(body, 16 * 1024 * 1024) === undefined)
+  // Count final JSON, including text, tools, escaping and base64.
+  if (jsonRequestByteLength(body, endpoint.requestBytes) === undefined)
     throw new AssetMediaError(
-      "Qwen images were not sent: the complete DashScope request exceeds 16 MiB. Send fewer images or reduce other request content; originals have not been changed.",
+      `Qwen images were not sent: the complete request exceeds ${endpoint.requestLimit}. Send fewer images or reduce other request content; originals have not been changed.`,
     )
 }

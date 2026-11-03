@@ -1,3 +1,4 @@
+import { isQwenVisionModel } from "../qwen-models.ts"
 import { openAIVisionPolicy } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
@@ -254,7 +255,7 @@ export function captureStepContext(
         target.model === "doubao-seed-2-1-pro-260915") ||
       (input.serviceId === "qwen" &&
         input.wireApi === "openai_chat_completions" &&
-        target.model === "qwen3.8-max") ||
+        isQwenVisionModel(target.model)) ||
       (input.serviceId === "deepseek" &&
         input.wireApi === "openai_chat_completions" &&
         model.model === "deepseek-flash") ||
