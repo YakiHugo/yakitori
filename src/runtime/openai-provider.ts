@@ -1,3 +1,4 @@
+import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import {
   CODEX_IMAGE_REQUEST_SAFETY_BYTES,
   CodexImageRequestSizeError,
@@ -7,7 +8,7 @@ import {
 import {
   OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
   OpenAIImageRequestSizeError,
-  prepareOpenAIAstraImage,
+  prepareOpenAIImage,
   validateOpenAIImageRequest,
 } from "./openai-image-policy.ts"
 import OpenAI, { type ClientOptions, toFile } from "openai"
@@ -365,15 +366,15 @@ async function* streamOpenAI(
             return reasoning
           })
       }
-      if (nativeAstraImages) validateOpenAIImageRequest(body)
+      if (nativeOpenAIImages) validateOpenAIImageRequest(body)
       return body
     }
     // Native compaction can retain images outside portable content. Gate by
     // endpoint/model, not portable image presence, and bound the final wire body.
-    const nativeAstraImages =
+    const nativeOpenAIImages =
       responseProfile === "openai" &&
       requestProfile === undefined &&
-      (request.target.model || defaultModel) === "gpt-6-astra" &&
+      openAIVisionPolicy(request.target.model || defaultModel) !== undefined &&
       URL.parse(client.baseURL)?.href.replace(/\/$/, "") ===
         "https://api.openai.com/v1"
     const nativeKimiImages =
@@ -418,10 +419,10 @@ async function* streamOpenAI(
       throw new AssetMediaError(
         "Codex image URLs are not supported. Import the image as an attachment before sending; no remote image was fetched.",
       )
-    let astraImageBytes = 0
+    let openAIImageBytes = 0
     let grokImageBytes = 0
     let preparedImageBytes = 0
-    if (nativeKimiImages || nativeAstraImages || codexImages) {
+    if (nativeKimiImages || nativeOpenAIImages || codexImages) {
       const placeholders = request.messages.map(
         (message): ModelMessage =>
           message.role === "user" || message.role === "tool"
@@ -435,7 +436,7 @@ async function* streamOpenAI(
                         data: "",
                         detail: block.detail ?? "high",
                       }
-                    : nativeAstraImages &&
+                    : nativeOpenAIImages &&
                         block.type === "document" &&
                         block.data === undefined &&
                         !("url" in block.file)
@@ -447,19 +448,19 @@ async function* streamOpenAI(
       )
       const size = jsonRequestByteLength(
         buildBody(placeholders, new Map()),
-        nativeAstraImages
+        nativeOpenAIImages
           ? OPENAI_IMAGE_REQUEST_SAFETY_BYTES
           : codexImages
             ? CODEX_IMAGE_REQUEST_SAFETY_BYTES
             : KIMI_IMAGE_REQUEST_SAFETY_BYTES,
       )
       if (size === undefined) {
-        if (nativeAstraImages) throw new OpenAIImageRequestSizeError()
+        if (nativeOpenAIImages) throw new OpenAIImageRequestSizeError()
         if (codexImages) throw new CodexImageRequestSizeError()
         throw new KimiImageRequestSizeError()
       }
-      if (nativeAstraImages) {
-        astraImageBytes = size
+      if (nativeOpenAIImages) {
+        openAIImageBytes = size
         // Reject existing inline payloads before Buffer.from allocates decoded
         // copies. Resolved assets are charged incrementally before re-encoding.
         let inlineBytes = size
@@ -495,16 +496,21 @@ async function* streamOpenAI(
           }
         : {}),
 
-      ...(nativeAstraImages
+      ...(nativeOpenAIImages
         ? {
             prepareImage: async (
               bytes: Buffer,
               image: ModelImageBlock,
             ): Promise<ModelImageBlock> => {
-              astraImageBytes += 4 * Math.ceil(bytes.length / 3) + 1
-              if (astraImageBytes > OPENAI_IMAGE_REQUEST_SAFETY_BYTES)
+              openAIImageBytes += 4 * Math.ceil(bytes.length / 3) + 1
+              if (openAIImageBytes > OPENAI_IMAGE_REQUEST_SAFETY_BYTES)
                 throw new OpenAIImageRequestSizeError()
-              return prepareOpenAIAstraImage(bytes, image, request.signal)
+              return prepareOpenAIImage(
+                bytes,
+                image,
+                request.target.model || defaultModel,
+                request.signal,
+              )
             },
           }
         : {}),
@@ -576,7 +582,7 @@ async function* streamOpenAI(
             : { prompt_cache_key: request.cacheKey }),
         },
       )
-      if (nativeAstraImages) validateOpenAIImageRequest(compactBody)
+      if (nativeOpenAIImages) validateOpenAIImageRequest(compactBody)
       const { data: compacted, response: compactResponse } =
         await client.responses
           .compact(

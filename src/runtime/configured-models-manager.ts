@@ -1,3 +1,4 @@
+import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import { restrictSenseNovaVision } from "./sensenova-vision.ts"
 import { restrictTencentVision } from "./tencent-chat-only.ts"
 import {
@@ -64,6 +65,19 @@ export function createConfiguredModelsManager(input: {
           })),
       provider: input.provider,
       model: configured.id,
+    }
+    // Only fill native visual defaults. Prompt/tool/context fallback stays intact,
+    // and explicit connection-level capability overrides still apply last.
+    if (
+      input.serviceId === "openai" &&
+      input.wireApi === "openai_responses" &&
+      openAIVisionPolicy(configured.id) !== undefined
+    ) {
+      resolved = {
+        ...resolved,
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      }
     }
     resolved = mergeEffectiveModel(resolved, configured)
     if (input.wireApi !== undefined) {

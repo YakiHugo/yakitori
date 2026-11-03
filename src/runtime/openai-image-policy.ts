@@ -1,3 +1,4 @@
+import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import {
   inspectImageBytes,
   InvalidImageDataError,
@@ -7,7 +8,7 @@ import { jsonRequestByteLength } from "./json-request-budget.ts"
 import type { ModelImageBlock } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
-// Native Responses Astra only; not the ChatGPT/Codex proxy or compatible APIs.
+// Verified native Responses models only; not the ChatGPT/Codex proxy or compatible APIs.
 // https://developers.openai.com/api/docs/guides/images-vision (2026-11-02)
 // API ceiling: 512 MB / 1500 images. This lower local serialization guard fits
 // one existing 50 MB attachment after base64 plus framing, without accumulating
@@ -58,24 +59,33 @@ export function validateOpenAIImageRequest(body: unknown): void {
   }
 }
 
-export async function prepareOpenAIAstraImage(
+export async function prepareOpenAIImage(
   bytes: Buffer,
   image: ModelImageBlock,
+  model: string,
   signal?: AbortSignal,
 ): Promise<ModelImageBlock> {
   signal?.throwIfAborted()
+  const policy = openAIVisionPolicy(model)
+  if (policy === undefined)
+    throw new Error("Unverified native OpenAI image policy.")
   const metadata = inspectImageBytes(bytes)
   const detail = image.detail ?? "high"
-  // High is reduced server-side to a 2500-patch budget. Original instead has
+  // High is reduced server-side to the model's edge/2500-patch budget.
+  // GPT-5.4/5.5 original is also resized server-side (6000 edge/10000 patches).
+  // Astra/GPT-5.6 original instead has
   // a hard 30000-patch rejection after the 65535-edge adjustment, not a resize
   // budget. Never secretly switch detail or shrink original to evade rejection.
-  if (detail === "original") {
-    const scale = Math.min(1, 65535 / Math.max(metadata.width, metadata.height))
+  if (detail === "original" && policy.originalPatchBudget === undefined) {
+    const scale = Math.min(
+      1,
+      policy.originalMaxDimension / Math.max(metadata.width, metadata.height),
+    )
     const width = Math.max(1, Math.round(metadata.width * scale))
     const height = Math.max(1, Math.round(metadata.height * scale))
     if (Math.ceil(width / 32) * Math.ceil(height / 32) > 30000)
       throw new InvalidImageDataError(
-        "Astra original detail exceeds the 30000-patch input limit. Export a smaller copy or explicitly choose high detail; the original has not been changed.",
+        "OpenAI original detail exceeds the 30000-patch input limit. Export a smaller copy or explicitly choose high detail; the original has not been changed.",
       )
   }
   await validateModelImage(bytes, signal)

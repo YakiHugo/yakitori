@@ -1,3 +1,4 @@
+import { openAIVisionPolicy } from "./openai-vision-models.ts"
 import { readImageDimensions } from "../kernel/image-metadata.ts"
 import type { ModelImageBlock, ModelWireApi } from "./model.ts"
 import type { ResolvedModel } from "./model-catalog.ts"
@@ -11,7 +12,7 @@ export type ImageTokenEstimator = (
 // https://developers.openai.com/api/docs/guides/images-vision
 // These are estimates for context planning, not billing or image admission.
 // Do not infer this policy from a connection ID, compatible protocol, Codex
-// OAuth transport, model prefix, or fallback model metadata.
+// OAuth transport or model prefix.
 export function openAIImageTokenEstimator(input: {
   serviceId?: string | undefined
   wireApi?: ModelWireApi | undefined
@@ -23,24 +24,12 @@ export function openAIImageTokenEstimator(input: {
     | "imageDetailModes"
   >
 }): ImageTokenEstimator | undefined {
-  if (
-    input.serviceId !== "openai" ||
-    input.wireApi !== "openai_responses" ||
-    input.model.usedFallbackModelMetadata
-  )
+  if (input.serviceId !== "openai" || input.wireApi !== "openai_responses")
     return undefined
-  const model = input.model.model
-  const modernOriginal = [
-    "gpt-6-astra",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-  ].includes(model)
-  if (
-    !modernOriginal &&
-    !["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"].includes(model)
-  )
-    return undefined
+  // Exact visual facts are independently verified even when unrelated prompt,
+  // tools or context metadata remains fallback. Unknown IDs still have no policy.
+  const policy = openAIVisionPolicy(input.model.model)
+  if (policy === undefined) return undefined
 
   return (image, stage) => {
     if (!input.model.inputModalities.includes("image")) return 0
@@ -50,13 +39,9 @@ export function openAIImageTokenEstimator(input: {
       (stage === "prepared" ||
         input.model.imageDetailModes.includes("original"))
     const maxDimension = original
-      ? modernOriginal
-        ? 65_535
-        : 6_000
-      : model === "gpt-6-astra"
-        ? 65_535
-        : 2_048
-    const patchBudget = original ? (modernOriginal ? undefined : 10_000) : 2_500
+      ? policy.originalMaxDimension
+      : policy.highMaxDimension
+    const patchBudget = original ? policy.originalPatchBudget : 2500
     const dimensions =
       image.data === undefined
         ? undefined
@@ -68,16 +53,9 @@ export function openAIImageTokenEstimator(input: {
     // known detail's maximum admitted patch count; do not fetch during budgeting.
     if (dimensions === undefined)
       return Math.ceil((patchBudget ?? 30_000) * 1.2)
-    // Except native Astra, inline raw history still goes through the 2048-edge high
-    // preparation before transport. Account for that projection without
-    // rewriting history. Prepared inline bytes already have their wire size.
-    const projectedMaxDimension =
-      stage === "history" && !original && model !== "gpt-6-astra"
-        ? Math.min(maxDimension, 2048)
-        : maxDimension
     const edgeScale = Math.min(
       1,
-      projectedMaxDimension / Math.max(dimensions.width, dimensions.height),
+      maxDimension / Math.max(dimensions.width, dimensions.height),
     )
     let width = Math.max(1, Math.round(dimensions.width * edgeScale))
     let height = Math.max(1, Math.round(dimensions.height * edgeScale))

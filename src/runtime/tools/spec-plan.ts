@@ -1,3 +1,4 @@
+import { openAIVisionPolicy } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
 import { isMimoVisionModel } from "../mimo-image-policy.ts"
@@ -219,7 +220,7 @@ export function captureStepContext(
       (input.serviceId === "codex" && input.wireApi === "openai_responses") ||
       (input.serviceId === "openai" &&
         input.wireApi === "openai_responses" &&
-        target.model === "gpt-6-astra") ||
+        openAIVisionPolicy(target.model) !== undefined) ||
       input.wireApi === "bedrock_converse" ||
       (input.serviceId === "xai" &&
         input.wireApi === "openai_responses" &&
