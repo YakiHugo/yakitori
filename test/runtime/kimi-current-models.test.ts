@@ -241,7 +241,7 @@ describe("current Kimi API and Code model routing", () => {
 
   it.each(
     codeModels,
-  )("keeps %s Code metadata, high effort and existing image preparation", async (model) => {
+  )("keeps %s Code metadata and high effort with native client image preparation", async (model) => {
     const { step, session, send, bodies } = configured(model, "kimi-code")
     expect(step.target).toMatchObject({
       instructionProfileId: "kimi-code",
@@ -252,7 +252,7 @@ describe("current Kimi API and Code model routing", () => {
     expect(session.models.capacity(step.target)?.contextWindowTokens).toBe(
       model === "k3.1-pro" ? 262144 : 1048576,
     )
-    expect(step.deferImagePreparation).toBe(false)
+    expect(step.deferImagePreparation).toBe(true)
     const messages = history(await sourceImage())
     const before = structuredClone(messages)
     const events = await send(messages)
@@ -263,7 +263,7 @@ describe("current Kimi API and Code model routing", () => {
     const images = wireImages(body)
     expect(images).toHaveLength(2)
     for (const image of images)
-      expect((await sharp(image).metadata()).width).toBe(2048)
+      expect((await sharp(image).metadata()).width).toBe(2000)
     expect(messages).toEqual(before)
   })
 

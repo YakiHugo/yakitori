@@ -746,7 +746,7 @@ it.each([
   ["anthropic", "anthropic_messages", true],
   ["anthropic", "openai_chat_completions", false],
   [undefined, "anthropic_messages", false],
-  ["kimi-code", "anthropic_messages", false],
+  ["kimi-code", "anthropic_messages", true],
   ["moonshot", "openai_responses", true],
   ["moonshot", "openai_chat_completions", false],
   ["gemini", "gemini_generate_content", true],

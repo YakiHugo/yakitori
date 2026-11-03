@@ -828,7 +828,7 @@ it.each([
     "anthropic_messages",
     "https://api.kimi.com/coding",
     "kimi-code",
-    false,
+    true,
   ],
   [
     "gemini",

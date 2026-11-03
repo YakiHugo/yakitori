@@ -227,7 +227,7 @@ export function captureStepContext(
       (input.serviceId === "meta" &&
         input.wireApi === "openai_chat_completions" &&
         isMetaVisionModel(target.model)) ||
-      (input.serviceId === "anthropic" &&
+      ((input.serviceId === "anthropic" || input.serviceId === "kimi-code") &&
         input.wireApi === "anthropic_messages") ||
       (input.serviceId === "gemini" &&
         input.wireApi === "gemini_generate_content") ||
