@@ -1,10 +1,12 @@
 import { anthropicModel } from "../runtime/anthropic-models.ts"
 import { geminiModelMetadata } from "../runtime/gemini-models.ts"
+import { isMetaContributorModel } from "../runtime/meta-models.ts"
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import { rekaVisionModel } from "../runtime/reka-vision.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { providerServiceForEndpoint } from "../runtime/provider-services.ts"
+import { stepfunDiscoveredMetadata } from "../runtime/stepfun-models.ts"
 import { ConfigurationError } from "./config-errors.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
@@ -70,6 +72,7 @@ export async function discoverProviderModels(
         !gemini &&
         [404, 405].includes(response.status) &&
         officialPreset?.id !== "reka" &&
+        officialPreset?.id !== "stepfun" &&
         configuration.wireApi === officialPreset?.wireApi &&
         officialPreset?.models.length
       )
@@ -96,6 +99,14 @@ export async function discoverProviderModels(
     if (!isRecord(body) || !Array.isArray(entries))
       throw new ConfigurationError(
         `The model catalog must contain a ${gemini ? "models" : "data"} array.`,
+      )
+    const stepfunTyped =
+      officialPreset?.id === "stepfun" &&
+      entries.some(
+        (entry) =>
+          isRecord(entry) &&
+          typeof entry.model_type === "string" &&
+          entry.model_type.trim(),
       )
     for (const entry of entries) {
       if (gemini) {
@@ -149,6 +160,16 @@ export async function discoverProviderModels(
       }
       if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim())
         throw new ConfigurationError("A model catalog entry has no model ID.")
+      // Match Step Code's typed catalog: search, audio and generation entries
+      // cannot enter the coding-model picker. Untyped catalogs stay usable.
+      if (
+        stepfunTyped &&
+        !["大语言模型", "路由模型"].includes(String(entry.model_type))
+      )
+        continue
+      // A catalog response is not consent to use private content for training.
+      if (officialPreset?.id === "meta" && isMetaContributorModel(entry.id))
+        continue
       // Reka serves third-party models too. Only this exact first-party model
       // has a complete coding/vision contract adapted here; Flash 3 lacks tools.
       // GET /models is authoritative for account availability.
@@ -300,6 +321,9 @@ export async function discoverProviderModels(
             }
           : {}),
         ...nativeFacts,
+        ...(officialPreset?.id === "stepfun"
+          ? stepfunDiscoveredMetadata({ ...entry, id: entry.id })
+          : {}),
         ...(kind === undefined ? {} : { kind }),
       })
     }

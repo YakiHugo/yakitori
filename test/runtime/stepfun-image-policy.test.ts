@@ -83,17 +83,22 @@ function failure(result: Awaited<ReturnType<typeof run>>, text: string) {
 }
 afterEach(() => vi.restoreAllMocks())
 
-describe("Step 5 native vision", () => {
-  it.each([
-    "png",
-    "jpeg",
-    "webp",
-    "gif",
-  ] as const)("preserves %s original pixels/encoding and detects MIME", async (format) => {
+describe("StepFun native vision", () => {
+  it.each(
+    ["step-5-preview", "step-3.7-flash"].flatMap((model) =>
+      (["png", "jpeg", "webp", "gif"] as const).map((format) => ({
+        model,
+        format,
+      })),
+    ),
+  )("preserves $model $format original pixels/encoding and detects MIME", async ({
+    model,
+    format,
+  }) => {
     const bytes = await sharp(await png())
       .toFormat(format)
       .toBuffer()
-    const input = request([inline(bytes)])
+    const input = request([inline(bytes)], model)
     const original = structuredClone(input)
     const result = await run(input)
     expect(result.events.at(-1)?.type).toBe("response")
@@ -110,7 +115,10 @@ describe("Step 5 native vision", () => {
     )
   })
 
-  it("rejects animated GIF rather than silently taking one frame", async () => {
+  it.each([
+    "step-5-preview",
+    "step-3.7-flash",
+  ])("rejects %s animated GIF rather than silently taking one frame", async (model) => {
     const frames = Buffer.alloc(32 * 32 * 3, 80)
     frames.fill(180, 32 * 16 * 3)
     const bytes = await sharp(frames, {
@@ -118,7 +126,7 @@ describe("Step 5 native vision", () => {
     })
       .gif({ delay: [100, 200] })
       .toBuffer()
-    failure(await run(request([inline(bytes)])), "static GIF")
+    failure(await run(request([inline(bytes)], model)), "static GIF")
   })
 
   it("keeps provider-addressable URLs without client downloading", async () => {
@@ -141,10 +149,14 @@ describe("Step 5 native vision", () => {
     })
   })
 
-  it("accepts 60 images and rejects 61 before reading local assets", async () => {
+  it.each([
+    "step-5-preview",
+    "step-3.7-flash",
+  ])("accepts 60 %s images and rejects 61 before reading local assets", async (model) => {
     expect(
-      (await run(request(Array(60).fill(inline(await png(1)))))).events.at(-1)
-        ?.type,
+      (
+        await run(request(Array(60).fill(inline(await png(1))), model))
+      ).events.at(-1)?.type,
     ).toBe("response")
     const read = vi.fn().mockRejectedValue(new Error("Must not read"))
     const image: ModelImageBlock = {
@@ -154,7 +166,7 @@ describe("Step 5 native vision", () => {
       sizeBytes: 1,
     }
     failure(
-      await run({ ...request(Array(61).fill(image)), assets: { read } }),
+      await run({ ...request(Array(61).fill(image), model), assets: { read } }),
       "60 images",
     )
     expect(read).not.toHaveBeenCalled()
@@ -211,6 +223,8 @@ describe("Step 5 native vision", () => {
   it.each([
     endpoint,
     "https://api.stepfun.ai/v1",
+    "https://api.stepfun.com/step_plan/v1",
+    "https://api.stepfun.ai/step_plan/v1",
   ])("discovers and resolves the native model at %s without alias or relay inheritance", async (baseURL) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(

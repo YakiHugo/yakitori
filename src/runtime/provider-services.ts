@@ -3,6 +3,8 @@ import { doubaoModels } from "./doubao-models.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { qwenModels } from "./qwen-models.ts"
 import { geminiPresetModels } from "./gemini-models.ts"
+import { metaModels } from "./meta-models.ts"
+import { stepfunModels } from "./stepfun-models.ts"
 import type {
   ProviderConfiguration,
   ProviderPreset,
@@ -90,21 +92,8 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "MODEL_API_KEY",
     flavor: "meta",
-    models: [
-      {
-        id: "muse-spark-1.3",
-        contextWindowTokens: 1_048_576,
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-      {
-        id: "muse-wonder-1.0",
-        contextWindowTokens: 1_048_576,
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-    ],
-    documentationURL: "https://dev.meta.ai/docs/image-understanding",
+    models: metaModels,
+    documentationURL: "https://dev.meta.ai/docs/models",
   },
   {
     id: "nvidia",
@@ -376,20 +365,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "STEPFUN_API_KEY",
     flavor: "stepfun",
-    models: [
-      {
-        id: "step-5-preview",
-        displayName: "Step 5 Preview",
-        contextWindowTokens: 1_000_000,
-        contextWindowScope: "total",
-        maxOutputTokens: 64_000,
-        // Only still-image input is adapted here, not the model's video API.
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-        efforts: ["low", "medium", "high"],
-        defaultEffort: "medium",
-      },
-    ],
+    models: stepfunModels,
     documentationURL:
       "https://platform.stepfun.ai/docs/en/guides/models/step-5-preview",
   },
@@ -487,6 +463,17 @@ const serviceEndpointVariants: Readonly<
   stepfun: [
     {
       baseURL: "https://api.stepfun.ai/v1",
+      wireApi: "openai_chat_completions",
+    },
+    // Step Code profiles use the same Chat Completions contract. A saved
+    // connection must explicitly select the region and billing endpoint.
+    // https://github.com/stepfun-ai/Step-Code/blob/fa100638d5b598c600c7926d63904b1689f7e4a1/packages/coding-agent/src/step/onboarding.ts
+    {
+      baseURL: "https://api.stepfun.com/step_plan/v1",
+      wireApi: "openai_chat_completions",
+    },
+    {
+      baseURL: "https://api.stepfun.ai/step_plan/v1",
       wireApi: "openai_chat_completions",
     },
   ],
