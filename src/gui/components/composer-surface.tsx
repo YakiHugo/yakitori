@@ -46,6 +46,7 @@ import {
   attachmentUrl,
   discardDraftAttachments,
   discardPickedAttachments,
+  pickAttachmentFiles,
   pickAttachments as selectAttachments,
   validateAttachmentFiles,
 } from "../composer-attachments.ts"
@@ -278,7 +279,10 @@ export function ComposerSurface({
           !live.has(assetSourceKey(image.file)),
       )
       if (unused.length)
-        void discardDraftAttachments(unused).catch((error: unknown) =>
+        void discardDraftAttachments(
+          unused,
+          currentOwner.current.apiBase,
+        ).catch((error: unknown) =>
           currentOwner.current.onAttachmentError(
             error instanceof Error
               ? error.message
@@ -492,7 +496,7 @@ export function ComposerSurface({
         if (!insertion.isCurrent()) return
         const added = await importAttachments(prepare, validate)
         if (added?.length && !insertion.insert(added))
-          await discardDraftAttachments(added)
+          await discardDraftAttachments(added, apiBase)
       } catch (error) {
         if (insertion.isCurrent())
           onAttachmentError(
@@ -513,7 +517,7 @@ export function ComposerSurface({
     enqueueAttachments(
       async () => ({
         collect: (importSessionId) =>
-          appendAttachmentFiles([], importSessionId, files),
+          appendAttachmentFiles([], importSessionId, files, apiBase),
       }),
       () => validateAttachmentFiles(files),
     )
@@ -521,6 +525,20 @@ export function ComposerSurface({
 
   const pickAttachments = () => {
     setAddMenuOpen(false)
+    if (window.yakitoriDesktop === undefined) {
+      // Opening the picker after importTail.then() loses the browser gesture.
+      const selection = pickAttachmentFiles()
+      enqueueAttachments(async () => {
+        const files = await selection
+        if (!files.length) return
+        validateAttachmentFiles(files)
+        return {
+          collect: (importSessionId) =>
+            appendAttachmentFiles([], importSessionId, files, apiBase),
+        }
+      })
+      return
+    }
     enqueueAttachments(async () => {
       const selection = await selectAttachments()
       if (selection === undefined) return
@@ -933,12 +951,13 @@ export function ComposerSurface({
             }}
             onPasteAttachments={(images) => void addFiles(images)}
             onDiscardAttachments={(images) => {
-              void discardDraftAttachments(images).catch((error: unknown) =>
-                onAttachmentError(
-                  error instanceof Error
-                    ? error.message
-                    : "Unused attachments could not be released.",
-                ),
+              void discardDraftAttachments(images, apiBase).catch(
+                (error: unknown) =>
+                  onAttachmentError(
+                    error instanceof Error
+                      ? error.message
+                      : "Unused attachments could not be released.",
+                  ),
               )
             }}
             onKeyDown={handleDraftKeyDown}

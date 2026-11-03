@@ -90,6 +90,10 @@ import type {
 import { createAccountRuntime } from "./account-runtime.ts"
 import { readAccountUsage } from "./account-usage.ts"
 import { requireAssetBaseUrl, rolloutAssetUrl } from "./asset-url.ts"
+import {
+  createAttachmentUploads,
+  type AttachmentUploads,
+} from "./attachment-uploads.ts"
 import { createBrowserCaptureTool } from "./browser-capture-tool.ts"
 import { createBrowserChooserTool } from "./browser-chooser-tool.ts"
 import { createBrowserDialogTool } from "./browser-dialog-tool.ts"
@@ -201,6 +205,7 @@ export type YakitoriApplicationOptions = Readonly<{
   assetBaseUrl?: string
   activeMateId?: string
   guiStaticDir?: string
+  attachmentUploadOrigins?: readonly string[]
   mateDatabasePath?: string
   projectDatabasePath?: string
   rootDir?: string
@@ -897,7 +902,9 @@ export async function createYakitoriApplication(
     await threadStore.initialize()
     const ephemeralAssetOwners = new Map<string, () => void>()
     const draftAssetOwners = new Map<string, () => void>()
+    let attachmentUploads: AttachmentUploads | undefined
     const releaseDraftRolloutAssets = (rolloutIds: readonly string[]) => {
+      attachmentUploads?.release(rolloutIds)
       for (const rolloutId of new Set(rolloutIds)) {
         if (!rolloutId.startsWith("draft_")) continue
         draftAssetOwners.get(rolloutId)?.()
@@ -938,6 +945,14 @@ export async function createYakitoriApplication(
           return mutate()
         })
       },
+    })
+    attachmentUploads = await createAttachmentUploads({
+      rolloutAssets,
+      temporaryDirectory: join(sessionStoreRoot, "incoming-attachments"),
+      ...(options.attachmentUploadOrigins === undefined
+        ? {}
+        : { allowedOrigins: options.attachmentUploadOrigins }),
+      releaseDraftRolloutAssets,
     })
     const agentGraphStore = createSqliteAgentGraphStore({
       databasePath: join(sessionStoreRoot, "agent-graph.sqlite"),
@@ -1622,6 +1637,7 @@ export async function createYakitoriApplication(
       readSource: (id) => threadStore.readThread(id),
       resolvePermission: (input) => permissionGate.resolve(input),
       rolloutAssets,
+      releaseDraftRolloutAssets,
       createProcessor: async (stored) => {
         const release = threadStore.retainEphemeralRolloutAssets(
           stored.metadata.rolloutId,
@@ -1742,6 +1758,7 @@ export async function createYakitoriApplication(
           ...(computerPreview === undefined ? {} : { computerPreview }),
           availableProviders: modelRouter.namespaces,
           rolloutAssets,
+          attachmentUploads,
           reportOperationalFailure: reporter,
           userAgent: serverUserAgent,
           onMessageProcessor: (processor) => {

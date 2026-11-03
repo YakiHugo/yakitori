@@ -11,6 +11,7 @@ import {
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, posix, resolve, sep } from "node:path"
+import { ATTACHMENT_FILE_SAFETY_BYTES } from "../protocol/attachment-upload.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import type {
@@ -22,7 +23,6 @@ import type {
 
 // Bound disk snapshots, allocations and parser input independently of provider
 // quotas. A request may contain multiple attachments subject to runtime budgets.
-const ATTACHMENT_FILE_SAFETY_BYTES = 50_000_000
 const MAX_IMAGE_METADATA_BYTES = 1024 * 1024
 
 export type AttachmentBytesInput = {
@@ -737,7 +737,9 @@ async function linkOnce(
     if (!isAlreadyExists(error)) throw error
     const existing = await stat(path)
     if (!existing.isFile() || existing.size !== sourceBytes) {
-      throw new Error("A different rollout asset already exists at this path.")
+      throw new AttachmentConflictError(
+        "A different rollout asset already exists at this path.",
+      )
     }
     const [source, target] = await Promise.all([
       readFile(sourcePath),

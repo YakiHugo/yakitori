@@ -8,6 +8,7 @@ import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import type { RolloutAssets } from "../kernel/index.ts"
 import type { ModelRoutePreviewer } from "../protocol/model-routing.ts"
+import type { AttachmentUploads } from "./attachment-uploads.ts"
 import type { ChatGPTConnections } from "./chatgpt-connections.ts"
 import type { ComputerControl } from "./computer-control.ts"
 import type { ComputerPreviewService } from "./computer-preview.ts"
@@ -59,6 +60,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly computerPreview?: ComputerPreviewService
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
+  readonly attachmentUploads?: AttachmentUploads
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly requestGate?: RequestGate
   readonly messageProcessor?: MessageProcessor
@@ -103,7 +105,8 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     void requestGate
       .run(async () => {
         try {
-          await handleRequest(request, response, rolloutAssets, staticAssets)
+          if (!(await options.attachmentUploads?.handle(request, response)))
+            await handleRequest(request, response, rolloutAssets, staticAssets)
         } catch (error) {
           if (!(error instanceof URIError)) {
             reportOperationalFailure(reporter, {
@@ -191,9 +194,9 @@ function waitForResponseCompletion(response: ServerResponse): Promise<void> {
   })
 }
 
-// The HTTP surface is intentionally small: API traffic moved to the JSON-RPC
-// WebSocket transport (/rpc). What remains is the health probe, the rollout
-// asset binary route, static GUI assets with the SPA fallback, and CORS.
+// Structured API traffic uses JSON-RPC (/rpc). Binary attachment writes have
+// their own strict local-origin boundary; this handler owns health, asset
+// reads, static GUI assets, and their read-only CORS policy.
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -374,6 +377,7 @@ function writeUnhandledError(response: ServerResponse, error: unknown): void {
 
 function isApiPath(segments: readonly string[]): boolean {
   return (
+    segments[0] === "attachments" ||
     segments[0] === "sessions" ||
     segments[0] === "health" ||
     segments[0] === "projects" ||

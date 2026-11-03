@@ -28,6 +28,69 @@ import {
   smokePdfBytes,
 } from "./fixtures.ts"
 
+test("browser attachment picker uploads bytes and removes abandoned staging files", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    expect(await page.evaluate(() => window.yakitoriDesktop)).toBeUndefined()
+    const file = join(environment.root, "workspace", "smoke.png")
+    const bytes = await readFile(file)
+    await page.getByRole("button", { name: "Add context" }).click()
+    const chooser = page.waitForEvent("filechooser")
+    await page.getByRole("option", { name: "Add images or PDFs" }).click()
+    const upload = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        response.url().includes("/attachments/uploads/"),
+    )
+    await (await chooser).setFiles(file)
+    const response = await upload
+    expect(response.status()).toBe(200)
+    await expect(
+      page.getByRole("button", { name: "Preview smoke.png", exact: true }),
+    ).toBeVisible()
+    const preview = page
+      .getByRole("button", { name: "Preview smoke.png", exact: true })
+      .locator("img")
+    const source = await preview.getAttribute("src")
+    if (!source) throw new Error("Missing attachment preview source")
+    const stored = await page.request.get(source)
+    expect(stored.status()).toBe(200)
+    // File-backed request bodies are not exposed by every browser debugger.
+    // Read back the actual stored asset to verify the end-to-end byte transfer.
+    expect(await stored.body()).toEqual(bytes)
+    const discarded = page.waitForResponse(
+      (result) =>
+        result.request().method() === "DELETE" &&
+        result.url() === response.url(),
+    )
+    // Images live outside the text document and are removed by their own action.
+    await page
+      .getByRole("button", { name: "Remove smoke.png", exact: true })
+      .click()
+    expect((await discarded).ok()).toBe(true)
+    await expect(
+      page.getByRole("button", { name: "Preview smoke.png", exact: true }),
+    ).toHaveCount(0)
+    expect((await page.request.get(source)).status()).toBe(404)
+    expect(errors).toEqual([])
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
 type BrowserViewSmoke = {
   tabs: string[]
   claims: string[]
