@@ -1338,30 +1338,86 @@ describe("composer", () => {
     })
   })
 
-  it("keeps attachments desktop-only without creating a session in a plain browser", async () => {
+  it("opens the browser picker and uploads its file without creating a session", async () => {
     const user = userEvent.setup()
     Object.defineProperty(window, "yakitoriDesktop", {
       configurable: true,
       value: undefined,
     })
-    respondWithSessionCreate()
+    const id = "12345678-1234-4123-8123-123456789abc"
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(id)
+    const uploaded = {
+      ...draftImage("high"),
+      file: {
+        rolloutId: "draft_upload_12345678123441238123123456789abc",
+        path: "attachments/staging/upload/1.png",
+      },
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ attachment: uploaded }))
+    vi.stubGlobal("fetch", request)
+    vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {})
+    useAppStore.setState({ apiBase: "http://127.0.0.1:8123" })
     render(<Composer />)
-
     await user.click(screen.getByRole("button", { name: "Add context" }))
     await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+    if (!input) throw new Error("Missing browser file picker")
+    const file = new File(["png"], "shot.png", { type: "image/png" })
+    fireEvent.change(input, { target: { files: [file] } })
+    await waitFor(() =>
+      expect(useAppStore.getState().promptDraft?.attachments).toEqual([
+        uploaded,
+      ]),
+    )
+    expect(request.mock.calls[0]?.[1]?.body).toBe(file)
+    expect(String(request.mock.calls[0]?.[0])).toBe(
+      `http://127.0.0.1:8123/attachments/uploads/${id}`,
+    )
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(document.querySelector('input[type="file"]')).toBeNull()
+  })
 
-    await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toBe(
-        "Attachments require the Yakitori desktop app.",
+  it("discards a browser upload when navigation supersedes the draft", async () => {
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: undefined,
+    })
+    const id = "12345678-1234-4123-8123-123456789abc"
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(id)
+    const pending = Promise.withResolvers<Response>()
+    const request = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal("fetch", request)
+    useAppStore.setState({ apiBase: "http://127.0.0.1:8123" })
+    render(<Composer />)
+    fireEvent.paste(screen.getByRole("textbox"), {
+      clipboardData: {
+        files: [new File(["png"], "shot.png", { type: "image/png" })],
+        getData: () => "",
+      },
+    })
+    await waitFor(() => expect(request).toHaveBeenCalledOnce())
+    await act(async () => {
+      await useAppStore.getState().selectSession("session_existing")
+      pending.resolve(
+        Response.json({
+          attachment: {
+            ...draftImage("high"),
+            file: {
+              rolloutId: "draft_upload_12345678123441238123123456789abc",
+              path: "attachments/staging/upload/1.png",
+            },
+          },
+        }),
       )
     })
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
-    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(
-      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
-        (attachment) => attachment.mediaType !== "application/pdf",
-      ),
-    ).toHaveLength(0)
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(2))
+    expect(request.mock.calls[1]?.[1]?.method).toBe("DELETE")
+    expect(useAppStore.getState().promptDraft?.attachments ?? []).toEqual([])
   })
 
   it("turns the send button into an interrupt action while a turn runs", async () => {

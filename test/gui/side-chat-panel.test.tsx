@@ -155,6 +155,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  vi.unstubAllGlobals()
   useWorkspaceStore.setState({
     tabs: [],
     sessionId: undefined,
@@ -931,6 +932,46 @@ describe("side chat panel", () => {
         }) as HTMLElement
       ).textContent,
     ).toBe("Explain")
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Main conversation draft"),
+    )
+  })
+
+  it("uploads browser drops to the side chat API without changing the main draft", async () => {
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: undefined,
+    })
+    const id = "12345678-1234-4123-8123-123456789abc"
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(id)
+    const image = {
+      name: "diagram.png",
+      mediaType: "image/png" as const,
+      sizeBytes: 5,
+      file: {
+        rolloutId: "draft_upload_12345678123441238123123456789abc",
+        path: "attachments/staging/upload/1.png",
+      },
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ attachment: image }))
+    vi.stubGlobal("fetch", request)
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create" ? snapshot() : {},
+    )
+    render(<Panel />)
+    const form = screen
+      .getByRole("textbox", { name: "Message side chat" })
+      .closest("form")
+    if (!form) throw new Error("Missing side chat form")
+    const file = new File(["image"], "diagram.png", { type: "image/png" })
+    fireEvent.drop(form, { dataTransfer: { types: ["Files"], files: [file] } })
+    await screen.findByRole("button", { name: "Preview diagram.png" })
+    expect(String(request.mock.calls[0]?.[0])).toBe(
+      `http://api.test/attachments/uploads/${id}`,
+    )
+    expect(request.mock.calls[0]?.[1]?.body).toBe(file)
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("Main conversation draft"),
     )

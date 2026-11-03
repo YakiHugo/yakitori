@@ -11,7 +11,6 @@ import {
 import {
   attachmentUrl,
   discardDraftAttachments,
-  requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
@@ -301,7 +300,6 @@ export function SideChatPanel({
     let release: (() => Promise<void>) | undefined
     try {
       validate?.()
-      requireDesktopBridge()
       const prepared = await prepare()
       if (!prepared) return
       release = prepared.cleanup
@@ -316,7 +314,7 @@ export function SideChatPanel({
         expiredByServer ||
         isExpired(chatRef.current ?? current)
       ) {
-        await discardDraftAttachments(added)
+        await discardDraftAttachments(added, apiBase)
         return
       }
       return added

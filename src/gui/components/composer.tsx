@@ -6,10 +6,7 @@ import {
   inputContentAttachments,
   inputContentText,
 } from "../../protocol/user-input.ts"
-import {
-  discardDraftAttachments,
-  requireDesktopBridge,
-} from "../composer-attachments.ts"
+import { discardDraftAttachments } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import {
@@ -195,7 +192,6 @@ export function Composer() {
       // Reject unusable files before a lazy createSession can litter an
       // empty session.
       validate?.()
-      requireDesktopBridge()
       const prepared = await prepare()
       if (prepared === undefined) return
       cleanup = prepared.cleanup
@@ -212,7 +208,7 @@ export function Composer() {
             current.selection.sessionId !== undefined
           ))
       ) {
-        await discardDraftAttachments(next)
+        await discardDraftAttachments(next, apiBase)
         return
       }
       return next
