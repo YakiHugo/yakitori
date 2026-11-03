@@ -149,10 +149,6 @@ describe("native OpenAI Responses image estimates", () => {
     { ...context, serviceId: "codex" },
     { ...context, serviceId: "moonshot" },
     { ...context, wireApi: "openai_chat_completions" as const },
-    {
-      ...context,
-      model: { ...context.model, usedFallbackModelMetadata: true },
-    },
     { ...context, model: { ...context.model, model: "gpt-5.6-sol-custom" } },
     { ...context, model: { ...context.model, model: "gpt-6.1-sol" } },
   ])("does not apply public API facts to unverified transport/model facts: %j", (input) => {
@@ -193,4 +189,13 @@ describe("native OpenAI Responses image estimates", () => {
     // The legacy heuristic remains explicitly unchanged outside this scope.
     expect(estimateModelRequestBudget(request).imageTokens).toBe(12000)
   })
+})
+
+it("uses independently verified visual facts without upgrading fallback prompt or tools metadata", () => {
+  const estimate = openAIImageTokenEstimator({
+    ...context,
+    model: { ...context.model, usedFallbackModelMetadata: true },
+  })
+  expect(estimate?.(image(4096, 512), "history")).toBe(615)
+  expect(estimate?.(image(6400, 3200, "original"), "history")).toBe(24000)
 })

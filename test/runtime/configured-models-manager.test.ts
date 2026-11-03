@@ -363,3 +363,60 @@ describe("configured models manager", () => {
     ).toThrow("Invalid or duplicate configured model ID")
   })
 })
+
+it.each([
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5.5",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+])("adds only confirmed native Responses image defaults for %s", (model) => {
+  const options = {
+    provider: "personal",
+    catalogProvider: "openai",
+    wireApi: "openai_responses" as const,
+    models: [{ id: model }],
+  }
+  const fallback = createConfiguredModelsManager(options).resolve({
+    provider: "personal",
+    model,
+  })
+  const native = createConfiguredModelsManager({
+    ...options,
+    serviceId: "openai",
+  }).resolve({ provider: "personal", model })
+  expect(native).toEqual({
+    ...fallback,
+    inputModalities: ["text", "image"],
+    imageDetailModes: ["high", "original"],
+  })
+  expect(native.usedFallbackModelMetadata).toBe(true)
+  const overridden = createConfiguredModelsManager({
+    ...options,
+    serviceId: "openai",
+    models: [
+      {
+        id: model,
+        inputModalities: ["text"],
+        imageDetailModes: [],
+        contextWindowTokens: 123456,
+        instructionProfileId: "gpt-5.5",
+      },
+    ],
+  }).resolve({ provider: "personal", model })
+  expect(overridden).toMatchObject({
+    inputModalities: ["text"],
+    imageDetailModes: [],
+    contextWindowTokens: 123456,
+    instructionProfileId: "gpt-5.5",
+    usedFallbackModelMetadata: true,
+  })
+  const chat = createConfiguredModelsManager({
+    ...options,
+    serviceId: "openai",
+    wireApi: "openai_chat_completions",
+  }).resolve({ provider: "personal", model })
+  expect(chat.inputModalities).toEqual(["text"])
+})

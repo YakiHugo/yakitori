@@ -9,7 +9,7 @@ import type {
 } from "../../src/runtime/model.ts"
 import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import {
-  prepareOpenAIAstraImage,
+  prepareOpenAIImage,
   validateOpenAIImageRequest,
   OPENAI_IMAGE_REQUEST_SAFETY_BYTES,
 } from "../../src/runtime/openai-image-policy.ts"
@@ -109,7 +109,11 @@ describe("native Responses Astra image preparation", () => {
     const bytes = await sharp(await png())
       .toFormat(format)
       .toBuffer()
-    const prepared = await prepareOpenAIAstraImage(bytes, block(bytes))
+    const prepared = await prepareOpenAIImage(
+      bytes,
+      block(bytes),
+      "gpt-6-astra",
+    )
     expect(prepared.data).toBe(bytes.toString("base64"))
     expect(prepared.mediaType).toBe(`image/${format}`)
     expect(prepared.detail).toBe("high")
@@ -117,7 +121,8 @@ describe("native Responses Astra image preparation", () => {
   it("keeps static GIF intact and rejects animation rather than flattening", async () => {
     const staticGif = Buffer.from(gifImageBase64, "base64")
     expect(
-      (await prepareOpenAIAstraImage(staticGif, block(staticGif))).data,
+      (await prepareOpenAIImage(staticGif, block(staticGif), "gpt-6-astra"))
+        .data,
     ).toBe(gifImageBase64)
     const animated = await sharp(Buffer.from([255, 0, 0, 0, 0, 255]), {
       raw: {
@@ -130,7 +135,7 @@ describe("native Responses Astra image preparation", () => {
       .gif({ loop: 0, delay: [100, 100] })
       .toBuffer()
     await expect(
-      prepareOpenAIAstraImage(animated, block(animated)),
+      prepareOpenAIImage(animated, block(animated), "gpt-6-astra"),
     ).rejects.toThrow("non-animated GIF")
   })
   it("rejects oversized original before decoding or a model call, without changing high detail", async () => {
@@ -270,8 +275,20 @@ describe("native Responses Astra image preparation", () => {
 it.each([
   { native: true, model: "gpt-6-astra", width: 4096 },
   { native: false, model: "gpt-6-astra", width: 2048 },
+  { native: false, model: "gpt-5.5", width: 2048 },
+  { native: false, model: "gpt-5.6-sol", width: 2048 },
   { native: true, model: "gpt-6-sol", width: 2048 },
-])("captures real Turn projection and repeat user/tool replay only for native Astra ($native/$model)", async ({
+  { native: true, model: "gpt-6-luna", width: 2048 },
+  ...[
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ].map((model) => ({ native: true, model, width: 4096 })),
+])("captures real Turn projection and repeat user/tool replay only for verified native models ($native/$model)", async ({
   native,
   model,
   width,
@@ -290,7 +307,11 @@ it.each([
       baseURL: native
         ? "https://api.openai.com/v1"
         : "https://relay.example/v1",
-      models: [{ id: model, inputModalities: ["text", "image"] }],
+      models: [
+        native && model.startsWith("gpt-5.")
+          ? { id: model }
+          : { id: model, inputModalities: ["text", "image"] },
+      ],
     },
     "unused",
   )
@@ -325,7 +346,15 @@ it.each([
         { type: "tool_call", id: "call_1", name: "inspect", input: {} },
       ],
     },
-    { role: "tool", toolCallId: "call_1", content: [raw] },
+    {
+      role: "tool",
+      toolCallId: "call_1",
+      content: [
+        native && model.startsWith("gpt-5.")
+          ? { ...raw, detail: "original" }
+          : raw,
+      ],
+    },
   ]
   const before = structuredClone(history)
   try {
@@ -352,6 +381,11 @@ it.each([
       })
       const urls = imageUrls(JSON.parse(bodies[replay] ?? "{}"))
       expect(urls).toHaveLength(2)
+      if (native && model.startsWith("gpt-5.")) {
+        expect(bodies[replay]).toContain('"detail":"high"')
+        expect(bodies[replay]).toContain('"detail":"original"')
+        expect(step.modelInfo.usedFallbackModelMetadata).toBe(true)
+      }
       for (const url of urls) {
         const payload = Buffer.from(url.split(",")[1] ?? "", "base64")
         expect((await sharp(payload).metadata()).width).toBe(width)
@@ -460,5 +494,46 @@ it("prepares mixed local PDF and raw image without treating preflight placeholde
   expect(body.input[0].content[0]).toMatchObject({
     type: "input_file",
     file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
+  })
+})
+
+it.each([
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5.5",
+])("leaves %s original resizing to the API instead of applying the modern rejection ceiling", async (model) => {
+  const bytes = await sharp({
+    create: { width: 6400, height: 6400, channels: 3, background: "blue" },
+  })
+    .png()
+    .toBuffer()
+  const input = request([block(bytes, "original")])
+  const before = structuredClone(input.messages)
+  const result = await send({ ...input, target: { ...input.target, model } })
+  expect(result.events.at(-1)).toMatchObject({ type: "response" })
+  const body = JSON.parse(result.bodies[0] ?? "{}")
+  expect(body.input[0].content[0].detail).toBe("original")
+  expect(imageUrls(body)).toEqual([
+    `data:image/png;base64,${bytes.toString("base64")}`,
+  ])
+  expect(input.messages).toEqual(before)
+})
+
+it.each([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+])("rejects over-limit %s original before decoding", async (model) => {
+  const header = Buffer.alloc(24)
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(header)
+  header.writeUInt32BE(6400, 16)
+  header.writeUInt32BE(6400, 20)
+  const input = request([block(header, "original")])
+  const result = await send({ ...input, target: { ...input.target, model } })
+  expect(result.bodies).toHaveLength(0)
+  expect(result.events.at(-1)).toMatchObject({
+    type: "failure",
+    failure: { message: expect.stringContaining("30000-patch") },
   })
 })

@@ -42,12 +42,12 @@ describe("Step tool planning", () => {
       wireApi: "openai_responses",
       enabled: false,
     },
-    // Documented public image rules alone do not promote fallback catalog metadata.
+    // Visual policy is independently verified; other catalog metadata stays fallback.
     {
       model: "gpt-5.6-sol",
       serviceId: "openai",
       wireApi: "openai_responses",
-      enabled: false,
+      enabled: true,
     },
   ] as const)("captures only verified native image estimation into the request plan: $serviceId/$model/$wireApi", async ({
     model,
@@ -58,6 +58,7 @@ describe("Step tool planning", () => {
     const provider = "renamed-account"
     const models = createConfiguredModelsManager({
       provider,
+      serviceId,
       catalogProvider: "openai",
       wireApi,
       models: [{ id: model, inputModalities: ["text", "image"] }],
@@ -81,7 +82,7 @@ describe("Step tool planning", () => {
       wireApi,
     })
     expect(step.imageTokenEstimator !== undefined).toBe(enabled)
-    // Codex owns detail-based preparation separately from native Astra.
+    // Codex owns detail-based preparation separately from native API models.
     expect(step.deferImagePreparation).toBe(enabled || serviceId === "codex")
     const plan = prepareModelRequestPlan(
       {
