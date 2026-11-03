@@ -1,4 +1,5 @@
 import { createBedrockConverseProvider } from "../runtime/bedrock-converse-provider.ts"
+import { configuredModelWithDefaults } from "../runtime/configured-model-defaults.ts"
 import {
   createAnthropicTurnTransport,
   createChatCompletionsProvider,
@@ -34,18 +35,12 @@ export function createConfiguredProvider(
       provider: id,
       ...(service === undefined ? {} : { serviceId: service.id }),
       ...(catalogProvider === undefined ? {} : { catalogProvider }),
-      models: configured.map((model) => {
-        const { defaultEffort, ...known } =
-          service?.models.find((known) => known.id === model.id) ?? {}
-        return {
-          ...known,
-          ...(defaultEffort !== undefined &&
-          (model.efforts === undefined || model.efforts.includes(defaultEffort))
-            ? { defaultEffort }
-            : {}),
-          ...model,
-        }
-      }),
+      models: configured.map((model) =>
+        configuredModelWithDefaults(
+          model,
+          service?.models.find((known) => known.id === model.id),
+        ),
+      ),
       wireApi: configuration.wireApi,
     })
   const listeners = new Set<() => void>()
