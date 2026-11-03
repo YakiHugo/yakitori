@@ -10,8 +10,8 @@ import {
   discardDraftAttachments,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
-import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
+import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import {
   attachmentInputDraft,
   sameInputDraft,
@@ -186,9 +186,7 @@ export function Composer() {
     prepare,
     validate,
   ) => {
-    if (readingAttachments) return
     setReadingAttachments(true)
-    setAttachmentError(undefined)
     let importSessionId = sessionId
     const importIntentRevision =
       useAppStore.getState().sessionSelectionIntentRevision

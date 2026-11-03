@@ -268,11 +268,13 @@ function OrderedFixture({
   initial,
   handle,
   discard,
+  onSelection,
   apiBase = "http://ordered-editor.test/",
 }: {
   initial: InputDraft
   handle: React.RefObject<PromptEditorHandle | null>
   discard?: (images: readonly UserAttachment[]) => void
+  onSelection?: (from: number, to: number) => void
   apiBase?: string
 }) {
   const [parts, setParts] = useState(initial)
@@ -284,6 +286,7 @@ function OrderedFixture({
         apiBase={apiBase}
         value={parts}
         onChange={setParts}
+        {...(onSelection ? { onSelection } : {})}
         {...(discard ? { onDiscardAttachments: discard } : {})}
       />
       <output data-testid="parts">{JSON.stringify(parts)}</output>
@@ -380,6 +383,240 @@ const stagedPdf: PdfAttachment = {
     path: "attachments/staging/pdf/manual.pdf",
   },
 }
+it("keeps queued PDF imports in order before text typed at their shared caret", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(
+    <OrderedFixture
+      handle={handle}
+      initial={inputFixture([{ type: "text", text: "before" }])}
+    />,
+  )
+  const first = handle.current?.captureAttachmentInsertion()
+  const second = handle.current?.captureAttachmentInsertion()
+  const otherPdf = {
+    ...stagedPdf,
+    name: "second.pdf",
+    file: { ...stagedPdf.file, path: "attachments/staging/second/manual.pdf" },
+  }
+  pasteText(" after")
+  act(() => {
+    expect(first?.insert([stagedPdf])).toBe(true)
+  })
+  act(() => {
+    expect(second?.insert([otherPdf])).toBe(true)
+  })
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "before" },
+      { ...stagedPdf, type: "document" },
+      { ...otherPdf, type: "document" },
+      { type: "text", text: " after" },
+    ]),
+  )
+})
+
+it("keeps mixed queued imports ordered while retaining images outside the text document", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(<OrderedFixture handle={handle} initial={inputFixture([])} />)
+  const first = handle.current?.captureAttachmentInsertion()
+  const second = handle.current?.captureAttachmentInsertion()
+  const otherPdf = {
+    ...stagedPdf,
+    name: "second.pdf",
+    file: { ...stagedPdf.file, path: "attachments/staging/second/manual.pdf" },
+  }
+  const otherImage = {
+    ...stagedImage,
+    name: "second.png",
+    file: {
+      ...stagedImage.file,
+      path: "attachments/staging/second/placed.png",
+    },
+  }
+  act(() => {
+    expect(first?.insert([stagedImage, stagedPdf])).toBe(true)
+  })
+  act(() => {
+    expect(second?.insert([otherPdf, otherImage])).toBe(true)
+  })
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { ...stagedPdf, type: "document" },
+      { ...otherPdf, type: "document" },
+      { type: "text", text: " " },
+      { ...stagedImage, type: "image" },
+      { ...otherImage, type: "image" },
+    ]),
+  )
+})
+
+it("replaces a captured selection once and places the next queued PDF after it", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(
+    <OrderedFixture
+      handle={handle}
+      initial={inputFixture([{ type: "text", text: "replace me" }])}
+    />,
+  )
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "a", ctrlKey: true })
+  const first = handle.current?.captureAttachmentInsertion()
+  const second = handle.current?.captureAttachmentInsertion()
+  const otherPdf = {
+    ...stagedPdf,
+    name: "second.pdf",
+    file: { ...stagedPdf.file, path: "attachments/staging/second/manual.pdf" },
+  }
+  act(() => {
+    expect(first?.insert([stagedPdf])).toBe(true)
+  })
+  act(() => {
+    expect(second?.insert([otherPdf])).toBe(true)
+  })
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { ...stagedPdf, type: "document" },
+      { ...otherPdf, type: "document" },
+    ]),
+  )
+})
+
+it.each([
+  {
+    name: "identical",
+    first: [1, 5],
+    second: [1, 5],
+    before: "A",
+    between: "",
+    after: "F",
+    reversed: false,
+  },
+  {
+    name: "overlapping",
+    first: [0, 4],
+    second: [2, 6],
+    before: "",
+    between: "",
+    after: "EF",
+    reversed: false,
+  },
+  {
+    name: "adjacent on the right",
+    first: [0, 3],
+    second: [3, 6],
+    before: "",
+    between: "",
+    after: "",
+    reversed: false,
+  },
+  {
+    name: "adjacent on the left",
+    first: [3, 6],
+    second: [0, 3],
+    before: "",
+    between: "",
+    after: "",
+    reversed: true,
+  },
+  {
+    name: "disjoint",
+    first: [0, 2],
+    second: [4, 6],
+    before: "",
+    between: "CD",
+    after: "",
+    reversed: false,
+  },
+] as const)("preserves both queued PDFs from $name text selections", async ({
+  first: firstRange,
+  second: secondRange,
+  before,
+  between,
+  after,
+  reversed,
+}) => {
+  const handle = createRef<PromptEditorHandle>()
+  const onSelection = vi.fn()
+  render(
+    <OrderedFixture
+      handle={handle}
+      onSelection={onSelection}
+      initial={inputFixture([{ type: "text", text: "ABCDEF" }])}
+    />,
+  )
+  const editor = screen.getByRole("textbox")
+  // Allow the editor's initial focus normalization before changing the native
+  // selection. Both captures must use real TextSelections, not Select All.
+  await act(async () => {
+    handle.current?.focus()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  })
+  const select = async (from: number, to: number) => {
+    await act(async () => {
+      const text = editor.querySelector("p")?.firstChild
+      if (!text) throw new Error("Expected a draft paragraph")
+      window.getSelection()?.setBaseAndExtent(text, from, text, to)
+      document.dispatchEvent(new Event("selectionchange"))
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    })
+    expect(onSelection).toHaveBeenLastCalledWith(from, to)
+  }
+  await select(firstRange[0], firstRange[1])
+  const first = handle.current?.captureAttachmentInsertion()
+  await select(secondRange[0], secondRange[1])
+  const second = handle.current?.captureAttachmentInsertion()
+  const otherPdf = {
+    ...stagedPdf,
+    name: "second.pdf",
+    file: { ...stagedPdf.file, path: "attachments/staging/second/manual.pdf" },
+  }
+  act(() => {
+    expect(first?.insert([stagedPdf])).toBe(true)
+  })
+  act(() => {
+    expect(second?.insert([otherPdf])).toBe(true)
+  })
+  expect(editedParts()).toEqual(
+    inputFixture([
+      ...(before ? [{ type: "text" as const, text: before }] : []),
+      { ...(reversed ? otherPdf : stagedPdf), type: "document" },
+      ...(between ? [{ type: "text" as const, text: between }] : []),
+      { ...(reversed ? stagedPdf : otherPdf), type: "document" },
+      ...(after ? [{ type: "text" as const, text: after }] : []),
+    ]),
+  )
+})
+
+it("maps queued imports through edits at a different caret without following the moved cursor", () => {
+  const handle = createRef<PromptEditorHandle>()
+  render(
+    <OrderedFixture
+      handle={handle}
+      initial={inputFixture([{ type: "text", text: "tail" }])}
+    />,
+  )
+  const first = handle.current?.captureAttachmentInsertion()
+  const second = handle.current?.captureAttachmentInsertion()
+  act(() => handle.current?.replaceRange(0, 0, "prefix "))
+  const otherPdf = {
+    ...stagedPdf,
+    name: "second.pdf",
+    file: { ...stagedPdf.file, path: "attachments/staging/second/manual.pdf" },
+  }
+  act(() => {
+    expect(first?.insert([stagedPdf])).toBe(true)
+  })
+  act(() => {
+    expect(second?.insert([otherPdf])).toBe(true)
+  })
+  expect(editedParts()).toEqual(
+    inputFixture([
+      { type: "text", text: "prefix tail" },
+      { ...stagedPdf, type: "document" },
+      { ...otherPdf, type: "document" },
+    ]),
+  )
+})
+
 it("keeps PDFs inline, appends images after the text, and retains PDF Undo ownership", () => {
   const handle = createRef<PromptEditorHandle>()
   const discard = vi.fn()

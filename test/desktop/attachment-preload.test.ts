@@ -19,15 +19,25 @@ describe("desktop attachment preload", () => {
 
     await bridge.importAttachmentFiles({ files: [pdf, image] })
 
-    expect(invoke).toHaveBeenCalledExactlyOnceWith(
-      "yakitori:import-attachment-files",
-      {
-        items: [
-          { name: "notes.pdf", data: new Uint8Array(Buffer.from("%PDF-1.4")) },
-          { name: "shot.png", filePath: "/selected/shot.png" },
-        ],
-      },
-    )
+    expect(invoke.mock.calls).toEqual([
+      [
+        "yakitori:import-attachment-files",
+        {
+          items: [
+            {
+              name: "notes.pdf",
+              data: new Uint8Array(Buffer.from("%PDF-1.4")),
+            },
+          ],
+        },
+      ],
+      [
+        "yakitori:import-attachment-files",
+        {
+          items: [{ name: "shot.png", filePath: "/selected/shot.png" }],
+        },
+      ],
+    ])
     expect(readNativeFile).not.toHaveBeenCalled()
   })
 
@@ -41,6 +51,80 @@ describe("desktop attachment preload", () => {
       bridge.importAttachmentFiles({ files: [pdf] }),
     ).rejects.toThrow("50 MB")
     expect(readFile).not.toHaveBeenCalled()
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it("waits for one stored file before reading the next and preserves batch order", async () => {
+    const { bridge, invoke } = loadPreload()
+    const first = new File(["one"], "one.png", { type: "image/png" })
+    const second = new File(["two"], "two.png", { type: "image/png" })
+    const secondRead = vi.spyOn(second, "arrayBuffer")
+    const storedFirst = { name: "one.png", file: { path: "first" } }
+    const storedSecond = { name: "two.png", file: { path: "second" } }
+    const storage = Promise.withResolvers<unknown>()
+    invoke
+      .mockReturnValueOnce(storage.promise)
+      .mockResolvedValueOnce([storedSecond])
+    const pending = bridge.importAttachmentFiles({
+      sessionId: "session_1",
+      files: [first, second],
+    })
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce())
+    expect(secondRead).not.toHaveBeenCalled()
+    storage.resolve([storedFirst])
+    expect(await pending).toEqual([storedFirst, storedSecond])
+    expect(secondRead).toHaveBeenCalledOnce()
+    expect(invoke.mock.calls.map(([, input]) => input)).toEqual([
+      {
+        sessionId: "session_1",
+        items: [{ name: "one.png", data: new Uint8Array(Buffer.from("one")) }],
+      },
+      {
+        sessionId: "session_1",
+        items: [{ name: "two.png", data: new Uint8Array(Buffer.from("two")) }],
+      },
+    ])
+  })
+
+  it("rolls back only the successful files of a failed batch before rejecting", async () => {
+    const { bridge, invoke } = loadPreload()
+    const stored = { name: "one.png", file: { path: "first" } }
+    const failed = new Error("Second import failed")
+    invoke.mockResolvedValueOnce([stored]).mockRejectedValueOnce(failed)
+    const files = [new File(["one"], "one.png"), new File(["two"], "two.png")]
+    await expect(bridge.importAttachmentFiles({ files })).rejects.toThrow(
+      "Second import failed",
+    )
+    expect(invoke.mock.calls.at(-1)).toEqual([
+      "yakitori:discard-draft-attachments",
+      [stored],
+    ])
+    expect(invoke).toHaveBeenCalledTimes(3)
+  })
+
+  it("reports cleanup failure instead of claiming an unsuccessful batch was removed", async () => {
+    const { bridge, invoke } = loadPreload()
+    invoke
+      .mockResolvedValueOnce([{ name: "one.png" }])
+      .mockRejectedValueOnce(new Error("Import failed"))
+      .mockRejectedValueOnce(new Error("Cleanup failed"))
+    await expect(
+      bridge.importAttachmentFiles({
+        files: [new File(["one"], "one.png"), new File(["two"], "two.png")],
+      }),
+    ).rejects.toThrow("Attachment import and staging cleanup both failed.")
+  })
+
+  it("validates later file sizes before reading or importing the batch", async () => {
+    const { bridge, invoke } = loadPreload()
+    const first = new File(["one"], "one.png")
+    const large = new File([], "large.png")
+    Object.defineProperty(large, "size", { value: 50_000_001 })
+    const read = vi.spyOn(first, "arrayBuffer")
+    await expect(
+      bridge.importAttachmentFiles({ files: [first, large] }),
+    ).rejects.toThrow("50 MB")
+    expect(read).not.toHaveBeenCalled()
     expect(invoke).not.toHaveBeenCalled()
   })
 
@@ -68,7 +152,9 @@ describe("desktop attachment preload", () => {
 
 function loadPreload() {
   let bridge: YakitoriDesktopBridge | undefined
-  const invoke = vi.fn(async () => undefined)
+  const invoke = vi.fn<
+    (channel: string, ...args: unknown[]) => Promise<unknown>
+  >(async () => [])
   const getPathForFile = vi.fn((_file: File) => "")
   runInNewContext(preload, {
     process: { platform: "test" },

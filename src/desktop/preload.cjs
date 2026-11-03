@@ -61,26 +61,54 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
     return ipcRenderer.invoke("yakitori:discard-picked-attachments", input)
   },
   async importAttachmentFiles(input) {
-    const items = []
-    for (const file of input.files) {
-      // Match the main/sidecar transport safety boundary before allocating bytes.
-      if (file.size > 50_000_000) {
-        throw new Error("Attachment must be a file no larger than 50 MB.")
-      }
-      const filePath = webUtils.getPathForFile(file)
-      items.push(
-        filePath === ""
-          ? {
-              name: file.name,
-              data: new Uint8Array(await file.arrayBuffer()),
-            }
-          : { name: file.name, filePath },
-      )
+    // Validate the entire batch before allocating or importing any file.
+    if (input.files.some((file) => file.size > 50_000_000)) {
+      throw new Error("Attachment must be a file no larger than 50 MB.")
     }
-    return ipcRenderer.invoke("yakitori:import-attachment-files", {
-      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
-      items,
-    })
+    const attachments = []
+    try {
+      for (const file of input.files) {
+        // Await storage before reading the next pathless File. Only one file's
+        // bytes cross IPC at a time; retained batch state contains references.
+        const filePath = webUtils.getPathForFile(file)
+        const item =
+          filePath === ""
+            ? {
+                name: file.name,
+                data: new Uint8Array(await file.arrayBuffer()),
+              }
+            : { name: file.name, filePath }
+        const imported = await ipcRenderer.invoke(
+          "yakitori:import-attachment-files",
+          {
+            ...(input.sessionId === undefined
+              ? {}
+              : { sessionId: input.sessionId }),
+            items: [item],
+          },
+        )
+        attachments.push(...imported)
+      }
+      return attachments
+    } catch (cause) {
+      // The main process owns cleanup of the failed file. Roll back earlier
+      // files from this batch so callers still receive all attachments or none.
+      if (attachments.length > 0) {
+        try {
+          await ipcRenderer.invoke(
+            "yakitori:discard-draft-attachments",
+            attachments,
+          )
+        } catch (cleanup) {
+          throw new AggregateError(
+            [cause, cleanup],
+            "Attachment import and staging cleanup both failed.",
+            { cause },
+          )
+        }
+      }
+      throw cause
+    }
   },
   discardDraftAttachments(input) {
     return ipcRenderer.invoke("yakitori:discard-draft-attachments", input)

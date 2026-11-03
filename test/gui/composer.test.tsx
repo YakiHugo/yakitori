@@ -1197,6 +1197,120 @@ describe("composer", () => {
     ).toEqual(inputParts("").attachments)
   })
 
+  it("queues repeated paste and drop imports in order without enabling Send between them", async () => {
+    const bridge = window.yakitoriDesktop
+    if (!bridge) throw new Error("Expected the desktop bridge")
+    const first = Promise.withResolvers<ReturnType<typeof draftImage>[]>()
+    const second = Promise.withResolvers<ReturnType<typeof draftImage>[]>()
+    vi.mocked(bridge.importAttachmentFiles)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    render(<Composer />)
+    const editor = screen.getByRole("textbox")
+    const form = editor.closest("form")
+    if (!form) throw new Error("Expected the composer form")
+    const one = new File(["one"], "one.png", { type: "image/png" })
+    const two = new File(["two"], "two.png", { type: "image/png" })
+    fireEvent.paste(editor, {
+      clipboardData: { files: [one], getData: () => "" },
+    })
+    await waitFor(() =>
+      expect(bridge.importAttachmentFiles).toHaveBeenCalledOnce(),
+    )
+    fireEvent.drop(form, { dataTransfer: { types: ["Files"], files: [two] } })
+    expect(bridge.importAttachmentFiles).toHaveBeenCalledOnce()
+    const firstImage = { ...draftImage("high"), name: "one.png" }
+    const secondImage = {
+      ...draftImage("high"),
+      name: "two.png",
+      file: {
+        rolloutId: "session_1",
+        path: "attachments/staging/draft_2/1.png",
+      },
+    }
+    await act(async () => first.resolve([firstImage]))
+    await waitFor(() =>
+      expect(bridge.importAttachmentFiles).toHaveBeenCalledTimes(2),
+    )
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    expect(useAppStore.getState().promptDraft?.attachments).toEqual([
+      firstImage,
+    ])
+    await act(async () => second.resolve([secondImage]))
+    await waitFor(() =>
+      expect(useAppStore.getState().promptDraft?.attachments).toEqual([
+        firstImage,
+        secondImage,
+      ]),
+    )
+    expect(bridge.importAttachmentFiles).toHaveBeenNthCalledWith(1, {
+      files: [one],
+    })
+    expect(bridge.importAttachmentFiles).toHaveBeenNthCalledWith(2, {
+      files: [two],
+    })
+  })
+
+  it("discards a completed old import and skips its queued batch after navigation", async () => {
+    const bridge = window.yakitoriDesktop
+    if (!bridge) throw new Error("Expected the desktop bridge")
+    const first = Promise.withResolvers<ReturnType<typeof draftImage>[]>()
+    vi.mocked(bridge.importAttachmentFiles).mockReturnValueOnce(first.promise)
+    render(<Composer />)
+    const editor = screen.getByRole("textbox")
+    const file = new File(["one"], "one.png", { type: "image/png" })
+    fireEvent.paste(editor, {
+      clipboardData: { files: [file], getData: () => "" },
+    })
+    await waitFor(() =>
+      expect(bridge.importAttachmentFiles).toHaveBeenCalledOnce(),
+    )
+    fireEvent.paste(editor, {
+      clipboardData: { files: [file], getData: () => "" },
+    })
+    await act(async () => {
+      await useAppStore.getState().selectSession("session_existing")
+      first.resolve([draftImage("high")])
+    })
+    await waitFor(() =>
+      expect(bridge.discardDraftAttachments).toHaveBeenCalledWith([
+        draftImage("high"),
+      ]),
+    )
+    expect(bridge.importAttachmentFiles).toHaveBeenCalledOnce()
+    expect(useAppStore.getState().promptDraft?.attachments ?? []).toEqual([])
+  })
+
+  it("continues queued imports after failure without clearing the failure notice", async () => {
+    const bridge = window.yakitoriDesktop
+    if (!bridge) throw new Error("Expected the desktop bridge")
+    const first = Promise.withResolvers<ReturnType<typeof draftImage>[]>()
+    vi.mocked(bridge.importAttachmentFiles)
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce([draftImage("high")])
+    render(<Composer />)
+    const editor = screen.getByRole("textbox")
+    const file = new File(["one"], "one.png", { type: "image/png" })
+    fireEvent.paste(editor, {
+      clipboardData: { files: [file], getData: () => "" },
+    })
+    await waitFor(() =>
+      expect(bridge.importAttachmentFiles).toHaveBeenCalledOnce(),
+    )
+    fireEvent.paste(editor, {
+      clipboardData: { files: [file], getData: () => "" },
+    })
+    await act(async () => first.reject(new Error("First batch failed.")))
+    await waitFor(() =>
+      expect(useAppStore.getState().promptDraft?.attachments).toHaveLength(1),
+    )
+    expect(screen.getByRole("alert").textContent).toBe("First batch failed.")
+    expect(bridge.importAttachmentFiles).toHaveBeenCalledTimes(2)
+  })
+
   it("stages dropped images without creating a session", async () => {
     respondWithSessionCreate()
     render(<Composer />)

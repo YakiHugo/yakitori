@@ -296,9 +296,8 @@ export function SideChatPanel({
     prepare,
     validate,
   ) => {
-    if (readingAttachments || sending.current || expired) return
+    if (sending.current || expired) return
     setReadingAttachments(true)
-    setAttachmentError(undefined)
     let release: (() => Promise<void>) | undefined
     try {
       validate?.()

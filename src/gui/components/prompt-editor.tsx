@@ -22,10 +22,10 @@ import type {
   UserAttachment,
 } from "../../protocol/asset-types.ts"
 import { assetSourceKey } from "../../protocol/asset-types.ts"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { appendDraftImages, sameInputDraft } from "../input-draft.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
@@ -39,6 +39,7 @@ import {
 export type PromptEditorHandle = Readonly<{
   focus(atEnd?: boolean): void
   captureAttachmentInsertion(): Readonly<{
+    isCurrent(): boolean
     insert(attachments: readonly UserAttachment[]): boolean
     cancel(): void
   }>
@@ -175,7 +176,12 @@ export function PromptEditor(props: Props) {
       },
       captureAttachmentInsertion() {
         const view = editor.current
-        if (!view) return { insert: () => false, cancel: () => {} }
+        if (!view)
+          return {
+            isCurrent: () => false,
+            insert: () => false,
+            cancel: () => {},
+          }
         const pending = {
           bookmark: view.state.selection.empty
             ? attachmentInsertionBookmark(view.state.selection.from)
@@ -183,6 +189,8 @@ export function PromptEditor(props: Props) {
         }
         insertions.current.add(pending)
         return {
+          isCurrent: () =>
+            editor.current === view && insertions.current.has(pending),
           insert(attachments) {
             if (editor.current !== view || !insertions.current.delete(pending))
               return false
@@ -200,11 +208,12 @@ export function PromptEditor(props: Props) {
             }).firstChild?.content
             if (content && content.size > 0)
               view.dispatch(
-                closeHistory(view.state.tr).replaceWith(
-                  selection.from,
-                  selection.to,
-                  content,
-                ),
+                closeHistory(view.state.tr)
+                  .replaceWith(selection.from, selection.to, content)
+                  .setMeta("attachmentInsertion", {
+                    from: selection.from,
+                    to: selection.to,
+                  }),
               )
             // An image-only import leaves the document unchanged, so no
             // transaction will report the new draft.
@@ -305,8 +314,35 @@ export function PromptEditor(props: Props) {
       }),
       editable: () => !latest.current.disabled,
       dispatchTransaction(tr) {
-        for (const pending of insertions.current)
-          pending.bookmark = pending.bookmark.map(tr.mapping)
+        const inserted: { from: number; to: number } | undefined = tr.getMeta(
+          "attachmentInsertion",
+        )
+        for (const pending of insertions.current) {
+          if (!inserted) {
+            pending.bookmark = pending.bookmark.map(tr.mapping)
+            continue
+          }
+          const selection = pending.bookmark.resolve(view.state.doc)
+          const overlaps = selection.empty
+            ? selection.from >= inserted.from && selection.from <= inserted.to
+            : inserted.from === inserted.to
+              ? selection.from < inserted.from && selection.to > inserted.from
+              : selection.from < inserted.to && selection.to > inserted.from
+          // A queued import must not replace an earlier attachment or overtake
+          // it at the same caret. A shared selection is consumed only once.
+          if (overlaps || selection.empty) {
+            pending.bookmark = attachmentInsertionBookmark(
+              tr.mapping.map(overlaps ? inserted.to : selection.from, 1),
+            )
+          } else {
+            // Independent selections still replace their own text, excluding
+            // attachments inserted exactly at either selection boundary.
+            pending.bookmark = TextSelection.between(
+              tr.doc.resolve(tr.mapping.map(selection.from, 1)),
+              tr.doc.resolve(tr.mapping.map(selection.to, -1)),
+            ).getBookmark()
+          }
+        }
         view.updateState(view.state.apply(tr))
         if (tr.docChanged) emitChange(view)
         if (tr.docChanged || tr.selectionSet) {
