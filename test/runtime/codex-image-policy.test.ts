@@ -1,3 +1,4 @@
+import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import type OpenAI from "openai"
 import sharp from "sharp"
 import { expect, it } from "vitest"
@@ -74,10 +75,17 @@ it("guards the exact encoded request including non-image content", () => {
   ).not.toThrow()
 })
 
-it.each([
-  true,
-  false,
-])("projects historical originals for Codex using captured original support=%s and sends prepared user/tool images", async (supportsOriginal) => {
+it.each(
+  ["gpt-6.1-sol", "gpt-6.1-terra"].flatMap((model) => [
+    { model, supportsOriginal: true, bundled: true },
+    { model, supportsOriginal: true, bundled: false },
+    { model, supportsOriginal: false, bundled: false },
+  ]),
+)("projects $model historical originals using bundled=$bundled original=$supportsOriginal and sends user/tool images", async ({
+  model,
+  supportsOriginal,
+  bundled,
+}) => {
   const bytes = await fixture(2048, 2048)
   const messages: ModelMessage[] = [
     { role: "user", content: [image(bytes, "original")] },
@@ -109,31 +117,35 @@ it.each([
   const history = JSON.stringify(messages)
   const target = {
     provider: "renamed-codex",
-    model: "gpt-6.1-sol",
-    instructionProfileId: "codex",
+    model,
+    instructionProfileId: model,
   }
-  const discovered = await discoverCodexModels({
-    baseUrl: "https://chatgpt.example/backend-api/codex",
-    accessToken: "test",
-    fetchFn: async () =>
-      new Response(
-        JSON.stringify({
-          models: [
-            {
-              slug: target.model,
-              input_modalities: ["text", "image"],
-              supports_image_detail_original: supportsOriginal,
-              shell_type: "shell_command",
-              apply_patch_tool_type: "freeform",
-            },
-          ],
-        }),
-      ),
-  })
-  expect(discovered[0]?.capabilities?.imageDetailModes).toEqual(
+  const discovered = bundled
+    ? []
+    : await discoverCodexModels({
+        baseUrl: "https://chatgpt.example/backend-api/codex",
+        accessToken: "test",
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              models: [
+                {
+                  slug: target.model,
+                  input_modalities: ["text", "image"],
+                  supports_image_detail_original: supportsOriginal,
+                  shell_type: "shell_command",
+                  apply_patch_tool_type: "freeform",
+                },
+              ],
+            }),
+          ),
+      })
+  const capabilities = bundled
+    ? createStaticModelsManager("renamed-codex", "codex").resolve(target)
+    : discovered[0]?.capabilities
+  expect(capabilities?.imageDetailModes).toEqual(
     supportsOriginal ? ["high", "original"] : ["high"],
   )
-  const capabilities = discovered[0]?.capabilities
   if (capabilities === undefined)
     throw new Error("Missing discovered capabilities")
   const projected = await prepareModelMedia(messages, {

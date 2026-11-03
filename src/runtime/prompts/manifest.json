@@ -210,5 +210,21 @@
     "version": "1",
     "selection": "Faux and unrecognized models only; not a vendor prompt.",
     "sha256": "1e633ec685899be040ca803baf7dbda408f32a0b1717f52e971d00b308fd6abb"
+  },
+  "gpt-6.1-sol": {
+    "file": "codex-gpt-6.1-sol.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/7e8143a8970394e38830ff7b30143da539bd0a18/codex-rs/models-manager/models.json",
+    "version": "7e8143a8970394e38830ff7b30143da539bd0a18",
+    "selection": "Exact model instructions_template, trimmed; optional persistent, tools, approval and transport-specific blocks remain harness-owned. Literal connector_id example is retained, not a template variable to resolve.",
+    "sha256": "6df4f6b6b8d1ce39e103a724d36d77d712c5f8ed518ff7e43270554a3613954f"
+  },
+  "gpt-6.1-terra": {
+    "file": "codex-gpt-6.1-terra.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/7e8143a8970394e38830ff7b30143da539bd0a18/codex-rs/models-manager/models.json",
+    "version": "7e8143a8970394e38830ff7b30143da539bd0a18",
+    "selection": "Exact model instructions_template, trimmed; optional persistent, tools, approval and transport-specific blocks remain harness-owned. Literal connector_id example is retained, not a template variable to resolve.",
+    "sha256": "8e5e8f9a863bb360482e4d9fc000f1e4f1a85b1fdab7301dba58b36d1185b707"
   }
 }
