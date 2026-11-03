@@ -1,4 +1,5 @@
 import { anthropicCodeModels } from "./anthropic-models.ts"
+import { doubaoModels } from "./doubao-models.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
 import { qwenModels } from "./qwen-models.ts"
 import { geminiPresetModels } from "./gemini-models.ts"
@@ -189,16 +190,7 @@ export const providerServices: readonly ProviderPreset[] = [
     wireApi: "openai_chat_completions",
     envKey: "ARK_API_KEY",
     flavor: "doubao",
-    models: [
-      {
-        id: "doubao-seed-2-1-pro-260915",
-        displayName: "Doubao Seed 2.1 Pro",
-        contextWindowTokens: 1_048_576,
-        maxOutputTokens: 262_144,
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-    ],
+    models: doubaoModels,
     documentationURL:
       "https://console.volcengine.com/ark/region:cn-beijing/docs/model-list",
   },

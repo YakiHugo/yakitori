@@ -24,6 +24,7 @@ import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
+import { isDoubaoVisionModel } from "./doubao-models.ts"
 import { createGlmImagePolicy } from "./glm-image-policy.ts"
 import {
   JsonRequestBudgetError,
@@ -254,9 +255,9 @@ async function* streamChatCompletions(
       throw new AssetMediaError(
         "Image input is only supported for documented MiniMax M3 and M3.1-Flash models.",
       )
-    if (doubao && hasImages && model !== "doubao-seed-2-1-pro-260915")
+    if (doubao && hasImages && !isDoubaoVisionModel(model))
       throw new AssetMediaError(
-        "Doubao image input is only supported for the documented Seed 2.1 Pro model.",
+        "Doubao image input is only supported for the documented Seed Evolving, 2.1 Pro and 2.1 Turbo models.",
       )
     const meta =
       options.flavor === "meta" &&

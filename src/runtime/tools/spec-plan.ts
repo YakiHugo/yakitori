@@ -1,4 +1,5 @@
 import { isQwenVisionModel } from "../qwen-models.ts"
+import { isDoubaoVisionModel } from "../doubao-models.ts"
 import { openAIVisionPolicy } from "../openai-vision-models.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
 import { isMetaVisionModel } from "../meta-image-policy.ts"
@@ -203,13 +204,14 @@ export function captureStepContext(
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
-    // Seed 2.0+ high detail has a fixed documented 1280-token image cost.
+    // Seed 2.1 and Evolving high detail have a fixed 1280-token image cost.
     // The Doubao adapter always sends high; never apply this to relay profiles.
     // https://console.volcengine.com/ark/region:cn-beijing/docs/image-understanding
+    // https://console.volcengine.com/ark/region:cn-beijing/docs/latest-model
     imageTokenEstimator:
       input.serviceId === "doubao" &&
       input.wireApi === "openai_chat_completions" &&
-      model.model === "doubao-seed-2-1-pro-260915"
+      isDoubaoVisionModel(model.model)
         ? () => 1280
         : input.wireApi === "bedrock_converse"
           ? () => 230
@@ -252,7 +254,7 @@ export function captureStepContext(
         input.wireApi === "openai_chat_completions") ||
       (input.serviceId === "doubao" &&
         input.wireApi === "openai_chat_completions" &&
-        target.model === "doubao-seed-2-1-pro-260915") ||
+        isDoubaoVisionModel(target.model)) ||
       (input.serviceId === "qwen" &&
         input.wireApi === "openai_chat_completions" &&
         isQwenVisionModel(target.model)) ||
