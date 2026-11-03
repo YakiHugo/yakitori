@@ -271,6 +271,15 @@ describe("Step tool planning", () => {
   })
 
   it.each([
+    { model: "claude-sonnet-5-5", configuredWindow: 200_000, media: 600 },
+    { model: "claude-opus-5-5", configuredWindow: 1_000, media: 600 },
+    { model: "claude-haiku-5-5", configuredWindow: 1_000, media: 600 },
+    { model: "claude-fable-5-1", configuredWindow: 1_000, media: 600 },
+    { model: "claude-opus-5", configuredWindow: 1_000, media: 600 },
+    { model: "claude-sonnet-5", configuredWindow: 1_000, media: 600 },
+    { model: "claude-fable-5", configuredWindow: 1_000, media: 600 },
+    { model: "claude-opus-4-8", configuredWindow: 1_000, media: 600 },
+    { model: "claude-opus-4-7", configuredWindow: 1_000, media: 600 },
     { model: "claude-sonnet-4-6", configuredWindow: 200_000, media: 600 },
     { model: "claude-opus-4-6", configuredWindow: 1_000, media: 600 },
     { model: "claude-haiku-4-5", configuredWindow: 1_000_000, media: 100 },

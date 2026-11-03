@@ -5,13 +5,14 @@ import {
 } from "../kernel/image-metadata.ts"
 import { AssetMediaError } from "./asset-media.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
-import type { ModelImageBlock } from "./model.ts"
+import type { ModelImageBlock, ModelRequest } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
 // Direct Meta Model API, checked 2026-11-02:
 // https://dev.meta.ai/docs/models
 // https://dev.meta.ai/docs/image-understanding
 // https://dev.meta.ai/docs/api-reference/chat-completions/schemas
+import { isMetaVisionModel } from "./meta-models.ts"
 export { isMetaVisionModel } from "./meta-models.ts"
 
 // Local serialization/allocation guard, not a Meta quota. Fits a documented
@@ -60,4 +61,44 @@ export function validateMetaImageRequest(body: {
     )
   if (jsonRequestByteLength(body, META_REQUEST_SAFETY_BYTES) === undefined)
     throw new MetaImageRequestSizeError()
+}
+
+export function createMetaImagePolicy(request: ModelRequest, model: string) {
+  const count = request.messages.reduce(
+    (total, message) =>
+      total +
+      (message.role === "user" || message.role === "tool"
+        ? message.content.filter((block) => block.type === "image").length
+        : 0),
+    0,
+  )
+  if (count > 0 && !isMetaVisionModel(model))
+    throw new AssetMediaError(
+      "Meta image input is enabled only for muse-spark-1.3, muse-spark-1.2 and muse-wonder-1.0 Standard models, not aliases or subscription-only variants.",
+    )
+  if (count > 50)
+    throw new AssetMediaError(
+      "Meta accepts at most 50 images per request. Send fewer images; originals have not been changed.",
+    )
+  let imageBytes = 0
+  return {
+    ...(isMetaVisionModel(model)
+      ? {
+          prepareImage(bytes: Buffer) {
+            imageBytes += 4 * Math.ceil(bytes.length / 3)
+            if (imageBytes > META_REQUEST_SAFETY_BYTES)
+              throw new MetaImageRequestSizeError()
+            return prepareMetaImage(bytes, request.signal)
+          },
+        }
+      : {}),
+    // Unknown models still receive the request guard, including native history.
+    validateBody: validateMetaImageRequest,
+  }
+}
+
+export function isMetaEndpoint(baseURL: string): boolean {
+  return (
+    URL.parse(baseURL)?.href.replace(/\/$/, "") === "https://api.meta.ai/v1"
+  )
 }

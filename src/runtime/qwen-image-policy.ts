@@ -4,9 +4,13 @@ import {
   InvalidImageDataError,
 } from "../kernel/image-metadata.ts"
 import { AssetMediaError } from "./asset-media.ts"
-import type { QwenEndpointPolicy } from "./qwen-endpoints.ts"
+import {
+  qwenEndpointPolicy,
+  type QwenEndpointPolicy,
+} from "./qwen-endpoints.ts"
+import { isQwenTextModel, isQwenVisionModel } from "./qwen-models.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
-import type { ModelImageBlock } from "./model.ts"
+import type { ModelImageBlock, ModelRequest } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
 // Qwen OpenAI-compatible image contract, checked 2026-11-03:
@@ -97,4 +101,40 @@ export function validateQwenImageRequest(
     throw new AssetMediaError(
       `Qwen images were not sent: the complete request exceeds ${endpoint.requestLimit}. Send fewer images or reduce other request content; originals have not been changed.`,
     )
+}
+
+export function createQwenImagePolicy(
+  request: ModelRequest,
+  model: string,
+  baseURL: string,
+) {
+  const endpoint = qwenEndpointPolicy(baseURL)
+  if (endpoint === undefined) return undefined
+  if (
+    isQwenTextModel(model) &&
+    request.messages.some(
+      (message) =>
+        (message.role === "user" || message.role === "tool") &&
+        message.content.some((block) => block.type === "image"),
+    )
+  )
+    throw new AssetMediaError(
+      `Qwen ${model} is text-only. Choose a documented vision model; images were not sent and originals have not been changed.`,
+    )
+  if (!isQwenVisionModel(model)) return undefined
+  let imageBytes = 0
+  return {
+    prepareImage(bytes: Buffer, image: ModelImageBlock) {
+      // Bound inline accumulation before allocating each base64 copy.
+      imageBytes += 4 * Math.ceil(bytes.length / 3)
+      if (imageBytes > endpoint.requestBytes)
+        throw new AssetMediaError(
+          `Qwen images were not sent: image data alone exceeds the ${endpoint.requestLimit} request limit. Send fewer images; originals have not been changed.`,
+        )
+      return prepareQwenImage(bytes, image, request.signal)
+    },
+    validateBody(body: { messages: readonly ChatCompletionMessageParam[] }) {
+      validateQwenImageRequest(body, endpoint, model)
+    },
+  }
 }

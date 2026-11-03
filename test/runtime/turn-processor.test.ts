@@ -6203,6 +6203,8 @@ it("reprojects ordered user PDFs across native, text, image and unknown-model ca
 
 it.each([
   { model: "claude-haiku-4-5", imageCount: 99, limit: 100 },
+  { model: "claude-sonnet-5-5", imageCount: 599, limit: 600 },
+  { model: "claude-opus-4-8", imageCount: 599, limit: 600 },
   { model: "claude-sonnet-4-6", imageCount: 599, limit: 600 },
   { model: "claude-opus-4-6", imageCount: 599, limit: 600 },
   { model: "claude-unverified-custom", imageCount: 99, limit: 100 },
