@@ -1,3 +1,4 @@
+import { restrictChatOnlyModel } from "./chat-only-model-policy.ts"
 import type { EffectiveModel } from "./effective-model.ts"
 import type { ModelImageBlock } from "./model.ts"
 import { AssetMediaError } from "./asset-media.ts"
@@ -17,27 +18,10 @@ export function isSenseNovaEndpoint(baseURL: string): boolean {
 // This is a conservative harness restriction, not a claim the model lacks tools.
 // https://github.com/OpenSenseNova/SenseNova6.8/blob/main/API.md
 export function restrictSenseNovaVision(model: EffectiveModel): EffectiveModel {
-  const {
-    applyPatchToolType: _,
-    defaultEffort: __,
-    multiAgentReasoningEffort: ___,
-    ...rest
-  } = model
-  return {
-    ...rest,
-    toolPolicy: "chat_only",
-    instructions:
-      "You are a text and image conversation assistant. Analyze only content supplied in this conversation. You cannot call tools, access workspace files, run commands, browse, or perform actions. Do not claim to have inspected, edited, or executed anything. You may explain code as text. Ask the user to provide missing content. If an action is needed, explain this limitation and ask them to switch to a tool-enabled model.",
-    shellToolType: "disabled",
-    fileEditingToolType: "none",
-    supportsCustomTools: false,
-    supportsNativeToolSearch: false,
-    inputModalities:
-      model.model === sensenovaVisionModel ? ["text", "image"] : ["text"],
-    imageDetailModes: ["high"],
-    efforts: [],
-    speeds: [],
-  }
+  return restrictChatOnlyModel(
+    model,
+    model.model === sensenovaVisionModel ? ["text", "image"] : ["text"],
+  )
 }
 
 export async function prepareSenseNovaImage(
