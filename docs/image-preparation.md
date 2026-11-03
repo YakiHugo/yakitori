@@ -232,3 +232,26 @@ References (verified 2026-11-02):
 [public Responses model IDs](https://platform.kimi.ai/docs/api/responses),
 [public model parameters](https://platform.kimi.ai/docs/api/models-overview),
 [Kimi Code model capabilities and plans](https://www.kimi.com/code/docs/en/kimi-code/models.html).
+
+## LongCat image chat
+
+The LongCat service uses the dedicated Chat image contract, with original-byte
+passthrough rather than the generic 2048px preparation. It retains system
+messages and uses the existing chat-only execution boundary. This is a
+conservative adapter restriction, not a claim that LongCat lacks tools: the
+current Chat reference does not specify tools, while the Responses reference
+specifies tools but requires publicly accessible image URLs. Private images are
+not uploaded to bridge those contracts. GIF bytes are preserved without claiming
+animation-frame interpretation or video support. Remote URLs remain provider-
+fetched and their contents are validated by the provider.
+
+The local 32 MB encoded-request guard is a Yakitori allocation bound, not a
+published service quota. The dedicated model parameter reference is used for
+capacity; its 256K output limit conflicts with the Quick Start's 128K prose.
+No paid API verification was performed.
+
+References (verified 2026-11-03):
+[images](https://longcat.chat/platform/docs/image-video-understanding),
+[Chat](https://longcat.chat/platform/docs/api/chat),
+[Responses](https://longcat.chat/platform/docs/api/responses),
+[parameters](https://longcat.chat/platform/docs/api/model-params).

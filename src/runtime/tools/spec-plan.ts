@@ -234,6 +234,9 @@ export function captureStepContext(
         input.wireApi === "gemini_generate_content") ||
       (input.serviceId === "moonshot" &&
         input.wireApi === "openai_responses") ||
+      (input.serviceId === "longcat" &&
+        input.wireApi === "openai_chat_completions" &&
+        target.model === "LongCat-2.5") ||
       (input.serviceId === "sensenova" &&
         input.wireApi === "openai_chat_completions" &&
         target.model === "sensenova-6.8-flash-lite") ||
