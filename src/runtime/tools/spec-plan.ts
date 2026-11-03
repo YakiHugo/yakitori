@@ -1,11 +1,6 @@
-import { isQwenVisionModel } from "../qwen-models.ts"
-import { isDoubaoVisionModel } from "../doubao-models.ts"
-import { isStepfunVisionModel } from "../stepfun-models.ts"
-import { hasOpenAIImagePreparation } from "../openai-vision-models.ts"
+import { anthropicModel } from "../anthropic-models.ts"
+import { resolveImagePreparation } from "../image-preparation-profiles.ts"
 import type { AgentModelOverrides } from "../agent-model-selection.ts"
-import { isMetaVisionModel } from "../meta-image-policy.ts"
-import { isMimoVisionModel } from "../mimo-image-policy.ts"
-import { nvidiaVisionModel } from "../nvidia-image-policy.ts"
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import { catalogModelCapacity, type ResolvedModel } from "../model-catalog.ts"
 import type { ProviderToolCapabilities } from "../model-provider.ts"
@@ -17,10 +12,7 @@ import {
   supportsOpenAIChatToolPdf,
   supportsOpenAIChatUserPdf,
 } from "../native-pdf-capabilities.ts"
-import {
-  type ImageTokenEstimator,
-  openAIImageTokenEstimator,
-} from "../openai-image-budget.ts"
+import type { ImageTokenEstimator } from "../openai-image-budget.ts"
 import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   type ResolvedStepConfiguration,
@@ -117,7 +109,9 @@ export function captureStepContext(
   // https://platform.claude.com/docs/en/build-with-claude/context-windows#context-window-sizes-by-model
   const anthropicCapacity =
     input.wireApi === "anthropic_messages"
-      ? catalogModelCapacity({ provider: "anthropic", model: model.model })
+      ? (anthropicModel(model.model)?.configuration.contextWindowTokens ??
+        catalogModelCapacity({ provider: "anthropic", model: model.model })
+          ?.contextWindowTokens)
       : undefined
   const documentReading: DocumentReadingCapabilities = Object.freeze({
     nativePdf,
@@ -155,7 +149,7 @@ export function captureStepContext(
                 maxRequestMediaUnits:
                   anthropicCapacity === undefined
                     ? UNVERIFIED_ANTHROPIC_MEDIA_SAFETY_UNITS
-                    : anthropicCapacity.contextWindowTokens >= 1_000_000
+                    : anthropicCapacity >= 1_000_000
                       ? 600
                       : 100,
                 ...(anthropicCapacity === undefined
@@ -205,75 +199,11 @@ export function captureStepContext(
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
-    // Seed 2.1 and Evolving high detail have a fixed 1280-token image cost.
-    // The Doubao adapter always sends high; never apply this to relay profiles.
-    // https://console.volcengine.com/ark/region:cn-beijing/docs/image-understanding
-    // https://console.volcengine.com/ark/region:cn-beijing/docs/latest-model
-    imageTokenEstimator:
-      input.serviceId === "doubao" &&
-      input.wireApi === "openai_chat_completions" &&
-      isDoubaoVisionModel(model.model)
-        ? () => 1280
-        : input.wireApi === "bedrock_converse"
-          ? () => 230
-          : openAIImageTokenEstimator({
-              serviceId: input.serviceId,
-              wireApi: input.wireApi,
-              model,
-            }),
-    deferImagePreparation:
-      (input.serviceId === "nvidia" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === nvidiaVisionModel) ||
-      (input.serviceId === "codex" && input.wireApi === "openai_responses") ||
-      (input.serviceId === "openai" &&
-        input.wireApi === "openai_responses" &&
-        hasOpenAIImagePreparation(target.model)) ||
-      input.wireApi === "bedrock_converse" ||
-      (input.serviceId === "xai" &&
-        input.wireApi === "openai_responses" &&
-        target.model === "grok-4.7") ||
-      (input.serviceId === "meta" &&
-        input.wireApi === "openai_chat_completions" &&
-        isMetaVisionModel(target.model)) ||
-      ((input.serviceId === "anthropic" || input.serviceId === "kimi-code") &&
-        input.wireApi === "anthropic_messages") ||
-      (input.serviceId === "gemini" &&
-        input.wireApi === "gemini_generate_content") ||
-      (input.serviceId === "moonshot" &&
-        input.wireApi === "openai_responses") ||
-      (input.serviceId === "longcat" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === "LongCat-2.5") ||
-      (input.serviceId === "sensenova" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === "sensenova-6.8-flash-lite") ||
-      (input.serviceId === "tencent" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === "hy-vision-2.0-instruct") ||
-      (input.serviceId === "minimax" &&
-        input.wireApi === "openai_chat_completions") ||
-      (input.serviceId === "doubao" &&
-        input.wireApi === "openai_chat_completions" &&
-        isDoubaoVisionModel(target.model)) ||
-      (input.serviceId === "qwen" &&
-        input.wireApi === "openai_chat_completions" &&
-        isQwenVisionModel(target.model)) ||
-      (input.serviceId === "deepseek" &&
-        input.wireApi === "openai_chat_completions" &&
-        model.model === "deepseek-flash") ||
-      (input.serviceId === "glm" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === "glm-5.3-flash") ||
-      (input.serviceId === "stepfun" &&
-        input.wireApi === "openai_chat_completions" &&
-        isStepfunVisionModel(target.model)) ||
-      (input.serviceId === "mimo" &&
-        input.wireApi === "openai_chat_completions" &&
-        isMimoVisionModel(target.model)) ||
-      (input.serviceId === "reka" &&
-        input.wireApi === "openai_chat_completions" &&
-        target.model === "reka-edge-2603"),
+    ...resolveImagePreparation({
+      serviceId: input.serviceId,
+      wireApi: input.wireApi,
+      model,
+    }),
     documentReading,
     userDocumentReading: Object.freeze({
       ...documentReading,

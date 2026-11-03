@@ -513,6 +513,50 @@ describe("direct Qwen images", () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it("keeps encoded-image admission budgets local to each request on a reused provider", async () => {
+    const bodies: string[] = []
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_url, options) => {
+        bodies.push(String(options?.body))
+        return new Response(
+          'data: {"id":"reply","choices":[{"index":0,"delta":{"content":"Seen"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      })
+    const small = await image()
+    const source = Buffer.concat([
+      Buffer.from(small.data, "base64"),
+      Buffer.alloc(6_500_000),
+    ])
+    const block: ModelImageBlock = { ...small, data: source.toString("base64") }
+    const stream = createChatCompletionsProvider({
+      apiKey: "unused",
+      model: "qwen3.8-max",
+      flavor: "qwen",
+      baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const events = await Array.fromAsync(stream(request(block)))
+      expect(events.at(-1)).toMatchObject({ type: "response" })
+    }
+    const events = await Array.fromAsync(
+      stream({
+        ...request(block),
+        messages: [{ role: "user", content: [block, block] }],
+      }),
+    )
+    expect(events.at(-1)).toMatchObject({
+      type: "failure",
+      failure: { kind: "invalid_request", stage: "request_build" },
+    })
+    expect(JSON.stringify(events)).toContain("16 MiB DashScope")
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(
+      bodies.every((body) => body.includes(source.toString("base64"))),
+    ).toBe(true)
+  })
+
   it("sends native image data without an OpenAI detail parameter", async () => {
     const bodies: string[] = []
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {

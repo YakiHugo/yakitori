@@ -10,6 +10,10 @@ import { validateModelImage } from "./prepare-model-image.ts"
 const REQUEST_BYTES = 48 * 1024 * 1024
 const IMAGE_BYTES = 32 * 1024 * 1024
 
+export function isDeepseekVisionModel(model: string): boolean {
+  return model === "deepseek-flash"
+}
+
 export function deepseekImagePolicy(
   baseURL: string,
   model: string,
@@ -18,7 +22,7 @@ export function deepseekImagePolicy(
   if (
     URL.parse(baseURL)?.href.replace(/\/$/, "") !==
       "https://api.deepseek.com" ||
-    model !== "deepseek-flash"
+    !isDeepseekVisionModel(model)
   )
     return undefined
   const images = request.messages.flatMap((message) =>

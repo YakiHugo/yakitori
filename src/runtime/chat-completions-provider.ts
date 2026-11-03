@@ -1,18 +1,13 @@
+import { isStepfunEndpoint } from "./stepfun-image-policy.ts"
 import {
   isSparkChatEndpoint,
   validateSparkChatMessages,
   validateSparkChatRequest,
 } from "./spark-chat-policy.ts"
 import { qwenEndpointPolicy } from "./qwen-endpoints.ts"
-import { isQwenTextModel, isQwenVisionModel } from "./qwen-models.ts"
-import {
-  createLongCatImagePolicy,
-  isLongCatEndpoint,
-  longcatVisionModel,
-} from "./longcat-vision.ts"
+import { isLongCatEndpoint, longcatVisionModel } from "./longcat-vision.ts"
 import {
   isSenseNovaEndpoint,
-  prepareSenseNovaImage,
   sensenovaVisionModel,
 } from "./sensenova-vision.ts"
 import OpenAI from "openai"
@@ -24,36 +19,22 @@ import type {
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
-import { inspectImageBytes } from "../kernel/image-metadata.ts"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
-import { deepseekImagePolicy } from "./deepseek-image-policy.ts"
-import { isDoubaoVisionModel } from "./doubao-models.ts"
-import { createGlmImagePolicy } from "./glm-image-policy.ts"
 import { glmTextModel } from "./glm-models.ts"
-import {
-  JsonRequestBudgetError,
-  jsonRequestByteLength,
-} from "./json-request-budget.ts"
-import {
-  isMetaVisionModel,
-  META_REQUEST_SAFETY_BYTES,
-  MetaImageRequestSizeError,
-  prepareMetaImage,
-  validateMetaImageRequest,
-} from "./meta-image-policy.ts"
-import { createMimoImagePolicy, isMimoEndpoint } from "./mimo-image-policy.ts"
+import { JsonRequestBudgetError } from "./json-request-budget.ts"
+import { isMetaEndpoint } from "./meta-image-policy.ts"
+import { isMimoEndpoint } from "./mimo-image-policy.ts"
+import { createChatImagePolicy } from "./image-preparation-profiles.ts"
 import { isMetaContributorModel } from "./meta-models.ts"
 import {
-  createNvidiaImagePolicy,
   isNvidiaEndpoint,
   validateNvidiaRequest,
 } from "./nvidia-image-policy.ts"
 import {
   flattenModelSystem,
   type ModelContentBlock,
-  type ModelImageBlock,
   type ModelMessage,
   type ModelRequest,
   ModelStopReason,
@@ -87,19 +68,9 @@ import {
   ModelRequestPlanError,
   validateChatOnlyRequest,
 } from "./model-request-plan.ts"
-import { validateModelImage } from "./prepare-model-image.ts"
-import {
-  prepareQwenImage,
-  validateQwenImageRequest,
-} from "./qwen-image-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
-import { createRekaVisionPolicy, isRekaEndpoint } from "./reka-vision.ts"
-import {
-  createStepfunImagePolicy,
-  isStepfunEndpoint,
-} from "./stepfun-image-policy.ts"
+import { isRekaEndpoint } from "./reka-vision.ts"
 import { tencentVisionModel } from "./tencent-chat-only.ts"
-import { createTencentImagePolicy } from "./tencent-image-policy.ts"
 
 export type ChatCompletionsProviderOptions = Readonly<{
   apiKey: string
@@ -202,7 +173,6 @@ async function* streamChatCompletions(
     const stepfun =
       options.flavor === "stepfun" && isStepfunEndpoint(options.baseURL)
     const doubao = options.flavor === "doubao"
-    const minimax = options.flavor === "minimax"
     const model = request.target.model || options.model
     const spark =
       options.flavor === "spark" && isSparkChatEndpoint(options.baseURL)
@@ -251,7 +221,6 @@ async function* streamChatCompletions(
       options.flavor === "nvidia" && isNvidiaEndpoint(options.baseURL)
     if (nvidia) validateNvidiaRequest(request, model)
     const reka = options.flavor === "reka" && isRekaEndpoint(options.baseURL)
-    const rekaImages = reka ? createRekaVisionPolicy(request, model) : undefined
     const sensenova =
       options.flavor === "sensenova" && isSenseNovaEndpoint(options.baseURL)
     if (sensenova) {
@@ -284,200 +253,27 @@ async function* streamChatCompletions(
         )
     }
     const portableChat = sensenova || longcat
-    const longcatImages = longcat
-      ? createLongCatImagePolicy(request)
-      : undefined
     const tencentVision =
       options.flavor === "tencent" && model === tencentVisionModel
     if (tencentVision) validateChatOnlyRequest(request)
-    const tencentImages = tencentVision
-      ? createTencentImagePolicy(request.signal)
-      : undefined
-    const hasImages = request.messages.some(
-      (message) =>
-        (message.role === "user" || message.role === "tool") &&
-        message.content.some((block) => block.type === "image"),
-    )
-    if (
-      minimax &&
-      hasImages &&
-      !["MiniMax-M3", "MiniMax-M3.1-Flash"].includes(model)
-    )
-      throw new AssetMediaError(
-        "Image input is only supported for documented MiniMax M3 and M3.1-Flash models.",
-      )
-    if (doubao && hasImages && !isDoubaoVisionModel(model))
-      throw new AssetMediaError(
-        "Doubao image input is only supported for the documented Seed Evolving, 2.1 Pro and 2.1 Turbo models.",
-      )
-    const meta =
-      options.flavor === "meta" &&
-      URL.parse(options.baseURL)?.href.replace(/\/$/, "") ===
-        "https://api.meta.ai/v1"
+    const meta = options.flavor === "meta" && isMetaEndpoint(options.baseURL)
     if (meta && isMetaContributorModel(model))
       throw new AssetMediaError(
         "Meta Contributor models are not enabled: they allow Meta to train on prompts, code, files and responses. Yakitori has no informed data-sharing opt-in for these models yet. Choose the Standard model ID without -contributor; nothing was sent.",
       )
-    if (meta && hasImages && !isMetaVisionModel(model))
-      throw new AssetMediaError(
-        "Meta image input is enabled only for muse-spark-1.3, muse-spark-1.2 and muse-wonder-1.0 Standard models, not aliases or subscription-only variants.",
-      )
-    if (
-      meta &&
-      request.messages.reduce(
-        (count, message) =>
-          count +
-          (message.role === "user" || message.role === "tool"
-            ? message.content.filter((block) => block.type === "image").length
-            : 0),
-        0,
-      ) > 50
-    )
-      throw new AssetMediaError(
-        "Meta accepts at most 50 images per request. Send fewer images; originals have not been changed.",
-      )
-    let metaImageBytes = 0
-    if (options.flavor === "tencent" && hasImages && !tencentVision)
-      throw new AssetMediaError(
-        "TokenHub image input is only enabled for the documented HY Vision 2.0 Instruct model.",
-      )
-    // MiniMax OpenAI API: 10 MB/image, 64 MB/body. Preserve source pixels;
-    // detail high delegates visual processing to the service (not OpenAI auto).
-    // https://platform.minimax.io/docs/api-reference/text-openai-api
-    // These byte bounds are not context-token bounds. MiniMax publishes only
-    // rough visual token ranges (high can exceed 15k); the harness's generic
-    // image estimate can undercount them. Do not invent a local token ceiling
-    // or silently reduce detail: provider context rejection remains visible.
-    let imageBytes = 0
     const qwen =
       options.flavor === "qwen"
         ? qwenEndpointPolicy(options.baseURL)
         : undefined
-    const nativeQwenImages = qwen !== undefined && isQwenVisionModel(model)
-    if (qwen && hasImages && isQwenTextModel(model))
-      throw new AssetMediaError(
-        `Qwen ${model} is text-only. Choose a documented vision model; images were not sent and originals have not been changed.`,
-      )
-    const glmImages =
-      options.flavor === "glm" && model === "glm-5.3-flash"
-        ? createGlmImagePolicy(request)
-        : undefined
-    let qwenImageBytes = 0
-    const imagePolicy =
-      options.flavor === "deepseek"
-        ? deepseekImagePolicy(options.baseURL, model, request)
-        : undefined
-    const stepfunImages = stepfun
-      ? createStepfunImagePolicy(request, model)
-      : undefined
-    const mimoImages = mimo ? createMimoImagePolicy(request, model) : undefined
-    const nvidiaImages = nvidia ? createNvidiaImagePolicy(request) : undefined
+    const imagePolicy = createChatImagePolicy({
+      flavor: options.flavor,
+      baseURL: options.baseURL,
+      model,
+      request,
+    })
     const media = await prepareProviderMedia(request, {
-      ...(nvidiaImages ? { prepareImage: nvidiaImages.prepareImage } : {}),
-      ...(rekaImages ? { prepareImage: rekaImages.prepareImage } : {}),
-      ...(sensenova
-        ? {
-            inlineImageUrls: true,
-            prepareImage: (bytes, image) =>
-              prepareSenseNovaImage(bytes, image, request.signal),
-          }
-        : {}),
-      ...(longcatImages ? { prepareImage: longcatImages.prepareImage } : {}),
-      ...(mimoImages ? { prepareImage: mimoImages.prepareImage } : {}),
+      ...imagePolicy,
       inlineDocumentUrls: true,
-      ...(stepfunImages ? { prepareImage: stepfunImages.prepareImage } : {}),
-      ...(tencentImages === undefined
-        ? {}
-        : { inlineImageUrls: true, prepareImage: tencentImages.prepareImage }),
-      ...(imagePolicy === undefined
-        ? {}
-        : { prepareImage: imagePolicy.prepareImage }),
-      ...(glmImages ? { prepareImage: glmImages.prepareImage } : {}),
-      ...(meta && isMetaVisionModel(model)
-        ? {
-            prepareImage: (bytes: Buffer) => {
-              metaImageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (metaImageBytes > META_REQUEST_SAFETY_BYTES)
-                throw new MetaImageRequestSizeError()
-              return prepareMetaImage(bytes, request.signal)
-            },
-          }
-        : {}),
-      ...(nativeQwenImages
-        ? {
-            prepareImage: (bytes: Buffer, image: ModelImageBlock) => {
-              // Bound inline accumulation before allocating each base64 copy.
-              qwenImageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (qwenImageBytes > qwen.requestBytes)
-                throw new AssetMediaError(
-                  `Qwen images were not sent: image data alone exceeds the ${qwen.requestLimit} request limit. Send fewer images; originals have not been changed.`,
-                )
-              return prepareQwenImage(bytes, image, request.signal)
-            },
-          }
-        : {}),
-      ...(doubao
-        ? {
-            // Remote image URLs stay provider-owned; do not fetch them locally.
-            prepareImage: async (bytes: Buffer, image: ModelImageBlock) => {
-              // Ark base64 contract, checked 2026-11-02:
-              // https://docs.volcengine.com/docs/ark/image-understanding?lang=zh
-              // Preserve originals: Ark owns visual resizing/tokenization.
-              if (bytes.length >= 10_000_000)
-                throw new AssetMediaError(
-                  "Doubao image must be smaller than 10 MB. Resize a copy; the original has not been changed.",
-                )
-              imageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (imageBytes > 64_000_000)
-                throw new AssetMediaError(
-                  "Doubao request exceeds 64 MB including encoded images.",
-                )
-              const metadata = inspectImageBytes(bytes)
-              if (
-                metadata.width <= 14 ||
-                metadata.height <= 14 ||
-                metadata.width * metadata.height > 36_000_000 ||
-                Math.max(metadata.width, metadata.height) /
-                  Math.min(metadata.width, metadata.height) >
-                  150
-              )
-                throw new AssetMediaError(
-                  "Doubao images require sides above 14 pixels, at most 36 million pixels and aspect ratio at most 150:1. Resize a copy; the original has not been changed.",
-                )
-              await validateModelImage(bytes, request.signal)
-              return {
-                type: "image" as const,
-                mediaType: metadata.mediaType,
-                detail: image.detail ?? "high",
-                data: bytes.toString("base64"),
-              }
-            },
-          }
-        : {}),
-      ...(minimax
-        ? {
-            inlineImageUrls: true,
-            prepareImage: async (bytes, image) => {
-              if (bytes.length > 10_000_000)
-                throw new AssetMediaError(
-                  "MiniMax image exceeds 10 MB. Resize a copy; the original has not been changed.",
-                )
-              imageBytes += 4 * Math.ceil(bytes.length / 3)
-              if (imageBytes > 64_000_000)
-                throw new AssetMediaError(
-                  "MiniMax request exceeds 64 MB including encoded images.",
-                )
-              const metadata = inspectImageBytes(bytes)
-              await validateModelImage(bytes, request.signal)
-              return {
-                type: "image" as const,
-                mediaType: metadata.mediaType,
-                detail: image.detail ?? "high",
-                data: bytes.toString("base64"),
-              }
-            },
-          }
-        : {}),
     })
     const messages = toChatCompletionsMessages(
       media.messages,
@@ -606,24 +402,7 @@ async function* streamChatCompletions(
         thinking: { type: "enabled", clear_thinking: false, ...thinking },
       })
     }
-    if (minimax && jsonRequestByteLength(body, 64_000_000) === undefined)
-      throw new AssetMediaError(
-        "MiniMax request exceeds 64 MB including text, tools and encoded images.",
-      )
-    if (doubao && jsonRequestByteLength(body, 64_000_000) === undefined)
-      throw new AssetMediaError(
-        "Doubao request exceeds 64 MB including text, tools and encoded images.",
-      )
-    tencentImages?.validateBody(body)
-    if (nativeQwenImages) validateQwenImageRequest(body, qwen, model)
-    imagePolicy?.validateBody(body, media.messages)
-    glmImages?.validateBody(body)
-    if (meta) validateMetaImageRequest(body)
-    stepfunImages?.validateBody(body)
-    mimoImages?.validateBody(body)
-    longcatImages?.validateBody(body)
-    nvidiaImages?.validateBody(body)
-    rekaImages?.validateBody(body, messages)
+    imagePolicy?.validateBody?.(body, media.messages)
     if (spark) validateSparkChatMessages(messages)
     if (mimo) {
       const thinking = (body as { thinking?: { type?: string } }).thinking
