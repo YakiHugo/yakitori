@@ -5,7 +5,7 @@ import type { ModelImageBlock } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
 
 // Codex's standard Responses detail-based preparation, not public API quotas.
-// openai/codex @ 2816088b68069dd5ce1f71a653cd956eb367c28e:
+// openai/codex @ 7e8143a8970394e38830ff7b30143da539bd0a18:
 // codex-rs/core/src/image_preparation.rs; codex-rs/utils/image/src/lib.rs.
 // UnifiedImageBudget/Responses Lite are separate feature-gated transports;
 // Yakitori does not negotiate them. Original support is captured from model
