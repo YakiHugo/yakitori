@@ -22,10 +22,13 @@ vi.mock("node:os", async (original) => ({
   homedir: () => home.path,
 }))
 
-it("persists Ark encrypted tool continuation across reopening without leaking to renderer or another account/provider", async () => {
+it.each([
+  "doubao-seed-2-1-pro-260915",
+  "doubao-seed-evolving",
+  "doubao-seed-2-1-turbo-260628",
+])("persists %s encrypted tool continuation across reopening without leaking to renderer or another account/provider", async (model) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-ark-continuation-"))
   home.path = root
-  const model = "doubao-seed-2-1-pro-260915"
   const bodies: string[] = []
   let effects = 0
   const fetch = vi

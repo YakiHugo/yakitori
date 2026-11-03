@@ -28,10 +28,14 @@ const image = async (
       .toBuffer()
   ).toString("base64"),
 })
-const request = (block: ModelImageBlock, text = "Inspect"): ModelRequest => ({
+const request = (
+  block: ModelImageBlock,
+  text = "Inspect",
+  model = "doubao-seed-2-1-pro-260915",
+): ModelRequest => ({
   target: {
     provider: "personal",
-    model: "doubao-seed-2-1-pro-260915",
+    model,
     instructionProfileId: "default",
   },
   system: [],
@@ -100,7 +104,11 @@ describe("direct Doubao images", () => {
 
   it.each([
     { native: true, model: "doubao-seed-2-1-pro-260915" },
+    { native: true, model: "doubao-seed-evolving" },
+    { native: true, model: "doubao-seed-2-1-turbo-260628" },
     { native: false, model: "doubao-seed-2-1-pro-260915" },
+    { native: false, model: "doubao-seed-evolving" },
+    { native: false, model: "doubao-seed-2-1-turbo-260628" },
   ])("projects history/tool images through the captured Turn (native=$native, model=$model)", async ({
     native,
     model,
@@ -189,6 +197,7 @@ describe("direct Doubao images", () => {
         type: "response",
       })
       const payload = JSON.parse(bodies[0] ?? "{}")
+      expect(payload.reasoning_effort).toBe(native ? "high" : undefined)
       const urls = payload.messages.flatMap(
         (message: {
           content: string | { type: string; image_url?: { url: string } }[]
@@ -230,14 +239,18 @@ async function collect(input: ModelRequest) {
 
 describe("Doubao admission and native continuation", () => {
   it.each([
-    [14, 32],
-    [32, 14],
-    [2401, 15],
-  ])("rejects invalid geometry %ix%i before network", async (width, height) => {
+    ["doubao-seed-2-1-pro-260915", 14, 32],
+    ["doubao-seed-2-1-pro-260915", 32, 14],
+    ["doubao-seed-2-1-pro-260915", 2401, 15],
+    ["doubao-seed-evolving", 14, 32],
+    ["doubao-seed-2-1-turbo-260628", 2401, 15],
+  ] as const)("rejects invalid geometry for %s (%ix%i) before network", async (model, width, height) => {
     const fetch = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("Unexpected fetch"))
-    const events = await collect(request(await image(width, height)))
+    const events = await collect(
+      request(await image(width, height), "Inspect", model),
+    )
     expect(events.at(-1)).toMatchObject({
       type: "failure",
       failure: {
@@ -274,7 +287,11 @@ describe("Doubao admission and native continuation", () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it("rejects 10 MB images before decoding or network", async () => {
+  it.each([
+    "doubao-seed-2-1-pro-260915",
+    "doubao-seed-evolving",
+    "doubao-seed-2-1-turbo-260628",
+  ])("rejects 10 MB images for %s before image decoding or network", async (model) => {
     const fetch = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("Unexpected fetch"))
@@ -283,7 +300,9 @@ describe("Doubao admission and native continuation", () => {
       mediaType: "image/png",
       data: Buffer.alloc(10_000_000).toString("base64"),
     }
-    expect((await collect(request(block))).at(-1)).toMatchObject({
+    expect(
+      (await collect(request(block, "Inspect", model))).at(-1),
+    ).toMatchObject({
       type: "failure",
       failure: {
         stage: "request_build",
@@ -343,7 +362,11 @@ describe("Doubao admission and native continuation", () => {
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
-  it("preserves the complete opaque thinking block only in scoped native history for tool continuation", async () => {
+  it.each([
+    "doubao-seed-2-1-pro-260915",
+    "doubao-seed-evolving",
+    "doubao-seed-2-1-turbo-260628",
+  ])("preserves opaque thinking for %s in scoped native tool history", async (model) => {
     const bodies: string[] = []
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
       bodies.push(String(options?.body))
@@ -401,7 +424,7 @@ describe("Doubao admission and native continuation", () => {
       )
     })
     const input: ModelRequest = {
-      ...request(await image()),
+      ...request(await image(), "Inspect", model),
       continuationScope: "account",
       tools: [
         {
