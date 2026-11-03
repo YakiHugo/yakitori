@@ -20,7 +20,6 @@ import {
   Target,
   X,
 } from "lucide-react"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import {
   type ReactNode,
   useCallback,
@@ -52,6 +51,7 @@ import {
 } from "../composer-attachments.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { textInputDraft, trimInputDraft } from "../input-draft.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   type ComposerSuggestion,
@@ -206,7 +206,7 @@ export function ComposerSurface({
   importAttachments: ComposerAttachmentImport
   readingAttachments: boolean
   attachmentError?: string | undefined
-  onAttachmentError(error: string): void
+  onAttachmentError(error: string | undefined): void
   // Powers the @-mention file picker; without it the @ trigger stays inert.
   searchFiles?:
     | ((query: string) => Promise<
@@ -231,6 +231,9 @@ export function ComposerSurface({
   const draft = promptPartsText(parts)
   const attachments = inputContentAttachments(inputContent(parts))
   const editorRef = useRef<PromptEditorHandle | null>(null)
+  const importTail = useRef(Promise.resolve())
+  const importCount = useRef(0)
+  const [importsPending, setImportsPending] = useState(false)
   const contextPanelRef = useRef<HTMLDivElement>(null)
   const addContextRef = useRef<HTMLButtonElement>(null)
   const menuSession = useRef(sessionId)
@@ -468,47 +471,65 @@ export function ComposerSurface({
     !busy &&
     !sending &&
     !readingAttachments &&
+    !importsPending &&
     !compactBlocked &&
     !submissionBlocked
   const canResume =
     !containsInput && onResume !== undefined && activeTurnId === undefined
 
-  const addFiles = async (files: readonly File[]) => {
-    if (files.length === 0) return
+  // Queue intent, not decoded bytes. The insertion belongs to the originating
+  // editor, so navigation or replacing its draft also invalidates queued work.
+  const enqueueAttachments = (
+    prepare: Parameters<ComposerAttachmentImport>[0],
+    validate?: () => void,
+  ) => {
     const insertion = editorRef.current?.captureAttachmentInsertion()
-    try {
-      const added = await importAttachments(
-        async () => ({
-          collect: (importSessionId) =>
-            appendAttachmentFiles([], importSessionId, files),
-        }),
-        () => validateAttachmentFiles(files),
-      )
-      if (added?.length && !insertion?.insert(added))
-        await discardDraftAttachments(added)
-    } finally {
-      insertion?.cancel()
-    }
+    if (!insertion) return
+    if (importCount.current++ === 0) onAttachmentError(undefined)
+    setImportsPending(true)
+    const operation = importTail.current.then(async () => {
+      try {
+        if (!insertion.isCurrent()) return
+        const added = await importAttachments(prepare, validate)
+        if (added?.length && !insertion.insert(added))
+          await discardDraftAttachments(added)
+      } catch (error) {
+        if (insertion.isCurrent())
+          onAttachmentError(
+            error instanceof Error
+              ? error.message
+              : "Attachments could not be imported.",
+          )
+      } finally {
+        insertion.cancel()
+        if (--importCount.current === 0) setImportsPending(false)
+      }
+    })
+    importTail.current = operation
   }
 
-  const pickAttachments = async () => {
+  const addFiles = (files: readonly File[]) => {
+    if (files.length === 0) return
+    enqueueAttachments(
+      async () => ({
+        collect: (importSessionId) =>
+          appendAttachmentFiles([], importSessionId, files),
+      }),
+      () => validateAttachmentFiles(files),
+    )
+  }
+
+  const pickAttachments = () => {
     setAddMenuOpen(false)
-    const insertion = editorRef.current?.captureAttachmentInsertion()
-    try {
-      const added = await importAttachments(async () => {
-        const selection = await selectAttachments()
-        if (selection === undefined) return
-        return {
-          collect: (importSessionId) =>
-            appendPickedAttachments([], importSessionId, selection.selectionId),
-          cleanup: () => discardPickedAttachments(selection.selectionId),
-        }
-      })
-      if (added?.length && !insertion?.insert(added))
-        await discardDraftAttachments(added)
-    } finally {
-      insertion?.cancel()
-    }
+    enqueueAttachments(async () => {
+      const selection = await selectAttachments()
+      if (selection === undefined) return
+      return {
+        collect: (importSessionId) =>
+          appendPickedAttachments([], importSessionId, selection.selectionId),
+        cleanup: () => discardPickedAttachments(selection.selectionId),
+      }
+    })
   }
 
   const pickAddAction = (action: "files" | "image") => {
