@@ -25,18 +25,16 @@ export function resolveProviderBackend(
   configuration: Pick<ProviderConfiguration, "service" | "baseURL" | "wireApi">,
 ): ProviderBackend {
   const service = providerServiceForEndpoint(configuration)
-  const responses = configuration.wireApi === "openai_responses"
-  const messages = configuration.wireApi === "anthropic_messages"
   const codex =
     configuration.service === "codex" &&
-    responses &&
+    configuration.wireApi === "openai_responses" &&
     new URL(configuration.baseURL).href.replace(/\/$/, "") ===
       "https://chatgpt.com/backend-api/codex"
   const serviceId = codex ? "codex" : service?.id
-  const openai = service?.id === "openai"
-  const anthropic = service?.id === "anthropic" && messages
+  const id = `${serviceId ?? "generic"}/${configuration.wireApi}` as const
+  const protocol = providerProtocols[id]
   return {
-    id: `${serviceId ?? "generic"}/${configuration.wireApi}`,
+    id,
     ...(service === undefined ? {} : { service }),
     ...(serviceId === undefined ? {} : { serviceId }),
     ...(codex
@@ -45,38 +43,73 @@ export function resolveProviderBackend(
         ? {}
         : { catalogProvider: service.catalogProvider }),
     capabilities: {
-      remoteCompaction: codex
-        ? "codex_remote"
-        : openai && responses
-          ? "responses_compact"
-          : false,
-      nativePdf:
-        (openai &&
-          (responses || configuration.wireApi === "openai_chat_completions")) ||
-        anthropic ||
-        (service?.id === "gemini" &&
-          (configuration.wireApi === "gemini_generate_content" ||
-            configuration.wireApi === "gemini_interactions")),
+      remoteCompaction: false,
+      nativePdf: false,
+      ...protocol?.capabilities,
       tools: {
-        supportsCustomTools: codex || (openai && responses),
-        ...(codex || (openai && responses)
-          ? { nativeDeferredProtocol: "openai_deferred" }
-          : anthropic
-            ? { nativeDeferredProtocol: "anthropic_deferred" }
-            : {}),
+        supportsCustomTools: false,
+        ...protocol?.capabilities?.tools,
       },
     },
-    responseProfile:
-      service?.id === "xai"
-        ? "grok"
-        : service?.id === "moonshot"
-          ? "kimi"
-          : "openai",
-    anthropicProfile: anthropic
-      ? "anthropic"
-      : service?.id === "kimi-code" && messages
-        ? "kimi-code"
-        : "generic",
+    responseProfile: protocol?.responseProfile ?? "openai",
+    anthropicProfile: protocol?.anthropicProfile ?? "generic",
     chatCompletionsFlavor: service?.flavor ?? "generic",
   }
+}
+
+// These are protocol contracts, not model capabilities or account settings.
+// Only an explicit service at a validated endpoint above can select a row;
+// matching a vendor name, model name or API shape alone grants no features.
+const providerProtocols: Readonly<
+  Record<
+    `${string}/${ProviderConfiguration["wireApi"]}`,
+    Readonly<{
+      capabilities?: Partial<ModelProviderCapabilities>
+      responseProfile?: ProviderBackend["responseProfile"]
+      anthropicProfile?: ProviderBackend["anthropicProfile"]
+    }>
+  >
+> = {
+  "codex/openai_responses": {
+    capabilities: {
+      remoteCompaction: "codex_remote",
+      tools: {
+        supportsCustomTools: true,
+        nativeDeferredProtocol: "openai_deferred",
+      },
+    },
+  },
+  "openai/openai_responses": {
+    capabilities: {
+      remoteCompaction: "responses_compact",
+      nativePdf: true,
+      tools: {
+        supportsCustomTools: true,
+        nativeDeferredProtocol: "openai_deferred",
+      },
+    },
+  },
+  "openai/openai_chat_completions": {
+    capabilities: { nativePdf: true },
+  },
+  "anthropic/anthropic_messages": {
+    capabilities: {
+      nativePdf: true,
+      tools: {
+        supportsCustomTools: false,
+        nativeDeferredProtocol: "anthropic_deferred",
+      },
+    },
+    anthropicProfile: "anthropic",
+  },
+  "gemini/gemini_generate_content": {
+    capabilities: { nativePdf: true },
+  },
+  "gemini/gemini_interactions": {
+    capabilities: { nativePdf: true },
+  },
+  "xai/openai_responses": { responseProfile: "grok" },
+  "xai/openai_chat_completions": { responseProfile: "grok" },
+  "moonshot/openai_responses": { responseProfile: "kimi" },
+  "kimi-code/anthropic_messages": { anthropicProfile: "kimi-code" },
 }
