@@ -81,8 +81,8 @@ describe("Step tool planning", () => {
       wireApi,
     })
     expect(step.imageTokenEstimator !== undefined).toBe(enabled)
-    // Raw delegation is limited to the verified native Astra transport.
-    expect(step.deferImagePreparation).toBe(enabled)
+    // Codex owns detail-based preparation separately from native Astra.
+    expect(step.deferImagePreparation).toBe(enabled || serviceId === "codex")
     const plan = prepareModelRequestPlan(
       {
         target: step.target,
