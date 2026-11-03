@@ -4,6 +4,7 @@ import {
   prepareAnthropicImage,
 } from "./anthropic-image-policy.ts"
 import { prepareModelImage } from "./prepare-model-image.ts"
+import { prepareKimiCodeImage } from "./kimi-code-image-policy.ts"
 import Anthropic, { toFile } from "@anthropic-ai/sdk"
 import type {
   BetaContentBlockParam,
@@ -209,6 +210,14 @@ async function* streamAnthropic(
     const nativeImagePolicy =
       URL.parse(client.baseURL ?? fallbackBaseURL)?.href ===
       "https://api.anthropic.com/"
+    const kimiCodeImages =
+      profile === "kimi-code" &&
+      [
+        "https://api.kimi.com/coding",
+        "https://api.kimi.com/coding/v1",
+      ].includes(
+        new URL(client.baseURL ?? fallbackBaseURL).href.replace(/\/$/, ""),
+      )
     // Native hosted tools have different screenshot limits; legacy SDK controls
     // can rewrite the JSON body. Keep these advanced requests on their existing
     // image preparation instead of guessing their resize or serialization rules.
@@ -245,6 +254,8 @@ async function* streamAnthropic(
       bytes: Buffer,
       image: import("./model.ts").ModelImageBlock,
     ) => {
+      if (kimiCodeImages)
+        return prepareKimiCodeImage(bytes, image, request.signal)
       if (!checkNativeImageLimits)
         return prepareModelImage(bytes, image.detail ?? "high", request.signal)
       const prepared = await prepareAnthropicImage(
@@ -268,7 +279,8 @@ async function* streamAnthropic(
       return prepared
     }
     const mediaOptions = {
-      ...(nativeImagePolicy ? { prepareImage } : {}),
+      ...(nativeImagePolicy || kimiCodeImages ? { prepareImage } : {}),
+      ...(kimiCodeImages ? { inlineImageUrls: true } : {}),
       ...(upload === undefined
         ? {}
         : {
