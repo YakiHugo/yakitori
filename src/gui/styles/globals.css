@@ -217,6 +217,13 @@
 .markdown :where(hr) + * {
   margin-top: var(--prose-section-gap);
 }
+.markdown .katex-display {
+  max-width: 100%;
+  margin: 0;
+  padding-block: var(--spacing);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 .markdown > :first-child,
 .markdown :where(li, blockquote) > :first-child {
   margin-top: 0;

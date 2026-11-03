@@ -41,6 +41,8 @@ it.each([
   ["<div>one</div>\n\n<div>two</div>", "<div>one</div> <div>two</div>"],
   ["&copy; &eacute; &#x1F600;", "© é 😀"],
   ["[foo_bar | label](https://example.com)", "foo_bar | label"],
+  ["**中文。**下一句", "中文。下一句"],
+  ["链接 https://example.com/a。", "链接 https://example.com/a。"],
   [
     "| First | Second |\n| --- | --- |\n| foo_bar | x\\|y |",
     "First Second foo_bar x|y",
@@ -52,5 +54,12 @@ it.each([
 ])("indexes the actual rendered Markdown text for %s", (markdown, visible) => {
   const { container } = render(<MarkdownView text={markdown} />)
   expect(conversationFindRanges(container, visible)).toHaveLength(1)
+  expect(markdownVisibleText(markdown)).toBe(visible)
+})
+
+it.each([
+  ["$E=mc^2$", "E=mc^2"],
+  ["\\(x^2+y^2=z^2\\)", "x^2+y^2=z^2"],
+])("projects TeX source into searchable text for %s", (markdown, visible) => {
   expect(markdownVisibleText(markdown)).toBe(visible)
 })

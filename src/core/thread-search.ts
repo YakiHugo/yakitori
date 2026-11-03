@@ -1,9 +1,9 @@
 export { literalMatches } from "../shared/literal-matches.ts"
 
 import type { Nodes } from "mdast"
-import remarkGfm from "remark-gfm"
 import remarkParse from "remark-parse"
 import { unified } from "unified"
+import { markdownRemarkPlugins } from "../shared/markdown-plugins.ts"
 import type { ThreadSummary } from "./rollout.ts"
 
 export type ThreadSearchOccurrence = Readonly<{
@@ -41,9 +41,9 @@ export function startAfterThreadCursor(
   return index < 0 ? summaries.length : index
 }
 
-// Match the GUI's existing CommonMark/GFM parser. Regex removal cannot
-// distinguish literal punctuation, code, escaped text and table delimiters.
-const markdownParser = unified().use(remarkParse).use(remarkGfm)
+// Match the GUI parser. Regex removal cannot distinguish literal punctuation,
+// code, escaped text and table delimiters.
+const markdownParser = unified().use(remarkParse).use(markdownRemarkPlugins)
 
 export function markdownVisibleText(markdown: string): string {
   const document = markdownParser.parse(markdown)
@@ -64,11 +64,15 @@ export function markdownVisibleText(markdown: string): string {
     switch (node.type) {
       case "text":
       case "inlineCode":
+      case "inlineMath":
       case "code":
+      case "math":
       // react-markdown's default skipHtml=false displays raw HTML as text;
       // it does not interpret markup or decode entities within that markup.
       case "html":
-        return node.type === "code" ? ` ${node.value} ` : node.value
+        return node.type === "code" || node.type === "math"
+          ? ` ${node.value} `
+          : node.value
       case "break":
       case "thematicBreak":
         return " "

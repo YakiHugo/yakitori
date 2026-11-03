@@ -37,6 +37,16 @@ afterEach(() => {
   })
 })
 
+it("renders strong CJK text ending in punctuation before an adjacent sentence", () => {
+  const { container } = render(
+    <MarkdownView text="**会变化，但两家变化的层级不一样。**截至" />,
+  )
+  expect(container.querySelector("strong")?.textContent).toBe(
+    "会变化，但两家变化的层级不一样。",
+  )
+  expect(container.textContent).toBe("会变化，但两家变化的层级不一样。截至")
+})
+
 describe("links", () => {
   it("loads site icons without changing link names and keeps failed icons actionable", async () => {
     const user = userEvent.setup()
@@ -273,6 +283,63 @@ describe("links", () => {
     expect(inert.getAttribute("href")).toBeNull()
     await user.click(inert)
     expect(openUrl).not.toHaveBeenCalled()
+  })
+})
+
+describe("CJK and math", () => {
+  it.each([
+    ["これは**「重要なこと」**です。", "strong", "「重要なこと」"],
+    ["~~中文。~~下一句", "del", "中文。"],
+  ])("renders adjacent CJK delimiters in %s", (text, tag, expected) => {
+    const { container } = render(<MarkdownView text={text} />)
+    expect(container.querySelector(tag)?.textContent).toBe(expected)
+  })
+
+  it("renders dollar and LaTeX math delimiters with KaTeX", () => {
+    const { container } = render(
+      <MarkdownView
+        text={
+          "Inline $E=mc^2$ and \\(x^2+y^2=z^2\\).\n\n\\[\na+b=c\n\\]\n\n$$\nx+y=z\n$$"
+        }
+      />,
+    )
+    expect(container.querySelectorAll(".katex")).toHaveLength(4)
+    expect(container.querySelectorAll(".katex-display")).toHaveLength(2)
+  })
+
+  it("does not interpret math delimiters inside inline code", () => {
+    const { container } = render(<MarkdownView text="Use `$x$` literally." />)
+    expect(container.querySelector(".katex")).toBeNull()
+    expect(container.querySelector("code")?.textContent).toBe("$x$")
+  })
+})
+
+describe("raw HTML trust boundaries", () => {
+  const text = '<span data-local-html="trusted">local HTML</span>'
+
+  it("keeps model HTML as text by default", () => {
+    const { container } = render(<MarkdownView text={text} />)
+    expect(container.querySelector("[data-local-html]")).toBeNull()
+    expect(container.textContent).toContain(text)
+  })
+
+  it("renders safe HTML when the caller trusts the document", () => {
+    const { container } = render(<MarkdownView text={text} allowRawHtml />)
+    expect(container.querySelector("[data-local-html]")?.textContent).toBe(
+      "local HTML",
+    )
+  })
+
+  it("removes scripts and event handlers from trusted document HTML", () => {
+    const { container } = render(
+      <MarkdownView
+        text={`${text}<script>alert("no")</script><span onclick="alert('no')">safe</span>`}
+        allowRawHtml
+      />,
+    )
+    expect(container.querySelector("script")).toBeNull()
+    expect(container.querySelector("[onclick]")).toBeNull()
+    expect(container.textContent).toContain("safe")
   })
 })
 

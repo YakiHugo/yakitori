@@ -447,6 +447,7 @@ function FilePreview({
                   workspaceRoot={cwd}
                   documentPath={absolutePath}
                   className="file-preview-markdown"
+                  allowRawHtml
                 />
               ) : rendered && html ? (
                 <HtmlPreview
