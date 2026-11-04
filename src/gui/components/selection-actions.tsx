@@ -224,7 +224,7 @@ export function SelectionActions({
                 type="button"
                 onClick={() => actOnSelection("conversation")}
               >
-                Quote in conversation
+                Add to chat
               </button>
               <span className="selection-actions-divider" />
               <button type="button" onClick={() => actOnSelection("side")}>

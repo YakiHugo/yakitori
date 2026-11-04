@@ -25,6 +25,8 @@ export function ContextExcerptCards({
   const [editing, setEditing] = useState<{
     id: string
     originalComment: string | undefined
+    atSource?: boolean
+    creating?: boolean
   }>()
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const container = useRef<HTMLDivElement>(null)
@@ -44,7 +46,12 @@ export function ContextExcerptCards({
         (item) => item.id === request.excerptId,
       )
       if (excerpt)
-        setEditing({ id: excerpt.id, originalComment: excerpt.comment })
+        setEditing({
+          id: excerpt.id,
+          originalComment: excerpt.comment,
+          atSource: true,
+          creating: request.creating === true,
+        })
     }
     window.addEventListener(editExcerptEvent, edit)
     return () => window.removeEventListener(editExcerptEvent, edit)
@@ -58,7 +65,11 @@ export function ContextExcerptCards({
         ) ?? [],
       ).find((element) => element.dataset.excerptId === active.id)
       if (!trigger || !popover.current) return
-      const rect = trigger.getBoundingClientRect()
+      const source = editing?.atSource && findContextSource(active.source)
+      const range = source && resolveExcerptRange(source, active)
+      const rect = range
+        ? range.getBoundingClientRect()
+        : trigger.getBoundingClientRect()
       const { width, height } = popover.current.getBoundingClientRect()
       setPosition({
         top: Math.max(
@@ -80,7 +91,7 @@ export function ContextExcerptCards({
       window.removeEventListener("resize", place)
       document.removeEventListener("scroll", place, true)
     }
-  }, [active])
+  }, [active, editing?.atSource])
   const activeId = active?.id
   const editable = onChange !== undefined
   useEffect(() => {
@@ -115,7 +126,19 @@ export function ContextExcerptCards({
       if (!isUnmodifiedEscape(event)) return
       event.preventDefault()
       event.stopPropagation()
-      if (onChange && editing && active.comment !== editing.originalComment) {
+      if (editing?.creating) {
+        onRemove?.(active.id)
+        container.current
+          ?.closest("[data-composer-surface]")
+          ?.querySelector<HTMLElement>(
+            '[role="textbox"][contenteditable="true"]',
+          )
+          ?.focus({ preventScroll: true })
+      } else if (
+        onChange &&
+        editing &&
+        active.comment !== editing.originalComment
+      ) {
         const { comment: _comment, ...excerpt } = active
         onChange(
           editing.originalComment === undefined
@@ -131,7 +154,7 @@ export function ContextExcerptCards({
       document.removeEventListener("pointerdown", outside)
       document.removeEventListener("keydown", keydown)
     }
-  }, [active, editing, onChange])
+  }, [active, editing, onChange, onRemove])
   if (!excerpts.length) return null
   const save = () => {
     if (!active || !editing || !onChange) return
@@ -139,6 +162,10 @@ export function ContextExcerptCards({
     const comment = active.comment?.trim() || undefined
     if (comment !== active.comment)
       onChange(comment === undefined ? excerpt : { ...excerpt, comment })
+    container.current
+      ?.closest("[data-composer-surface]")
+      ?.querySelector<HTMLElement>('[role="textbox"][contenteditable="true"]')
+      ?.focus({ preventScroll: true })
     setEditing(undefined)
   }
   const sourceElement = active && findContextSource(active.source)

@@ -66,7 +66,7 @@ const actions = () => ({
 })
 
 it.each([
-  "Quote in conversation",
+  "Add to chat",
   "Ask in side chat",
 ])("%s immediately attaches the same anchored excerpt without requiring a comment", async (action) => {
   const props = actions()
@@ -87,9 +87,7 @@ it.each([
   selectText(selected)
   await userEvent.setup().click(screen.getByRole("button", { name: action }))
   const callback =
-    action === "Quote in conversation"
-      ? props.onAddToConversation
-      : props.onAskInSideChat
+    action === "Add to chat" ? props.onAddToConversation : props.onAskInSideChat
   expect(callback).toHaveBeenCalledWith(
     expect.objectContaining({
       text: "useful explanation",
@@ -145,7 +143,7 @@ it("routes a side conversation selection by its owning tab rather than its sourc
   selectText(screen.getByText("Side response"))
   await userEvent
     .setup()
-    .click(screen.getByRole("button", { name: "Quote in conversation" }))
+    .click(screen.getByRole("button", { name: "Add to chat" }))
   expect(props.onAddToConversation).toHaveBeenCalledWith(
     expect.objectContaining({ source }),
     "side-tab",
@@ -198,7 +196,7 @@ it.each([
   else element.textContent = "Replaced response"
   await userEvent
     .setup()
-    .click(screen.getByRole("button", { name: "Quote in conversation" }))
+    .click(screen.getByRole("button", { name: "Add to chat" }))
   expect(props.onAddToConversation).not.toHaveBeenCalled()
 })
 
@@ -411,7 +409,7 @@ it("captures UTF-16 offsets in user message text containing Unicode", async () =
   fireEvent.pointerUp(element)
   await userEvent
     .setup()
-    .click(screen.getByRole("button", { name: "Quote in conversation" }))
+    .click(screen.getByRole("button", { name: "Add to chat" }))
   const captured = props.onAddToConversation.mock
     .calls[0]?.[0] as ContextExcerpt
   expect(captured).toMatchObject({

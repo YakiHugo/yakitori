@@ -489,7 +489,7 @@ test("new session composer stays centered through creation and docks after the f
   await renderingApp.finish(prompt)
 })
 
-test("selected text attaches immediately and its card edits optional comments", async ({
+test("selected text opens a source comment and keeps the composer draft across new sessions", async ({
   page,
   renderingApp,
 }, testInfo) => {
@@ -502,6 +502,7 @@ test("selected text attaches immediately and its card edits optional comments", 
     .getByRole("region", { name: "Response", exact: true })
     .getByText(explanation, { exact: true })
   const composer = page.getByRole("textbox", { name: "Message the Mate" })
+  await composer.fill("Keep my unfinished question")
   for (const [index, confirmation] of ["Save comment", "Enter"].entries()) {
     await response.evaluate((element) => {
       const range = document.createRange()
@@ -510,16 +511,28 @@ test("selected text attaches immediately and its card edits optional comments", 
       window.getSelection()?.addRange(range)
       element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
     })
-    await page.getByRole("button", { name: "Quote in conversation" }).click()
-    await expect(composer).toBeFocused()
+    await page.getByRole("button", { name: "Add to chat" }).click()
     const card = page.locator("[data-composer-surface]").getByRole("button", {
       name: `Open excerpt ${index + 1}: Assistant message`,
     })
-    await card.click()
     const comment = page.getByRole("textbox", {
       name: "Excerpt comment (optional)",
     })
     await expect(comment).toBeFocused()
+    await expect(composer).toHaveText("Keep my unfinished question")
+    const sourceBounds = await response.boundingBox()
+    const commentBounds = await page
+      .getByRole("dialog", { name: "Excerpt details" })
+      .boundingBox()
+    expect(sourceBounds).not.toBeNull()
+    expect(commentBounds).not.toBeNull()
+    if (sourceBounds && commentBounds)
+      expect(
+        Math.min(
+          Math.abs(commentBounds.y + commentBounds.height - sourceBounds.y),
+          Math.abs(commentBounds.y - sourceBounds.y - sourceBounds.height),
+        ),
+      ).toBeLessThan(16)
     await comment.fill(`Confirmed with ${confirmation}`)
     if (index === 0)
       await page.screenshot({
@@ -532,8 +545,33 @@ test("selected text attaches immediately and its card edits optional comments", 
         .getByRole("button", { name: "Save comment", exact: true })
         .click()
     await expect(comment).toHaveCount(0)
+    await expect(composer).toBeFocused()
     await expect(card).toContainText(`Confirmed with ${confirmation}`)
   }
+  const original = page.locator(
+    '.sidebar-session [data-sidebar-drag="session"][aria-current="true"]',
+  )
+  const originalId = await original.getAttribute("data-drag-id")
+  if (!originalId) throw new Error("Missing original session")
+  await page.getByRole("button", { name: "New session", exact: true }).click()
+  await expect(composer).toHaveText("")
+  await expect(
+    page.locator("[data-composer-surface] .context-excerpt-card"),
+  ).toHaveCount(0)
+  await composer.fill("A separate new draft")
+  await page
+    .locator(`[data-sidebar-drag="session"][data-drag-id="${originalId}"]`)
+    .click()
+  await expect(composer).toHaveText("Keep my unfinished question")
+  await expect(
+    page.locator("[data-composer-surface] .context-excerpt-card"),
+  ).toHaveCount(2)
+  await expect(page.locator("[data-composer-surface]")).toContainText(
+    "Confirmed with Save comment",
+  )
+  await expect(page.locator("[data-composer-surface]")).toContainText(
+    "Confirmed with Enter",
+  )
 })
 
 test("Markdown images load local, inline and HTTP sources during streaming and after reload", async ({

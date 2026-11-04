@@ -51,6 +51,34 @@ const session: ApiSessionDetail = {
   },
 }
 
+it("keeps an unallocated native draft and its quotes when switching engines", async () => {
+  const { chooseNewEngine } = await import(
+    "../../src/gui/store/engine-store.ts"
+  )
+  useAppStore.getState().setPromptDraft({
+    kind: "input",
+    text: "Keep the native draft",
+    attachments: [],
+    elements: [],
+  })
+  useAppStore.getState().addPromptExcerpt({
+    id: "quote_native",
+    text: "Quoted passage",
+    source: {
+      kind: "message",
+      label: "Assistant message",
+      sessionId: "earlier",
+      messageId: "answer",
+    },
+  })
+  chooseNewEngine("external")
+  chooseNewEngine("")
+  expect(useAppStore.getState().promptDraft?.text).toBe("Keep the native draft")
+  expect(useAppStore.getState().promptExcerpts).toMatchObject([
+    { id: "quote_native", text: "Quoted passage" },
+  ])
+})
+
 it.each([
   "composing",
   "committed",

@@ -15,6 +15,7 @@ export type ContextSourceNavigation = Readonly<{
 export type ExcerptEditRequest = Readonly<{
   ownerId: string
   excerptId: string
+  creating?: boolean
 }>
 
 export function requestExcerptEdit(request: ExcerptEditRequest) {
