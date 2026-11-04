@@ -295,8 +295,8 @@ extension Computer {
                 flags: ["click", "scroll", "drag"].contains(action) ? modifiers.union(chord?.1 ?? []) : [],
                 source: source, prepare: keyboardEvent, post: post, release: { deliver($0, window: window, foreground: foreground) }, checkpoint: checkpoint) {
                 if let point, action == "hover" {
-                    if !alternateHover { try post(mouse(.mouseMoved, point)) }
-                    evidence["hover_route"] = alternateHover ? "accessibility" : "pointer"
+                    try post(mouse(.mouseMoved, point))
+                    evidence["hover_route"] = "pointer"
                 } else if let point, action == "click" {
                     for count in 1...clickCount {
                         let down = try mouse(downType, point)

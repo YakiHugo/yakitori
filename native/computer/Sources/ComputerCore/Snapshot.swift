@@ -157,7 +157,7 @@ struct Snapshot {
         guard let imageWidth, let imageHeight else {
             throw ComputerFailure("coordinates_unavailable", "AX-only observations have no screenshot coordinates; use an element or observe in vision/both mode.")
         }
-        guard x.isFinite, y.isFinite, x >= 0, y >= 0,
+        guard x >= 0, y >= 0,
               x < Double(imageWidth), y < Double(imageHeight) else {
             throw ComputerFailure("invalid_coordinates", "Coordinates must be inside the observed screenshot in pixels.")
         }
