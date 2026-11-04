@@ -17,7 +17,7 @@ import {
 import { useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
-import { ContextExcerptCards } from "../context-excerpt-cards.tsx"
+import { ContextExcerpts } from "../context-excerpts.tsx"
 import { ImageLightbox } from "../image-lightbox.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "../pdf-attachment.tsx"
 import { parsePrompt } from "../prompt-document.ts"
@@ -111,7 +111,7 @@ export function UserMessageCell({
               className="message-attachments"
               aria-label="Message sources"
             >
-              <ContextExcerptCards excerpts={contextAttachments} />
+              <ContextExcerpts excerpts={contextAttachments} />
             </section>
           ) : null}
           {inputDisplayParts(entry.content).map((part, index) => {

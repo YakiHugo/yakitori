@@ -1,5 +1,12 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
@@ -107,7 +114,7 @@ describe("attachments", () => {
     ).toBeDefined()
   })
 
-  it("shows saved excerpt cards with read-only original feedback", async () => {
+  it("groups saved excerpts with read-only original feedback", async () => {
     const user = userEvent.setup()
     render(
       <UserMessageCell
@@ -142,17 +149,10 @@ describe("attachments", () => {
         queued={false}
       />,
     )
-    expect(
-      screen.getByRole("button", { name: "Open excerpt 1: notes.md" }),
-    ).toBeDefined()
-    expect(
-      screen.getByRole("button", { name: "Open excerpt 2: Assistant message" }),
-    ).toBeDefined()
-    await user.click(
-      screen.getByRole("button", { name: "Open excerpt 2: Assistant message" }),
-    )
-    const popover = screen.getByRole("dialog", { name: "Excerpt details" })
+    await user.click(screen.getByRole("button", { name: "2 annotations" }))
+    const popover = screen.getByRole("dialog", { name: "Annotations" })
     expect(popover.textContent).toContain("A previous response.")
+    expect(within(popover).getAllByRole("listitem")).toHaveLength(2)
     expect(popover.textContent).toContain("Please check this.")
     expect(screen.queryByRole("textbox")).toBeNull()
   })

@@ -648,11 +648,11 @@ it("queues selected text in a side chat draft without sending it", async () => {
   ).toBeDefined()
   await user.click(
     screen.getByRole("button", {
-      name: "Open excerpt 1: Assistant message",
+      name: "1 annotation",
     }),
   )
   expect(
-    screen.getByRole("dialog", { name: "Excerpt details" }).textContent,
+    screen.getByRole("dialog", { name: "Annotations" }).textContent,
   ).toContain("Consider this explanation.")
   expect(useAppStore.getState().promptExcerpts).toEqual([])
   expect(
@@ -687,9 +687,7 @@ it("reuses an idle side discussion after browsing and confirms closing a draft",
       .askInSideChat({ ...excerpt, id: "selection-2", text: "Second quote" })
   })
   expect(screen.getAllByRole("tab", { name: "Side chat" })).toHaveLength(1)
-  expect(
-    screen.getByRole("button", { name: "Open excerpt 2: file.ts" }),
-  ).toBeDefined()
+  expect(screen.getByRole("button", { name: "2 annotations" })).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Close Side chat" }))
   expect(screen.getByRole("dialog", { name: "Close Side chat?" })).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Cancel" }))
@@ -788,14 +786,15 @@ it("attaches side excerpts immediately and edits their comments without changing
     })
     useWorkspaceStore.getState().addTab("browser")
   })
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
   await user.click(
-    screen.getByRole("button", { name: "Open excerpt 1: Saved side source" }),
+    screen.getByRole("button", { name: "Go to source for excerpt 1" }),
   )
-  await user.click(screen.getByRole("button", { name: "Go to source" }))
   expect(
     selectWorkspacePresentation(useWorkspaceStore.getState()).activeId,
   ).toBe(tabId)
   act(() => useAppStore.getState().removePromptExcerpt("main-copy"))
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
   await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
   expect(side()).toMatchObject({ excerpts: [] })
   selectQuote(response)

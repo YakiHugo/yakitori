@@ -34,7 +34,7 @@ import {
   type ComposerAttachmentImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
-import { ContextExcerptCards } from "./context-excerpt-cards.tsx"
+import { ContextExcerpts } from "./context-excerpts.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { ModelSelector } from "./model-selector.tsx"
@@ -537,7 +537,7 @@ export function SideChatPanel({
               {message.role === "user" ? (
                 <>
                   {message.content.references?.length ? (
-                    <ContextExcerptCards
+                    <ContextExcerpts
                       excerpts={message.content.references}
                     />
                   ) : null}

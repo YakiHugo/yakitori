@@ -512,9 +512,12 @@ test("selected text opens a source comment and keeps the composer draft across n
       element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
     })
     await page.getByRole("button", { name: "Add to chat" }).click()
-    const card = page.locator("[data-composer-surface]").getByRole("button", {
-      name: `Open excerpt ${index + 1}: Assistant message`,
-    })
+    const annotations = page
+      .locator("[data-composer-surface]")
+      .getByRole("button", {
+        name: index === 0 ? "1 annotation" : "2 annotations",
+        exact: true,
+      })
     const comment = page.getByRole("textbox", {
       name: "Excerpt comment (optional)",
     })
@@ -522,7 +525,7 @@ test("selected text opens a source comment and keeps the composer draft across n
     await expect(composer).toHaveText("Keep my unfinished question")
     const sourceBounds = await response.boundingBox()
     const commentBounds = await page
-      .getByRole("dialog", { name: "Excerpt details" })
+      .getByRole("dialog", { name: "Excerpt comment" })
       .boundingBox()
     expect(sourceBounds).not.toBeNull()
     expect(commentBounds).not.toBeNull()
@@ -532,11 +535,11 @@ test("selected text opens a source comment and keeps the composer draft across n
           Math.abs(commentBounds.y + commentBounds.height - sourceBounds.y),
           Math.abs(commentBounds.y - sourceBounds.y - sourceBounds.height),
         ),
-      ).toBeLessThan(16)
+      ).toBeLessThan(40)
     await comment.fill(`Confirmed with ${confirmation}`)
     if (index === 0)
       await page.screenshot({
-        path: testInfo.outputPath("excerpt-cards.png"),
+        path: testInfo.outputPath("annotation-editor.png"),
         animations: "disabled",
       })
     if (confirmation === "Enter") await comment.press("Enter")
@@ -546,8 +549,26 @@ test("selected text opens a source comment and keeps the composer draft across n
         .click()
     await expect(comment).toHaveCount(0)
     await expect(composer).toBeFocused()
-    await expect(card).toContainText(`Confirmed with ${confirmation}`)
+    await expect(annotations).toBeVisible()
+    await annotations.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText(`Confirmed with ${confirmation}`)
+    await page.keyboard.press("Escape")
+    await composer.focus()
   }
+  const firstMarker = await page
+    .getByRole("button", { name: "Open excerpt 1 in main conversation" })
+    .boundingBox()
+  const secondMarker = await page
+    .getByRole("button", { name: "Open excerpt 2 in main conversation" })
+    .boundingBox()
+  expect(firstMarker).not.toBeNull()
+  expect(secondMarker).not.toBeNull()
+  if (firstMarker && secondMarker)
+    expect(firstMarker.x + firstMarker.width).toBeLessThanOrEqual(
+      secondMarker.x,
+    )
   const original = page.locator(
     '.sidebar-session [data-sidebar-drag="session"][aria-current="true"]',
   )
@@ -556,7 +577,7 @@ test("selected text opens a source comment and keeps the composer draft across n
   await page.getByRole("button", { name: "New session", exact: true }).click()
   await expect(composer).toHaveText("")
   await expect(
-    page.locator("[data-composer-surface] .context-excerpt-card"),
+    page.locator("[data-composer-surface] .context-excerpt-pill"),
   ).toHaveCount(0)
   await composer.fill("A separate new draft")
   await page
@@ -564,14 +585,74 @@ test("selected text opens a source comment and keeps the composer draft across n
     .click()
   await expect(composer).toHaveText("Keep my unfinished question")
   await expect(
-    page.locator("[data-composer-surface] .context-excerpt-card"),
-  ).toHaveCount(2)
-  await expect(page.locator("[data-composer-surface]")).toContainText(
-    "Confirmed with Save comment",
-  )
-  await expect(page.locator("[data-composer-surface]")).toContainText(
-    "Confirmed with Enter",
-  )
+    page.locator("[data-composer-surface] .context-excerpt-pill"),
+  ).toHaveCount(1)
+  await page
+    .locator("[data-composer-surface]")
+    .getByRole("button", { name: "2 annotations", exact: true })
+    .click()
+  const details = page.getByRole("dialog", { name: "Annotations", exact: true })
+  await expect(details).toContainText("Confirmed with Save comment")
+  await expect(details).toContainText("Confirmed with Enter")
+  await page.screenshot({
+    path: testInfo.outputPath("annotation-summary.png"),
+    animations: "disabled",
+  })
+  await page.keyboard.press("Escape")
+  await page.setViewportSize({ width: 600, height: 700 })
+  await page
+    .locator("[data-composer-surface]")
+    .getByRole("button", { name: "2 annotations", exact: true })
+    .click()
+  const bounds = await details.boundingBox()
+  expect(bounds).not.toBeNull()
+  if (bounds) {
+    expect(bounds.x).toBeGreaterThanOrEqual(8)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(592)
+    expect(bounds.y).toBeGreaterThanOrEqual(8)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(692)
+  }
+  await page.screenshot({
+    path: testInfo.outputPath("annotation-summary-narrow.png"),
+    animations: "disabled",
+  })
+  await page.keyboard.press("Escape")
+  await page.evaluate(() => document.documentElement.classList.add("dark"))
+  await page
+    .getByRole("button", { name: "Open excerpt 2 in main conversation" })
+    .click()
+  const narrowEditor = page.getByRole("dialog", {
+    name: "Excerpt comment",
+    exact: true,
+  })
+  const editorBounds = await narrowEditor.boundingBox()
+  expect(editorBounds).not.toBeNull()
+  if (editorBounds) {
+    expect(editorBounds.x).toBeGreaterThanOrEqual(8)
+    expect(editorBounds.x + editorBounds.width).toBeLessThanOrEqual(592)
+    expect(editorBounds.y).toBeGreaterThanOrEqual(8)
+    expect(editorBounds.y + editorBounds.height).toBeLessThanOrEqual(692)
+  }
+  await page.screenshot({
+    path: testInfo.outputPath("annotation-editor-dark-narrow.png"),
+    animations: "disabled",
+  })
+  await page.keyboard.press("Escape")
+  await page
+    .locator("[data-composer-surface]")
+    .getByRole("button", { name: "2 annotations", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Remove excerpt 1", exact: true })
+    .click()
+  await expect(details.getByRole("listitem")).toHaveCount(1)
+  await expect(details).toContainText("Confirmed with Enter")
+  await expect(details).not.toContainText("Confirmed with Save comment")
+  await expect(
+    page
+      .locator("[data-composer-surface]")
+      .getByRole("button", { name: "1 annotation", exact: true }),
+  ).toBeVisible()
 })
 
 test("Markdown images load local, inline and HTTP sources during streaming and after reload", async ({

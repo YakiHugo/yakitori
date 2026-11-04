@@ -1341,12 +1341,10 @@ test("expired side chats dismiss excerpt actions and leave main chat quoting ava
     await selectResponse(mainResponse)
     await page.getByRole("button", { name: "Add to chat", exact: true }).click()
     await expect(
-      page
-        .getByRole("main")
-        .getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+      page.getByRole("main").getByRole("button", { name: "1 annotation" }),
     ).toBeVisible()
     await expect(
-      side.getByRole("button", { name: /^Open excerpt/ }),
+      side.getByRole("button", { name: /^\d+ annotations?$/ }),
     ).toHaveCount(0)
     expect(errors).toEqual([])
   } finally {

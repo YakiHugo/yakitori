@@ -106,9 +106,7 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
   useAppStore.getState().addPromptExcerpt(excerpt)
   const user = userEvent.setup()
   render(<Composer />)
-  expect(
-    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
-  ).toBeDefined()
+  expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
@@ -125,17 +123,13 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
   expect(useAppStore.getState().promptDraft).toEqual(
     inputParts("Please review"),
   )
-  expect(
-    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
-  ).toBeDefined()
+  expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
   await act(async () => held.acknowledge())
   await waitFor(() =>
     expect(useAppStore.getState().promptDraft).toBeUndefined(),
   )
   expect(useAppStore.getState().promptExcerpts).toEqual([])
-  expect(
-    screen.queryByRole("button", { name: "Open excerpt 1: main.ts" }),
-  ).toBeNull()
+  expect(screen.queryByRole("button", { name: "1 annotation" })).toBeNull()
 })
 
 it("retains the draft and annotations when admission fails", async () => {
@@ -173,7 +167,7 @@ it("preserves annotations edited or added while the submitted snapshot is pendin
   ])
 })
 
-it("preserves a comment being typed in the excerpt card while its earlier snapshot is acknowledged", async () => {
+it("preserves a comment being typed in the annotation editor while its earlier snapshot is acknowledged", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
   const user = userEvent.setup()
@@ -182,8 +176,9 @@ it("preserves a comment being typed in the excerpt card while its earlier snapsh
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
   await user.click(
-    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
+    screen.getByRole("button", { name: "Edit excerpt 1: main.ts" }),
   )
   const comment = screen.getByRole("textbox", {
     name: "Excerpt comment (optional)",
@@ -228,14 +223,11 @@ it("lets the composer preview and remove annotations without expanding an inline
     (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)
       .disabled,
   ).toBe(false)
-  await user.click(
-    screen.getByRole("button", { name: "Open excerpt 1: main.ts" }),
-  )
-  expect(screen.getAllByText("const result = await run()")).toHaveLength(2)
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
+  expect(screen.getAllByText("const result = await run()")).toHaveLength(1)
   expect(
-    screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
-  ).toBeDefined()
-  expect(screen.getByRole("button", { name: "Save comment" })).toBeDefined()
+    screen.queryByRole("textbox", { name: "Excerpt comment (optional)" }),
+  ).toBeNull()
   await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
   expect(
     (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)

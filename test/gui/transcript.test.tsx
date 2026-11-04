@@ -9,7 +9,7 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
-import { ContextExcerptCards } from "../../src/gui/components/context-excerpt-cards.tsx"
+import { ContextExcerpts } from "../../src/gui/components/context-excerpts.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
 import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import {
@@ -168,16 +168,16 @@ it("reveals collapsed commentary when following a saved excerpt source", () => {
   render(
     <TooltipProvider>
       <Transcript />
-      <ContextExcerptCards excerpts={[excerpt]} />
+      <ContextExcerpts excerpts={[excerpt]} />
     </TooltipProvider>,
   )
   expect(
     document.querySelector('[data-context-message-id="progress"]'),
   ).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "1 annotation" }))
   fireEvent.click(
-    screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+    screen.getByRole("button", { name: "Go to source for excerpt 1" }),
   )
-  fireEvent.click(screen.getByRole("button", { name: "Go to source" }))
   const source = document.querySelector('[data-context-message-id="progress"]')
   expect(source).not.toBeNull()
   expect(scrollIntoView.mock.contexts).toContain(source)

@@ -58,7 +58,7 @@ import {
   type ComposerSuggestion,
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
-import { ContextExcerptCards } from "./context-excerpt-cards.tsx"
+import { ContextExcerpts } from "./context-excerpts.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
 import {
@@ -847,7 +847,7 @@ export function ComposerSurface({
               commandPanel
             )}
           </div>
-          <ContextExcerptCards
+          <ContextExcerpts
             key={excerptOwnerId}
             ownerId={excerptOwnerId}
             excerpts={excerpts}
