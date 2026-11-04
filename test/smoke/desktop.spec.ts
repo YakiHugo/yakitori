@@ -454,17 +454,27 @@ test("embedded browser selections attach editable excerpts to main and side draf
       .click()
     const main = page
       .locator("main")
-      .getByRole("button", { name: "Open excerpt 1: Excerpt source" })
-    await expect(main).toContainText("Frozen browser excerpt")
+      .getByRole("button", { name: "1 annotation" })
+    await expect(main).toBeVisible()
     await expect(
       page.getByRole("textbox", { name: "Message the Mate" }),
     ).toBeFocused()
     await main.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText("Frozen browser excerpt")
+    await page
+      .getByRole("button", { name: "Edit excerpt 1: Excerpt source" })
+      .click()
     await page
       .getByRole("textbox", { name: "Excerpt comment (optional)" })
       .fill("Main feedback")
     await page.getByRole("button", { name: "Save comment" }).click()
-    await expect(main).toContainText("Main feedback")
+    await main.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText("Main feedback")
+    await page.keyboard.press("Escape")
     const showWorkspace = page.getByRole("button", {
       name: "Show workspace",
       exact: true,
@@ -480,15 +490,29 @@ test("embedded browser selections attach editable excerpts to main and side draf
       .click()
     const side = page
       .getByRole("tabpanel")
-      .getByRole("button", { name: "Open excerpt 1: Excerpt source" })
-    await expect(side).toContainText("Frozen browser excerpt")
+      .getByRole("button", { name: "1 annotation" })
+    await expect(side).toBeVisible()
     await side.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText("Frozen browser excerpt")
+    await page
+      .getByRole("button", { name: "Edit excerpt 1: Excerpt source" })
+      .click()
     await page
       .getByRole("textbox", { name: "Excerpt comment (optional)" })
       .fill("Side feedback")
     await page.getByRole("button", { name: "Save comment" }).click()
-    await expect(side).toContainText("Side feedback")
-    await expect(main).toContainText("Main feedback")
+    await side.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText("Side feedback")
+    await page.keyboard.press("Escape")
+    await main.click()
+    await expect(
+      page.getByRole("dialog", { name: "Annotations", exact: true }),
+    ).toContainText("Main feedback")
+    await page.keyboard.press("Escape")
     await page.screenshot({
       path: testInfo.outputPath("browser-excerpt-drafts.png"),
       animations: "disabled",

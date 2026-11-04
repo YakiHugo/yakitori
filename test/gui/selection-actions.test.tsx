@@ -12,7 +12,7 @@ import { userEvent } from "@testing-library/user-event"
 import { useState } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
-import { ContextExcerptCards } from "../../src/gui/components/context-excerpt-cards.tsx"
+import { ContextExcerpts } from "../../src/gui/components/context-excerpts.tsx"
 import {
   ExcerptSourceLayer,
   findContextSource,
@@ -241,7 +241,7 @@ function Draft({
       {showSource ? (
         <p {...contextSourceAttributes(source)}>A useful explanation.</p>
       ) : null}
-      <ContextExcerptCards
+      <ContextExcerpts
         ownerId={ownerId}
         excerpts={excerpts}
         onChange={(next) =>
@@ -265,15 +265,55 @@ function Draft({
   )
 }
 
+it("previews annotations on hover without taking focus from the composer", async () => {
+  const user = userEvent.setup()
+  render(
+    <>
+      <input aria-label="Draft text" />
+      <Draft showSource={false} />
+    </>,
+  )
+  const composer = screen.getByRole("textbox", { name: "Draft text" })
+  await user.click(composer)
+  await user.hover(screen.getByRole("button", { name: "1 annotation" }))
+  const preview = screen.getByRole("dialog", { name: "Annotations" })
+  expect(document.activeElement).toBe(composer)
+  await user.hover(preview)
+  expect(within(preview).getByText("useful explanation")).toBeDefined()
+  await user.unhover(preview)
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(document.activeElement).toBe(composer)
+})
+
+it("keeps Enter used by an input method in the comment editor and supports multiline comments", async () => {
+  const user = userEvent.setup()
+  render(<Draft />)
+  await user.click(
+    screen.getByRole("button", { name: "Open excerpt 1 in main conversation" }),
+  )
+  const comment = screen.getByRole("textbox")
+  await user.type(comment, "第一行")
+  fireEvent.keyDown(comment, { key: "Enter", isComposing: true })
+  expect(screen.getByRole("textbox")).toBe(comment)
+  await user.keyboard("{Shift>}{Enter}{/Shift}第二行")
+  expect((comment as HTMLTextAreaElement).value).toBe("第一行\n第二行")
+  await user.keyboard("{Enter}")
+  expect(screen.queryByRole("textbox")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
+  expect(screen.getByText("第一行 第二行")).toBeDefined()
+})
+
 it("edits and clears comments without a mounted source, and Escape discards an unsaved edit", async () => {
   const user = userEvent.setup()
   render(<Draft showSource={false} />)
-  const open = () =>
-    user.click(
-      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
+  const open = async () => {
+    await user.click(screen.getByRole("button", { name: "1 annotation" }))
+    expect(screen.getByText(/cannot be located precisely/)).toBeDefined()
+    await user.click(
+      screen.getByRole("button", { name: "Edit excerpt 1: Assistant message" }),
     )
+  }
   await open()
-  expect(screen.getByText(/cannot be located precisely/)).toBeDefined()
   await user.type(screen.getByRole("textbox"), "Saved feedback")
   await user.click(screen.getByRole("button", { name: "Save comment" }))
   await open()
@@ -298,6 +338,7 @@ it("opens the same editor from the source marker and removes its derived highlig
   await user.type(screen.getByRole("textbox"), "Feedback")
   await user.keyboard("{Enter}")
   expect(document.querySelector(".excerpt-highlight")).not.toBeNull()
+  await user.click(screen.getByRole("button", { name: "1 annotation" }))
   await user.click(screen.getByRole("button", { name: "Remove excerpt 1" }))
   await waitFor(() =>
     expect(document.querySelector(".excerpt-highlight")).toBeNull(),
@@ -336,9 +377,7 @@ it("stops highlighting a source that has changed without losing the editable sna
   )
   await userEvent
     .setup()
-    .click(
-      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
-    )
+    .click(screen.getByRole("button", { name: "1 annotation" }))
   expect(
     within(screen.getByRole("dialog")).getByText("useful explanation"),
   ).toBeDefined()
@@ -346,7 +385,7 @@ it("stops highlighting a source that has changed without losing the editable sna
 
 it("shows each saved excerpt in order with a read-only original comment", async () => {
   render(
-    <ContextExcerptCards
+    <ContextExcerpts
       excerpts={[
         { ...excerpt, comment: "Saved" },
         {
@@ -365,13 +404,18 @@ it("shows each saved excerpt in order with a read-only original comment", async 
     screen
       .getAllByRole("button")
       .map((button) => button.getAttribute("aria-label")),
-  ).toEqual(["Open excerpt 1: Assistant message", "Open excerpt 2: Page"])
+  ).toEqual(["2 annotations"])
   await userEvent
     .setup()
-    .click(
-      screen.getByRole("button", { name: "Open excerpt 1: Assistant message" }),
-    )
-  expect(within(screen.getByRole("dialog")).getByText("Saved")).toBeDefined()
+    .click(screen.getByRole("button", { name: "2 annotations" }))
+  const details = within(screen.getByRole("dialog"))
+  expect(
+    details.getAllByRole("listitem").map((item) => item.textContent),
+  ).toEqual([
+    expect.stringContaining("useful explanation"),
+    expect.stringContaining("A page quote"),
+  ])
+  expect(details.getByText("Saved")).toBeDefined()
   expect(screen.queryByRole("textbox")).toBeNull()
   expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull()
 })

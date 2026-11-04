@@ -19,9 +19,8 @@
   white-space: nowrap;
 }
 .selection-actions button:hover,
-.context-excerpt-preview:hover,
-.context-excerpt-remove:hover,
-.context-excerpt-actions button:hover {
+.context-excerpt-pill:hover,
+.context-excerpt-popover button:hover {
   background: var(--accent);
 }
 .selection-actions-divider {
@@ -31,7 +30,7 @@
   background: var(--border);
 }
 ::highlight(yakitori-excerpts) {
-  background: #3b82f633;
+  background: #128dff40;
 }
 .excerpt-source-layer {
   position: fixed;
@@ -41,138 +40,191 @@
 }
 .excerpt-highlight {
   position: fixed;
-  background: #3b82f633;
+  background: #128dff40;
   border-radius: 2px;
 }
-.excerpt-marker {
+.excerpt-markers {
   position: fixed;
+  display: flex;
+  gap: 2px;
+  max-width: calc(100vw - 16px);
+  overflow: auto;
+  pointer-events: auto;
+}
+.excerpt-marker {
+  position: relative;
+  flex-shrink: 0;
   display: grid;
   place-items: center;
   width: 25px;
   height: 25px;
   border: 2px solid var(--background);
-  border-radius: 50%;
-  background: #2878e7;
+  border-radius: 50% 50% 50% 4px;
+  background: #128dff;
   color: white;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   box-shadow: 0 1px 4px #0002;
   pointer-events: auto;
 }
-.context-excerpt-cards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+
+.excerpt-marker:hover {
+  scale: 1.08;
+}
+.context-excerpts {
   padding: 10px 16px 0;
 }
-.context-excerpt-cards-readonly {
+.context-excerpts-readonly {
   padding: 0;
 }
-.context-excerpt-card {
-  display: flex;
-  align-items: flex-start;
-  width: min(240px, 100%);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  overflow: hidden;
-}
-.context-excerpt-preview {
-  display: grid;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  text-align: left;
+.context-excerpt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 8px;
+  color: var(--muted-foreground);
   font-size: 12px;
+  line-height: 18px;
+}
+.context-excerpt-pill[aria-expanded="true"] {
+  background: var(--accent);
+}
+.context-excerpt-popover {
+  position: fixed;
+  z-index: 65;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 8px 32px #0002,
+    0 2px 6px #0001;
+  font-size: 12px;
+  outline: none;
+}
+.context-excerpt-summary {
+  width: min(360px, calc(100vw - 16px));
+  border-radius: 14px;
+}
+.context-excerpt-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.context-excerpt-list li {
+  padding: 14px;
+}
+.context-excerpt-list li + li {
+  border-top: 1px solid var(--border);
+}
+.context-excerpt-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.context-excerpt-number {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 19px;
+  height: 19px;
+  border-radius: 6px 6px 6px 2px;
+  background: color-mix(in srgb, #128dff 12%, transparent);
+  color: #128dff;
+  font-size: 11px;
+  font-weight: 600;
 }
 .context-excerpt-source {
   display: flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  margin-right: auto;
+  border-radius: 4px;
   color: var(--muted-foreground);
   font-size: 11px;
 }
-.context-excerpt-quote,
-.context-excerpt-comment {
+.context-excerpt-source span {
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  line-height: 18px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.context-excerpt-comment {
+.context-excerpt-source svg {
+  flex-shrink: 0;
+}
+.context-excerpt-icon,
+.context-excerpt-editor-actions button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   color: var(--muted-foreground);
-}
-.context-excerpt-remove {
-  margin: 4px 4px 0 0;
-  padding: 4px;
-  border-radius: 5px;
-  color: var(--muted-foreground);
-}
-.context-excerpt-popover {
-  position: fixed;
-  z-index: 65;
-  width: min(360px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--popover);
-  color: var(--popover-foreground);
-  box-shadow: 0 6px 24px #0002;
-  font-size: 12px;
 }
 .context-excerpt-popover blockquote {
-  margin: 10px 0;
+  margin: 10px 0 0;
   padding-left: 10px;
-  border-left: 2px solid var(--border);
-  max-height: 180px;
+  border-left: 2px solid color-mix(in srgb, #128dff 30%, transparent);
+  max-height: 160px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  line-height: 1.6;
+  color: var(--muted-foreground);
 }
-.context-excerpt-popover textarea {
-  width: 100%;
-  resize: vertical;
-  min-height: 64px;
-  max-height: 160px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  outline: none;
-}
-.context-excerpt-popover textarea:focus {
-  border-color: var(--ring);
-}
-.context-excerpt-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-}
-.context-excerpt-actions button {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 8px;
-  border-radius: 5px;
-}
-.context-excerpt-actions button:first-child {
-  margin-right: auto;
+.context-excerpt-comment {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
 }
 .context-excerpt-notice {
   margin-top: 8px;
   color: var(--muted-foreground);
   font-size: 11px;
 }
-.context-excerpt-cards-readonly .context-excerpt-card {
-  border-color: color-mix(in srgb, currentColor 25%, transparent);
+.context-excerpt-editor {
+  width: min(294px, calc(100vw - 16px));
+  padding: 14px 14px 10px;
+  border-radius: 22px;
 }
-.context-excerpt-location {
-  margin-top: 5px;
-  overflow-wrap: anywhere;
+.context-excerpt-editor textarea {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  max-height: 160px;
+  resize: none;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  line-height: 20px;
+}
+.context-excerpt-editor textarea::placeholder {
   color: var(--muted-foreground);
-  font-size: 11px;
+}
+.context-excerpt-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+}
+.context-excerpt-editor-actions .context-excerpt-number {
+  margin-right: auto;
+}
+.context-excerpt-editor-actions .context-excerpt-save {
+  width: 28px;
+  height: 28px;
+  background: var(--foreground);
+  color: var(--background);
+}
+.context-excerpt-editor-actions .context-excerpt-save:hover {
+  opacity: 0.8;
+  background: var(--foreground);
 }

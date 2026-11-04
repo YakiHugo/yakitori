@@ -99,7 +99,10 @@ export function resolveExcerptRange(
 }
 
 type Rect = { top: number; left: number; width: number; height: number }
-function visibleRectangles(range: Range, source: HTMLElement): Rect[] {
+export function visibleExcerptRectangles(
+  range: Range,
+  source: HTMLElement,
+): Rect[] {
   let bounds = {
     top: 0,
     left: 0,
@@ -172,7 +175,7 @@ export function ExcerptSourceLayer({
         return [
           {
             ...item,
-            rectangles: visibleRectangles(range, source),
+            rectangles: visibleExcerptRectangles(range, source),
           },
         ]
       })
@@ -231,21 +234,55 @@ export function ExcerptSourceLayer({
     }
   }, [items, supportsHighlight])
 
+  // References to the same passage share a row so every numbered marker remains reachable.
+  const markerGroups = new Map<
+    string,
+    { top: number; left: number; items: ExcerptHighlight[] }
+  >()
+  for (const item of located) {
+    if (!item.rectangles.length) continue
+    const top = Math.max(
+      0,
+      Math.min(...item.rectangles.map((rect) => rect.top)) - 25,
+    )
+    const left =
+      Math.max(...item.rectangles.map((rect) => rect.left + rect.width)) - 12.5
+    const key = `${top}:${left}`
+    const group = markerGroups.get(key)
+    if (group) group.items.push(item)
+    else markerGroups.set(key, { top, left, items: [item] })
+  }
   return createPortal(
     <div data-excerpt-ui="" className="excerpt-source-layer">
-      {located.flatMap(
-        ({ excerpt, ownerId, number, conversation, rectangles }) => {
-          if (!rectangles.length) return []
-          return [
-            ...(!supportsHighlight
-              ? rectangles.map((rect) => (
-                  <span
-                    key={`${ownerId}:${excerpt.id}:${rect.top}:${rect.left}:${rect.width}:${rect.height}`}
-                    className="excerpt-highlight"
-                    style={rect}
-                  />
-                ))
-              : []),
+      {!supportsHighlight
+        ? located.flatMap(({ excerpt, ownerId, rectangles }) =>
+            rectangles.map((rect) => (
+              <span
+                key={`${ownerId}:${excerpt.id}:${rect.top}:${rect.left}:${rect.width}:${rect.height}`}
+                className="excerpt-highlight"
+                style={rect}
+              />
+            )),
+          )
+        : null}
+      {Array.from(markerGroups, ([key, { top, left, items }]) => (
+        <div
+          key={key}
+          className="excerpt-markers"
+          style={{
+            top,
+            left: Math.max(
+              8,
+              Math.min(
+                window.innerWidth -
+                  Math.min(items.length * 27 - 2, window.innerWidth - 16) -
+                  8,
+                left,
+              ),
+            ),
+          }}
+        >
+          {items.map(({ excerpt, ownerId, number, conversation }) => (
             <button
               key={`${ownerId}:${excerpt.id}`}
               type="button"
@@ -254,27 +291,15 @@ export function ExcerptSourceLayer({
               title={[conversation, excerpt.comment]
                 .filter(Boolean)
                 .join(" · ")}
-              style={{
-                top: Math.max(
-                  0,
-                  Math.min(...rectangles.map((rect) => rect.top)) - 25,
-                ),
-                left: Math.min(
-                  window.innerWidth - 25,
-                  Math.max(
-                    ...rectangles.map((rect) => rect.left + rect.width),
-                  ) - 12.5,
-                ),
-              }}
               onClick={() =>
                 requestExcerptEdit({ ownerId, excerptId: excerpt.id })
               }
             >
               {number}
-            </button>,
-          ]
-        },
-      )}
+            </button>
+          ))}
+        </div>
+      ))}
     </div>,
     document.body,
   )
