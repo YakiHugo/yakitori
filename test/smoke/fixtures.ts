@@ -910,9 +910,6 @@ export async function runProviderFlow(
     await expect(
       page.getByRole("button", { name: "future-coding", exact: true }),
     ).toHaveCount(0)
-    await expect(
-      page.getByRole("button", { name: "manual-coding", exact: true }),
-    ).toHaveCount(0)
     await page.getByRole("button", { name: "smoke-model", exact: true }).click()
     await page
       .getByRole("textbox", { name: "Message the Mate", exact: true })

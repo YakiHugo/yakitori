@@ -17,7 +17,6 @@ import {
 } from "react"
 import type {
   ImageAttachment,
-  ImageDetail,
   PdfAttachment,
   UserAttachment,
 } from "../../protocol/asset-types.ts"
@@ -44,7 +43,6 @@ export type PromptEditorHandle = Readonly<{
     cancel(): void
   }>
   removeAttachment(index: number): void
-  setImageDetail(index: number, detail: ImageDetail): void
   replaceRange(
     from: number,
     to: number,
@@ -248,20 +246,6 @@ export function PromptEditor(props: Props) {
         emitChange(view)
         // Images have no Undo path back, so removed staging bytes release now.
         releaseUnusedAttachments(currentDraft(view))
-      },
-      setImageDetail(index, detail) {
-        const view = editor.current
-        if (!view) return
-        let count = 0
-        view.state.doc.descendants((node) => {
-          if (node.type.name === "document") count++
-        })
-        const imageIndex = index - count
-        if (preservedImages.current[imageIndex] === undefined) return
-        preservedImages.current = preservedImages.current.map((image, i) =>
-          i === imageIndex ? { ...image, detail } : image,
-        )
-        emitChange(view)
       },
       replaceRange(from, to, text, cursorOffset) {
         const view = editor.current

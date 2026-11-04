@@ -11,14 +11,14 @@ import {
 import { useEffect } from "react"
 import { type SettingsSection, useAppStore } from "../store/app-store.ts"
 import { McpSettings } from "./mcp-settings.tsx"
+import { ProviderSettings } from "./provider-settings.tsx"
+import { RuntimeSettings } from "./runtime-settings.tsx"
 import {
   GeneralSettingsSection,
   NotificationSettingsSection,
 } from "./settings-panel.tsx"
-import { UsageSection } from "./usage-section.tsx"
 import { SubscriptionsSection } from "./subscription-panel.tsx"
-import { ProviderSettings } from "./provider-settings.tsx"
-import { RuntimeSettings } from "./runtime-settings.tsx"
+import { UsageSection } from "./usage-section.tsx"
 
 const sections = [
   { id: "general", label: "General", icon: Monitor },
@@ -46,7 +46,7 @@ const sectionAria: Record<SettingsSection, string> = {
 
 export function SettingsPage() {
   const section = useAppStore((state) => state.settingsSection) ?? "general"
-  const setSettingsSection = useAppStore((state) => state.setSettingsSection)
+  const openSettings = useAppStore((state) => state.openSettings)
   const closeSettings = useAppStore((state) => state.closeSettings)
 
   useEffect(() => {
@@ -80,7 +80,7 @@ export function SettingsPage() {
                 type="button"
                 key={id}
                 aria-current={section === id ? "page" : undefined}
-                onClick={() => setSettingsSection(id)}
+                onClick={() => openSettings(id)}
               >
                 <Icon size={16} />
                 <span>{label}</span>

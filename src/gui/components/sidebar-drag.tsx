@@ -24,7 +24,6 @@ type Drop = Readonly<{
   label: string
   change?: SidebarChange
   project?: Readonly<{ targetId: string; after: boolean }>
-  pinProject?: boolean
 }>
 
 // Only explicit data attributes identify destinations. Dragging a conversation
@@ -82,7 +81,6 @@ function dropAt(
         return {
           element,
           label: pinned ? "Pin project" : "Return to Projects",
-          pinProject: pinned,
         }
     }
   }

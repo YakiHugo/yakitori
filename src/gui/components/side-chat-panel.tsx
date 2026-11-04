@@ -80,7 +80,7 @@ export function SideChatPanel({
       defaultModel: state.defaultModel,
     })
   })
-  const draftAttachments = inputContentAttachments(inputContent(tab.draft))
+  const draftAttachments = inputContentAttachments(tab.draft)
   const route = useModelRoutePreview(
     selection ?? chat?.modelSelection,
     {
@@ -305,9 +305,8 @@ export function SideChatPanel({
       release = prepared.cleanup
       const current = await ensureChat()
       if (!current || isExpired(current)) return
-      const images = await prepared.collect(current.id)
+      const added = await prepared.collect(current.id)
       const latest = latestTab()
-      const added = images
       if (
         disposed.current ||
         !latest ||
@@ -537,9 +536,7 @@ export function SideChatPanel({
               {message.role === "user" ? (
                 <>
                   {message.content.references?.length ? (
-                    <ContextExcerpts
-                      excerpts={message.content.references}
-                    />
+                    <ContextExcerpts excerpts={message.content.references} />
                   ) : null}
                   {inputDisplayParts(message.content).map((part, index) =>
                     part.type === "text" ? (
@@ -639,17 +636,13 @@ export function SideChatPanel({
               }}
             />
           ) : null}
-          {tab.excerpts.length > 0 ||
-          inputContentAttachments(inputContent(tab.draft)).length > 0 ? (
+          {tab.excerpts.length > 0 || draftAttachments.length > 0 ? (
             <p>
               {tab.excerpts.length} context excerpt
               {tab.excerpts.length === 1 ? "" : "s"} and{" "}
-              {inputContentAttachments(inputContent(tab.draft)).length}{" "}
-              attachment
-              {inputContentAttachments(inputContent(tab.draft)).length === 1
-                ? ""
-                : "s"}{" "}
-              remain in this side chat.
+              {draftAttachments.length} attachment
+              {draftAttachments.length === 1 ? "" : "s"} remain in this side
+              chat.
             </p>
           ) : null}
           <div className="side-chat-expired-actions">

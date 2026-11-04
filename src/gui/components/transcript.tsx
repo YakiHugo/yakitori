@@ -1,4 +1,3 @@
-import { answerTextParts } from "../../protocol/model-output.ts"
 import {
   ArrowDown,
   BookOpen,
@@ -18,10 +17,12 @@ import {
   useRef,
   useState,
 } from "react"
-import type {
-  ActiveModelRetry,
-  ExecutionEntry,
-  TurnTiming,
+import { answerTextParts } from "../../protocol/model-output.ts"
+import {
+  type ActiveModelRetry,
+  type ExecutionEntry,
+  executionEntryKey,
+  type TurnTiming,
 } from "../execution-view.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
@@ -46,8 +47,8 @@ import {
 import { reasoningSections } from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
-import { TurnActivityLabel } from "./turn-activity-label.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
+import { TurnActivityLabel } from "./turn-activity-label.tsx"
 import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
@@ -75,7 +76,8 @@ function groupEntries(
     const last = blocks.at(-1)
     if (turnId !== undefined && last?.turnId === turnId)
       last.entries.push(entry)
-    else blocks.push({ key: entryKey(entry), turnId, entries: [entry] })
+    else
+      blocks.push({ key: executionEntryKey(entry), turnId, entries: [entry] })
   }
   const previousByKey = new Map(previous.map((block) => [block.key, block]))
   return blocks.map((block) => {
@@ -87,22 +89,6 @@ function groupEntries(
       ? stable
       : block
   })
-}
-
-function entryKey(entry: ExecutionEntry): string {
-  switch (entry.kind) {
-    case "user_input":
-      return entry.inputId
-    case "assistant":
-    case "reasoning":
-      return entry.itemId
-    case "tool":
-      return entry.toolCallId
-    case "permission":
-      return entry.permissionRequestId
-    case "turn_terminal":
-      return `${entry.turnId}:${entry.state}`
-  }
 }
 
 export function Transcript({
@@ -349,7 +335,7 @@ export function Transcript({
                   />
                 ) : (
                   block.entries.map((entry) => (
-                    <EntryCell key={entryKey(entry)} entry={entry} />
+                    <EntryCell key={executionEntryKey(entry)} entry={entry} />
                   ))
                 )
               })
@@ -527,7 +513,7 @@ const TurnBlock = memo(
                 key={
                   item.kind === "activity"
                     ? item.id
-                    : entryKey(
+                    : executionEntryKey(
                         item.kind === "entry" ? item.entry : item.entries[0],
                       )
                 }
@@ -559,7 +545,7 @@ const TurnBlock = memo(
                     )}
                   >
                     {item.entries.map((entry) => (
-                      <EntryCell key={entryKey(entry)} entry={entry} />
+                      <EntryCell key={executionEntryKey(entry)} entry={entry} />
                     ))}
                   </ActivityGroup>
                 ) : (
@@ -637,7 +623,7 @@ const TurnBlock = memo(
           </div>
         ) : null}
         {persistent.map((entry) => (
-          <EntryCell key={entryKey(entry)} entry={entry} />
+          <EntryCell key={executionEntryKey(entry)} entry={entry} />
         ))}
         {visibleAnswer ? (
           <ResponseActions
@@ -733,7 +719,7 @@ function groupTurnTimeline(
           ? { kind: "entry", entry }
           : {
               kind: "activity",
-              id: `${run.callId}:${entryKey(entry)}`,
+              id: `${run.callId}:${executionEntryKey(entry)}`,
               entries: [entry, ...rest],
             },
       )
@@ -846,7 +832,7 @@ function ActionGroup({
       <TranscriptDisclosureContent id={contentId} open={open} className="pt-2">
         <div className="flex flex-col gap-1 pl-3">
           {entries.map((entry) => (
-            <EntryCell key={entryKey(entry)} entry={entry} />
+            <EntryCell key={executionEntryKey(entry)} entry={entry} />
           ))}
         </div>
       </TranscriptDisclosureContent>

@@ -46,44 +46,37 @@ it("reconciles a committed queued input by ID without resending after its RPC ac
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      createTask(snapshot, input) {
-        const context = ((_snapshot, input) => {
-          const selection = { provider: "faux", model: "scripted" }
-          return {
-            turnId: input.submissionId,
-            selection,
-            configuration: {
-              schemaVersion: 5 as const,
-              defaultTarget: selection,
-              workspaceRoot: process.cwd(),
-              enabledTools: [],
-              approvalPolicy: "always_approve" as const,
-              promptCacheKey: input.submissionId,
-              baseInstructions: {
-                text: "Test turn",
-                revision: "test",
-                provenance: { type: "custom" as const },
-              },
-              executionPolicyDefaults: createSessionExecutionPolicy(),
-              modelAutoCompactTokenLimitScope: "total" as const,
+      createTask(_snapshot, input) {
+        const selection = { provider: "faux", model: "scripted" }
+        const context = {
+          turnId: input.submissionId,
+          selection,
+          configuration: {
+            schemaVersion: 5 as const,
+            defaultTarget: selection,
+            workspaceRoot: process.cwd(),
+            enabledTools: [],
+            approvalPolicy: "always_approve" as const,
+            promptCacheKey: input.submissionId,
+            baseInstructions: {
+              text: "Test turn",
+              revision: "test",
+              provenance: { type: "custom" as const },
             },
-          }
-        })(snapshot, input)
+            executionPolicyDefaults: createSessionExecutionPolicy(),
+            modelAutoCompactTokenLimitScope: "total" as const,
+          },
+        }
         let stop: (() => void) | undefined
         return {
-          kind: input.manualCompact === true ? "compact" : "regular",
           async run(session, execution) {
             await session.beginExecution(execution, context)
             const runtime = bindExecution(session, execution)
 
-            const task = (() => {
-              return {
-                completion: runtime.recordInitialInput().then(() => completion),
-                abort: release,
-              }
-            })()
-            stop = task.abort
-            return (await task.completion) ?? undefined
+            const recorded = runtime.recordInitialInput()
+            stop = release
+            await recorded
+            await completion
           },
           async abort() {
             stop?.()

@@ -269,7 +269,6 @@ export type AppStoreActions = {
   ): void
   openSettings(section?: SettingsSection): void
   closeSettings(): void
-  setSettingsSection(section: SettingsSection): void
   setProviderSettingsPage(page: ProviderSettingsPage): void
   loadUsage(): Promise<void>
   openGoalDialog(): void
@@ -2030,12 +2029,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 : { modelSelection: sourceModelSelection }),
             },
           )
-          if (
-            get().sessionSelectionIntentRevision !== intentRevision ||
-            !isCurrentSelection(sourceSelection)
-          ) {
-            return
-          }
+          if (!isCurrentSelection(sourceSelection)) return
           if (sourceModelSelection !== undefined) {
             get().setModelSelection(response.session.id, sourceModelSelection)
           }
@@ -3150,15 +3144,6 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       if (section === "usage") void get().loadUsage()
     },
     closeSettings: () => set({ settingsSection: undefined }),
-    setSettingsSection: (section) => {
-      set({
-        settingsSection: section,
-        providerSettingsPage: { kind: "accounts" },
-      })
-      if (section === "subscriptions" && !get().subscriptionsFresh())
-        void get().loadSubscriptions()
-      if (section === "usage") void get().loadUsage()
-    },
     setProviderSettingsPage: (page) =>
       set({ settingsSection: "providers", providerSettingsPage: page }),
     openGoalDialog: () =>

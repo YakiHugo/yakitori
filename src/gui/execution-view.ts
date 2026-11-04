@@ -1,4 +1,3 @@
-import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type {
   ApiPendingInput,
   ApiPendingPermission,
@@ -16,6 +15,7 @@ import type {
 import type { ContextExcerpt } from "../protocol/input-context.ts"
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
 import type { ModelFailureKind } from "../protocol/model-failure.ts"
+import type { ModelOutputPresentation } from "../protocol/model-output.ts"
 import type { InputDraft } from "../protocol/user-input.ts"
 import { inputContentText } from "../protocol/user-input.ts"
 import { type CitationSource, citationSources } from "./citation-sources.ts"
@@ -211,6 +211,22 @@ const EMPTY_TELEMETRY: SessionTelemetry = {
   outputTokens: 0,
   cacheReadInputTokens: 0,
   cacheWriteInputTokens: 0,
+}
+
+export function executionEntryKey(entry: ExecutionEntry): string {
+  switch (entry.kind) {
+    case "user_input":
+      return entry.inputId
+    case "assistant":
+    case "reasoning":
+      return entry.itemId
+    case "tool":
+      return entry.toolCallId
+    case "permission":
+      return entry.permissionRequestId
+    case "turn_terminal":
+      return `${entry.turnId}:${entry.state}`
+  }
 }
 
 export function createExecutionViewState(

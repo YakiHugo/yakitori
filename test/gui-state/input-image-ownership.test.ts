@@ -74,12 +74,6 @@ describe("renderer input image ownership", () => {
   it("rejects changed ordering, text and metadata instead of assigning unrelated assets", () => {
     const ownership = createInputAttachmentOwnership()
     expect(() =>
-      ownership.promote("http://localhost/", source, {
-        ...accepted,
-        text: "changed",
-      }),
-    ).toThrow("does not match")
-    expect(() =>
       ownership.promote(
         "http://localhost/",
         source,

@@ -2,7 +2,6 @@ import { useCallback, useContext, useRef, useState } from "react"
 import { GOAL_DIRECTIVE } from "../../protocol/directives.ts"
 import { canResumeTurn } from "../../protocol/turn-recovery.ts"
 import {
-  inputContent,
   inputContentAttachments,
   inputContentText,
 } from "../../protocol/user-input.ts"
@@ -141,7 +140,7 @@ export function Composer() {
     defaultProvider,
     defaultModel,
   })
-  const draftAttachments = inputContentAttachments(inputContent(draft))
+  const draftAttachments = inputContentAttachments(draft)
   const requiresImages = draftAttachments.some((attachment) =>
     attachment.mediaType.startsWith("image/"),
   )
@@ -293,8 +292,8 @@ export function Composer() {
           updatePromptExcerpt(excerpt)
       }}
       onSubmit={(parts, mode) => {
-        const text = inputContentText(inputContent(parts))
-        const images = inputContentAttachments(inputContent(parts))
+        const text = inputContentText(parts)
+        const images = inputContentAttachments(parts)
         conversationScroll?.jumpToBottom()
         if (images.length === 0 && excerpts.length === 0) {
           if (text === "/status" || text === "/mcp") {

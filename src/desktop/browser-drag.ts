@@ -104,7 +104,7 @@ export class BrowserDrag {
   #binding: DragBinding | undefined
   readonly #contexts = new Map<
     string,
-    { frameId: string; sessionId: string | undefined; uniqueId: string }
+    { sessionId: string | undefined; uniqueId: string }
   >()
   readonly #message = (
     _event: unknown,
@@ -129,7 +129,6 @@ export class BrowserDrag {
     ) {
       const frameId = params.context.auxData.frameId
       this.#contexts.set(JSON.stringify([session, frameId]), {
-        frameId,
         sessionId: session,
         uniqueId: params.context.uniqueId,
       })
