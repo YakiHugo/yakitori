@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { once } from "node:events"
 import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
@@ -180,22 +179,15 @@ describe("turn extension boundaries", () => {
     ["retirement", "execution"].flatMap((failureSource) =>
       [false, true].map((interrupted) => ({ failureSource, interrupted })),
     ),
-  )("keeps a Session occupied when $failureSource cannot settle an owned process (interrupted=$interrupted)", async ({
+  )("keeps a Session occupied when $failureSource cannot settle owned resources (interrupted=$interrupted)", async ({
     failureSource,
     interrupted,
   }) => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-resource-settlement-"))
-    const child = spawn(
-      process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
-    )
-    await once(child, "spawn")
-    const childClosed = once(child, "close")
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     const registry = createToolRegistry([])
-    const failure = new Error("Owned process could not be closed")
+    const failure = new Error("Owned resource could not be closed")
     const replacement: RuntimeTool = {
       toolName: { namespace: "owned", name: "effect" },
       description: "Replacement resource",
@@ -247,8 +239,6 @@ describe("turn extension boundaries", () => {
     })
     onTestFinished(async () => {
       release.resolve()
-      child.kill("SIGKILL")
-      await childClosed
       try {
         await manager.shutdown().catch((error: unknown) => {
           if (
@@ -293,8 +283,6 @@ describe("turn extension boundaries", () => {
       }
     }
     expect(thread.status).toBe(SessionStatus.Active)
-    expect(child.pid).toBeDefined()
-    expect(() => process.kill(child.pid ?? 0, 0)).not.toThrow()
     expect(
       await thread.startIfIdle({ content: createUserInput("next turn") }),
     ).toEqual({ type: "not_submitted", reason: "not_idle" })

@@ -17,7 +17,6 @@ export type SubscriptionConnections = {
     id: string,
     text?: string,
   ): Promise<readonly SubscriptionConnection[]>
-  refresh(): Promise<void>
   close(): Promise<void>
 }
 
@@ -26,7 +25,6 @@ export type SubscriptionConnections = {
 // only when interaction is needed or explicitly requested.
 export function createSubscriptionConnections(input: {
   readAvailability(): Promise<Readonly<Record<"codex" | "grok", boolean>>>
-  refresh(): Promise<void>
   importAccount(id: "codex" | "grok", text?: string): Promise<void>
   loginCompleted(id: "codex" | "grok"): Promise<void>
 }): SubscriptionConnections {
@@ -74,7 +72,6 @@ export function createSubscriptionConnections(input: {
   }
   return {
     read,
-    refresh: input.refresh,
     async importAccount(id, text) {
       if (closed) throw new ConfigurationError("Subscription login is closed.")
       if (id !== "codex" && id !== "grok")

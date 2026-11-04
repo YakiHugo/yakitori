@@ -137,12 +137,11 @@ export function createGrokProvider(
             "The configured Grok account changed during model discovery.",
           )
         const accessToken = credentials.accessToken
-        const models = await discoverOpenAiCompatibleModels({
+        return discoverOpenAiCompatibleModels({
           provider: "grok",
           baseUrl: GROK_API_BASE_URL,
           accessToken,
         })
-        return models.map((model) => ({ ...model, provider }))
       },
       cacheStore: createFileModelsCacheStore({
         provider,

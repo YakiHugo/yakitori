@@ -1870,8 +1870,7 @@ function forkBoundaryIndex(
     )
   }
   const turnId = input.boundary.turnId
-  const terminal = findLastIndex(
-    history,
+  const terminal = history.findLastIndex(
     (entry) =>
       entry.item.type === "turn_completed" && entry.item.turnId === turnId,
   )
@@ -2054,17 +2053,6 @@ async function reconcilePendingTail(
   }
   await truncate(path, completeLength)
   return false
-}
-
-function findLastIndex<T>(
-  values: readonly T[],
-  predicate: (value: T) => boolean,
-): number {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    const value = values[index]
-    if (value !== undefined && predicate(value)) return index
-  }
-  return -1
 }
 
 async function appendFileNewline(path: string): Promise<void> {
@@ -2675,7 +2663,6 @@ function isSubmissionMetadata(value: unknown): boolean {
       "modelSelection",
       "parentInputId",
       "metadata",
-      "queuedDispatch",
       "requestFingerprint",
       "provenance",
       "source",
@@ -2692,8 +2679,7 @@ function isSubmissionMetadata(value: unknown): boolean {
     (value.requestFingerprint === undefined ||
       (typeof value.requestFingerprint === "string" &&
         /^[a-f0-9]{64}$/.test(value.requestFingerprint))) &&
-    (value.metadata === undefined || isJsonObject(value.metadata)) &&
-    (value.queuedDispatch === undefined || value.queuedDispatch === true)
+    (value.metadata === undefined || isJsonObject(value.metadata))
   )
 }
 

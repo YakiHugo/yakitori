@@ -44,7 +44,6 @@ async function loginFixture() {
   })
   const service = createSubscriptionConnections({
     readAvailability: async () => ({ codex: available, grok: false }),
-    refresh: async () => {},
     importAccount: completed,
     loginCompleted: () => {
       importStarted.resolve()
@@ -59,7 +58,6 @@ it("imports the selected subscription and refuses to report success without an a
   const imported = vi.fn(async () => {})
   const service = createSubscriptionConnections({
     readAvailability: async () => ({ codex: false, grok: true }),
-    refresh: async () => {},
     importAccount: imported,
     loginCompleted: async () => {},
   })
@@ -81,7 +79,6 @@ it("waits for a file import during shutdown and leaves its failure with the requ
   })
   const service = createSubscriptionConnections({
     readAvailability: async () => ({ codex: true, grok: false }),
-    refresh: async () => {},
     importAccount: () => importing,
     loginCompleted: async () => {},
   })

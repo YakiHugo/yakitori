@@ -456,7 +456,7 @@ export function createSessionSubscriptions(
 
 // Snapshot pendingPermissions that did not already arrive as live
 // permission.requested transients during the replay window.
-export function unbufferedPendingPermissions(
+function unbufferedPendingPermissions(
   pendingPermissions: readonly ApiPendingPermission[],
   buffered: readonly SessionDelivery[],
 ): readonly ApiPendingPermission[] {

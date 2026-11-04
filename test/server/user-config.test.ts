@@ -4,6 +4,7 @@ import {
   open,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises"
@@ -20,7 +21,11 @@ import {
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>()
-  return { ...actual, writeFile: vi.fn(actual.writeFile) }
+  return {
+    ...actual,
+    writeFile: vi.fn(actual.writeFile),
+    rename: vi.fn(actual.rename),
+  }
 })
 
 describe("user config", () => {
@@ -698,33 +703,57 @@ describe("user config", () => {
 
   it("holds the OS config lock across the complete write", async () => {
     await withConfigPath(async (configPath) => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        )
       await writeFile(configPath, 'provider = "codex"\nmodel = "one"\n')
       const externalLock = await open(
         `${configPath}.yakitori.lock`,
         "a+",
         0o600,
       )
-      let locked = false
+      const expectLocked = async () => {
+        await expect(flockAsync(externalLock.fd, "exnb")).rejects.toMatchObject(
+          {
+            code: expect.stringMatching(/EAGAIN|EWOULDBLOCK/),
+          },
+        )
+      }
+      let staged = false
+      let committed = false
+      vi.mocked(writeFile).mockImplementation(async (path, ...args) => {
+        await actual.writeFile(path, ...args)
+        if (
+          typeof path === "string" &&
+          path.startsWith(`${configPath}.`) &&
+          path.endsWith(".tmp")
+        ) {
+          staged = true
+          await expectLocked()
+        }
+      })
+      vi.mocked(rename).mockImplementation(async (...args) => {
+        await expectLocked()
+        await actual.rename(...args)
+        await expectLocked()
+        committed = true
+      })
       try {
-        await flockAsync(externalLock.fd, "ex")
-        locked = true
-        let settled = false
-        const write = createUserConfigStore({ configPath })
-          .writeValue({ keyPath: ["model"], value: "two" })
-          .finally(() => {
-            settled = true
-          })
-
-        await new Promise((resolvePromise) => setImmediate(resolvePromise))
-        expect(settled).toBe(false)
-
-        await flockAsync(externalLock.fd, "un")
-        locked = false
-        await expect(write).resolves.toMatchObject({
+        await expect(
+          createUserConfigStore({ configPath }).writeValue({
+            keyPath: ["model"],
+            value: "two",
+          }),
+        ).resolves.toMatchObject({
           effective: { model: "two" },
         })
+        expect(staged && committed).toBe(true)
+        await flockAsync(externalLock.fd, "exnb")
       } finally {
-        if (locked) await flockAsync(externalLock.fd, "un")
+        vi.mocked(writeFile).mockImplementation(actual.writeFile)
+        vi.mocked(rename).mockImplementation(actual.rename)
+        await flockAsync(externalLock.fd, "un")
         await externalLock.close()
       }
     })
@@ -954,7 +983,7 @@ async function withConfigPath(
 
 function flockAsync(
   fileDescriptor: number,
-  operation: "ex" | "un",
+  operation: "ex" | "exnb" | "un",
 ): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     flock(fileDescriptor, operation, (error) => {

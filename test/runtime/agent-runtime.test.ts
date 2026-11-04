@@ -42,7 +42,6 @@ describe("agent runtime", () => {
           ...immediateProcessor(),
           createTask(snapshot, input) {
             return {
-              kind: "regular",
               async run(session, execution) {
                 await session.beginExecution(
                   execution,
@@ -517,43 +516,28 @@ describe("agent runtime", () => {
           ...immediateProcessor(),
           createTask(snapshot, input) {
             const context = testTurnContext(snapshot, input)
-            let stop: (() => void) | undefined
             return {
-              kind: input.manualCompact === true ? "compact" : "regular",
               async run(session, execution) {
                 await session.beginExecution(execution, context)
                 const turnRuntime = bindExecution(session, execution)
-
-                const task = (() => {
-                  return {
-                    completion: (async () => {
-                      await turnRuntime.recordInitialInput()
-                      const answer = (id: string, text: string) => ({
-                        id,
-                        turnId: input.submissionId,
-                        createdAt: "2026-10-02T00:00:00.000Z",
-                        item: {
-                          role: "assistant" as const,
-                          content: [{ type: "text" as const, text }],
-                        },
-                      })
-                      await turnRuntime.recordConversationItems([
-                        answer("answer_one", "Con"),
-                        answer("answer_two", "tinuation."),
-                      ])
-                      return {
-                        reason,
-                        answerItemIds: ["answer_one", "answer_two"],
-                      }
-                    })(),
-                    abort() {},
-                  }
-                })()
-                stop = task.abort
-                return (await task.completion) ?? undefined
-              },
-              async abort() {
-                stop?.()
+                await turnRuntime.recordInitialInput()
+                const answer = (id: string, text: string) => ({
+                  id,
+                  turnId: input.submissionId,
+                  createdAt: "2026-10-02T00:00:00.000Z",
+                  item: {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text }],
+                  },
+                })
+                await turnRuntime.recordConversationItems([
+                  answer("answer_one", "Con"),
+                  answer("answer_two", "tinuation."),
+                ])
+                return {
+                  reason,
+                  answerItemIds: ["answer_one", "answer_two"],
+                }
               },
             }
           },
@@ -1018,34 +1002,21 @@ async function notificationCount(
 
 function immediateProcessor(): SessionTaskRunner {
   return {
-    createTask(snapshot, input) {
-      const context = ((_snapshot, input) => {
-        return {
-          turnId: input.submissionId,
+    createTask(_snapshot, input) {
+      const context = {
+        turnId: input.submissionId,
+        selection: TARGET,
+        configuration: SessionConfiguration.create({
           selection: TARGET,
-          configuration: SessionConfiguration.create({
-            selection: TARGET,
-            workspaceRoot: "/workspace",
-            enabledTools: [],
-            approvalPolicy: "always_approve",
-            promptCacheKey: input.submissionId,
-          }).snapshot,
-        }
-      })(snapshot, input)
-      let stop: (() => void) | undefined
+          workspaceRoot: "/workspace",
+          enabledTools: [],
+          approvalPolicy: "always_approve",
+          promptCacheKey: input.submissionId,
+        }).snapshot,
+      }
       return {
-        kind: input.manualCompact === true ? "compact" : "regular",
         async run(session, execution) {
           await session.beginExecution(execution, context)
-
-          const task = (() => {
-            return { completion: Promise.resolve(), abort() {} }
-          })()
-          stop = task.abort
-          return (await task.completion) ?? undefined
-        },
-        async abort() {
-          stop?.()
         },
       }
     },
@@ -1138,10 +1109,8 @@ function memoryGraphStore(): {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((accept, decline) => {
+  const promise = new Promise<T>((accept) => {
     resolve = accept
-    reject = decline
   })
-  return { promise, resolve, reject }
+  return { promise, resolve }
 }

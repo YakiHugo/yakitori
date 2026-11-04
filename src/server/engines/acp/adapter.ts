@@ -157,15 +157,6 @@ export class AcpEngine implements EngineAdapter {
     return binding
   }
 
-  async listSessions(
-    input: { cwd?: string; cursor?: string } = {},
-  ): Promise<Record<string, unknown>> {
-    await this.connect()
-    if (!this.capabilities.list)
-      throw new Error("External agent does not support session/list")
-    return object(await this.requireConnection().request("session/list", input))
-  }
-
   private async bindSession(input: {
     appSessionId: string
     engineSessionId?: string

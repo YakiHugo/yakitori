@@ -9,7 +9,7 @@ import {
   readInstructionPrefix,
 } from "./instruction-files.ts"
 
-export const PROJECT_INSTRUCTIONS_MAX_BYTES = 32 * 1024
+const PROJECT_INSTRUCTIONS_MAX_BYTES = 32 * 1024
 export type ProjectInstructions = Readonly<{ directory: string; text: string }>
 export type ProjectInstructionInput = Readonly<{
   workspaceRoot?: string

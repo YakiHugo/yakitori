@@ -89,20 +89,18 @@ function applyGrant(
     const observedRange = grant.ranges?.[0]
     if (observedRange === undefined) return
     if (previous?.complete === true) {
-      const ranges = mergeRanges(previous.ranges, grant.ranges)
       revisions.set(path, {
         complete: true,
         observation: previous.observation,
         ...(previous.sha256 === undefined ? {} : { sha256: previous.sha256 }),
-        ...(ranges === undefined ? {} : { ranges }),
+        ranges: mergeRanges(previous.ranges, grant.ranges),
       })
       return
     }
     revisions.set(path, {
       complete: false,
       observation: "ranged_read",
-      ranges: mergeRanges(previous?.ranges, grant.ranges) ??
-        grant.ranges ?? [observedRange],
+      ranges: mergeRanges(previous?.ranges, grant.ranges),
     })
     return
   }
@@ -174,7 +172,7 @@ function parseRanges(
 function mergeRanges(
   left: VisibleFileRevision["ranges"],
   right: VisibleFileRevision["ranges"],
-): VisibleFileRevision["ranges"] {
+): NonNullable<VisibleFileRevision["ranges"]> {
   const ranges = [...(left ?? []), ...(right ?? [])].sort(
     (first, second) => first.startLine - second.startLine,
   )

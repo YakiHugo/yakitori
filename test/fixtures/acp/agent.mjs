@@ -44,13 +44,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (mode !== "load") process.exit(14)
     text(m.params.sessionId, "replayed history")
     reply(m.id, {})
-  } else if (m.method === "session/list")
-    reply(m.id, {
-      sessions: [
-        { sessionId: "external-session", cwd: "/tmp", title: "Fixture" },
-      ],
-    })
-  else if (m.method === "session/prompt") {
+  } else if (m.method === "session/prompt") {
     prompt = m
     const content = m.params.prompt[0].text
     if (content === "die") return process.exit(3)

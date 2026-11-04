@@ -1,13 +1,13 @@
 import { ToolLimitDefaults } from "../limits.ts"
 import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
-import { resolveWritePath } from "./path-policy.ts"
-import { compareAndWriteTextFile } from "./text-file-write.ts"
 import {
   completeFileChangeExecution,
   fileChangeExecution,
 } from "./execution-descriptors.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { resolveWritePath } from "./path-policy.ts"
+import { compareAndWriteTextFile } from "./text-file-write.ts"
 import { plainToolName } from "./tool-name.ts"
+import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 export function createWriteFileTool(
   maxBytes = ToolLimitDefaults.fileWriteBytes,
@@ -73,7 +73,19 @@ export function createWriteFileTool(
         expectedSha256: observed?.sha256 ?? null,
       })
       if (!written.ok) return written
-      return withFileObservation(written)
+      return {
+        ...written,
+        output: {
+          ...written.output,
+          fileObservation: {
+            path: written.output.path,
+            kind: "write",
+            complete: true,
+            sha256: written.output.sha256,
+            ...(written.output.created ? { created: true } : {}),
+          },
+        },
+      }
     },
   }
 }
@@ -132,36 +144,6 @@ function parseWriteInput(
     path: record.path,
     content: record.content,
   }
-}
-
-function withFileObservation(
-  written: Extract<ToolExecutionResult, { ok: true }>,
-): Extract<ToolExecutionResult, { ok: true }> {
-  if (!isRecord(written.output) || typeof written.output.path !== "string") {
-    return written
-  }
-  const sha256 =
-    typeof written.output.sha256 === "string"
-      ? written.output.sha256
-      : undefined
-  if (sha256 === undefined) return written
-  return {
-    ...written,
-    output: {
-      ...written.output,
-      fileObservation: {
-        path: written.output.path,
-        kind: "write",
-        complete: true,
-        sha256,
-        ...(written.output.created === true ? { created: true } : {}),
-      },
-    },
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function writeFailure(

@@ -395,19 +395,18 @@ it("bounds each root independently so a large repo cannot starve user skills", a
     const userSkill = join(userHome, ".agents", "skills", "review")
     await mkdir(repoSkills, { recursive: true })
     await mkdir(userSkill, { recursive: true })
-    // Ordinary unrelated files also consume enumeration work. This exercises
-    // the real filesystem boundary without timing or syscall-count assertions.
-    for (let start = 0; start < 20_001; start += 256)
-      await Promise.all(
-        Array.from({ length: Math.min(256, 20_001 - start) }, (_, index) =>
-          writeFile(join(repoSkills, `asset-${start + index}`), ""),
-        ),
-      )
+    // Ordinary files consume real enumeration work. A small host traversal
+    // budget tests root isolation without a large inode-creation fixture.
+    await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        writeFile(join(repoSkills, `asset-${index}`), ""),
+      ),
+    )
     await writeFile(
       join(userSkill, "SKILL.md"),
       "---\nname: review\ndescription: User review\n---\n",
     )
-    const snapshot = await createSkillsLoader()({
+    const snapshot = await createSkillsLoader({ hostTraversalEntryLimit: 4 })({
       workingDirectory: root,
       homeDir: join(root, "empty"),
       userHomeDir: userHome,

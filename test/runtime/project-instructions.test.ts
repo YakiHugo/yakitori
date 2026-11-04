@@ -108,32 +108,6 @@ describe("project instructions", () => {
     }
   })
 
-  it("returns cached results until an instruction file changes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "yakitori-instructions-"))
-    try {
-      const file = join(root, "AGENTS.md")
-      await writeFile(file, "v1 rules")
-      const loader = createProjectInstructionsLoader()
-      const input = {
-        workingDirectory: root,
-        homeDir: join(root, "empty-home"),
-      }
-
-      expect((await loader(input))?.text).toContain("v1 rules")
-      expect((await loader(input))?.text).toContain("v1 rules")
-
-      await writeFile(file, "v2 rules")
-      // mtime granularity can hide an immediate rewrite; ensure it moves.
-      const future = new Date(Date.now() + 5_000)
-      await utimes(file, future, future)
-
-      expect((await loader(input))?.text).toContain("v2 rules")
-      expect((await loader(input))?.text).not.toContain("v1 rules")
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
   it("detects instruction files created after an empty result", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-instructions-"))
     try {

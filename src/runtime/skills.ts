@@ -26,7 +26,7 @@ export {
   type SkillToolDependency,
 } from "./skills-metadata.ts"
 
-export const SKILLS_CATALOG_MAX_BYTES = 20 * 1024
+const SKILLS_CATALOG_MAX_BYTES = 20 * 1024
 // Host safety boundaries: bound metadata I/O, traversal memory, and injected
 // text independently. Large bodies do not remove a skill from discovery.
 const METADATA_READ_BYTES = 32 * 1024
@@ -127,9 +127,9 @@ Resolve relative references from the skill directory. Follow its references rout
 For multiple skills, choose the smallest sufficient set and announce the order. Report missing, disabled, ambiguous, or unreadable skills; do not claim they were loaded. Continue with an appropriate fallback when possible.
 `
 
-export function createSkillsLoader(): (
-  input: SkillLoadInput,
-) => Promise<SkillsSnapshot> {
+export function createSkillsLoader(
+  options: Readonly<{ hostTraversalEntryLimit?: number }> = {},
+): (input: SkillLoadInput) => Promise<SkillsSnapshot> {
   // Each invocation owns its inventory and parsed metadata. Sharing mutable
   // stat-keyed caches lets concurrent refreshes publish stale mixed snapshots.
   return async (input) => {
@@ -173,7 +173,10 @@ export function createSkillsLoader(): (
     const skills = new Map<string, SkillMetadata>()
     const candidates = new Map<string, SkillMetadata["scope"]>()
     for (const root of roots) {
-      const discovery = await discoverSkillFiles(root.path)
+      const discovery = await discoverSkillFiles(
+        root.path,
+        options.hostTraversalEntryLimit,
+      )
       diagnostics.push(...discovery.diagnostics)
       for (const path of discovery.paths)
         if (!candidates.has(path)) candidates.set(path, root.scope)

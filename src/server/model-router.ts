@@ -183,7 +183,6 @@ export function createModelRouter(input: {
     requirements: ModelRouteRequirements &
       Readonly<{ preferredAccount?: string }> = {},
   ): Readonly<{
-    candidate: Binding
     target: ModelSelection
     model?: ResolvedModel
     rejection?: ModelRouteRejection
@@ -200,7 +199,6 @@ export function createModelRouter(input: {
         model: candidate.model,
       }
       const reject = (code: ModelRouteRejection["code"], message: string) => ({
-        candidate,
         target,
         rejection: {
           accountId: candidate.accountId,
@@ -265,7 +263,7 @@ export function createModelRouter(input: {
           )
       }
       models.validate(target)
-      return { candidate, target, model }
+      return { target, model }
     })
   }
 

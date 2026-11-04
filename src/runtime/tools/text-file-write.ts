@@ -15,8 +15,11 @@ import {
   resolveWorkspaceRoot,
   resolveWritePath,
 } from "./path-policy.ts"
-import type { ToolExecutionResult } from "./types.ts"
-import { createBoundedUnifiedDiff } from "./unified-diff.ts"
+import type { ToolFailure } from "./types.ts"
+import {
+  type BoundedUnifiedDiff,
+  createBoundedUnifiedDiff,
+} from "./unified-diff.ts"
 
 export type CompareAndWriteTextFileInput = Readonly<{
   workspaceRoot: string
@@ -28,9 +31,29 @@ export type CompareAndWriteTextFileInput = Readonly<{
   validateTarget?: (absolutePath: string) => Promise<void>
 }>
 
+export type TextFileWriteOutput = Readonly<{
+  path: string
+  previousSha256: string | null
+  sha256: string
+  byteCount: number
+  created: boolean
+  diff: BoundedUnifiedDiff
+}>
+
+export type TextFileDeleteOutput = Readonly<{
+  path: string
+  previousSha256: string | null
+  deleted: true
+  diff: BoundedUnifiedDiff
+}>
+
+type TextFileResult<Output> =
+  | ToolFailure
+  | Readonly<{ ok: true; output: Output; content: string }>
+
 export async function compareAndWriteTextFile(
   input: CompareAndWriteTextFileInput,
-): Promise<ToolExecutionResult> {
+): Promise<TextFileResult<TextFileWriteOutput>> {
   if (input.createParentDirectories === true) {
     if (input.path.length === 0 || input.path.includes("\0")) {
       return writeFailure("path_denied", "Path must be a non-empty string.")
@@ -164,7 +187,7 @@ export async function compareAndDeleteTextFile(input: {
   readonly workspaceRoot: string
   readonly path: string
   readonly expectedSha256: string
-}): Promise<ToolExecutionResult> {
+}): Promise<TextFileResult<TextFileDeleteOutput>> {
   const resolved = await resolveWritePath(input.workspaceRoot, input.path)
   if (!resolved.ok) return pathError(resolved)
   if (!resolved.exists) {
@@ -240,7 +263,7 @@ async function checkPrecondition(
       readonly currentSha256: string | null
       readonly currentContent: Buffer | null
     }
-  | { readonly ok: false; readonly result: ToolExecutionResult }
+  | { readonly ok: false; readonly result: ToolFailure }
 > {
   if (!target.exists) {
     if (expectedSha256 === null) {
@@ -293,7 +316,7 @@ async function checkPrecondition(
 
 function pathError(
   target: Extract<ResolvedFileTarget, { readonly ok: false }>,
-): ToolExecutionResult {
+): ToolFailure {
   return writeFailure(target.error.code, target.error.message)
 }
 
@@ -304,7 +327,7 @@ function writeFailure(
     readonly currentSha256?: string
     readonly suggestion?: string
   },
-): ToolExecutionResult {
+): ToolFailure {
   return {
     ok: false,
     code,

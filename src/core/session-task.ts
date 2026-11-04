@@ -20,7 +20,6 @@ export type ExecutionContext = Readonly<{
 }>
 
 export type SessionTask = Readonly<{
-  kind: "regular" | "compact"
   run(
     session: Session,
     execution: ExecutionContext,
@@ -69,10 +68,3 @@ export type TaskOutcome =
 export type TaskSettlement =
   | TaskOutcome
   | Readonly<{ type: "cleanup_failed"; error: unknown }>
-
-export type SessionTaskHandle = Readonly<{
-  kind: SessionTask["kind"]
-  executionId: string
-  cancel(): void
-  settled: Promise<TaskSettlement>
-}>

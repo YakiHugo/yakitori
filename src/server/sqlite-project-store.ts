@@ -94,7 +94,7 @@ export class InvalidProjectCursorError extends Error {
   }
 }
 
-export function createProjectId(): string {
+function createProjectId(): string {
   return `project_${globalThis.crypto.randomUUID()}`
 }
 
@@ -573,10 +573,7 @@ function requireIdempotencyKey(key: string): string {
   })
 }
 
-function sameRoots(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
+function sameRoots(left: readonly string[], right: readonly string[]): boolean {
   return (
     left.length === right.length &&
     left.every((path, index) => right[index] === path)

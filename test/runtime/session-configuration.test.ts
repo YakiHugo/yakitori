@@ -380,7 +380,6 @@ describe("session configuration", () => {
     })
     const legacy = {
       ...current.snapshot,
-      schemaVersion: 3,
       approvalPolicy: "never",
     }
 

@@ -289,7 +289,6 @@ async function executeComposedTool(
         ...input,
         signal: lifetime,
         calls: [call],
-        onScheduled: () => {},
         parentToolCallId: prepared.call.id,
         toolExecutionGate: gate,
         recordToolStarted: async (item) => {

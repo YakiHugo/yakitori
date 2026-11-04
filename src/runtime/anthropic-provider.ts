@@ -1,16 +1,3 @@
-import {
-  prepareAnthropicThinkingHistory,
-  reportAnthropicThinkingChanges,
-  thinkingBindingBeta,
-} from "./anthropic-thinking-policy.ts"
-import { anthropicModel } from "./anthropic-models.ts"
-import {
-  anthropicImageCount,
-  anthropicImageTier,
-  prepareAnthropicImage,
-  validateAnthropicScreenshot,
-} from "./anthropic-image-policy.ts"
-import { prepareKimiCodeImage } from "./kimi-code-image-policy.ts"
 import Anthropic, { toFile } from "@anthropic-ai/sdk"
 import type {
   BetaContentBlockParam,
@@ -28,8 +15,21 @@ import type {
   Tool,
 } from "@anthropic-ai/sdk/resources/messages"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
+import {
+  anthropicImageCount,
+  anthropicImageTier,
+  prepareAnthropicImage,
+  validateAnthropicScreenshot,
+} from "./anthropic-image-policy.ts"
+import { anthropicModel } from "./anthropic-models.ts"
+import {
+  prepareAnthropicThinkingHistory,
+  reportAnthropicThinkingChanges,
+  thinkingBindingBeta,
+} from "./anthropic-thinking-policy.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
+import { prepareKimiCodeImage } from "./kimi-code-image-policy.ts"
 import {
   DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
@@ -154,7 +154,6 @@ async function* streamAnthropic(
       : undefined
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let providerRequestId: string | undefined
-  let failureStage: "connect" | "response_body" = "connect"
   const customFallbackKeys = new Map(
     request.tools.flatMap((tool) =>
       tool.kind === "custom" && tool.customInputFallbackKey !== undefined
@@ -523,7 +522,6 @@ async function* streamAnthropic(
       wireResponse.response.headers.get("request-id") ??
       wireResponse.response.headers.get("x-request-id") ??
       undefined
-    failureStage = "response_body"
   } catch (error) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
@@ -871,7 +869,7 @@ async function* streamAnthropic(
             )
           : error,
         request.target.provider,
-        failureStage,
+        "response_body",
         providerRequestId,
         message?.id,
       ),
@@ -1101,7 +1099,7 @@ export function toAnthropicTools(
   }))
 }
 
-export function toAnthropicSystem(
+function toAnthropicSystem(
   sections: ModelRequest["system"],
   cacheBreakpoints = false,
 ): string | TextBlockParam[] {
@@ -1145,7 +1143,7 @@ function toAnthropicRequestMessages(
 
 function markLastModelContentBlockCacheable(
   messages: BetaMessageParam[],
-): boolean {
+): void {
   for (
     let messageIndex = messages.length - 1;
     messageIndex >= 0;
@@ -1167,10 +1165,9 @@ function markLastModelContentBlockCacheable(
         continue
       }
       block.cache_control = { type: "ephemeral" }
-      return true
+      return
     }
   }
-  return false
 }
 
 export function fromAnthropicMessage(

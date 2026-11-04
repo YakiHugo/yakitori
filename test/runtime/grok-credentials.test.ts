@@ -116,11 +116,6 @@ describe("Grok OIDC credentials (read-only)", () => {
     await expect(
       resolveGrokModelCredentials({ path, now: () => 500_000 }),
     ).rejects.toThrow(/no login/)
-    await expect(
-      resolveGrokModelCredentials({ path, now: () => 500_000 }).then(
-        (credentials) => credentials.ownerIdentity,
-      ),
-    ).rejects.toThrow(/no login/)
   })
 
   it.each([

@@ -49,7 +49,6 @@ import {
 import { createUserConfigStore } from "../../../src/server/user-config.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
 import { inputFixture } from "../../fixtures/user-input.ts"
-import { bindExecution } from "../../support/session-execution.ts"
 import {
   initializeConnection,
   openTestConnection,
@@ -71,36 +70,24 @@ function createRealHandlers(
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      createTask(snapshot, input) {
-        const context = ((_snapshot, input) => {
-          const selection = { provider: "faux", model: "scripted" }
-          return {
-            turnId: input.submissionId,
+      createTask(_snapshot, input) {
+        const selection = { provider: "faux", model: "scripted" }
+        const context = {
+          turnId: input.submissionId,
+          selection,
+          configuration: SessionConfiguration.create({
             selection,
-            configuration: SessionConfiguration.create({
-              selection,
-              workspaceRoot: process.cwd(),
-              enabledTools: [],
-              approvalPolicy: "always_approve",
-              promptCacheKey: input.submissionId,
-            }).snapshot,
-          }
-        })(snapshot, input)
-        let stop: (() => void) | undefined
+            workspaceRoot: process.cwd(),
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: input.submissionId,
+          }).snapshot,
+        }
         return {
-          kind: input.manualCompact === true ? "compact" : "regular",
           async run(session, execution) {
             await session.beginExecution(execution, context)
-            const runtime = bindExecution(session, execution)
-
-            const task = (() => {
-              return { completion: runtime.recordInitialInput(), abort() {} }
-            })()
-            stop = task.abort
-            return (await task.completion) ?? undefined
-          },
-          async abort() {
-            stop?.()
+            await session.recordInitialInput(execution)
+            return undefined
           },
         }
       },

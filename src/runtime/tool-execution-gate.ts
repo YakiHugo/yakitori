@@ -65,7 +65,6 @@ export function createToolExecutionGate(): ToolExecutionGate {
     while (queue[0]?.cancelled) queue.shift()
     const first = queue[0]
     if (first === undefined || !first.ready) return
-    if (activeReaders > 0 && first.mode === "exclusive") return
     if (first.mode === "exclusive") {
       if (activeReaders > 0) return
       queue.shift()

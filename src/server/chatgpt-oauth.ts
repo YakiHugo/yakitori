@@ -100,7 +100,6 @@ export function createChatGPTOAuth(input: {
       const nonce = randomBytes(32).toString("base64url")
       const verifier = randomBytes(64).toString("base64url")
       const expiresAt = now() + ATTEMPT_LIFETIME_MS
-      let callbackIssuedClientId = selected?.clientId ?? pendingClientId
       let validatedRegistration: ChatGPTRegistration | undefined
       let consumed = false
       let cancelled = false
@@ -129,9 +128,6 @@ export function createChatGPTOAuth(input: {
         // This URL may contain an ID-token hint. Open only in the system browser;
         // never log it or expose it to the renderer's persisted settings/history.
         authorizationUrl: authorizationUrl.href,
-        get issuedClientId() {
-          return callbackIssuedClientId
-        },
         get registration() {
           return validatedRegistration === undefined
             ? undefined
@@ -188,7 +184,6 @@ export function createChatGPTOAuth(input: {
               callbackClientId !== (selected?.clientId ?? pendingClientId))
           )
             throw new ChatGPTAuthError("invalid_callback")
-          callbackIssuedClientId = clientId
           await persistRegistration?.(clientId)
           if (cancelled || now() >= expiresAt)
             throw new ChatGPTAuthError("expired_attempt")

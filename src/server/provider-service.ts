@@ -141,7 +141,7 @@ export function createProviderService(
       catalog = createProviderModelCatalog({
         directory: join(input.credentialDirectory, "..", "provider-models"),
         identity,
-        discover: () => discover(configuration, key),
+        discover: () => discoverProviderModels(configuration, key),
         changed: () => input.changed?.(),
         ...(input.now ? { now: input.now } : {}),
         ...(input.catalogTtlMs === undefined
@@ -171,7 +171,6 @@ export function createProviderService(
   }
   const reload = async () => {
     const generation = ++reloadGeneration
-    await input.subscriptions?.()?.refresh()
     const configurations = await readConfigurations()
     const entries = await Promise.all(
       Object.entries(configurations).map(async ([id, configuration]) => {
@@ -385,12 +384,6 @@ export function createProviderService(
       throw new ConfigurationError(
         "Enter an API key or choose a local service that needs no key.",
       )
-    return discover(configuration, key)
-  }
-  const discover = async (
-    configuration: ProviderConfiguration,
-    key: string,
-  ) => {
     return discoverProviderModels(configuration, key)
   }
   const modelManager = (provider: string) => {

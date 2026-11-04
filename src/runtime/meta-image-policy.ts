@@ -1,24 +1,24 @@
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions/completions"
 import {
-  inspectImageBytes,
   InvalidImageDataError,
+  inspectImageBytes,
 } from "../kernel/image-metadata.ts"
 import { AssetMediaError } from "./asset-media.ts"
 import { jsonRequestByteLength } from "./json-request-budget.ts"
-import type { ModelImageBlock, ModelRequest } from "./model.ts"
-import { validateModelImage } from "./prepare-model-image.ts"
-
 // Direct Meta Model API, checked 2026-11-02:
 // https://dev.meta.ai/docs/models
 // https://dev.meta.ai/docs/image-understanding
 // https://dev.meta.ai/docs/api-reference/chat-completions/schemas
 import { isMetaVisionModel } from "./meta-models.ts"
+import type { ModelImageBlock, ModelRequest } from "./model.ts"
+import { validateModelImage } from "./prepare-model-image.ts"
+
 export { isMetaVisionModel } from "./meta-models.ts"
 
 // Local serialization/allocation guard, not a Meta quota. Fits a documented
 // maximum 50 MB image after base64 with framing, while bounding image history.
-export const META_REQUEST_SAFETY_BYTES = 80 * 1024 * 1024
-export class MetaImageRequestSizeError extends AssetMediaError {
+const META_REQUEST_SAFETY_BYTES = 80 * 1024 * 1024
+class MetaImageRequestSizeError extends AssetMediaError {
   constructor() {
     super(
       "Meta request was not sent: exceeds Yakitori's 80 MiB local request budget. Send fewer images or reduce other request content; originals have not been changed.",

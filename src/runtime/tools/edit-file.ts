@@ -18,7 +18,10 @@ import {
   normalizeReplacementLineEndings,
   preserveCurlyQuoteStyle,
 } from "./text-file-format.ts"
-import { compareAndWriteTextFile } from "./text-file-write.ts"
+import {
+  compareAndWriteTextFile,
+  type TextFileWriteOutput,
+} from "./text-file-write.ts"
 import { plainToolName } from "./tool-name.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -90,16 +93,12 @@ export function createEditFileTool(
             ? fileExistsFailure(resolved.displayPath)
             : written
         }
-        const baseOutput = asJsonObject(written.output)
-        const createdGrant = editGrant(baseOutput, { created: true })
         const result = {
           ok: true,
           output: {
-            ...baseOutput,
+            ...written.output,
             action: "create",
-            ...(createdGrant === undefined
-              ? {}
-              : { fileObservation: createdGrant }),
+            fileObservation: editGrant(written.output, { created: true }),
           },
           content: `Created ${resolved.displayPath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
         } satisfies ToolExecutionResult
@@ -283,10 +282,8 @@ export function createEditFileTool(
         )
       }
 
-      const baseOutput = asJsonObject(written.output)
-      const grant = editGrant(baseOutput, { optimisticRebase })
       const output = {
-        ...baseOutput,
+        ...written.output,
         replacementCount: matches.length,
         matchMode: located.mode,
         optimisticRebase,
@@ -302,7 +299,7 @@ export function createEditFileTool(
                 editWithinObservedRanges,
               },
             }),
-        ...(grant === undefined ? {} : { fileObservation: grant }),
+        fileObservation: editGrant(written.output, { optimisticRebase }),
       }
       return {
         ok: true,
@@ -313,25 +310,15 @@ export function createEditFileTool(
   }
 }
 
-function asJsonObject(value: unknown): JsonObject {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return value as JsonObject
-  }
-  return {}
-}
-
 function editGrant(
-  output: JsonObject,
+  output: TextFileWriteOutput,
   flags: Readonly<{ created?: boolean; optimisticRebase?: boolean }>,
-): JsonObject | undefined {
-  const path = output.path
-  const sha256 = output.sha256
-  if (typeof path !== "string" || typeof sha256 !== "string") return undefined
+): JsonObject {
   return {
-    path,
+    path: output.path,
     kind: "edit",
     complete: flags.created === true,
-    sha256,
+    sha256: output.sha256,
     ...(flags.created === true ? { created: true } : {}),
     ...(flags.optimisticRebase === true ? { optimisticRebase: true } : {}),
   }

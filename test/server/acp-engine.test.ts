@@ -271,7 +271,7 @@ describe("external ACP v1 process boundary", () => {
       ),
     ).toBe(false)
   })
-  it("retains metadata delivered before session/new returns and exposes negotiated session/list", async () => {
+  it("shares concurrent binding and retains metadata delivered before session/new returns", async () => {
     const adapter = engine()
     const bindings = await Promise.all([
       adapter.bind({ appSessionId: "app", cwd: "/tmp" }),
@@ -288,14 +288,6 @@ describe("external ACP v1 process boundary", () => {
         availableCommands: [],
       },
     })
-    expect(await adapter.listSessions()).toEqual({
-      sessions: [
-        { sessionId: "external-session", cwd: "/tmp", title: "Fixture" },
-      ],
-    })
-    await expect(engine("none").listSessions()).rejects.toThrow(
-      "does not support session/list",
-    )
   })
 
   it("shuts down an active child without declaring cancellation or success", async () => {

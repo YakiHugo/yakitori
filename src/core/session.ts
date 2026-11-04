@@ -46,7 +46,6 @@ import {
 import {
   type ExecutionContext,
   type SessionTask,
-  type SessionTaskHandle,
   type SessionTaskRunner,
   TaskCleanupError,
   type TaskOutcome,
@@ -94,7 +93,7 @@ type ActiveTurn = {
   inputRecorded: boolean
   // Compaction can replace model history before a continued answer finishes.
   assistantItems: ResponseItemEnvelope[]
-  context: TurnContextItem | undefined
+  executionStarted: boolean
   readonly execution: ExecutionContext
   readonly definition: SessionTask
   readonly abort: AbortController
@@ -108,7 +107,6 @@ type ActiveTurn = {
   escalation: Promise<void> | undefined
   escalationTimer: ReturnType<typeof setTimeout> | undefined
   cleanupError: unknown
-  readonly handle: SessionTaskHandle
   readonly finalized: Promise<void>
   interruptReason: string | undefined
 }
@@ -126,7 +124,6 @@ type SessionCommand =
   | Readonly<{ type: "shutdown_if_idle"; resolve: (closed: boolean) => void }>
 
 type AcceptedAgentMessage = {
-  readonly envelope: ResponseItemEnvelope
   readonly items: readonly RolloutItem[]
   append?: RolloutAppend
 }
@@ -142,7 +139,6 @@ type AcceptedThreadMessage = {
 
 type PendingTurnStart = {
   readonly input: TurnInput
-  readonly context: TurnContextItem
   readonly inputItem: ResponseItemEnvelope | undefined
   readonly items: readonly RolloutItem[]
   append?: RolloutAppend
@@ -700,12 +696,6 @@ export class Session {
       input,
       signal: abort.signal,
     }
-    const handle: SessionTaskHandle = {
-      kind: definition.kind,
-      executionId: execution.executionId,
-      cancel: () => this.#cancelTask(active),
-      settled: Promise.resolve().then(() => this.#settleTask(active)),
-    }
     const active: ActiveTurn = {
       ...(messageAdmission === undefined ? {} : { messageAdmission }),
       finishing: false,
@@ -713,7 +703,7 @@ export class Session {
       inputItem,
       inputRecorded: false,
       assistantItems: [],
-      context: undefined,
+      executionStarted: false,
       execution,
       definition,
       abort,
@@ -726,17 +716,16 @@ export class Session {
       escalation: undefined,
       escalationTimer: undefined,
       cleanupError: undefined,
-      handle,
-      finalized: handle.settled.then((outcome) =>
-        this.#onTaskSettled(active, outcome),
-      ),
+      finalized: Promise.resolve()
+        .then(() => this.#settleTask(active))
+        .then((outcome) => this.#onTaskSettled(active, outcome)),
       interruptReason: undefined,
     }
     this.#activeTurn = active
     this.#setStatus(SessionStatus.Active)
     this.#setAgentStatus("running")
     this.#events.send({ type: "turn.started", threadId: this.id, input })
-    // The handle already owns preparation and cleanup before admission publishes.
+    // Task settlement owns preparation and cleanup before admission publishes.
     await admitted
     return {
       type: "started",
@@ -805,17 +794,13 @@ export class Session {
     context: TurnContextItem,
   ): Promise<void> {
     const active = this.#requireExecution(execution)
-    if (
-      context.turnId !== active.input.submissionId ||
-      active.context !== undefined
-    )
+    if (context.turnId !== active.input.submissionId || active.executionStarted)
       throw new Error("Task prepared a mismatched or duplicate Turn context.")
-    active.context = structuredClone(context)
+    active.executionStarted = true
     this.#configuration = structuredClone(context.configuration)
     const input = active.input
     const pending: PendingTurnStart = {
       input,
-      context,
       inputItem: active.inputItem,
       items: [
         {
@@ -1061,7 +1046,7 @@ export class Session {
   #interruptActiveTurn(reason: string): void {
     if (this.#activeTurn === undefined) return
     this.#activeTurn.interruptReason = reason
-    this.#activeTurn.handle.cancel()
+    this.#cancelTask(this.#activeTurn)
   }
 
   #cancelTask(active: ActiveTurn): void {
@@ -1763,7 +1748,7 @@ export class Session {
             { type: "agent_message", messageId, item: envelope },
           ]
           const append = this.#store.appendItems(this.id, items)
-          accepted = { envelope, items }
+          accepted = { items }
           this.#acceptedAgentMessages.set(messageId, accepted)
           this.#contextManager.record([envelope])
           try {

@@ -163,9 +163,7 @@ export function applyModelRequestControls<T extends object>(
   if (options === undefined) return body
   validateModelRequestControls(request, wireApi)
   const result: Record<string, unknown> = { ...body, ...options.body }
-  if (options.body.tools !== undefined) {
-    if (!Array.isArray(options.body.tools))
-      throw new ModelRequestControlsError("Native tools must be an array.")
+  if (Array.isArray(options.body.tools)) {
     const tools = "tools" in body ? body.tools : undefined
     result.tools = [
       ...(Array.isArray(tools) ? tools : []),

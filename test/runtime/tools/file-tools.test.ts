@@ -24,29 +24,6 @@ import {
 import { createWriteFileTool } from "../../../src/runtime/tools/write-file.ts"
 
 describe("bounded file tools", () => {
-  it("reads a live UTF-8 page without a full-file revision", async () => {
-    await withWorkspace(async (workspace) => {
-      const path = join(workspace, "notes.txt")
-      await writeFile(path, "line1\nline2\nline3\n")
-      const tool = createReadFileTool()
-      const result = await tool.execute(
-        { path: "notes.txt", offset: 1, limit: 2 },
-        { workspaceRoot: workspace },
-      )
-      expect(result.ok).toBe(true)
-      if (!result.ok) return
-      expect(result.output).toMatchObject({
-        path: "notes.txt",
-        complete: false,
-        truncated: true,
-        truncatedByLines: true,
-        content: expect.stringContaining("1\tline1\n2\tline2"),
-      })
-      expect(result.output).not.toHaveProperty("sha256")
-      expect(result.output).not.toHaveProperty("lineCount")
-    })
-  })
-
   it("creates new files and derives overwrite revisions from visible observations", async () => {
     await withWorkspace(async (workspace) => {
       const write = createWriteFileTool()

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { once } from "node:events"
 import { mkdtemp, rm } from "node:fs/promises"
 import { createServer } from "node:http"
@@ -24,11 +23,6 @@ it.each([
   "client",
 ])("does not retry HTTP inference or release $0 execution after model stream cleanup fails", async (ownership) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-model-cleanup-"))
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-    stdio: "ignore",
-  })
-  const closed = once(child, "close")
-  await once(child, "spawn")
   let requests = 0
   const server = createServer((request, response) => {
     request.resume()
@@ -48,7 +42,7 @@ it.each([
     model: "scripted",
     baseURL: `http://127.0.0.1:${address.port}/v1`,
   })
-  const cleanupFailure = new Error("Model-owned process could not close")
+  const cleanupFailure = new Error("Model stream teardown failed")
   const stream = createModelRequestStream(
     async function* (request) {
       try {
@@ -81,8 +75,6 @@ it.each([
       }),
   })
   onTestFinished(async () => {
-    child.kill("SIGKILL")
-    await closed
     try {
       await manager.shutdown().catch((error: unknown) => {
         if (
@@ -118,7 +110,6 @@ it.each([
     })
   expect(requests).toBe(1)
   expect(thread.status).toBe(SessionStatus.Active)
-  expect(() => process.kill(child.pid ?? 0, 0)).not.toThrow()
   expect(
     await thread.startIfIdle({ content: createUserInput("next") }),
   ).toEqual({

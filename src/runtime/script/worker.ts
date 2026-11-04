@@ -275,6 +275,4 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch((cause: unknown) => {
-  throw cause
-})
+void main()

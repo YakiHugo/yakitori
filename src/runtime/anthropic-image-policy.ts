@@ -1,11 +1,10 @@
 import {
-  inspectImageBytes,
   InvalidImageDataError,
+  inspectImageBytes,
 } from "../kernel/image-metadata.ts"
+import { anthropicModel } from "./anthropic-models.ts"
 import type { ModelImageBlock, ModelMessage } from "./model.ts"
 import { validateModelImage } from "./prepare-model-image.ts"
-
-import { anthropicModel } from "./anthropic-models.ts"
 
 const MAX_BASE64_BYTES = 10_000_000
 
@@ -98,7 +97,7 @@ export function validateAnthropicScreenshot(
 // Largest aspect-preserving dimensions fitting Claude's documented model
 // tier. The limits apply to padded 28px patches, not just the longest edge.
 // https://platform.claude.com/docs/en/build-with-claude/vision-coordinates
-export function anthropicImageSize(
+function anthropicImageSize(
   width: number,
   height: number,
   tier: "standard" | "high" = "standard",

@@ -13,6 +13,8 @@ import { resolveReadPath, resolveWorkspaceRoot } from "./path-policy.ts"
 import {
   compareAndDeleteTextFile,
   compareAndWriteTextFile,
+  type TextFileDeleteOutput,
+  type TextFileWriteOutput,
 } from "./text-file-write.ts"
 import { plainToolName } from "./tool-name.ts"
 import type { RuntimeTool, ToolExecutionResult, ToolFailure } from "./types.ts"
@@ -220,9 +222,7 @@ function parsePatch(patch: string): readonly PatchAction[] {
       let movePath: string | undefined
       const possibleMove = lines[index]?.trim()
       if (possibleMove?.startsWith("*** Move to: ")) {
-        movePath = patchPath(
-          possibleMove.slice("*** Move to: ".length),
-        )
+        movePath = patchPath(possibleMove.slice("*** Move to: ".length))
         index += 1
       }
       const chunks: PatchChunk[] = []
@@ -393,25 +393,18 @@ async function applyAction(
     expectedSha256,
   })
   if (!deleted.ok) {
-    const destinationSha256 = outputSha256(written.output)
-    if (destinationSha256 === undefined) {
-      return patchFailure(
-        "partial_move",
-        `Wrote ${action.movePath} but could not delete ${source.displayPath}; inspect both paths.`,
-      )
-    }
     const rollback =
       destinationBefore.content === undefined
         ? await compareAndDeleteTextFile({
             workspaceRoot,
             path: action.movePath,
-            expectedSha256: destinationSha256,
+            expectedSha256: written.output.sha256,
           })
         : await compareAndWriteTextFile({
             workspaceRoot,
             path: action.movePath,
             content: destinationBefore.content,
-            expectedSha256: destinationSha256,
+            expectedSha256: written.output.sha256,
           })
     return rollback.ok
       ? deleted
@@ -440,12 +433,7 @@ function applyChunks(content: string, chunks: readonly PatchChunk[]): string {
   let cursor = 0
   for (const chunk of chunks) {
     if (chunk.context !== undefined) {
-      const contextIndex = findSequence(
-        lines,
-        [chunk.context],
-        cursor,
-        false,
-      )
+      const contextIndex = findSequence(lines, [chunk.context], cursor, false)
       if (contextIndex < 0) {
         throw new Error(`Could not find @@ context: ${chunk.context}`)
       }
@@ -533,9 +521,7 @@ function parseSourceLines(content: string): SourceLine[] {
     const character = content[index]
     if (character !== "\r" && character !== "\n") continue
     const ending: SourceLine["ending"] =
-      character === "\r" && content[index + 1] === "\n"
-        ? "\r\n"
-        : character
+      character === "\r" && content[index + 1] === "\n" ? "\r\n" : character
     lines.push({ text: content.slice(start, index), ending })
     if (ending === "\r\n") index += 1
     start = index + 1
@@ -621,7 +607,10 @@ async function readOptionalPatchFile(
   try {
     bytes = await readFile(resolved.absolutePath)
   } catch {
-    return patchFailure("read_failed", `Could not read ${resolved.displayPath}.`)
+    return patchFailure(
+      "read_failed",
+      `Could not read ${resolved.displayPath}.`,
+    )
   }
   if (bytes.byteLength > maxBytes) {
     return patchFailure(
@@ -630,7 +619,10 @@ async function readOptionalPatchFile(
     )
   }
   const content = bytes.toString("utf8")
-  if (Buffer.from(content, "utf8").compare(bytes) !== 0 || content.includes("\0")) {
+  if (
+    Buffer.from(content, "utf8").compare(bytes) !== 0 ||
+    content.includes("\0")
+  ) {
     return patchFailure(
       "unsupported_text_encoding",
       `${resolved.displayPath} is not supported UTF-8 text.`,
@@ -709,7 +701,9 @@ function patchFailureWithChanges(
   }
 }
 
-function appliedChangesFromOutput(output: JsonValue | undefined): AppliedChange[] {
+function appliedChangesFromOutput(
+  output: JsonValue | undefined,
+): AppliedChange[] {
   if (!isRecord(output) || !Array.isArray(output.changes)) return []
   return output.changes.flatMap((value) => {
     if (
@@ -753,16 +747,14 @@ function isHunkHeader(line: string | undefined): boolean {
 
 function changeFromResult(
   kind: AppliedChange["kind"],
-  output: JsonValue,
+  output: TextFileWriteOutput | TextFileDeleteOutput,
 ): AppliedChange {
-  const fields = isRecord(output) ? output : {}
-  const diff = patchDiff(fields.diff)
   return {
-    path: typeof fields.path === "string" ? fields.path : "",
+    path: output.path,
     kind,
-    ...(diff === undefined ? {} : { diff }),
-    ...(typeof fields.sha256 === "string" ? { sha256: fields.sha256 } : {}),
-    ...(fields.created === true ? { created: true } : {}),
+    diff: output.diff,
+    ...("sha256" in output ? { sha256: output.sha256 } : {}),
+    ...("created" in output && output.created ? { created: true } : {}),
   }
 }
 
@@ -800,12 +792,6 @@ function patchDiff(value: unknown): PatchDiff | undefined {
     typeof value.text === "string" &&
     typeof value.truncated === "boolean"
     ? { format: "unified", text: value.text, truncated: value.truncated }
-    : undefined
-}
-
-function outputSha256(value: JsonValue): string | undefined {
-  return isRecord(value) && typeof value.sha256 === "string"
-    ? value.sha256
     : undefined
 }
 

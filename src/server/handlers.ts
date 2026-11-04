@@ -27,10 +27,9 @@ import {
   createRequestId,
   type EventMetadata,
   ForkReason,
-  IdPrefix,
   type InputContent,
   InputRole,
-  isIdWithPrefix,
+  isGeneratedSessionId,
   isJsonValue,
   isKernelEvent,
   isRequestId,
@@ -805,8 +804,7 @@ export function createThreadServerHandlers(
     const drafts = inputContentAttachments(content).filter(
       (attachment) =>
         !("url" in attachment.file) &&
-        ("url" in attachment.file ||
-          attachment.file.path.startsWith("attachments/staging/")),
+        attachment.file.path.startsWith("attachments/staging/"),
     )
     if (drafts.length === 0) return
     try {
@@ -875,14 +873,13 @@ export function createThreadServerHandlers(
           request.content,
         )
         const content = promoted.content
-        let rollbackPromotion = promoted.rollback
         // Session may have appended an admission even when its durability
         // fence failed. Keep promoted files for a retry with the same request
         // ID; deleting them would leave a durable queued attachment dangling.
         const draftKey = `${request.sessionId}\0${request.requestId}`
         const submitted = await submit(thread, content)
         if (submitted.type === "not_submitted") {
-          await rollbackPromotion?.()
+          await promoted.rollback?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
           })
@@ -921,7 +918,7 @@ export function createThreadServerHandlers(
                 draft,
               )
           if (completed && !accepted) {
-            await rollbackPromotion?.()
+            await promoted.rollback?.()
             await discardUnacceptedRequestAttachments(
               request.sessionId,
               rolloutId,
@@ -931,7 +928,6 @@ export function createThreadServerHandlers(
         }
         if (submitted.inputItemId === undefined)
           throw internalError("Input admission did not return an input item.")
-        rollbackPromotion = undefined
         return ok({
           requestId: request.requestId,
           turnId: submitted.turnId,
@@ -2887,11 +2883,7 @@ function requireRecord(
 }
 
 function requireSessionId(value: unknown, field: string): string {
-  if (
-    typeof value === "string" &&
-    isIdWithPrefix(value, IdPrefix.Session) &&
-    isGeneratedSessionId(value)
-  ) {
+  if (typeof value === "string" && isGeneratedSessionId(value)) {
     return value
   }
   throw invalidInput(`${field} must be a session id.`, {
@@ -2900,11 +2892,7 @@ function requireSessionId(value: unknown, field: string): string {
 }
 
 function requireInputId(value: unknown, field: string): string {
-  if (
-    typeof value === "string" &&
-    isIdWithPrefix(value, IdPrefix.Input) &&
-    isGeneratedInputId(value)
-  ) {
+  if (typeof value === "string" && isGeneratedInputId(value)) {
     return value
   }
   throw invalidInput(`${field} must be an input id.`, {
@@ -3229,12 +3217,6 @@ function internalError(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function isGeneratedSessionId(value: string): boolean {
-  return /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-    value,
-  )
 }
 
 function isGeneratedInputId(value: string): boolean {

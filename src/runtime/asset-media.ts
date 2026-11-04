@@ -191,7 +191,7 @@ export async function prepareProviderMedia(
         throw new AssetMediaError(
           "Asset size does not match its recorded size.",
         )
-      if (block.type === "document" && options.uploadDocument) {
+      if (options.uploadDocument) {
         uploadedFiles.set(block, await options.uploadDocument(block, bytes))
         content.push(block)
       } else content.push({ ...block, data: bytes.toString("base64") })

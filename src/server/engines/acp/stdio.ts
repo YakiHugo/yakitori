@@ -9,11 +9,9 @@ export type AcpCommand = {
 
 export class AcpRpcError extends Error {
   code: number
-  data: unknown
-  constructor(code: number, message: string, data?: unknown) {
+  constructor(code: number, message: string) {
     super(message)
     this.code = code
-    this.data = data
     this.name = "AcpRpcError"
   }
 }
@@ -162,7 +160,6 @@ export class AcpStdioConnection {
           typeof error.message === "string"
             ? error.message
             : "ACP request failed",
-          error.data,
         ),
       )
     } else if ("result" in message) {

@@ -386,18 +386,7 @@ export function createAgentRuntime(input: {
         path: registration?.path ?? "/root",
       })
       await control.closeAgent(threadId)
-      const descendants =
-        await input.graphStore.listThreadSpawnDescendants(threadId)
-      for (const discardedThreadId of [...descendants].reverse()) {
-        await manager.discardThread(discardedThreadId)
-        await input.graphStore.deleteThreadEdges(discardedThreadId)
-        finalizeDeletion(discardedThreadId)
-        threadRoots.delete(discardedThreadId)
-      }
-      await manager.discardThread(threadId)
-      await input.graphStore.deleteThreadEdges(threadId)
-      finalizeDeletion(threadId)
-      threadRoots.delete(threadId)
+      await discardStoredSubtree(threadId)
     },
 
     async close() {

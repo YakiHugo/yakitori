@@ -420,7 +420,6 @@ export function createTurnLoop(options: TurnLoopOptions): SessionTaskRunner {
       const closeModelSession = () =>
         (closePromise ??= Promise.resolve().then(() => modelSession?.close()))
       return {
-        kind: input.manualCompact === true ? "compact" : "regular",
         async run(session, execution) {
           try {
             throwIfAborted(execution.signal)
@@ -1353,10 +1352,9 @@ async function executeTurnModelLoop(
 
       const stablePrefix = input.session.executionSnapshot(input.execution)
         .context.history
-      const durableMessages = completeToolCallHistory(
+      const messages = completeToolCallHistory(
         stablePrefix.map(({ item }) => item),
       )
-      const messages = durableMessages
       let visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       let requestHistoryAnchorItemId = input.session
@@ -1769,8 +1767,6 @@ async function executeTurnModelLoop(
             ),
           )
         },
-        threadId: metadata.id,
-        turnId: input.input.submissionId,
         get itemId() {
           return responseItemId
         },
@@ -2014,8 +2010,6 @@ async function executeTurnModelLoop(
               recordModelAttempt: (attempt) =>
                 input.session.recordModelAttempt(input.execution, attempt),
               ...(wireApi === undefined ? {} : { wireApi }),
-              threadId: metadata.id,
-              turnId: input.input.submissionId,
               assistantResponseBytes:
                 step.executionPolicy.assistantResponseBytes,
               emitWarning: (message, diagnostic) =>
@@ -2319,8 +2313,6 @@ async function consumeModelStream(input: {
   readonly request: ModelRequest
   readonly toolPolicy?: "chat_only" | undefined
   readonly stream: StreamFn
-  readonly threadId: string
-  readonly turnId: string
   readonly itemId?: string
   readonly emitModelStream?: WithoutExecution<Session["emitModelStream"]>
   readonly emitWarning?: WithoutExecution<Session["emitWarning"]>
@@ -2591,9 +2583,6 @@ async function consumeModelStream(input: {
       })
     }
   }
-  if (terminal === undefined) {
-    throw new Error("Model stream ended without a terminal response.")
-  }
   return {
     ...terminal,
     ...(attempt === undefined ? {} : { origin: attempt.origin }),
@@ -2738,8 +2727,6 @@ async function compactLiveHistory(
         recordModelAttempt: (attempt) =>
           input.session.recordModelAttempt(input.execution, attempt),
         wireApi: input.wireApi,
-        threadId: input.session.executionSnapshot(input.execution).metadata.id,
-        turnId: input.turnId,
         assistantResponseBytes:
           compactionStep.executionPolicy.assistantResponseBytes,
         emitWarning: (message, diagnostic) =>
