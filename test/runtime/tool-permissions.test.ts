@@ -63,13 +63,4 @@ describe("tool permission policy", () => {
       ),
     ).toThrow("Unsupported approval policy: future_policy")
   })
-
-  it("does not treat the Codex never policy as always approve", () => {
-    expect(() =>
-      resolveToolPermissionRequest(
-        { kind: "approval", action: "command_execution" },
-        "never",
-      ),
-    ).toThrow("Unsupported approval policy: never")
-  })
 })

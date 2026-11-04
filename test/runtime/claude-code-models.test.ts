@@ -298,12 +298,28 @@ it.each([
   "claude-sonnet-4-5-20250929",
 ])("counts historical tool images against the 200K model limit for %s", async (model) => {
   const source = await png(1, 1)
-  const result = await run(
-    request(
-      model,
-      Array.from({ length: 101 }, () => image(source)),
-    ),
-  )
+  const input = request(model, [image(source)])
+  const result = await run({
+    ...input,
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "Inspect prior images." }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call", id: "call", name: "inspect", input: {} },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "call",
+        content: Array.from({ length: 100 }, () => image(source)),
+      },
+      ...input.messages,
+    ],
+  })
   expect(result.bodies).toEqual([])
   expect(result.events.at(-1)).toMatchObject({
     type: "failure",

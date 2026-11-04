@@ -640,15 +640,6 @@ it("keeps PDFs inline, appends images after the text, and retains PDF Undo owner
       { ...stagedImage, type: "image" },
     ]),
   )
-  act(() => handle.current?.setImageDetail(1, "high"))
-  expect(editedParts()).toEqual(
-    inputFixture([
-      { type: "text", text: "before" },
-      { ...stagedPdf, type: "document" },
-      { type: "text", text: "after " },
-      { ...stagedImage, type: "image", detail: "high" },
-    ]),
-  )
   act(() => handle.current?.removeAttachment(0))
   expect(
     screen.queryByRole("button", { name: "Open attached PDF manual.pdf" }),

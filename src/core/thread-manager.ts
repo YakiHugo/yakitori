@@ -247,17 +247,9 @@ export class ThreadManager {
               throw new Error(`Thread ${threadId} disappeared while seeding.`)
             })()
         }
-      } catch (error) {
-        await this.#store.discardThread(threadId)
-        await this.#store.deleteThread(threadId)
-        throw error
-      }
-      if (this.#closing) {
-        await this.#store.discardThread(threadId)
-        await this.#store.deleteThread(threadId)
-        throw new Error("ThreadManager shut down while creating a Thread.")
-      }
-      try {
+        if (this.#closing) {
+          throw new Error("ThreadManager shut down while creating a Thread.")
+        }
         return await this.#installStored(stored)
       } catch (error) {
         await this.#store.discardThread(threadId)

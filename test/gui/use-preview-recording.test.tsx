@@ -61,7 +61,7 @@ it.each([
   const other = { ...frame, dataUrl: "data:image/png;base64,other" }
   hook.rerender({
     active: transition !== "hidden",
-    identity: "other",
+    identity: transition === "hidden" ? "owned" : "other",
     frame: other,
   })
   expect(encoder.stop).toHaveBeenCalledTimes(1)

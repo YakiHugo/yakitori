@@ -222,16 +222,19 @@ describe("MiniMax vision", () => {
   })
   it("rejects oversized images and unsupported models before a network call", async () => {
     const { fetch } = capture()
-    for (const input of [
-      request(Buffer.alloc(10_000_001).toString("base64")),
-      request(pngImageBase64, "MiniMax-M2.7"),
-    ]) {
+    const bytes = Buffer.alloc(10_000_001)
+    Buffer.from(pngImageBase64, "base64").copy(bytes)
+    for (const [input, message] of [
+      [request(bytes.toString("base64")), "exceeds 10 MB"],
+      [request(pngImageBase64, "MiniMax-M2.7"), "only supported"],
+    ] as const) {
       expect(await collect(input)).toEqual([
         expect.objectContaining({
           type: "failure",
           failure: expect.objectContaining({
             kind: "invalid_request",
             stage: "request_build",
+            message: expect.stringContaining(message),
           }),
         }),
       ])

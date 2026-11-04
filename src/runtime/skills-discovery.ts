@@ -9,9 +9,12 @@ import {
 // memory without allowing a large repository root to starve user skills.
 const MAX_SCAN_ENTRIES = 20_000
 const MAX_SCAN_DEPTH = 32
-export const MAX_CONCURRENT_SKILL_LOADS = 64
+const MAX_CONCURRENT_SKILL_LOADS = 64
 
-export async function discoverSkillFiles(root: string): Promise<{
+export async function discoverSkillFiles(
+  root: string,
+  hostTraversalEntryLimit = MAX_SCAN_ENTRIES,
+): Promise<{
   paths: string[]
   diagnostics: InstructionDiagnostic[]
 }> {
@@ -21,7 +24,7 @@ export async function discoverSkillFiles(root: string): Promise<{
   let entries = 0
   let truncated = false
   const visit = async (path: string, depth: number): Promise<void> => {
-    if (depth > MAX_SCAN_DEPTH || entries >= MAX_SCAN_ENTRIES) {
+    if (depth > MAX_SCAN_DEPTH || entries >= hostTraversalEntryLimit) {
       truncated = true
       return
     }
@@ -33,7 +36,7 @@ export async function discoverSkillFiles(root: string): Promise<{
       const directory = await opendir(path)
       const children: string[] = []
       for await (const entry of directory) {
-        if (entries++ >= MAX_SCAN_ENTRIES) {
+        if (entries++ >= hostTraversalEntryLimit) {
           truncated = true
           break
         }
@@ -60,7 +63,7 @@ export async function discoverSkillFiles(root: string): Promise<{
       children.sort()
       for (const child of children) {
         await visit(child, depth + 1)
-        if (entries >= MAX_SCAN_ENTRIES) break
+        if (entries >= hostTraversalEntryLimit) break
       }
     } catch (error) {
       if (!isFileSystemError(error)) throw error

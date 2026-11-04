@@ -27,7 +27,10 @@ describe("read_file contract", () => {
       expect(first).toMatchObject({
         ok: true,
         output: {
+          path: "lines.txt",
           complete: false,
+          truncated: true,
+          truncatedByLines: true,
           range: { offset: 1, limit: 2, requestedLimit: 2 },
           continuation: { nextOffset: 3 },
           content: expect.stringContaining("1\tone\n2\ttwo"),
@@ -35,6 +38,7 @@ describe("read_file contract", () => {
       })
       if (!first.ok) return
       expect(first.output).not.toHaveProperty("sha256")
+      expect(first.output).not.toHaveProperty("lineCount")
       expect(first.content).toContain("file's current contents")
 
       await writeFile(

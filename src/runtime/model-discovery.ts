@@ -157,7 +157,6 @@ function grokDisplayName(modelId: string): string | undefined {
   // grok-4.20-0309-non-reasoning → Grok 4.20 Non-Reasoning
   const withoutDate = modelId.replace(/-\d{4}(?=-|$)/g, "")
   const words = withoutDate.split("-").filter(Boolean)
-  if (words.length === 0) return undefined
   const parts: string[] = []
   for (let index = 0; index < words.length; index += 1) {
     const word = words[index]

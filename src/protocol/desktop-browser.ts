@@ -50,9 +50,8 @@ export type BrowserDragRequest = Readonly<
 export function parseBrowserDragRequest(value: unknown): BrowserDragRequest {
   if (
     !isJsonObject(value) ||
-    !["drag_prepare", "drag_drop", "drag_cancel"].includes(
-      String(value.action),
-    ) ||
+    typeof value.action !== "string" ||
+    !["drag_prepare", "drag_drop", "drag_cancel"].includes(value.action) ||
     !["action", "target"].every((key) => Object.hasOwn(value, key))
   )
     throw new BrowserControlError(
@@ -638,6 +637,7 @@ export function parseBrowserDownloadRequest(
 ): BrowserDownloadRequest {
   if (
     !isJsonObject(value) ||
+    typeof value.action !== "string" ||
     ![
       "download_arm",
       "download_status",
@@ -645,7 +645,7 @@ export function parseBrowserDownloadRequest(
       "download_cancel",
       "download_collect",
       "download_release",
-    ].includes(String(value.action))
+    ].includes(value.action)
   )
     throw new BrowserControlError(
       "invalid_arguments",
@@ -726,9 +726,8 @@ export function parseBrowserDialogRequest(
 ): BrowserDialogRequest {
   if (
     !isJsonObject(value) ||
-    !["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(
-      String(value.action),
-    )
+    typeof value.action !== "string" ||
+    !["dialog_arm", "dialog_inspect", "dialog_disarm"].includes(value.action)
   )
     throw new BrowserControlError(
       "invalid_arguments",
@@ -739,12 +738,11 @@ export function parseBrowserDialogRequest(
   if (
     arm &&
     (!isJsonObject(response) ||
+      typeof response.type !== "string" ||
       Object.keys(response).some(
         (key) => !["type", "accept", "message", "promptText"].includes(key),
       ) ||
-      !["alert", "confirm", "beforeunload", "prompt"].includes(
-        String(response.type),
-      ) ||
+      !["alert", "confirm", "beforeunload", "prompt"].includes(response.type) ||
       typeof response.accept !== "boolean" ||
       (response.type === "alert" && !response.accept) ||
       (Object.hasOwn(response, "promptText") &&
@@ -820,9 +818,8 @@ export function parseBrowserChooserRequest(
 ): BrowserChooserRequest {
   if (
     !isJsonObject(value) ||
-    !["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(
-      String(value.action),
-    )
+    typeof value.action !== "string" ||
+    !["chooser_arm", "chooser_inspect", "chooser_disarm"].includes(value.action)
   )
     throw new BrowserControlError(
       "invalid_arguments",

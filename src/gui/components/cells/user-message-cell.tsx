@@ -1,4 +1,3 @@
-import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
 import { ImageOff, LoaderCircle, PencilLine, Target } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { assetSourceKey } from "../../../protocol/asset-types.ts"
@@ -14,6 +13,7 @@ import {
   inputDisplayParts,
   trimInputDraft,
 } from "../../input-draft.ts"
+import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
@@ -97,7 +97,7 @@ export function UserMessageCell({
       editorRef.current?.focus(true)
     }
   }, [editing])
-  const attachments = inputContentAttachments(inputContent(entry.content))
+  const attachments = inputContentAttachments(entry.content)
   const contextAttachments = entry.contextAttachments ?? []
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]

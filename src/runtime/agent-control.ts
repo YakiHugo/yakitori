@@ -63,8 +63,6 @@ export type AgentControlAdapter = Readonly<{
     readonly path: string
     readonly agentType: AgentType
     readonly depth: number
-    readonly message: string
-    readonly target: AgentModelTarget
     readonly forkedContext?: ForkedModelContext
   }): Promise<string>
   runChild(input: {
@@ -413,8 +411,6 @@ export function createAgentControl(input: {
             path,
             agentType: request.agentType,
             depth: actor.depth + 1,
-            message: request.message,
-            target: childTarget,
             ...(forkedContext === undefined ? {} : { forkedContext }),
           })
           try {

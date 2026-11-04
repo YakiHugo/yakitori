@@ -27,7 +27,7 @@ function mentionText(node: Node): string {
 
 // The same path-qualified representation is understood by runtime/skills.ts.
 // Atomic inline nodes are an editing concern, never a second submission format.
-export const promptSchema = new Schema({
+const promptSchema = new Schema({
   nodes: {
     doc: { content: "paragraph+" },
     paragraph: {

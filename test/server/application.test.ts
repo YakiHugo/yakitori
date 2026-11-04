@@ -1,4 +1,3 @@
-import { pngImageBytes } from "../fixtures/images.ts"
 import {
   chmod,
   mkdir,
@@ -42,6 +41,7 @@ import {
 import type { ProviderConfigurationResponse } from "../../src/server/provider-service.ts"
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
+import { pngImageBytes } from "../fixtures/images.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
 import { requireStoredAssetSource } from "../support/asset-source.ts"
@@ -396,35 +396,11 @@ describe("application composition", () => {
       environmentKey: "ANTHROPIC_API_KEY",
       endpoint: "https://api.anthropic.com/v1/messages",
     },
-    {
-      provider: "openai",
-      model: "gpt-6-sol",
-      login: true,
-      endpoint: "https://api.openai.com/v1/responses",
-    },
   ] as const)("uses the declared $provider endpoint despite SDK endpoint environment variables", async (connection) => {
     await withApplicationRoot(async (rootDir, workspace) => {
       process.env.OPENAI_BASE_URL = "https://relay.example/openai"
       process.env.ANTHROPIC_BASE_URL = "https://relay.example/anthropic"
-      if ("environmentKey" in connection) {
-        process.env[connection.environmentKey] = "test-key"
-      } else {
-        process.env.CODEX_HOME = join(rootDir, "codex-home")
-        await mkdir(process.env.CODEX_HOME, { recursive: true })
-        await writeFile(
-          join(process.env.CODEX_HOME, "auth.json"),
-          JSON.stringify({
-            auth_mode: "apikey",
-            OPENAI_API_KEY: "test-key",
-            tokens: null,
-          }),
-        )
-      }
-      process.env[
-        connection.provider === "anthropic"
-          ? "ANTHROPIC_API_KEY"
-          : "OPENAI_API_KEY"
-      ] = "test-key"
+      process.env[connection.environmentKey] = "test-key"
       await writeFile(
         join(rootDir, "config.toml"),
         [
@@ -432,7 +408,7 @@ describe("application composition", () => {
           `name = "Endpoint account"`,
           `service = "${connection.provider}"`,
           `authentication = "environment"`,
-          `env_key = "${connection.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}"`,
+          `env_key = "${connection.environmentKey}"`,
           `api_backend = "${connection.provider === "anthropic" ? "messages" : "responses"}"`,
           `base_url = "${connection.provider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1"}"`,
           `models = [{ id = "${connection.model}" }]`,
@@ -650,7 +626,6 @@ describe("application composition", () => {
 
         expectError(
           await application.handlers.admitInput(input),
-          409,
           ApiErrorCode.Conflict,
         )
         await waitForThreadIdle(application, sessionId)
@@ -2338,7 +2313,7 @@ describe("application composition", () => {
             })),
           ]),
         })
-        expectError(conflictingImage, 409, ApiErrorCode.Conflict)
+        expectError(conflictingImage, ApiErrorCode.Conflict)
         expect(conflictingImage.error.details).toMatchObject({
           reason: "request_conflict",
         })
@@ -2655,7 +2630,9 @@ describe("application composition", () => {
           content: [
             {
               type: "text",
-              text: expect.stringContaining("does not have image input enabled"),
+              text: expect.stringContaining(
+                "does not have image input enabled",
+              ),
             },
             { type: "text", text: "inspect[Image 1]" },
           ],
@@ -2943,7 +2920,7 @@ describe("application composition", () => {
         const rejected = await application.handlers.createSession({
           workingDirectory: join(rootDir, "missing-dir"),
         })
-        expectError(rejected, 400, ApiErrorCode.InvalidInput)
+        expectError(rejected, ApiErrorCode.InvalidInput)
         expect(rejected.error.message).toContain(
           "workingDirectory must be an existing directory",
         )
@@ -4195,7 +4172,6 @@ describe("application composition", () => {
             ]),
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
-          400,
           ApiErrorCode.InvalidInput,
         )
 
@@ -4241,7 +4217,6 @@ describe("application composition", () => {
             ]),
             modelSelection: { provider: "openai", model: "custom-coding" },
           }),
-          400,
           ApiErrorCode.InvalidInput,
         )
       } finally {
@@ -4642,7 +4617,7 @@ describe("application composition", () => {
           content: inputFixture([{ type: "text" as const, text: "use grok" }]),
           modelSelection: { provider: "grok", model: "grok-4.5" },
         })
-        expectError(admitted, 400, ApiErrorCode.InvalidInput)
+        expectError(admitted, ApiErrorCode.InvalidInput)
       } finally {
         await application.close()
         if (previousApiKey === undefined) delete process.env.XAI_API_KEY
@@ -4724,13 +4699,13 @@ describe("application composition", () => {
         expectOk(admitted)
         await waitForThreadIdle(application, created.value.session.id)
         const replayed = await application.handlers.admitInput(input)
-        expectError(replayed, 409, ApiErrorCode.Conflict)
+        expectError(replayed, ApiErrorCode.Conflict)
 
         const conflicting = await application.handlers.admitInput({
           ...input,
           content: inputFixture([{ type: "text" as const, text: "different" }]),
         })
-        expectError(conflicting, 409, ApiErrorCode.Conflict)
+        expectError(conflicting, ApiErrorCode.Conflict)
         const read = await application.handlers.readSession({
           sessionId: created.value.session.id,
         })
@@ -5763,7 +5738,6 @@ function expectOk<T>(
 
 function expectError<T>(
   result: ApplicationResult<T>,
-  _status: number,
   code: ApiErrorCode,
 ): asserts result is Extract<ApplicationResult<T>, { readonly ok: false }> {
   if (result.ok) throw new Error("Expected error response.")

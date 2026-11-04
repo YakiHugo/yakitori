@@ -1403,6 +1403,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
+      profile: "kimi-code",
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1432,6 +1433,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
+      profile: "kimi-code",
       apiKey: "test",
       model: "kimi-for-coding",
       client,
@@ -1463,6 +1465,7 @@ describe("anthropic provider conversion", () => {
       },
     } as unknown as Anthropic)
     const stream = createAnthropicTestStream({
+      profile: "kimi-code",
       apiKey: "test",
       model: "kimi-for-coding",
       client,

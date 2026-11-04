@@ -74,7 +74,8 @@ describe("agent control", () => {
     })
     await root.spawn({ ...request, taskName: "plain", model: "faux/plain" })
     await root.spawn({ ...request, taskName: "inherited" })
-    expect(harness.children.map((child) => child.target)).toEqual([
+    await expect.poll(() => harness.runRequests.length).toBe(4)
+    expect(harness.runRequests.map((request) => request.target)).toEqual([
       { provider: "faux", model: "worker", effort: "low" },
       { provider: "faux", model: "worker", effort: "medium" },
       { provider: "faux", model: "plain" },

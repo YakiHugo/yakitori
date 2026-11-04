@@ -304,7 +304,6 @@ export function ProviderEditor({
             {!draft.existing ? (
               <details
                 className="provider-model-selection"
-                open={draft.existing || undefined}
                 onToggle={(event) => setModelsOpen(event.currentTarget.open)}
               >
                 <summary>Model defaults (optional)</summary>

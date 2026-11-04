@@ -1,4 +1,3 @@
-import { bindExecution } from "../../support/session-execution.ts"
 import { describe, expect, it, vi } from "vitest"
 import { ThreadManager } from "../../../src/core/thread-manager.ts"
 import type { StoredEventEnvelope } from "../../../src/kernel/events.ts"
@@ -9,6 +8,7 @@ import { createThreadServerHandlers } from "../../../src/server/handlers.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
 import { inputFixture } from "../../fixtures/user-input.ts"
+import { bindExecution } from "../../support/session-execution.ts"
 import {
   deferred,
   initializeConnection,
@@ -27,47 +27,28 @@ describe("runtime terminal delivery", () => {
           store,
           onPersistenceError: (error) => persistenceErrors.push(error),
           createTurnProcessor: () => ({
-            createTask(snapshot, input) {
-              const context = prepareTurn(snapshot, input)
-              let stop: (() => void) | undefined
+            createTask(_snapshot, input) {
+              const context = prepareTurn(input)
               return {
-                kind: input.manualCompact === true ? "compact" : "regular",
                 async run(session, execution) {
                   await session.beginExecution(execution, context)
                   const runtime = bindExecution(session, execution)
-                  const control = {
-                    signal: execution.signal,
-                    takeSteering: () => session.takeSteering(execution),
-                    takeSteeringOrComplete: () =>
-                      session.takeSteeringOrComplete(execution),
-                  }
-                  const task = (() => {
-                    runtime.emitModelStream({
-                      itemId: "answer",
-                      kind: "assistant",
-                      delta: "first",
-                    })
-                    runtime.emitModelStream({
-                      itemId: "answer",
-                      kind: "assistant",
-                      delta: " last",
-                    })
-                    control.signal.addEventListener("abort", () =>
-                      mayFinish.resolve(),
-                    )
-                    return {
-                      completion: mayFinish.promise.then(() => {
-                        if (outcome === "failed")
-                          throw new Error("model failed")
-                      }),
-                      abort() {},
-                    }
-                  })()
-                  stop = task.abort
-                  return (await task.completion) ?? undefined
-                },
-                async abort() {
-                  stop?.()
+                  runtime.emitModelStream({
+                    itemId: "answer",
+                    kind: "assistant",
+                    delta: "first",
+                  })
+                  runtime.emitModelStream({
+                    itemId: "answer",
+                    kind: "assistant",
+                    delta: " last",
+                  })
+                  execution.signal.addEventListener("abort", () =>
+                    mayFinish.resolve(),
+                  )
+                  await mayFinish.promise
+                  if (outcome === "failed") throw new Error("model failed")
+                  return undefined
                 },
               }
             },
@@ -220,22 +201,12 @@ describe("runtime terminal delivery", () => {
     const manager = new ThreadManager({
       store,
       createTurnProcessor: () => ({
-        createTask(snapshot, input) {
-          const context = prepareTurn(snapshot, input)
-          let stop: (() => void) | undefined
+        createTask(_snapshot, input) {
+          const context = prepareTurn(input)
           return {
-            kind: input.manualCompact === true ? "compact" : "regular",
             async run(session, execution) {
               await session.beginExecution(execution, context)
-              const task = (() => ({
-                completion: Promise.resolve(),
-                abort() {},
-              }))()
-              stop = task.abort
-              return (await task.completion) ?? undefined
-            },
-            async abort() {
-              stop?.()
+              return undefined
             },
           }
         },
@@ -295,21 +266,13 @@ describe("runtime terminal delivery", () => {
     const manager = new ThreadManager({
       store,
       createTurnProcessor: () => ({
-        createTask(snapshot, input) {
-          const context = prepareTurn(snapshot, input)
-          let stop: (() => void) | undefined
+        createTask(_snapshot, input) {
+          const context = prepareTurn(input)
           return {
-            kind: input.manualCompact === true ? "compact" : "regular",
             async run(session, execution) {
               await session.beginExecution(execution, context)
-              const task = (() => {
-                return { completion: mayFinish.promise, abort() {} }
-              })()
-              stop = task.abort
-              return (await task.completion) ?? undefined
-            },
-            async abort() {
-              stop?.()
+              await mayFinish.promise
+              return undefined
             },
           }
         },
@@ -418,61 +381,45 @@ describe("runtime terminal delivery", () => {
     const manager = new ThreadManager({
       store,
       createTurnProcessor: () => ({
-        createTask(snapshot, input) {
-          const context = prepareTurn(snapshot, input)
-          let stop: (() => void) | undefined
+        createTask(_snapshot, input) {
+          const context = prepareTurn(input)
           return {
-            kind: input.manualCompact === true ? "compact" : "regular",
             async run(session, execution) {
               await session.beginExecution(execution, context)
               const runtime = bindExecution(session, execution)
-
-              const task = (() => {
-                for (const kind of ["assistant", "reasoning"] as const) {
-                  runtime.emitModelStream({
-                    itemId:
-                      kind === "reasoning" ? "answer_reasoning" : "answer",
-                    kind,
-                    delta: "first",
-                  })
-                  runtime.emitModelStream({
-                    itemId:
-                      kind === "reasoning" ? "answer_reasoning" : "answer",
-                    kind,
-                    delta: " last",
-                  })
-                }
-                runtime.emitWarning("Retrying attempt 2 of 3.", {
-                  code: "model.retry",
-                  message: "Stream disconnected",
-                  details: {
-                    discardedResponseItemIds: ["answer", "answer_reasoning"],
-                    kind: "stream_disconnected",
-                    nextAttempt: 2,
-                    maxAttempts: 3,
-                    delayMs: 1000,
-                  },
+              for (const kind of ["assistant", "reasoning"] as const) {
+                runtime.emitModelStream({
+                  itemId: kind === "reasoning" ? "answer_reasoning" : "answer",
+                  kind,
+                  delta: "first",
                 })
-                return {
-                  completion: mayResume.promise.then(async () => {
-                    for (const kind of ["assistant", "reasoning"] as const) {
-                      runtime.emitModelStream({
-                        itemId:
-                          kind === "reasoning" ? "answer_reasoning" : "answer",
-                        kind,
-                        delta: " resumed",
-                      })
-                    }
-                    await mayFinish.promise
-                  }),
-                  abort() {},
-                }
-              })()
-              stop = task.abort
-              return (await task.completion) ?? undefined
-            },
-            async abort() {
-              stop?.()
+                runtime.emitModelStream({
+                  itemId: kind === "reasoning" ? "answer_reasoning" : "answer",
+                  kind,
+                  delta: " last",
+                })
+              }
+              runtime.emitWarning("Retrying attempt 2 of 3.", {
+                code: "model.retry",
+                message: "Stream disconnected",
+                details: {
+                  discardedResponseItemIds: ["answer", "answer_reasoning"],
+                  kind: "stream_disconnected",
+                  nextAttempt: 2,
+                  maxAttempts: 3,
+                  delayMs: 1000,
+                },
+              })
+              await mayResume.promise
+              for (const kind of ["assistant", "reasoning"] as const) {
+                runtime.emitModelStream({
+                  itemId: kind === "reasoning" ? "answer_reasoning" : "answer",
+                  kind,
+                  delta: " resumed",
+                })
+              }
+              await mayFinish.promise
+              return undefined
             },
           }
         },
@@ -583,38 +530,25 @@ describe("runtime terminal delivery", () => {
     const manager = new ThreadManager({
       store,
       createTurnProcessor: () => ({
-        createTask(snapshot, input) {
-          const context = prepareTurn(snapshot, input)
-          let stop: (() => void) | undefined
+        createTask(_snapshot, input) {
+          const context = prepareTurn(input)
           return {
-            kind: input.manualCompact === true ? "compact" : "regular",
             async run(session, execution) {
               await session.beginExecution(execution, context)
               const runtime = bindExecution(session, execution)
-
-              const task = (() => {
-                runtime.emitModelStream({
-                  itemId: "answer",
-                  kind: "assistant",
-                  delta: "Hello",
-                })
-                return {
-                  completion: continueOutput.promise.then(async () => {
-                    runtime.emitModelStream({
-                      itemId: "answer",
-                      kind: "assistant",
-                      delta: " world",
-                    })
-                    await mayFinish.promise
-                  }),
-                  abort() {},
-                }
-              })()
-              stop = task.abort
-              return (await task.completion) ?? undefined
-            },
-            async abort() {
-              stop?.()
+              runtime.emitModelStream({
+                itemId: "answer",
+                kind: "assistant",
+                delta: "Hello",
+              })
+              await continueOutput.promise
+              runtime.emitModelStream({
+                itemId: "answer",
+                kind: "assistant",
+                delta: " world",
+              })
+              await mayFinish.promise
+              return undefined
             },
           }
         },
@@ -685,13 +619,9 @@ describe("runtime terminal delivery", () => {
   })
 })
 
-const prepareTurn: (
-  snapshot: import("../../../src/core/session.ts").SessionSnapshot,
+function prepareTurn(
   input: import("../../../src/core/session-io.ts").TurnInput,
-) => import("../../../src/core/rollout.ts").TurnContextItem = (
-  _snapshot,
-  input,
-) => {
+): import("../../../src/core/rollout.ts").TurnContextItem {
   const selection = { provider: "faux", model: "scripted" }
   return {
     turnId: input.submissionId,

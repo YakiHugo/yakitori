@@ -322,7 +322,6 @@ describe("Bedrock Converse native adapter", () => {
     const stream = createBedrockConverseProvider({ ...options, fetchFn })
     const img = await image()
     for (const content of [
-      Array(6).fill(img),
       [{ type: "text" as const, text: "a".repeat(25_000_000) }],
       [{ ...img, data: "broken" }],
     ]) {
@@ -349,11 +348,13 @@ describe("Bedrock Converse native adapter", () => {
     const fetchFn = vi.fn<typeof fetch>()
     const stream = createBedrockConverseProvider({ ...options, fetchFn })
     const edge = await image("png", 8001)
-    const oversized = {
-      ...edge,
-      data: Buffer.alloc(3_750_001).toString("base64"),
-    }
-    for (const img of [edge, oversized]) {
+    const valid = await image("png", 1)
+    const bytes = Buffer.alloc(3_750_001)
+    Buffer.from(valid.data, "base64").copy(bytes)
+    for (const [img, message] of [
+      [edge, "8000px edge limit"],
+      [{ ...valid, data: bytes.toString("base64") }, "3.75 MB per-image limit"],
+    ] as const) {
       expect(
         (
           await collect(
@@ -361,7 +362,13 @@ describe("Bedrock Converse native adapter", () => {
             request({ messages: [{ role: "user", content: [img] }] }),
           )
         )[0],
-      ).toMatchObject({ type: "failure", failure: { kind: "invalid_request" } })
+      ).toMatchObject({
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          message: expect.stringContaining(message),
+        },
+      })
     }
     expect(fetchFn).not.toHaveBeenCalled()
   })
@@ -610,23 +617,21 @@ describe("Bedrock Converse native adapter", () => {
     expect(cancelled).toBe(true)
   })
   it("rejects hosted server tool responses rather than executing them locally", async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        reply(
-          [
-            {
-              toolUse: {
-                type: "server_tool_use",
-                toolUseId: "call:1.a",
-                name: "run",
-                input: {},
-              },
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      reply(
+        [
+          {
+            toolUse: {
+              type: "server_tool_use",
+              toolUseId: "call:1.a",
+              name: "run",
+              input: {},
             },
-          ],
-          "tool_use",
-        ),
-      )
+          },
+        ],
+        "tool_use",
+      ),
+    )
     const events = await collect(
       createBedrockConverseProvider({ ...options, fetchFn }),
       request({

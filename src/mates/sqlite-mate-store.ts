@@ -5,19 +5,19 @@ import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
   createMateEventEnvelope,
   isMateProfile,
-  requireMateEvent,
   type MateEvent,
   type MateEventEnvelope,
+  requireMateEvent,
 } from "./events.ts"
 import { isMateEventId, isMateId, isMateRevisionId } from "./ids.ts"
-import { projectMate, type MateSummary } from "./mate-projector.ts"
+import { type MateSummary, projectMate } from "./mate-projector.ts"
 import {
   invalidMateListCursor,
-  requireMateListLimit,
   type MateStore,
   type MateStoreAppendOptions,
   type MateStoreListInput,
   type MateStoreListResult,
+  requireMateListLimit,
 } from "./mate-store.ts"
 
 export type SqliteMateStore = MateStore & {
@@ -136,11 +136,12 @@ function listMates(
     `)
     .all(input.cursor ?? "", limit + 1) as SummaryRow[]
   const page = rows.slice(0, limit)
+  const last = page.at(-1)
   return {
     mates: page.map((row) => parseMateSummary(row.summary_json, row.mate_id)),
-    ...(rows.length <= limit || page.length === 0
-      ? {}
-      : { nextCursor: requireLastMateId(page.map((row) => row.mate_id)) }),
+    ...(rows.length > limit && last !== undefined
+      ? { nextCursor: last.mate_id }
+      : {}),
   }
 }
 
@@ -239,15 +240,6 @@ function isStoredMateRevision(
       role: value.role,
     })
   )
-}
-
-function requireLastMateId(mateIds: readonly string[]): string {
-  const mateId = mateIds.at(-1)
-  if (mateId) return mateId
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidState,
-    message: "Expected a mate list cursor.",
-  })
 }
 
 function parseMateEventEnvelope(

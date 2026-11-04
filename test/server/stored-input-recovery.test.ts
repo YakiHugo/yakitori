@@ -12,7 +12,6 @@ import { fingerprintOperation } from "../../src/kernel/operation.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
-import { bindExecution } from "../support/session-execution.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -141,11 +140,7 @@ describe("stored input recovery", () => {
   })
 })
 
-async function recoveryFixture(
-  format: "parts" | "text",
-  fingerprint = true,
-  steer = false,
-) {
+async function recoveryFixture(format: "parts" | "text", fingerprint = true) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-stored-input-"))
   const id = "session_00000000-0000-4000-8000-000000000000"
   const store = new JsonlThreadStore({ root })
@@ -159,38 +154,25 @@ async function recoveryFixture(
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () => ({
-      dispose() {},
-      createTask(snapshot, input) {
-        const context = ((_snapshot, input) => {
-          const selection = { provider: "faux", model: "scripted" }
-          return {
-            turnId: input.submissionId,
+      createTask(_snapshot, input) {
+        const selection = { provider: "faux", model: "scripted" }
+        const context = {
+          turnId: input.submissionId,
+          selection,
+          configuration: SessionConfiguration.create({
             selection,
-            configuration: SessionConfiguration.create({
-              selection,
-              workspaceRoot: root,
-              enabledTools: [],
-              approvalPolicy: "always_approve",
-              promptCacheKey: input.submissionId,
-            }).snapshot,
-          }
-        })(snapshot, input)
-        let stop: (() => void) | undefined
+            workspaceRoot: root,
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: input.submissionId,
+          }).snapshot,
+        }
         return {
-          kind: input.manualCompact === true ? "compact" : "regular",
           async run(session, execution) {
             await session.beginExecution(execution, context)
-            const runtime = bindExecution(session, execution)
-
-            const task = (() => {
-              runs++
-              return { completion: runtime.recordInitialInput(), abort() {} }
-            })()
-            stop = task.abort
-            return (await task.completion) ?? undefined
-          },
-          async abort() {
-            stop?.()
+            runs++
+            await session.recordInitialInput(execution)
+            return undefined
           },
         }
       },
@@ -289,22 +271,6 @@ async function recoveryFixture(
         submissionMetadata: { metadata: { source: "saved" } },
       },
     },
-    ...(steer
-      ? [
-          {
-            type: "response_item" as const,
-            item: {
-              id: "message_saved_steer",
-              turnId: "request_steer",
-              createdAt: now,
-              item: {
-                role: "user" as const,
-                content: [{ type: "text" as const, text: "steered" }],
-              },
-            },
-          },
-        ]
-      : []),
     { type: "turn_completed", turnId: "request_saved", outcome: "completed" },
   ])
   await store.shutdownThread(id)

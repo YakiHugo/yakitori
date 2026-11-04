@@ -196,8 +196,7 @@ export function prepareModelRequestPlan(
       ? {}
       : { providerOptions: structuredClone(request.providerOptions) }),
   }
-  if (input.wireApi !== "unknown" && input.wireApi !== "faux")
-    validateModelRequestControls(prepared, input.wireApi)
+  if (knownWireApi) validateModelRequestControls(prepared, input.wireApi)
   if (typeof prepared.toolChoice === "object") {
     const name = prepared.toolChoice.name
     if (!prepared.tools.some((tool) => tool.name === name))

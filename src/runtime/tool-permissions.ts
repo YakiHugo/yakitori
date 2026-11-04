@@ -13,7 +13,7 @@ export function resolveToolPermissionRequest(
   if (requirement.kind === "none" || policy === "always_approve") {
     return undefined
   }
-  if (requirement.action === "file_change" && policy === "auto_file_tools") {
+  if (requirement.action === "file_change") {
     return undefined
   }
   return {

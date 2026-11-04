@@ -2051,7 +2051,6 @@ function withPreparation(processor: TestProcessor): SessionTaskRunner {
         }).snapshot,
       }
       return {
-        kind: input.manualCompact === true ? "compact" : "regular",
         async run(session, execution) {
           await session.beginExecution(execution, context)
           await session.recordInitialInput(execution)

@@ -114,18 +114,6 @@ import { sideChatMethods } from "./side-chat-methods.ts"
 import type { SessionSubscriptions } from "./subscriptions.ts"
 import { workspaceRpcMethods } from "./workspace-methods.ts"
 
-// The C8-D1 method surface: Codex's <resource>/<method> naming with the
-// Yakitori domain keeping `session` instead of `thread`. Params and response
-// DTOs are reused from protocol.ts; validation stays at the handler boundary
-// and invalid input maps to INVALID_PARAMS.
-
-// Server→client notification payloads. Each event notification carries its
-// durable cursor, so re-subscribe takes `after` and no cursor frame exists.
-
-// Live successful root Turns only. Never included in subscription replay.
-
-// Terminal for this subscription; reopening requires an explicit subscribe.
-
 export type RpcMethodOutcome = Readonly<{
   result: unknown
   // Runs after the response frame is sent, detached from the connection gate
@@ -1315,7 +1303,3 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     },
   },
 ]
-
-// Typed wire contract of the table above, one entry per method. Params the
-// table passes through unchanged reuse the protocol.ts request DTOs; the
-// handlers own their validation.

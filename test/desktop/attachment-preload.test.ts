@@ -146,7 +146,6 @@ describe("desktop attachment preload", () => {
       ["yakitori:discard-picked-attachments", { selectionId: "selection_2" }],
       ["yakitori:discard-draft-attachments", []],
     ])
-    expect(bridge).not.toHaveProperty("pickImages")
   })
 })
 

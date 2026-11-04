@@ -221,7 +221,6 @@ export function diffWorldState(
   previous: JsonObject | undefined,
   current: WorldState,
 ): WorldStateDiff | undefined {
-  requireUniqueSectionIds(current.sections)
   const currentState = snapshotWorldState(current)
   if (previous === undefined) {
     return {

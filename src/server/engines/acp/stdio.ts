@@ -9,11 +9,9 @@ export type AcpCommand = {
 
 export class AcpRpcError extends Error {
   code: number
-  data: unknown
-  constructor(code: number, message: string, data?: unknown) {
+  constructor(code: number, message: string) {
     super(message)
     this.code = code
-    this.data = data
     this.name = "AcpRpcError"
   }
 }
@@ -162,7 +160,6 @@ export class AcpStdioConnection {
           typeof error.message === "string"
             ? error.message
             : "ACP request failed",
-          error.data,
         ),
       )
     } else if ("result" in message) {
@@ -198,8 +195,12 @@ export class AcpStdioConnection {
       process.kill(-this.process.pid, 0)
       return true
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH")
-        return false
+      if (error instanceof Error && "code" in error) {
+        if (error.code === "ESRCH") return false
+        // macOS can report EPERM while a group contains only zombie members;
+        // this is not evidence that the owned process group has disappeared.
+        if (error.code === "EPERM") return true
+      }
       throw error
     }
   }

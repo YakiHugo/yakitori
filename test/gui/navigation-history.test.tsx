@@ -4,9 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { useNavigationHistory } from "../../src/gui/hooks/use-navigation-history.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
 import {
+  chooseNewEngine,
   initialEngineState,
   useEngineStore,
-  chooseNewEngine,
 } from "../../src/gui/store/engine-store.ts"
 
 beforeEach(() => {
@@ -19,9 +19,7 @@ it("traverses settings, ignores unrelated updates and truncates forward history 
   const { result } = renderHook(useNavigationHistory)
   expect(result.current.canGoBack).toBe(false)
   await act(async () => useAppStore.getState().openSettings("general"))
-  await act(async () =>
-    useAppStore.getState().setSettingsSection("notifications"),
-  )
+  await act(async () => useAppStore.getState().openSettings("notifications"))
   await act(async () =>
     useAppStore.setState({ message: "A background update" }),
   )

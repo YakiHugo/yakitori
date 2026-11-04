@@ -562,20 +562,6 @@ describe("composer", () => {
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
   })
 
-  it("uses the interrupt button for an active turn without duplicating its status", () => {
-    useAppStore.setState((state) => ({
-      selection: { sessionId: "session_1" },
-      execution: {
-        ...state.execution,
-        activeTurnId: "turn_1",
-      },
-    }))
-    render(<Composer />)
-
-    expect(screen.getByRole("button", { name: "Interrupt" })).toBeDefined()
-    expect(screen.queryByRole("status")).toBeNull()
-  })
-
   it("blocks send and slash execution while the session is busy", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
@@ -1432,6 +1418,7 @@ describe("composer", () => {
     render(<Composer />)
 
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+    expect(screen.queryByRole("status")).toBeNull()
     const interrupt = screen.getByRole("button", { name: "Interrupt" })
     expect(interrupt).toHaveProperty("disabled", false)
     await user.click(interrupt)

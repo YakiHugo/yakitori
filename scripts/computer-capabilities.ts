@@ -284,10 +284,9 @@ export async function verifyComputerCapabilities(context: {
         window_id: windowID,
         timeout: 2,
       })
-      const outcome = waiting.then((value) => value)
       await new Promise((done) => setTimeout(done, 200))
       process.kill(pid, "SIGHUP")
-      const result = await outcome
+      const result = await waiting
       assert(!result.isError, JSON.stringify(result.structuredContent))
       assert.equal(result.structuredContent?.changed, true)
       assert.equal(result.structuredContent?.timed_out, false)

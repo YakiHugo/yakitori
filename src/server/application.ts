@@ -667,7 +667,6 @@ export async function createYakitoriApplication(
           ),
         }
       },
-      async refresh() {},
       importAccount: connectSubscription,
       loginCompleted: (id) => connectSubscription(id),
     })

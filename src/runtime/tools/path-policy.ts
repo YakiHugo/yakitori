@@ -209,7 +209,7 @@ function pathCandidate(workspaceRoot: string, requestedPath: string): string {
   )
 }
 
-export function isInsideWorkspace(
+function isInsideWorkspace(
   workspaceRoot: string,
   absolutePath: string,
 ): boolean {

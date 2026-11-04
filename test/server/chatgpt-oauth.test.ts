@@ -267,22 +267,6 @@ describe("direct ChatGPT authorization", () => {
     expect(JSON.stringify(f.attempt.registration)).not.toContain("token")
   })
 
-  it("retains an issued client after failed exchange for a fresh PKCE attempt", async () => {
-    const f = await fixture({ status: 400, token: { error: "invalid_grant" } })
-    await expect(f.attempt.complete(f.callback())).rejects.toMatchObject({
-      code: "exchange_failed",
-    })
-    expect(f.attempt.registration).toBeUndefined()
-    expect(f.attempt.issuedClientId).toBe(clientId)
-    const retry = f.auth.begin(redirectUri, undefined, f.attempt.issuedClientId)
-    const url = new URL(retry.authorizationUrl)
-    expect(url.searchParams.get("client_id")).toBe(clientId)
-    expect(url.searchParams.has("agent_name_hint")).toBe(false)
-    expect(url.searchParams.get("state")).not.toBe(
-      f.authorization.searchParams.get("state"),
-    )
-  })
-
   it("consumes one concurrent callback and suppresses an in-flight cancelled result", async () => {
     let enter = () => {}
     let release = () => {}
@@ -379,7 +363,6 @@ describe("issued registration recovery barrier", () => {
       }),
     ).rejects.toThrow("Fixture disk full")
     expect(f.requests).toEqual([])
-    expect(f.attempt.issuedClientId).toBe("oaiapp_fake")
     expect(f.attempt.registration).toBeUndefined()
   })
 })

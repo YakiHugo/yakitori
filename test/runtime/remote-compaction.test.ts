@@ -328,12 +328,7 @@ describe("provider-native compaction history", () => {
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
-          content:
-            failure === "missing"
-              ? []
-              : failure === "duplicate"
-                ? [checkpoint, checkpoint]
-                : [checkpoint],
+          content: failure === "missing" ? [] : [checkpoint, checkpoint],
           providerResponseId: "resp_failed",
         },
       }

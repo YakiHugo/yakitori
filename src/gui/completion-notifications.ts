@@ -49,7 +49,7 @@ export async function getNotificationPermission(): Promise<NotificationPermissio
     : Notification.permission
 }
 
-export async function requestNotificationPermission(): Promise<NotificationPermissionState> {
+async function requestNotificationPermission(): Promise<NotificationPermissionState> {
   const native = window.yakitoriDesktop?.notifications
   if (native !== undefined) return native.permission()
   if (typeof Notification === "undefined") return "unsupported"

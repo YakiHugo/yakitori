@@ -234,7 +234,7 @@ export function attachmentUrl(
   return url
 }
 
-export function requireDesktopBridge(): YakitoriDesktopBridge {
+function requireDesktopBridge(): YakitoriDesktopBridge {
   if (window.yakitoriDesktop === undefined) {
     throw new Error("Attachments require the Yakitori desktop app.")
   }

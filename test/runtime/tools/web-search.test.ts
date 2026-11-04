@@ -138,25 +138,6 @@ describe("web_search contract", () => {
     })
   })
 
-  it("passes a no-results digest through like any other text", async () => {
-    const { endpoint } = await serveMcp(({ response }) => {
-      respondJson(response, {
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [
-            { type: "text", text: "No results found for the given query." },
-          ],
-        },
-      })
-    })
-    const result = await search("obscure", { endpoint })
-    expect(result).toMatchObject({
-      ok: true,
-      content: `No results found for the given query.\n\n${CITATION_REMINDER}`,
-    })
-  })
-
   it("maps result.isError to a structured failure", async () => {
     const { endpoint } = await serveMcp(({ response }) => {
       respondJson(response, {

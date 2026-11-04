@@ -411,7 +411,7 @@ it("serves original PDF bytes inline or as a safely named same-origin download",
         )
         expect(download.status).toBe(200)
         expect(download.headers.get("content-disposition")).toBe(
-          `attachment; filename="download.pdf"; filename*=UTF-8''${encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+          "attachment; filename=\"download.pdf\"; filename*=UTF-8''%E6%89%8B%E5%86%8C%20%28final%29.pdf",
         )
         expect(download.headers.get("content-length")).toBe(
           String(bytes.length),

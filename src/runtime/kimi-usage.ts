@@ -103,13 +103,7 @@ function parseTimeUnit(value: unknown): UsageWindow["unit"] | undefined {
 
 function formatWindow(window: UsageWindow): string {
   if (window.duration === 1 && window.unit === "week") return "Weekly limit"
-  const units = {
-    minute: "minute",
-    hour: "hour",
-    day: "day",
-    week: "week",
-  } as const
-  return `${window.duration}-${units[window.unit]} limit`
+  return `${window.duration}-${window.unit} limit`
 }
 
 function parseTimestamp(value: unknown): number | undefined {

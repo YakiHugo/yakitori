@@ -579,42 +579,8 @@ describe("unified exec tools", () => {
     }
   })
 
-  it("prunes exited unpolled sessions at the soft process cap", async () => {
-    const manager = createUnifiedExecProcessManager({ killGraceMs: 20 })
-    const sessions = await Promise.all(
-      Array.from({ length: 64 }, () =>
-        manager.exec({
-          command: "sleep 0.3",
-          cwd: process.cwd(),
-          shell: "/bin/sh",
-          env: process.env,
-          tty: false,
-          yieldTimeMs: 250,
-          maxOutputTokens: 100,
-        }),
-      ),
-    )
-    expect(sessions.every((result) => result.session_id !== undefined)).toBe(
-      true,
-    )
-    await new Promise((resolve) => setTimeout(resolve, 200))
-
-    await expect(
-      manager.exec({
-        command: "true",
-        cwd: process.cwd(),
-        shell: "/bin/sh",
-        env: process.env,
-        tty: false,
-        yieldTimeMs: 250,
-        maxOutputTokens: 100,
-      }),
-    ).resolves.toMatchObject({ exit_code: 0 })
-    await manager.close()
-  })
-
   it.skipIf(process.platform === "win32")(
-    "joins a pruned live process before releasing its owner",
+    "withdraws a pruned session and joins its live process before releasing its owner",
     async () => {
       const manager = createUnifiedExecProcessManager({ killGraceMs: 100 })
       const input = {
@@ -649,7 +615,20 @@ describe("unified exec tools", () => {
         command: `exec '${process.execPath}' -e 'process.on("SIGTERM", () => {}); console.log(process.pid); setInterval(() => {}, 1000)'`,
       })
       pid = Number(first.output.trim())
-      expect(pid).toBeGreaterThan(0)
+      await expect
+        .poll(async () => {
+          if (pid === 0) {
+            const output = await manager.write({
+              sessionId: first.session_id as number,
+              chars: "",
+              yieldTimeMs: 250,
+              maxOutputTokens: 100,
+            })
+            pid = Number(output.output.trim())
+          }
+          return pid
+        })
+        .toBeGreaterThan(0)
       await Promise.all(
         Array.from({ length: 63 }, () =>
           manager.exec({
@@ -659,6 +638,14 @@ describe("unified exec tools", () => {
         ),
       )
       await manager.exec({ ...input, command: "true" })
+      await expect(
+        manager.write({
+          sessionId: first.session_id as number,
+          chars: "",
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        }),
+      ).rejects.toThrow("Unknown unified exec session_id")
       const closing = manager.close()
       expect(manager.close()).toBe(closing)
       await closing

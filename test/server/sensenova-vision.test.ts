@@ -1,12 +1,12 @@
-import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
 import { afterEach, expect, it, vi } from "vitest"
-import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
+import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
+import type { ModelRequest } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { sensenovaVisionModel } from "../../src/runtime/sensenova-vision.ts"
-import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import type { ModelRequest } from "../../src/runtime/model.ts"
+import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
+import { createConfiguredProvider } from "../../src/server/configured-provider.ts"
 import { pngImageBase64 } from "../fixtures/images.ts"
 
 const target = {
@@ -268,23 +268,18 @@ it.each([
 
 it("does not treat an empty finish reason or DONE as successful completion", async () => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => response(false))
-  const registry = createProviderRegistry({ [target.provider]: provider() })
-  try {
-    const stream = createChatCompletionsProvider({
-      apiKey: "fixture",
-      baseURL: "https://token.sensenova.cn/v1",
-      model: target.model,
-      flavor: "sensenova",
-    })
-    const events = await Array.fromAsync(stream(request))
-    expect(events.some((event) => event.type === "response")).toBe(false)
-    expect(events.at(-1)).toMatchObject({
-      type: "failure",
-      failure: { kind: "stream_disconnected" },
-    })
-  } finally {
-    await registry.close()
-  }
+  const stream = createChatCompletionsProvider({
+    apiKey: "fixture",
+    baseURL: "https://token.sensenova.cn/v1",
+    model: target.model,
+    flavor: "sensenova",
+  })
+  const events = await Array.fromAsync(stream(request))
+  expect(events.some((event) => event.type === "response")).toBe(false)
+  expect(events.at(-1)).toMatchObject({
+    type: "failure",
+    failure: { kind: "stream_disconnected" },
+  })
 })
 
 it.each([

@@ -673,7 +673,6 @@ function createManager(
     createTask(snapshot, input) {
       const context = testTurnContext(snapshot, input)
       return {
-        kind: "regular",
         async run(session, execution) {
           await session.beginExecution(execution, context)
           await session.recordInitialInput(execution)

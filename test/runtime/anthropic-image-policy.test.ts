@@ -431,9 +431,6 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
     "../../src/core/rollout-assets.ts"
   )
   const { prepareModelMedia } = await import("../../src/runtime/model-media.ts")
-  const { prepareModelDocuments } = await import(
-    "../../src/runtime/prepare-model-document.ts"
-  )
   const { pdfFixture } = await import("./tools/pdf-fixture.ts")
   const root = await mkdtemp(join(tmpdir(), "native-image-projection-"))
   try {
@@ -441,7 +438,9 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
     const assets = createRolloutAssets(root, {
       withMutationLease: async (_id, mutate) => mutate(),
     })
-    const pdf = pdfFixture(["PDF raster stays on its existing policy"])
+    const pdf = pdfFixture([
+      { text: "PDF raster stays on its existing policy", color: [1, 0, 0] },
+    ])
     const source = await png()
     const storedPdf = await assets.saveToolFile(
       "rollout_test",
@@ -474,10 +473,6 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
       },
     ])
     const before = JSON.stringify(input.messages)
-    const legacyPdf = await prepareModelDocuments([document], assets, {
-      nativePdf: false,
-      images: true,
-    })
     const projected = await prepareModelMedia(input.messages, {
       deferImagePreparation: true,
       target: input.target,
@@ -491,13 +486,25 @@ it("projects PDF raster fallback separately while delegating ordinary inline and
     })
     const result = await send({ ...input, messages: projected, assets })
     expect(result.events.at(-1)?.type).toBe("response")
-    expect(sentImages(result.bodies)).toEqual([
-      ...legacyPdf.images.map((block) =>
-        Buffer.from(block.data ?? "", "base64"),
-      ),
-      source,
-      source,
-    ])
+    const images = sentImages(result.bodies)
+    expect(images).toHaveLength(3)
+    expect(images.slice(1)).toEqual([source, source])
+    const page = images[0]
+    // The fixture page is 240 by 160 points; 150 DPI yields 500 by 333 pixels.
+    expect(await sharp(page).metadata()).toMatchObject({
+      format: "jpeg",
+      width: 500,
+      height: 333,
+    })
+    const pixel = await sharp(page)
+      .extract({ left: 10, top: 300, width: 1, height: 1 })
+      .removeAlpha()
+      .raw()
+      .toBuffer()
+    // Its lower half is red, independent of fonts or JPEG encoder details.
+    expect(pixel[0]).toBeGreaterThan(240)
+    expect(pixel[1]).toBeLessThan(15)
+    expect(pixel[2]).toBeLessThan(15)
     expect(JSON.stringify(input.messages)).toBe(before)
     expect(await assets.read(storedImage.reference)).toEqual(source)
     // A model switch reprojects the same original rather than the last wire image.

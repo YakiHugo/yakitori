@@ -444,7 +444,7 @@ export async function writeWorkspaceFile(input: {
     )
   return {
     path: displayPath(cwd, target),
-    sha256: createHash("sha256").update(contentBytes).digest("hex"),
+    sha256: written.output.sha256,
   }
 }
 

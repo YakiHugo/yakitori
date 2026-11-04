@@ -409,8 +409,8 @@ export function createMcpConnectionManager(
     }
     const cancelledConnections: Promise<void>[] = []
     for (const name of [...configuredServers.keys()]) {
-      if (!keep.has(name)) configuredServers.delete(name)
       if (!keep.has(name)) {
+        configuredServers.delete(name)
         generations.set(name, (generations.get(name) ?? 0) + 1)
         restartAttempts.delete(name)
         const pending = connecting.get(name)

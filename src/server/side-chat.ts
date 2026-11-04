@@ -152,11 +152,11 @@ export function createSideChatService(options: {
         return Promise.reject(
           new SideChatError("Side conversations are closed.", "conflict"),
         )
+      const sourceChat =
+        input.sourceSessionId === undefined
+          ? undefined
+          : chats.get(input.sourceSessionId)
       const operation = (async () => {
-        const sourceChat =
-          input.sourceSessionId === undefined
-            ? undefined
-            : chats.get(input.sourceSessionId)
         if (sourceChat?.closing)
           throw new SideChatError(
             "The source conversation is no longer available.",
@@ -490,10 +490,6 @@ export function createSideChatService(options: {
         return snapshot(chat)
       })()
       creating.add(operation)
-      const sourceChat =
-        input.sourceSessionId === undefined
-          ? undefined
-          : chats.get(input.sourceSessionId)
       sourceChat?.importing.add(operation)
       const finish = () => {
         creating.delete(operation)

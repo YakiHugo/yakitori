@@ -14,6 +14,7 @@ import {
   createExecutionViewState,
   type ExecutionEntry,
   type ExecutionViewAction,
+  executionEntryKey,
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
@@ -87,6 +88,12 @@ function ChildTrace({
     let replaySnapshot: ApiSessionDetail | undefined
     setLoading(true)
     setError(undefined)
+    const onStreamUnavailable = (cause: unknown) => {
+      if (disposed) return
+      dispatch({ type: "stream_unavailable" })
+      setLoading(false)
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
     const stream = client.openSessionStream(
       sessionId,
       lastReceivedEventSeq.current,
@@ -118,18 +125,8 @@ function ChildTrace({
           setError(undefined)
           setLoading(false)
         },
-        onDisconnected: (cause) => {
-          if (disposed) return
-          dispatch({ type: "stream_unavailable" })
-          setLoading(false)
-          setError(cause instanceof Error ? cause.message : String(cause))
-        },
-        onError: (cause) => {
-          if (disposed) return
-          dispatch({ type: "stream_unavailable" })
-          setLoading(false)
-          setError(cause instanceof Error ? cause.message : String(cause))
-        },
+        onDisconnected: onStreamUnavailable,
+        onError: onStreamUnavailable,
       },
     )
     return () => {
@@ -251,13 +248,17 @@ function ChildTrace({
       const previous = result.at(-1)
       if (activity && previous?.activity) previous.entries.push(entry)
       else
-        result.push({ key: traceEntryKey(entry), activity, entries: [entry] })
+        result.push({
+          key: executionEntryKey(entry),
+          activity,
+          entries: [entry],
+        })
     }
     return result
   }, [view.entries, view.turnTimings, view.activeTurnId])
   const renderEntry = (entry: ExecutionEntry) => (
     <TraceEntry
-      key={traceEntryKey(entry)}
+      key={executionEntryKey(entry)}
       entry={entry}
       sessionId={sessionId}
       apiBase={apiBase}
@@ -317,7 +318,7 @@ function ChildTrace({
                       >
                         {block.entries.map((entry) => (
                           <li
-                            key={traceEntryKey(entry)}
+                            key={executionEntryKey(entry)}
                             className="agent-timeline-item"
                             data-kind={entry.kind}
                           >
@@ -408,22 +409,6 @@ function ChildTrace({
       />
     </section>
   )
-}
-
-function traceEntryKey(entry: ExecutionEntry): string {
-  switch (entry.kind) {
-    case "user_input":
-      return entry.inputId
-    case "assistant":
-    case "reasoning":
-      return entry.itemId
-    case "tool":
-      return entry.toolCallId
-    case "permission":
-      return entry.permissionRequestId
-    case "turn_terminal":
-      return `${entry.turnId}:${entry.state}`
-  }
 }
 
 function TraceEntry({

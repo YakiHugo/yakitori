@@ -124,7 +124,7 @@ export async function disconnectComputerUse(
     : status(false)
 }
 
-export async function probeComputerUse(
+async function probeComputerUse(
   config: McpServerConfig,
   requestPermissions = false,
 ): Promise<NonNullable<ComputerUseStatus["permissions"]>> {

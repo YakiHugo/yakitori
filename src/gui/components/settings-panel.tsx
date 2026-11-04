@@ -12,7 +12,7 @@ import {
 import { Select } from "./ui/select.tsx"
 import "../styles/settings.css"
 
-export function GeneralSettingsSection() {
+function usePreferenceSettings() {
   const preferences = usePreferencesStore()
   const [error, setError] = useState<string>()
   const update = (patch: Partial<Preferences>) => {
@@ -24,6 +24,11 @@ export function GeneralSettingsSection() {
       setError("Your preferences could not be saved. Check available storage.")
     }
   }
+  return { preferences, error, update }
+}
+
+export function GeneralSettingsSection() {
+  const { preferences, error, update } = usePreferenceSettings()
   return (
     <>
       <div className="settings-group">
@@ -75,17 +80,7 @@ export function GeneralSettingsSection() {
 }
 
 export function NotificationSettingsSection() {
-  const preferences = usePreferencesStore()
-  const [error, setError] = useState<string>()
-  const update = (patch: Partial<Preferences>) => {
-    try {
-      preferences.updatePreferences(patch)
-      setError(undefined)
-    } catch (error) {
-      if (!(error instanceof DOMException)) throw error
-      setError("Your preferences could not be saved. Check available storage.")
-    }
-  }
+  const { preferences, error, update } = usePreferenceSettings()
   return (
     <>
       <div className="settings-group">

@@ -238,10 +238,6 @@
   background: #0003;
   animation: sidebar-backdrop-in 150ms ease;
 }
-.subscription-dialog {
-  width: min(600px, calc(100vw - 32px));
-  padding: 22px;
-}
 .subscription-list {
   display: flex;
   flex-direction: column;

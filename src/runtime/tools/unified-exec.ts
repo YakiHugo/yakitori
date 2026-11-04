@@ -1,4 +1,3 @@
-import { signalProcessGroup } from "../process-signal.ts"
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomInt } from "node:crypto"
 import { closeSync, fsyncSync, openSync, writeSync } from "node:fs"
@@ -6,6 +5,7 @@ import { basename } from "node:path"
 import { type IPty, spawn as spawnPty } from "node-pty"
 import type { JsonValue } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
+import { signalProcessGroup } from "../process-signal.ts"
 import {
   createUserShellEnv,
   type UserShellEnv,
@@ -59,10 +59,9 @@ type WriteInput = Readonly<{
   maxOutputTokens: number
 }>
 
-type ProcessExit = Readonly<{ exitCode: number; signal?: string }>
+type ProcessExit = Readonly<{ exitCode: number }>
 
 type ProcessHandle = Readonly<{
-  pid: number
   write(chars: string): void
   terminate(signal: NodeJS.Signals): void
 }>
@@ -526,7 +525,6 @@ function launchPipe(
   const exit = observeChildExit(child, output)
   return {
     handle: {
-      pid: child.pid ?? -1,
       write(chars) {
         if (chars === "\u0003") {
           signalProcessGroup(child, "SIGINT")
@@ -575,13 +573,11 @@ function launchPty(
       const terminatedBySignal = signal !== undefined && signal !== 0
       resolve({
         exitCode: terminatedBySignal ? 128 + signal : exitCode,
-        ...(terminatedBySignal ? { signal: String(signal) } : {}),
       })
     })
   })
   return {
     handle: {
-      pid: terminal.pid,
       write: (chars) => terminal.write(chars),
       terminate: (signal) => terminal.kill(signal),
     },
@@ -598,10 +594,9 @@ function observeChildExit(
       output.append(`Failed to spawn command: ${error.message}`)
       resolve({ exitCode: -1 })
     })
-    child.once("close", (code, signal) =>
+    child.once("close", (code) =>
       resolve({
         exitCode: code ?? -1,
-        ...(signal === null ? {} : { signal }),
       }),
     )
   })

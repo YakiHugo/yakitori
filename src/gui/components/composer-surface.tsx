@@ -36,7 +36,6 @@ import { COMPACT_DIRECTIVE, GOAL_DIRECTIVE } from "../../protocol/directives.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import {
-  inputContent,
   inputContentAttachments,
   inputContentText,
 } from "../../protocol/user-input.ts"
@@ -230,7 +229,7 @@ export function ComposerSurface({
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const draft = promptPartsText(parts)
-  const attachments = inputContentAttachments(inputContent(parts))
+  const attachments = inputContentAttachments(parts)
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const importTail = useRef(Promise.resolve())
   const importCount = useRef(0)
@@ -266,11 +265,9 @@ export function ComposerSurface({
         ),
       )
       const unused = inputContentAttachments(
-        inputContent(
-          inputAttachmentOwnership.resolveDraft(
-            currentOwner.current.apiBase,
-            previous,
-          ),
+        inputAttachmentOwnership.resolveDraft(
+          currentOwner.current.apiBase,
+          previous,
         ),
       ).filter(
         (image) =>
@@ -461,7 +458,7 @@ export function ComposerSurface({
     }
   }, [trigger, query, queryKey, menuOpen, searchFiles])
 
-  const text = inputContentText(inputContent(parts)).trim()
+  const text = inputContentText(parts).trim()
   const previewAttachment =
     previewIndex === undefined ? undefined : attachments[previewIndex]
   const containsInput =
@@ -585,8 +582,6 @@ export function ComposerSurface({
   // mid-restore, busy, or compact with staged images, which the compact lane
   // rejects — the selection only completes the text so nothing is lost.
   const runSlashCommand = (command: SlashCommand): void => {
-    setDismissedQuery(queryKey)
-    setHighlight(undefined)
     // /goal always takes an argument, so completing the text is the whole
     // interaction; the submit path in Composer interprets the directive.
     if (command.name === GOAL_DIRECTIVE) {
@@ -604,8 +599,7 @@ export function ComposerSurface({
       (command.name !== "/status" &&
         command.name !== "/mcp" &&
         (busy || sending)) ||
-      (command.name === COMPACT_DIRECTIVE &&
-        (attachments.length > 0 || excerpts.length > 0))
+      (command.name === COMPACT_DIRECTIVE && excerpts.length > 0)
     if (blocked) {
       editorRef.current?.replaceRange(tokenStart, tokenEnd, command.name)
       editorRef.current?.focus()

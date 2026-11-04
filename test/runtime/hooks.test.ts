@@ -102,7 +102,7 @@ describe("hook runner", () => {
       const script = join(root, "async-hook.mjs")
       await writeFile(
         script,
-        `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(started)},'yes'); process.on('SIGTERM',()=>{writeFileSync(${JSON.stringify(stopped)},'yes');process.exit(0)}); setInterval(()=>{},1000);`,
+        `import {writeFileSync} from 'node:fs'; process.on('SIGTERM',()=>{writeFileSync(${JSON.stringify(stopped)},'yes');process.exit(0)}); setInterval(()=>{},1000); writeFileSync(${JSON.stringify(started)},'yes');`,
       )
       const handler = {
         type: "command" as const,
@@ -140,7 +140,7 @@ describe("hook runner", () => {
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
     await writeFile(
       script,
-      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(started)}, 'yes'); process.on('SIGTERM', () => setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) }, 100)); setInterval(() => {}, 1000)`,
+      `import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => setTimeout(() => { writeFileSync(${JSON.stringify(stopped)}, 'yes'); process.exit(0) }, 100)); setInterval(() => {}, 1000); writeFileSync(${JSON.stringify(started)}, 'yes')`,
     )
     const handler = {
       type: "command" as const,

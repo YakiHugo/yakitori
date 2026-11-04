@@ -262,7 +262,7 @@ it("rejects oversized expansion, DTDs, escaping relationships and paths outside 
   await writeFile(
     join(cwd, "escape.xlsx"),
     await zip({
-      "xl/workbook.xml": `<workbook><sheets><sheet name="evil" r:id="r1"/></sheets></workbook>`,
+      "xl/workbook.xml": `<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="evil" r:id="r1"/></sheets></workbook>`,
       "xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="r1" Target="../../../escape.xml"/></Relationships>`,
     }),
   )
@@ -271,7 +271,6 @@ it("rejects oversized expansion, DTDs, escaping relationships and paths outside 
   for (const path of [
     "bomb.docx",
     "entity.docx",
-    "escape.xlsx",
     "alias.docx",
     "../outside.docx",
   ]) {
@@ -281,6 +280,17 @@ it("rejects oversized expansion, DTDs, escaping relationships and paths outside 
       error: { data: { code: "invalid_input" } },
     })
   }
+  expect(
+    await connection.sendRequest("workspace/readOffice", {
+      cwd,
+      path: "escape.xlsx",
+    }),
+  ).toMatchObject({
+    error: {
+      message: "Office relationship escapes the archive.",
+      data: { code: "invalid_input" },
+    },
+  })
   expect(
     await connection.sendRequest("workspace/readOffice", {
       cwd,

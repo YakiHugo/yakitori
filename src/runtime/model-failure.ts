@@ -33,12 +33,7 @@ export function providerErrorMessage(payload: unknown): string | undefined {
     payload.error !== null
       ? payload.error
       : payload
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
+  if ("message" in error && typeof error.message === "string") {
     return error.message
   }
   return undefined

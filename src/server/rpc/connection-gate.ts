@@ -26,22 +26,17 @@ export class ConnectionRpcGate {
     this.notifyIfDrained()
   }
 
-  // Resolves once the gate is closed and every admitted task has finished.
-  waitForDrain(): Promise<void> {
-    if (!this.accepting && this.runningCount === 0) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-      this.drainWaiters.add(resolve)
-    })
-  }
-
   async shutdown(timeoutMs: number): Promise<"drained" | "timedOut"> {
     this.close()
+    if (this.runningCount === 0) return "drained"
     let cancelTimer: (() => void) | undefined
     const timedOut = new Promise<"timedOut">((resolve) => {
       const timer = setTimeout(() => resolve("timedOut"), timeoutMs)
       cancelTimer = () => clearTimeout(timer)
     })
-    const drained = this.waitForDrain().then((): "drained" => "drained")
+    const drained = new Promise<"drained">((resolve) => {
+      this.drainWaiters.add(() => resolve("drained"))
+    })
     const result = await Promise.race([drained, timedOut])
     cancelTimer?.()
     return result

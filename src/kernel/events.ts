@@ -276,7 +276,7 @@ export function createEventEnvelope(input: EventEnvelopeInput): EventEnvelope {
   }
 }
 
-export function isKnownEventType(value: unknown): value is EventType {
+function isKnownEventType(value: unknown): value is EventType {
   return typeof value === "string" && eventTypes.has(value)
 }
 
@@ -1220,18 +1220,10 @@ const sessionExecutionPolicyKeys = [
 ] as const
 
 function optionalFieldsAreValid(data: Record<string, unknown>): boolean {
-  if ("reason" in data && data.reason !== undefined && !isString(data.reason))
-    return false
   if (
     "metadata" in data &&
     data.metadata !== undefined &&
     !isJsonObject(data.metadata)
-  )
-    return false
-  if (
-    "providerMetadata" in data &&
-    data.providerMetadata !== undefined &&
-    !isJsonObject(data.providerMetadata)
   )
     return false
   for (const key of [
