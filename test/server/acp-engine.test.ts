@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createAcpEngine } from "../../src/server/engines/acp/adapter.ts"
 import type {
   EngineAdapter,
@@ -303,6 +303,66 @@ describe("external ACP v1 process boundary", () => {
       await adapter.send(binding, { requestId: "r2", text: "hello" }),
     ).toMatchObject({ status: "rejected" })
   })
+
+  it.skipIf(process.platform === "win32")(
+    "waits for the owned process group after a permission-denied liveness probe",
+    async () => {
+      let stderr = ""
+      let childPid: number | undefined
+      const adapter = createAcpEngine({
+        id: "fixture",
+        command: process.execPath,
+        args: [
+          "--input-type=module",
+          "-e",
+          `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); process.stderr.write(String(process.pid) + "\\n"); await import(${JSON.stringify(fixture)});`,
+        ],
+        onStderr: (text) => {
+          stderr += text
+          const match = /^(\d+)\n/.exec(stderr)
+          if (match) childPid = Number(match[1])
+        },
+      })
+      engines.push(adapter)
+      await adapter.connect()
+      await expect.poll(() => childPid).toBeTypeOf("number")
+      if (childPid === undefined) throw new Error("Missing child process ID")
+      const pid = childPid
+      const kill = process.kill
+      let injected = false
+      const probe = vi
+        .spyOn(process, "kill")
+        .mockImplementation((target, signal) => {
+          if (target === -pid && signal === 0 && !injected) {
+            injected = true
+            throw Object.assign(new Error("kill EPERM"), { code: "EPERM" })
+          }
+          return kill(target, signal)
+        })
+      try {
+        await expect(adapter.close()).resolves.toBeUndefined()
+        expect(injected).toBe(true)
+        for (const target of [pid, -pid])
+          await expect
+            .poll(() => {
+              try {
+                kill(target, 0)
+              } catch (error) {
+                return error
+              }
+            })
+            .toMatchObject({ code: "ESRCH" })
+      } finally {
+        probe.mockRestore()
+        try {
+          kill(-pid, "SIGKILL")
+        } catch (error) {
+          expect(error).toMatchObject({ code: "ESRCH" })
+        }
+        await adapter.close()
+      }
+    },
+  )
 
   it("does not treat an empty prompt response as a completed turn", async () => {
     const { adapter, binding, events } = await setup()

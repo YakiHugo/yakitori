@@ -195,8 +195,12 @@ export class AcpStdioConnection {
       process.kill(-this.process.pid, 0)
       return true
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH")
-        return false
+      if (error instanceof Error && "code" in error) {
+        if (error.code === "ESRCH") return false
+        // macOS can report EPERM while a group contains only zombie members;
+        // this is not evidence that the owned process group has disappeared.
+        if (error.code === "EPERM") return true
+      }
       throw error
     }
   }
