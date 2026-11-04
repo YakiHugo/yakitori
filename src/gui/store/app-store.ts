@@ -1836,8 +1836,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         sessionSkills: [],
         sessionSkillsError: undefined,
         commandPanel: undefined,
-        promptDraft: state.newSessionPrompt,
-        promptExcerpts: state.newSessionExcerpts,
+        promptDraft:
+          state.selection.sessionId === undefined
+            ? state.promptDraft
+            : state.newSessionPrompt,
+        promptExcerpts:
+          state.selection.sessionId === undefined
+            ? state.promptExcerpts
+            : state.newSessionExcerpts,
         hydratingSessionId: undefined,
         settingsSection: undefined,
         sessionSelectionIntentRevision:

@@ -6,7 +6,11 @@ import type {
 } from "../../protocol/engine.ts"
 import type { InputDraft } from "../../protocol/user-input.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
-import { textInputDraft } from "../input-draft.ts"
+import {
+  hasInputDraft,
+  sameInputDraft,
+  textInputDraft,
+} from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "./app-store.ts"
 
@@ -20,6 +24,7 @@ type EngineState = {
   snapshot?: EngineSessionSnapshot | undefined
   pendingRequestId?: string | undefined
   draft: InputDraft
+  drafts: Record<string, InputDraft>
   error?: string | undefined
   loading: boolean
   sending: boolean
@@ -30,6 +35,7 @@ export const initialEngineState: EngineState = {
   engines: [],
   sessions: [],
   draft: textInputDraft(""),
+  drafts: {},
   loading: false,
   sending: false,
   stopping: false,
@@ -40,7 +46,18 @@ let revision = 0
 let refreshing = false
 let refreshAgain = false
 
+function draftKey(engineId: string, sessionId?: string): string {
+  return JSON.stringify([engineId, sessionId ?? null])
+}
+
 export function clearEngineSelection() {
+  const state = useEngineStore.getState()
+  const drafts = { ...state.drafts }
+  if (state.engineId) {
+    const key = draftKey(state.engineId, state.sessionId)
+    if (hasInputDraft(state.draft)) drafts[key] = state.draft
+    else delete drafts[key]
+  }
   revision += 1
   localStorage.removeItem(selectionKey)
   useEngineStore.setState({
@@ -49,6 +66,7 @@ export function clearEngineSelection() {
     snapshot: undefined,
     pendingRequestId: undefined,
     draft: textInputDraft(""),
+    drafts,
     error: undefined,
     loading: false,
     sending: false,
@@ -57,9 +75,12 @@ export function clearEngineSelection() {
   })
 }
 export function chooseNewEngine(engineId: string) {
-  useAppStore.getState().clearSessionSelection()
   clearEngineSelection()
-  useEngineStore.setState({ engineId: engineId || undefined })
+  useAppStore.getState().clearSessionSelection()
+  useEngineStore.setState((state) => ({
+    engineId: engineId || undefined,
+    draft: state.drafts[draftKey(engineId)] ?? textInputDraft(""),
+  }))
 }
 
 export function startNewEngineSession(): void {
@@ -71,13 +92,17 @@ export function startNewEngineSession(): void {
 export async function selectEngineSession(
   session: Pick<EngineSessionSummary, "id" | "engineId" | "projectId">,
 ) {
-  useAppStore.getState().clearSessionSelection({ projectId: session.projectId })
   clearEngineSelection()
+  useAppStore.getState().clearSessionSelection({ projectId: session.projectId })
   useEngineStore.setState({
     engineId: session.engineId,
     sessionId: session.id,
     pendingRequestId: localStorage.getItem(pendingKey(session.id)) ?? undefined,
     loading: true,
+    draft:
+      useEngineStore.getState().drafts[
+        draftKey(session.engineId, session.id)
+      ] ?? textInputDraft(""),
   })
   localStorage.setItem(selectionKey, session.id)
   await refreshEngineSelection()
@@ -117,10 +142,18 @@ async function refreshEngineSelection() {
               current.stopping &&
               current.stoppingTurnId ===
                 projectEngineSession(snapshot).activeTurnId
+            // A read can confirm admission even when the send response was
+            // lost while this session's draft was parked by navigation.
+            const accepted =
+              receipt?.status === "accepted" || receipt?.status === "terminal"
             return {
               snapshot,
               loading: false,
               pendingRequestId: resolved ? undefined : current.pendingRequestId,
+              draft:
+                accepted && current.draft.text.trim() === receipt.input.text
+                  ? textInputDraft("")
+                  : current.draft,
               stopping,
               stoppingTurnId: stopping ? current.stoppingTurnId : undefined,
             }
@@ -190,6 +223,7 @@ export async function sendEngineInput(text: string) {
     !text.trim()
   )
     return
+  const engineId = state.engineId
   const captured = revision
   useEngineStore.setState({ sending: true, error: undefined })
   try {
@@ -216,7 +250,11 @@ export async function sendEngineInput(text: string) {
       if (revision !== captured) return
       sessionId = session.id
       localStorage.setItem(selectionKey, sessionId)
-      useEngineStore.setState({ sessionId, snapshot: created })
+      useEngineStore.setState((current) => {
+        const drafts = { ...current.drafts }
+        delete drafts[draftKey(engineId)]
+        return { sessionId, snapshot: created, drafts }
+      })
     }
     const requestId = `request_${crypto.randomUUID()}`
     localStorage.setItem(pendingKey(sessionId), requestId)
@@ -228,10 +266,40 @@ export async function sendEngineInput(text: string) {
     })
     if (localStorage.getItem(pendingKey(sessionId)) === requestId)
       localStorage.removeItem(pendingKey(sessionId))
+    if (result.status === "rejected") {
+      if (
+        useEngineStore.getState().sessionId === sessionId &&
+        useEngineStore.getState().pendingRequestId === requestId
+      )
+        useEngineStore.setState({ pendingRequestId: undefined })
+      throw new Error(result.reason)
+    }
+    // A successful send consumes only its snapshot, even after navigation.
+    useEngineStore.setState((current) => {
+      const drafts = { ...current.drafts }
+      const key = draftKey(engineId, sessionId)
+      const parked = drafts[key]
+      if (
+        parked &&
+        localStorage.getItem(pendingKey(sessionId)) === null &&
+        sameInputDraft(parked, state.draft)
+      )
+        delete drafts[key]
+      return {
+        drafts,
+        ...(current.sessionId === sessionId &&
+        (current.pendingRequestId === undefined ||
+          current.pendingRequestId === requestId)
+          ? {
+              pendingRequestId: undefined,
+              draft: sameInputDraft(current.draft, state.draft)
+                ? textInputDraft("")
+                : current.draft,
+            }
+          : {}),
+      }
+    })
     if (revision !== captured) return
-    useEngineStore.setState({ pendingRequestId: undefined })
-    if (result.status === "rejected") throw new Error(result.reason)
-    useEngineStore.setState({ draft: textInputDraft("") })
     const { engines } = await client().request("engine/list", {})
     useEngineStore.setState({ engines })
     await refreshEngineSelection()

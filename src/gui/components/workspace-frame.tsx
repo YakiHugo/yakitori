@@ -19,6 +19,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { flushSync } from "react-dom"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { connectBrowserViewRequests } from "../browser-view-requests.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
@@ -38,6 +39,7 @@ import {
   type ContextSourceNavigation,
   ExcerptSourceLayer,
   findContextSource,
+  requestExcerptEdit,
   revealContextSourceEvent,
 } from "./excerpt-source.tsx"
 import { DiscardFileDialog } from "./file-editor.tsx"
@@ -779,11 +781,21 @@ export function WorkspaceFrame({
                   app.sessionSelectionIntentRevision !== selectionRevision
                 )
                   return
-                if (sideChatId)
-                  useWorkspaceStore
-                    .getState()
-                    .addChatExcerpt(sideChatId, excerpt)
-                else addToMain(excerpt)
+                // Mount the card before asking its owner to edit the new quote.
+                flushSync(() => {
+                  if (sideChatId)
+                    useWorkspaceStore
+                      .getState()
+                      .addChatExcerpt(sideChatId, excerpt)
+                  else addToMain(excerpt)
+                })
+                requestExcerptEdit({
+                  ownerId: sideChatId
+                    ? `side:${sideChatId}`
+                    : `main:${selectionRevision}`,
+                  excerptId: excerpt.id,
+                  creating: true,
+                })
               }}
               onAskInSideChat={(excerpt, sideChatId) => {
                 const app = useAppStore.getState()

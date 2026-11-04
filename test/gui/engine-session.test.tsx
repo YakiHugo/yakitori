@@ -14,12 +14,14 @@ import {
 } from "../../src/gui/components/engine-session.tsx"
 import { projectEngineSession } from "../../src/gui/engine-session-view.ts"
 import { useAppStore } from "../../src/gui/store/app-store.ts"
+import { textInputDraft } from "../../src/gui/input-draft.ts"
 import {
   cancelEngineTurn,
   chooseNewEngine,
   initialEngineState,
   selectEngineSession,
   sendEngineInput,
+  startNewEngineSession,
   useEngineStore,
 } from "../../src/gui/store/engine-store.ts"
 import type {
@@ -85,6 +87,100 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("external engine workspace", () => {
+  it.each([
+    { status: "accepted", draft: "Send this once", expected: "" },
+    { status: "terminal", draft: " Send this once ", expected: "" },
+    { status: "accepted", draft: "Later edit", expected: "Later edit" },
+    { status: "rejected", draft: "Send this once", expected: "Send this once" },
+    { status: "unknown", draft: "Send this once", expected: "Send this once" },
+  ] as const)("reconciles a $status send receipt with the restored draft: $draft", async ({
+    status,
+    draft,
+    expected,
+  }) => {
+    const response = Promise.withResolvers<{
+      status: "accepted"
+      turnId: string
+    }>()
+    let requestId = ""
+    request.mockImplementation(async (method, params) => {
+      if (method === "engineSession/send") {
+        requestId = params.requestId
+        return response.promise
+      }
+      return {
+        ...snapshot(),
+        requests: requestId
+          ? [
+              {
+                requestId,
+                input: { requestId, text: "Send this once" },
+                status,
+              },
+            ]
+          : [],
+      }
+    })
+    const first = snapshot().session
+    await selectEngineSession(first)
+    useEngineStore.setState({ draft: textInputDraft("Send this once") })
+    const sending = sendEngineInput("Send this once")
+    useEngineStore.setState({ draft: textInputDraft(draft) })
+    await selectEngineSession({ ...first, id: "second" })
+    response.reject(new Error("Send response lost"))
+    await sending
+    await selectEngineSession(first)
+    expect(useEngineStore.getState().draft.text).toBe(expected)
+    expect(useEngineStore.getState().pendingRequestId).toBe(
+      status === "unknown" ? requestId : undefined,
+    )
+  })
+
+  it("restores each session's draft after selecting another session, starting a new session, or changing engines", async () => {
+    request.mockResolvedValue(snapshot())
+    const first = snapshot().session
+    const second = { ...first, id: "second" }
+    await selectEngineSession(first)
+    useEngineStore.setState({ draft: textInputDraft("First unfinished input") })
+    await selectEngineSession(second)
+    expect(useEngineStore.getState().draft.text).toBe("")
+    useEngineStore.setState({
+      draft: textInputDraft("Second unfinished input"),
+    })
+    startNewEngineSession()
+    expect(useEngineStore.getState().sessionId).toBeUndefined()
+    expect(useEngineStore.getState().draft.text).toBe("")
+    useEngineStore.setState({ draft: textInputDraft("New external input") })
+    chooseNewEngine("")
+    chooseNewEngine(engine.id)
+    expect(useEngineStore.getState().draft.text).toBe("New external input")
+    await selectEngineSession(first)
+    expect(useEngineStore.getState().draft.text).toBe("First unfinished input")
+    await selectEngineSession(second)
+    expect(useEngineStore.getState().draft.text).toBe("Second unfinished input")
+  })
+
+  it("consumes a parked draft only after acceptance and preserves later edits in another session", async () => {
+    const accepted = Promise.withResolvers<{
+      status: "accepted"
+      turnId: string
+    }>()
+    request.mockImplementation(async (method) =>
+      method === "engineSession/send" ? accepted.promise : snapshot(),
+    )
+    const first = snapshot().session
+    await selectEngineSession(first)
+    useEngineStore.setState({ draft: textInputDraft("Send this once") })
+    const sending = sendEngineInput("Send this once")
+    await selectEngineSession({ ...first, id: "second" })
+    useEngineStore.setState({ draft: textInputDraft("Keep this edit") })
+    accepted.resolve({ status: "accepted", turnId: "sent" })
+    await sending
+    expect(useEngineStore.getState().draft.text).toBe("Keep this edit")
+    await selectEngineSession(first)
+    expect(useEngineStore.getState().draft.text).toBe("")
+  })
+
   it("projects the accepted input before an already completed answer and ignores load replay", () => {
     const view = projectEngineSession(
       snapshot([
@@ -374,6 +470,7 @@ describe("external engine workspace", () => {
     expect(
       localStorage.getItem("yakitori.enginePending:external_session"),
     ).toBe(receipts[1])
+    expect(useEngineStore.getState().pendingRequestId).toBe(receipts[1])
     responses[1]?.({ status: "accepted", turnId: "second" })
     await second
     expect(

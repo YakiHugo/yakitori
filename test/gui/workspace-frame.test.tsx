@@ -745,9 +745,7 @@ it("attaches side excerpts immediately and edits their comments without changing
   const response = await screen.findByText("Side explanation")
   const mainDraft = useAppStore.getState().promptDraft
   selectQuote(response)
-  await user.click(
-    screen.getByRole("button", { name: "Quote in conversation" }),
-  )
+  await user.click(screen.getByRole("button", { name: "Add to chat" }))
   const side = () =>
     useWorkspaceStore.getState().tabs.find((tab) => tab.id === tabId)
   expect(side()).toMatchObject({
@@ -764,10 +762,7 @@ it("attaches side excerpts immediately and edits their comments without changing
     ],
   })
   expect(document.activeElement).toBe(
-    screen.getByRole("textbox", { name: "Message side chat" }),
-  )
-  await user.click(
-    screen.getByRole("button", { name: "Open excerpt 1: Side chat response" }),
+    screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
   )
   await user.type(
     screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
@@ -813,7 +808,7 @@ it("attaches side excerpts immediately and edits their comments without changing
   ).toEqual([])
 })
 
-it("adds a main excerpt directly and focuses the main composer while a side chat is open", async () => {
+it("opens a new main excerpt at its source and Escape removes it without changing the side chat", async () => {
   const user = userEvent.setup()
   useWorkspaceStore.getState().addTab("chat")
   render(
@@ -834,12 +829,15 @@ it("adds a main excerpt directly and focuses the main composer while a side chat
     </WorkspaceFrame>,
   )
   selectQuote(screen.getByText("Main explanation"))
-  await user.click(
-    screen.getByRole("button", { name: "Quote in conversation" }),
-  )
+  await user.click(screen.getByRole("button", { name: "Add to chat" }))
   expect(useAppStore.getState().promptExcerpts).toEqual([
     expect.objectContaining({ text: "Main explanation" }),
   ])
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Excerpt comment (optional)" }),
+  )
+  await user.keyboard("{Escape}")
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
   expect(document.activeElement).toBe(
     screen.getByRole("textbox", { name: "Message the Mate" }),
   )
