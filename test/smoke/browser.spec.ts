@@ -1339,9 +1339,7 @@ test("expired side chats dismiss excerpt actions and leave main chat quoting ava
       .getByRole("region", { name: "Response", exact: true })
       .getByText("Hello from faux.", { exact: true })
     await selectResponse(mainResponse)
-    await page
-      .getByRole("button", { name: "Quote in conversation", exact: true })
-      .click()
+    await page.getByRole("button", { name: "Add to chat", exact: true }).click()
     await expect(
       page
         .getByRole("main")

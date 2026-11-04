@@ -1397,7 +1397,7 @@ async function runOrderedInputFlow(
       selection?.addRange(range)
       node.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }))
     })
-    await page.getByRole("button", { name: "Quote in conversation" }).click()
+    await page.getByRole("button", { name: "Add to chat" }).click()
     const marker = page.getByRole("button", {
       name: "Open excerpt 1 in main conversation",
     })
@@ -1413,6 +1413,10 @@ async function runOrderedInputFlow(
         ),
       )
       .toEqual([{ text: "After attachment." }])
+    await expect(
+      page.getByRole("textbox", { name: "Excerpt comment (optional)" }),
+    ).toBeFocused()
+    await page.getByRole("button", { name: "Save comment" }).click()
     await marker.click()
     await page
       .getByRole("textbox", { name: "Excerpt comment (optional)" })
