@@ -44,9 +44,53 @@
 .activity-batch[data-grouped="true"] > .activity-batch-content {
   padding-top: 4px;
 }
+.activity-batch[data-grouped="true"] .activity-batch-viewport {
+  max-height: 14rem;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  padding-inline-end: 4px;
+}
 .activity-batch-viewport:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
+}
+@property --activity-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --activity-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+/* An inactive scroll timeline leaves both lengths at zero, so short batches
+   stay fully opaque. Scroll position drives the mask, not elapsed time. */
+@supports (animation-timeline: scroll(self y)) {
+  .activity-batch[data-grouped="true"] .activity-batch-viewport {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      #000 var(--activity-fade-top),
+      #000 calc(100% - var(--activity-fade-bottom)),
+      transparent
+    );
+    animation: activity-scroll-edges linear both;
+    animation-timeline: scroll(self y);
+  }
+  @keyframes activity-scroll-edges {
+    0%,
+    1% {
+      --activity-fade-top: 0px;
+      --activity-fade-bottom: 24px;
+    }
+    99%,
+    100% {
+      --activity-fade-top: 24px;
+      --activity-fade-bottom: 0px;
+    }
+  }
 }
 .tool-cell {
   min-width: 0;
