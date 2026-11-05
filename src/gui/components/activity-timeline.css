@@ -5,10 +5,92 @@
 }
 .agent-timeline-item {
   min-width: 0;
-  padding: 0 0 20px;
 }
-.agent-timeline-item:last-child {
-  padding-bottom: 0;
+.agent-timeline-item + .agent-timeline-item {
+  margin-top: var(--conversation-activity-gap);
+}
+.agent-timeline-item:is([data-kind="batch"], [data-kind="tool"])
+  + .agent-timeline-item:is([data-kind="batch"], [data-kind="tool"]) {
+  margin-top: 4px;
+}
+.activity-batch-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--conversation-detail-gap);
+  padding-block: 2px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
+}
+.activity-batch-trigger:not(.text-destructive):hover {
+  color: var(--foreground);
+}
+.activity-batch-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.activity-batch-viewport {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.activity-batch-viewport > * {
+  flex: none;
+}
+.activity-batch[data-grouped="true"] > .activity-batch-content {
+  padding-top: 4px;
+}
+.activity-batch[data-grouped="true"] .activity-batch-viewport {
+  max-height: 14rem;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  padding-inline-end: 4px;
+}
+.activity-batch-viewport:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+@property --activity-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --activity-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+/* An inactive scroll timeline leaves both lengths at zero, so short batches
+   stay fully opaque. Scroll position drives the mask, not elapsed time. */
+@supports (animation-timeline: scroll(self y)) {
+  .activity-batch[data-grouped="true"] .activity-batch-viewport {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      #000 var(--activity-fade-top),
+      #000 calc(100% - var(--activity-fade-bottom)),
+      transparent
+    );
+    animation: activity-scroll-edges linear both;
+    animation-timeline: scroll(self y);
+  }
+  @keyframes activity-scroll-edges {
+    0%,
+    1% {
+      --activity-fade-top: 0px;
+      --activity-fade-bottom: 24px;
+    }
+    99%,
+    100% {
+      --activity-fade-top: 24px;
+      --activity-fade-bottom: 0px;
+    }
+  }
 }
 .tool-cell {
   min-width: 0;
@@ -33,11 +115,12 @@
   min-width: 0;
   align-items: flex-start;
   gap: 8px;
-  padding: 7px 6px;
+  padding: 2px 0;
   border-radius: 6px;
+  color: var(--muted-foreground);
   text-align: left;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
 }
 .tool-trigger:focus-visible,
 .tool-resource-action:focus-visible {
@@ -61,13 +144,17 @@
   transform: rotate(90deg);
 }
 .tool-summary {
+  display: flex;
   flex: 1;
   min-width: 0;
+  align-items: baseline;
+  gap: var(--conversation-detail-gap);
 }
 .tool-title {
   display: flex;
+  flex: 1;
   min-width: 0;
-  gap: 7px;
+  gap: var(--conversation-detail-gap);
   align-items: baseline;
 }
 .tool-verb {
@@ -78,15 +165,28 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: color-mix(in oklab, var(--foreground) 85%, transparent);
+  color: var(--conversation-detail-foreground);
 }
 .tool-meta {
   display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
   flex-wrap: wrap;
-  column-gap: 10px;
-  font-size: 11px;
-  line-height: 17px;
+  column-gap: var(--conversation-detail-gap);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
   color: var(--muted-foreground);
+}
+.tool-meta > span {
+  overflow-wrap: anywhere;
+}
+.tool-cell:is(
+    [data-status="failed"],
+    [data-status="interrupted"],
+    [data-notice="true"]
+  )
+  .tool-summary {
+  display: block;
 }
 .tool-cell[data-status="failed"] :is(.tool-icon, .tool-verb, .tool-state) {
   color: var(--destructive);
@@ -97,15 +197,22 @@
   max-width: 42%;
   align-items: center;
   gap: 5px;
-  margin: 4px 4px 0 0;
-  padding: 5px 6px;
+  margin: 0;
+  padding: 6px;
   border-radius: 5px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
 }
 .tool-resource-action svg {
   flex: none;
+}
+.tool-resource-action[data-icon-only] {
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  max-width: none;
+  margin: 0;
+  padding: 7px;
 }
 .tool-resource-action span {
   overflow: hidden;
@@ -114,21 +221,48 @@
 }
 .tool-resource-action:hover {
   background: var(--muted);
-  color: var(--foreground);
 }
 .tool-details {
-  padding: 4px 0 8px 23px;
+  padding: 8px 0 4px var(--conversation-indent);
 }
 .tool-detail-surface {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  gap: var(--conversation-detail-gap);
 }
 .tool-error {
-  margin-bottom: 8px;
   color: var(--destructive);
-  font-size: 12px;
-  line-height: 20px;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.tool-collaboration-request {
+  color: var(--conversation-detail-foreground);
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-output {
+  min-width: 0;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--conversation-output-background);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  line-height: var(--text-code--line-height);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* State utilities can override colors. Typography stays outside layers because
+   this component sheet can load before Tailwind declares its base layer. */
+@layer components {
+  .tool-output {
+    color: var(--conversation-detail-foreground);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .tool-header,
@@ -143,8 +277,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px 12px;
-  margin: 2px 0 2px 27px;
-  padding-left: 12px;
+  margin: 2px 0 2px var(--conversation-indent);
 }
 .agent-collaboration-recipient {
   display: flex;
@@ -152,7 +285,8 @@
   min-width: 0;
   max-width: 100%;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
 }
 .agent-trace-link {
   display: inline-flex;
@@ -161,16 +295,14 @@
   gap: 6px;
   border-radius: 4px;
   padding: 3px 0;
-  color: var(--muted-foreground);
   text-align: left;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
 }
 .agent-trace-link span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.agent-trace-link:hover {
-  color: var(--foreground);
 }
 .agent-trace-link:focus-visible {
   outline: 2px solid var(--ring);

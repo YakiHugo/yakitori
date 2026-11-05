@@ -1,4 +1,10 @@
-import { Check, Circle, CircleDot } from "lucide-react"
+import {
+  Check,
+  ChevronRight,
+  Circle,
+  CircleDot,
+  ListChecks,
+} from "lucide-react"
 import { useId, useState } from "react"
 import type {
   SessionPlan,
@@ -6,7 +12,9 @@ import type {
 } from "../../../protocol/user-interaction.ts"
 import { getAppRpcClient } from "../../lib/rpc-client.ts"
 import { useAppStore } from "../../store/app-store.ts"
+import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { Button } from "../ui/button.tsx"
+import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { Field, FieldGroup, FieldLabel, Input } from "../ui/field.tsx"
 
 export function UserQuestionsCell({
@@ -55,7 +63,7 @@ export function UserQuestionsCell({
           .finally(() => setSubmitting(false))
       }}
     >
-      <p className="text-sm font-medium">
+      <p className="text-body font-medium">
         {done ? "Questions answered" : "Your input"}
       </p>
       <FieldGroup>
@@ -101,7 +109,7 @@ export function UserQuestionsCell({
         ))}
       </FieldGroup>
       {error ? (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-detail text-destructive">
           {error}
         </p>
       ) : null}
@@ -125,38 +133,60 @@ export function UserQuestionsCell({
 }
 
 export function PlanCell({ plan }: Readonly<{ plan: SessionPlan }>) {
+  const [open, setOpen] = useState(false)
+  const contentId = useId()
+  const completed = plan.plan.filter(
+    (step) => step.status === "completed",
+  ).length
   return (
-    <section
-      aria-label="Task plan"
-      className="flex flex-col gap-3 rounded-lg border p-4"
-    >
-      <p className="text-sm font-medium">Task plan</p>
-      {plan.explanation ? (
-        <p className="text-sm text-muted-foreground">{plan.explanation}</p>
-      ) : null}
-      <ol className="flex flex-col gap-2">
-        {plan.plan.map((step, index) => {
-          const Icon =
-            step.status === "completed"
-              ? Check
-              : step.status === "in_progress"
-                ? CircleDot
-                : Circle
-          return (
-            <li
-              // biome-ignore lint/suspicious/noArrayIndexKey: Each persisted plan update is an immutable tool result.
-              key={`${index}:${step.step}`}
-              className="flex items-start gap-2 text-sm"
-            >
-              <Icon
-                aria-label={step.status.replaceAll("_", " ")}
-                className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-              />
-              <span>{step.step}</span>
-            </li>
-          )
-        })}
-      </ol>
-    </section>
+    <Collapsible open={open} onOpenChange={setOpen} className="group/plan">
+      <CollapsibleTrigger
+        aria-controls={contentId}
+        className="activity-batch-trigger text-muted-foreground"
+      >
+        <ListChecks aria-hidden="true" className="size-4 shrink-0" />
+        <span>
+          Updated plan · {completed}/{plan.plan.length} completed
+        </span>
+        <ChevronRight
+          aria-hidden="true"
+          className="size-3 shrink-0 transition-transform group-data-[state=open]/plan:rotate-90"
+        />
+      </CollapsibleTrigger>
+      <TranscriptDisclosureContent
+        id={contentId}
+        open={open}
+        className="space-y-3 pt-2"
+      >
+        {plan.explanation ? (
+          <p className="text-detail text-muted-foreground">
+            {plan.explanation}
+          </p>
+        ) : null}
+        <ol className="flex flex-col gap-2">
+          {plan.plan.map((step, index) => {
+            const Icon =
+              step.status === "completed"
+                ? Check
+                : step.status === "in_progress"
+                  ? CircleDot
+                  : Circle
+            return (
+              <li
+                // biome-ignore lint/suspicious/noArrayIndexKey: Each persisted plan update is an immutable tool result.
+                key={`${index}:${step.step}`}
+                className="flex items-start gap-2 text-detail"
+              >
+                <Icon
+                  aria-label={step.status.replaceAll("_", " ")}
+                  className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                />
+                <span>{step.step}</span>
+              </li>
+            )
+          })}
+        </ol>
+      </TranscriptDisclosureContent>
+    </Collapsible>
   )
 }

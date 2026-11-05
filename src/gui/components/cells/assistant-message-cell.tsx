@@ -45,7 +45,7 @@ export function AssistantMessageCell({
       {entry.sources?.length ? (
         <section
           aria-label="Sources"
-          className="mt-3 text-sm text-muted-foreground"
+          className="mt-3 text-caption text-muted-foreground"
         >
           <div className="mb-1 font-medium">Sources</div>
           <ol className="flex flex-wrap gap-x-4 gap-y-1">

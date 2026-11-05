@@ -12,7 +12,7 @@
 :root {
   --radius: 0.625rem;
   --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --foreground: #1a1c1f;
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -84,6 +84,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
   }
 }
 
@@ -91,20 +92,20 @@
    between messages. One-sided margins avoid collapsed sibling margins
    cancelling a tighter heading/list relationship. */
 .markdown {
-  --prose-block-gap: calc(var(--spacing) * 3);
-  --prose-section-gap: calc(var(--spacing) * 6);
-  --prose-related-gap: calc(var(--spacing) * 2);
-  --prose-h1-size: var(--text-heading-lg);
-  --prose-h2-size: var(--text-heading-md);
-  --prose-h3-size: var(--text-heading-sm);
+  --prose-font-size: var(--text-body);
+  --prose-space: calc(var(--prose-font-size) / 4);
+  --prose-block-gap: calc(var(--prose-space) * 4);
+  --prose-section-gap: calc(var(--prose-space) * 4);
+  --prose-related-gap: var(--prose-space);
+  --prose-small-font-size: max(
+    var(--text-code),
+    calc(var(--prose-font-size) * 0.875)
+  );
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: var(--text-body);
+  font-size: var(--prose-font-size);
   line-height: var(--text-body--line-height);
-  color: var(
-    --prose-color,
-    color-mix(in oklab, var(--foreground) 85%, var(--background))
-  );
+  color: var(--prose-color, var(--foreground));
 }
 .markdown-compact {
   --prose-color: var(--muted-foreground);
@@ -113,13 +114,9 @@
     var(--foreground) 35%,
     var(--muted-foreground)
   );
-  --prose-block-gap: calc(var(--spacing) * 2);
-  --prose-section-gap: calc(var(--spacing) * 4);
-  --prose-related-gap: var(--spacing);
-  --prose-h1-size: var(--text-heading-md);
-  --prose-h2-size: var(--text-heading-sm);
-  --prose-h3-size: var(--text-body);
-  font-size: var(--text-detail);
+  --prose-font-size: var(--text-detail);
+  --prose-block-gap: var(--conversation-detail-gap);
+  --prose-section-gap: var(--conversation-detail-gap);
   line-height: var(--text-detail--line-height);
 }
 .markdown
@@ -131,37 +128,63 @@
   margin-top: var(--prose-block-gap);
 }
 .markdown :where(p + ul, p + ol) {
+  margin-top: 0;
+}
+.markdown > :where(p) + :where(ul, ol) {
   margin-top: var(--prose-related-gap);
+}
+.markdown > :where(ul, ol) + :where(p) {
+  margin-top: calc(var(--prose-space) * 2);
+}
+.markdown > :where(ul, ol) + :where(ul, ol) {
+  margin-top: 0;
 }
 .markdown :where(h1, h2, h3, h4, h5, h6) {
   margin-top: var(--prose-section-gap);
   font-weight: 600;
-  line-height: var(--text-heading-sm--line-height);
+  line-height: 1.625;
 }
 .markdown :where(h1) {
-  font-size: var(--prose-h1-size);
-  line-height: var(--text-heading-lg--line-height);
+  font-size: calc(var(--prose-font-size) * 1.5);
+  line-height: calc(var(--prose-space) * 8);
 }
 .markdown :where(h2) {
-  font-size: var(--prose-h2-size);
-  line-height: var(--text-heading-md--line-height);
+  font-size: calc(var(--prose-font-size) * 1.25);
+  line-height: calc(var(--prose-space) * 7);
 }
 .markdown :where(h3) {
-  font-size: var(--prose-h3-size);
+  font-size: calc(var(--prose-font-size) * 1.125);
+  line-height: calc(var(--prose-space) * 7);
 }
 .markdown :where(h4, h5, h6) {
   font-size: 1em;
 }
-.markdown :where(h1, h2, h3, h4, h5, h6) + * {
+.markdown :where(h1, h2, h3) + :where(p, ul, ol, blockquote) {
   margin-top: var(--prose-related-gap);
+}
+.markdown :where(h1) + :where(p, ul, ol, blockquote) {
+  margin-top: calc(var(--prose-space) * 2);
+}
+.markdown :where(h4) + :where(p, ul, ol, blockquote) {
+  margin-top: 0;
+}
+/* Process text keeps headings on its own scale, so a model's Markdown cannot
+   promote an intermediate thought above the answer's reading hierarchy. */
+.markdown-compact :where(h1, h2, h3, h4, h5, h6) {
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 500;
 }
 .markdown :where(strong, b) {
   font-size: inherit;
   color: var(--prose-emphasis, var(--foreground));
-  font-weight: inherit;
+  font-weight: 600;
 }
 .markdown :where(ul, ol) {
-  padding-inline-start: calc(var(--spacing) * 6);
+  padding-inline-start: calc(
+    var(--prose-font-size) *
+    var(--text-body--line-height)
+  );
   list-style-position: outside;
 }
 .markdown :where(ul) {
@@ -177,25 +200,23 @@
   list-style-type: square;
 }
 .markdown :where(li) {
-  padding-inline-start: var(--spacing);
+  padding-inline-start: calc(var(--prose-space) * 1.5);
 }
 .markdown :where(li + li) {
-  margin-top: var(--spacing);
-}
-.markdown :where(li:has(> p) + li) {
-  margin-top: var(--prose-block-gap);
+  margin-top: 0;
 }
 .markdown :where(li > ul, li > ol) {
-  margin-top: var(--spacing);
+  margin-top: 0;
 }
 .markdown :where(ul > li)::marker,
 .markdown :where(ol > li)::marker {
   color: inherit;
-  font-weight: 400;
+  font-weight: 600;
 }
 .markdown :where(blockquote) {
   position: relative;
-  padding-inline-start: calc(var(--spacing) * 4);
+  padding-block: calc(var(--prose-space) * 2);
+  padding-inline-start: calc(var(--prose-space) * 6);
   border: 0;
   color: inherit;
   font-style: normal;
@@ -204,18 +225,18 @@
   content: "";
   position: absolute;
   inset-inline-start: 0;
-  inset-block: 0;
-  width: var(--spacing);
-  border-radius: calc(var(--spacing) / 2);
+  inset-block: calc(var(--prose-space) * 2);
+  width: var(--prose-space);
+  border-radius: calc(var(--prose-space) / 2);
   background: var(--border);
 }
 .markdown :where(hr) {
-  margin-top: var(--prose-section-gap);
+  margin-top: calc(var(--prose-space) * 7);
   border: 0;
   border-top: 1px solid var(--border);
 }
 .markdown :where(hr) + * {
-  margin-top: var(--prose-section-gap);
+  margin-top: calc(var(--prose-space) * 7);
 }
 .markdown .katex-display {
   max-width: 100%;
@@ -223,10 +244,6 @@
   padding-block: var(--spacing);
   overflow-x: auto;
   overflow-y: hidden;
-}
-.markdown > :first-child,
-.markdown :where(li, blockquote) > :first-child {
-  margin-top: 0;
 }
 .markdown :where(code) {
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -244,16 +261,28 @@
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+.markdown .markdown-code-block {
+  margin-top: calc(var(--prose-space) * 5);
+}
 .markdown :where(pre) {
   background: var(--muted);
   border-radius: 12px;
   padding: calc(var(--spacing) * 4);
   overflow-x: auto;
-  line-height: 1.45;
+  font-size: var(--prose-small-font-size);
+  line-height: calc(var(--text-code) * var(--text-code--line-height));
+}
+.markdown .markdown-code-block + * {
+  margin-top: calc(var(--prose-space) * 5);
 }
 .markdown :where(pre code) {
   background: transparent;
   padding: 0;
+  font-size: inherit;
+}
+.markdown > :first-child,
+.markdown :where(li, blockquote) > :first-child {
+  margin-top: 0;
 }
 /* Shiki dual-theme output: token colors arrive as CSS variables; the .dark
    variant flips them. The block background stays the app's muted surface. */
@@ -371,7 +400,7 @@
   overflow-x: auto;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: var(--text-detail);
+  font-size: var(--prose-small-font-size);
 }
 .markdown :where(th, td) {
   padding: calc(var(--spacing) * 2) calc(var(--spacing) * 6)

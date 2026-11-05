@@ -3,6 +3,22 @@
 :root {
   --conversation-width: 48rem;
   --conversation-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --conversation-turn-gap: 32px;
+  --conversation-response-gap: 16px;
+  --conversation-activity-gap: 16px;
+  --conversation-detail-gap: 8px;
+  --conversation-indent: 16px;
+  --conversation-output-background: var(--muted);
+  --conversation-detail-foreground: color-mix(
+    in oklab,
+    var(--foreground) 85%,
+    var(--background)
+  );
+  --user-message-background: #000000;
+  --user-message-foreground: #ffffff;
+}
+.dark {
+  --user-message-background: rgb(50 50 50 / 85%);
 }
 .conversation-surface {
   min-width: 0;
@@ -14,7 +30,8 @@
   min-height: 32px;
   padding-bottom: 8px;
   text-align: left;
-  font-size: 14px;
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
   color: var(--muted-foreground);
 }
 .turn-activity-header[data-completed="true"] {
@@ -38,7 +55,57 @@
   /* The transcript owns following and restoration. Native scroll anchoring
      otherwise moves a disclosure trigger while content grows below it. */
   overflow-anchor: none;
-  padding-bottom: calc(var(--conversation-dock-height, 0px) + 32px);
+  gap: var(--conversation-turn-gap);
+  padding-top: var(--conversation-turn-gap);
+  padding-bottom: calc(
+    var(--conversation-dock-height, 0px) +
+    var(--conversation-turn-gap)
+  );
+}
+.conversation-response {
+  display: flex;
+  flex-direction: column;
+}
+.conversation-response > * + * {
+  margin-top: var(--conversation-response-gap);
+}
+.conversation-activity-content {
+  padding-top: var(--conversation-response-gap);
+}
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--conversation-detail-gap);
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+}
+.conversation-response > .message-actions {
+  margin-top: var(--conversation-detail-gap);
+}
+.reasoning-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--conversation-detail-gap);
+  padding-block: 4px;
+  color: var(--muted-foreground);
+  font-size: var(--text-detail);
+  line-height: var(--text-detail--line-height);
+}
+.reasoning-trigger:is(:hover, :focus-visible) {
+  color: var(--foreground);
+}
+.reasoning-content {
+  max-height: 24rem;
+  overflow-y: auto;
+  padding-block: var(--conversation-detail-gap);
+}
+.reasoning-trace,
+.reasoning-entry {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--conversation-detail-gap);
 }
 .conversation-dock {
   position: absolute;
@@ -191,6 +258,17 @@
   animation: conversation-appear 150ms ease-out;
 }
 
+.message-bubble,
+.side-chat-user-bubble {
+  max-width: 70%;
+  border-radius: 22px;
+  background: var(--user-message-background);
+  color: var(--user-message-foreground);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  overflow-wrap: anywhere;
+}
+
 .message-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -229,8 +307,8 @@
   gap: 7px;
   padding: 8px;
   color: var(--muted-foreground);
-  font-size: 10px;
-  line-height: 14px;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
 }
 .message-image:hover {
   border-color: var(--ring);

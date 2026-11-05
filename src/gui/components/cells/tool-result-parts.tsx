@@ -21,10 +21,7 @@ export function ToolResultParts({
         const key = `${toolCallId}:${index}`
         if (part.type === "text")
           return (
-            <pre
-              key={key}
-              className="font-mono text-xs leading-5 whitespace-pre-wrap break-words"
-            >
+            <pre key={key} className="tool-output max-h-96">
               {part.text}
             </pre>
           )
@@ -34,7 +31,7 @@ export function ToolResultParts({
             : rolloutAssetUrl(part.file, apiBase)
         if (url === undefined)
           return (
-            <p key={key} className="text-xs text-muted-foreground">
+            <p key={key} className="text-caption text-muted-foreground">
               {part.type === "document" ? "PDF" : "Image"} preview unavailable
             </p>
           )
@@ -58,7 +55,7 @@ export function ToolResultParts({
                   },
                 )
               }}
-              className="block text-sm underline underline-offset-2"
+              className="block text-caption underline underline-offset-2"
             >
               Open PDF: {part.name}
             </a>
@@ -80,7 +77,7 @@ export function ToolResultParts({
         )
       })}
       {openError === undefined ? null : (
-        <p role="alert" className="text-xs text-destructive">
+        <p role="alert" className="text-caption text-destructive">
           {openError}
         </p>
       )}

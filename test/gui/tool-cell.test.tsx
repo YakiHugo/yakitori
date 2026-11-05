@@ -34,7 +34,7 @@ afterEach(() => {
 })
 
 describe("tool cell", () => {
-  it("copies the full file location from the collapsed row without opening output", async () => {
+  it("shows a short file label and copies its full location without opening output", async () => {
     const user = userEvent.setup()
     const writeText = vi.spyOn(navigator.clipboard, "writeText")
     render(
@@ -61,6 +61,10 @@ describe("tool cell", () => {
         }}
       />,
     )
+    expect(screen.getByText("index.ts").getAttribute("title")).toBe(
+      "src/index.ts",
+    )
+    expect(screen.queryByText("src/index.ts", { exact: true })).toBeNull()
     await user.click(screen.getByRole("button", { name: "Copy path" }))
     expect(writeText).toHaveBeenCalledExactlyOnceWith(
       "/workspace/src/index.ts:12",

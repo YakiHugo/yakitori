@@ -1,20 +1,17 @@
-/* Shared reading and interface roles. Size and leading travel together;
-   inline emphasis stays on the surrounding text's scale.
-   Spacing follows Carbon's proximity principle: related elements stay closer
-   than separate groups. The 4px scale also backs Tailwind's gap/padding utilities.
-   https://www.carbondesignsystem.com/elements/spacing/overview/ */
+/* Codex desktop 26.1029.61003 defaults to system fonts and 14px / 1.625 chat text.
+   Keep interface spacing on the 4px grid; prose derives its rhythm from type. */
 @theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
   --spacing: 0.25rem;
-  --text-body: 0.9375rem;
-  --text-body--line-height: 1.6;
-  --text-detail: 0.875rem;
-  --text-detail--line-height: 1.571429;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.625;
+  --text-code: 0.75rem;
+  --text-code--line-height: 1.666667;
+  --text-detail: 0.8125rem;
+  --text-detail--line-height: 1.538462;
   --text-caption: 0.75rem;
   --text-caption--line-height: 1.333333;
-  --text-heading-sm: 1rem;
-  --text-heading-sm--line-height: 1.5;
-  --text-heading-md: 1.125rem;
-  --text-heading-md--line-height: 1.333333;
-  --text-heading-lg: 1.25rem;
-  --text-heading-lg--line-height: 1.4;
 }

@@ -1211,12 +1211,9 @@ test("failed tools show their full error on narrow screens and command output st
     .getByRole("region", { name: "Response", exact: true })
     .last()
   await commandResponse.getByRole("button", { name: /^Worked for/ }).click()
-  await commandResponse
-    .getByRole("button", { name: "Run", exact: true })
-    .click()
   const command = commandResponse.locator(".tool-cell")
   await command.getByRole("button", { name: /Run/ }).click()
-  const output = command.locator(".tool-detail-surface .overflow-auto")
+  const output = command.locator(".tool-output")
   await expect(output).toContainText("output line")
   const geometry = await output.evaluate((node) => ({
     height: node.clientHeight,
@@ -1232,13 +1229,10 @@ test("failed tools show their full error on narrow screens and command output st
     node.scrollTop = node.scrollHeight
   })
   const scrollTop = await output.evaluate((node) => node.scrollTop)
-  const group = commandResponse.getByRole("button", {
-    name: "Run",
-    exact: true,
-  })
-  await group.click()
+  const history = commandResponse.getByRole("button", { name: /^Worked for/ })
+  await history.click()
   await expect(output).toBeHidden()
-  await group.click()
+  await history.click()
   expect(await original.evaluate((node) => node.isConnected)).toBe(true)
   expect(await output.evaluate((node) => node.scrollTop)).toBe(scrollTop)
   await expect(command.getByRole("button", { name: /Run/ })).toHaveAttribute(
@@ -1247,10 +1241,11 @@ test("failed tools show their full error on narrow screens and command output st
   )
 })
 
-test("long tool groups retain opened output across folds and reveal offscreen rows", async ({
+test("long tool groups bound details, fade scroll edges and retain opened output across folds", async ({
   page,
   renderingApp,
 }, testInfo) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" })
   await writeFile(
     join(renderingApp.workspace, "large.ts"),
     Array.from({ length: 200 }, (_, index) => `Source row ${index + 1}`).join(
@@ -1270,8 +1265,30 @@ test("long tool groups retain opened output across folds and reveal offscreen ro
   const response = page.getByRole("region", { name: "Response", exact: true })
   const root = response.getByRole("button", { name: /^Worked for/ })
   await root.click()
-  const group = response.getByRole("button", { name: "Read 24", exact: true })
+  const group = response.getByRole("button", { name: "24 reads", exact: true })
   await group.click()
+  const viewport = response.getByRole("region", {
+    name: "Activity details",
+    exact: true,
+  })
+  const edgeFades = () =>
+    viewport.evaluate((node) => {
+      const style = getComputedStyle(node)
+      return {
+        top: Number.parseFloat(style.getPropertyValue("--activity-fade-top")),
+        bottom: Number.parseFloat(
+          style.getPropertyValue("--activity-fade-bottom"),
+        ),
+      }
+    })
+  const geometry = await viewport.evaluate((node) => ({
+    height: node.clientHeight,
+    scrollable: node.scrollHeight > node.clientHeight,
+  }))
+  expect(geometry.height).toBe(224)
+  expect(geometry.scrollable).toBe(true)
+  await expect(viewport).toHaveCSS("mask-image", /linear-gradient/)
+  await expect.poll(edgeFades).toEqual({ top: 0, bottom: 24 })
   const rows = response.locator(".tool-cell")
   await expect(rows).toHaveCount(24)
   await rows.locator(".tool-trigger").evaluateAll((buttons) => {
@@ -1280,27 +1297,96 @@ test("long tool groups retain opened output across folds and reveal offscreen ro
   const output = rows.first().locator("pre")
   const original = await output.elementHandle()
   if (!original) throw new Error("File output is missing.")
+  await viewport.evaluate((node) => {
+    node.scrollTop = 100
+  })
+  const scrollTop = await viewport.evaluate((node) => node.scrollTop)
+  expect(scrollTop).toBeGreaterThan(0)
   await group.click()
   await expect(output).toBeHidden()
   await group.click()
+  await expect
+    .poll(() => viewport.evaluate((node) => node.scrollTop))
+    .toBe(scrollTop)
   await root.click()
   await expect(output).toBeHidden()
   await root.click()
   expect(await original.evaluate((node) => node.isConnected)).toBe(true)
+  await expect
+    .poll(() => viewport.evaluate((node) => node.scrollTop))
+    .toBe(scrollTop)
   await expect(rows.locator('.tool-trigger[aria-expanded="true"]')).toHaveCount(
     24,
   )
   const last = rows.last()
-  await last.scrollIntoViewIfNeeded()
+  await last.locator(".tool-trigger").scrollIntoViewIfNeeded()
   await expect(last.locator(".tool-trigger")).toBeInViewport()
   await expect(last.locator("pre")).toContainText("Source row 200")
   await expect(last.locator(".tool-detail-surface")).toHaveCSS(
     "border-top-width",
     "0px",
   )
-  await last.screenshot({
+  await viewport.evaluate((node) => {
+    node.scrollTop = node.scrollHeight
+  })
+  await expect.poll(edgeFades).toEqual({ top: 24, bottom: 0 })
+  // Reduced motion removes time-based effects, but an edge must still say
+  // which direction contains hidden actions as the reader scrolls.
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await viewport.evaluate((node) => {
+    node.scrollTop = 0
+  })
+  await expect.poll(edgeFades).toEqual({ top: 0, bottom: 24 })
+  await viewport.evaluate((node) => {
+    node.scrollTop = node.scrollHeight
+  })
+  await expect.poll(edgeFades).toEqual({ top: 24, bottom: 0 })
+  await viewport.screenshot({
     path: testInfo.outputPath("tool-detail-borderless.png"),
   })
+})
+
+test("short tool groups keep both edge rows fully visible without a fade", async ({
+  page,
+  renderingApp,
+}) => {
+  await writeFile(join(renderingApp.workspace, "short.ts"), "Short source.\n")
+  const prompt = "Check a short group of file reads."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(
+    prompt,
+    "read_file",
+    { path: "short.ts", limit: 1 },
+    2,
+  )
+  await renderingApp.append(prompt, "Checked both files.")
+  await renderingApp.finish(prompt)
+  const response = page.getByRole("region", { name: "Response", exact: true })
+  await response.getByRole("button", { name: /^Worked for/ }).click()
+  await response.getByRole("button", { name: "2 reads", exact: true }).click()
+  const viewport = response.getByRole("region", {
+    name: "Activity details",
+    exact: true,
+  })
+  await viewport.scrollIntoViewIfNeeded()
+  await expect
+    .poll(() =>
+      viewport.evaluate((node) => {
+        const style = getComputedStyle(node)
+        return {
+          scrollable: node.scrollHeight > node.clientHeight,
+          top: Number.parseFloat(style.getPropertyValue("--activity-fade-top")),
+          bottom: Number.parseFloat(
+            style.getPropertyValue("--activity-fade-bottom"),
+          ),
+        }
+      }),
+    )
+    .toEqual({ scrollable: false, top: 0, bottom: 0 })
+  const rows = viewport.getByRole("button", { name: /Read short.ts/ })
+  await expect(rows).toHaveCount(2)
+  await expect(rows.first()).toBeInViewport({ ratio: 1 })
+  await expect(rows.last()).toBeInViewport({ ratio: 1 })
 })
 
 for (const reducedMotion of ["no-preference", "reduce"] as const) {
@@ -1323,6 +1409,10 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     const response = page.getByRole("region", { name: "Response", exact: true })
     const toggle = response.getByRole("button", { name: /^Worked for/ })
     const panel = response.locator(".conversation-disclosure")
+    await expect(panel).toBeHidden()
+    await expect(panel.locator("ol")).toHaveCount(1)
+    await page.reload()
+    await expect(toggle).toBeVisible()
     await expect(panel.locator("ol")).toHaveCount(0)
     await toggle.click()
     const reasoning = response.getByRole("button", {
@@ -1389,8 +1479,17 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
 test("preserves streamed reasoning and the final answer through completion and reload", async ({
   page,
   renderingApp,
-}) => {
+}, testInfo) => {
   const prompt = "Check reasoning display identity"
+  const interimText = "I will inspect the saved file."
+  await writeFile(
+    join(renderingApp.workspace, "hierarchy.txt"),
+    "Saved file content.\n",
+  )
+  const fontSize = (locator: Locator) =>
+    locator.evaluate((node) =>
+      Number.parseFloat(getComputedStyle(node).fontSize),
+    )
   await renderingApp.send(prompt)
   await renderingApp.think(
     prompt,
@@ -1401,35 +1500,95 @@ test("preserves streamed reasoning and the final answer through completion and r
   ).toHaveCount(1)
   await page.getByRole("button", { name: "Reasoning…", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
   await expect(
     page.getByText("Checking the complete reasoning body.", { exact: true }),
   ).toBeVisible()
+  await renderingApp.append(prompt, interimText)
+  await renderingApp.callTool(prompt, "read_file", { path: "hierarchy.txt" })
   await renderingApp.append(prompt, "The final answer is ready.")
+  const finalMessage = page
+    .locator(".markdown")
+    .filter({ hasText: /^The final answer is ready\.$/ })
+  await expect(finalMessage).toBeVisible()
+  const liveFinalFontSize = await fontSize(finalMessage)
   await renderingApp.finish(prompt)
-  await expect(
-    page.getByText("The final answer is ready.", { exact: true }),
-  ).toBeVisible()
+  await expect(finalMessage).toBeVisible()
+  expect(await fontSize(finalMessage)).toBe(liveFinalFontSize)
+  const response = page.getByRole("region", { name: "Response", exact: true })
   await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
+  await expect(response.getByText(interimText, { exact: true })).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Reasoning", exact: true }),
   ).toHaveCount(1)
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page.getByRole("button", { name: "Reasoning", exact: true }),
+  ).toHaveAttribute("aria-expanded", "true")
+  await expect(
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
+  const processMessage = response
+    .locator(".markdown")
+    .filter({ hasText: interimText })
+  const reasoningBody = response.getByText(
+    "Checking the complete reasoning body.",
+    {
+      exact: true,
+    },
+  )
+  const processFontSize = await fontSize(processMessage)
+  const reasoningFontSize = await fontSize(reasoningBody)
+  expect(processFontSize).toBe(liveFinalFontSize)
+  expect(reasoningFontSize).toBeLessThan(liveFinalFontSize)
+  expect(
+    await fontSize(
+      response
+        .locator(".reasoning-trace")
+        .getByText("Inspecting output", { exact: true }),
+    ),
+  ).toBeLessThanOrEqual(reasoningFontSize)
+  const row = response.locator(".tool-cell")
+  const toolToggle = row.getByRole("button", { name: /Read.*hierarchy\.txt/ })
+  expect(await fontSize(toolToggle)).toBe(reasoningFontSize)
+  const metadataFontSize = await fontSize(
+    response.locator(".message-actions time"),
+  )
+  expect(metadataFontSize).toBeLessThan(processFontSize)
+  expect(metadataFontSize).toBeLessThan(reasoningFontSize)
+  expect(
+    await reasoningBody.evaluate((node) => getComputedStyle(node).color),
+  ).not.toBe(
+    await finalMessage.evaluate((node) => getComputedStyle(node).color),
+  )
+  await toolToggle.click()
+  await expect(row.getByText(/Saved file content\./)).toBeVisible()
+  expect(await fontSize(row.locator(".tool-output"))).toBeLessThanOrEqual(
+    reasoningFontSize,
+  )
+  await page.screenshot({
+    path: testInfo.outputPath("conversation-hierarchy-light.png"),
+    animations: "disabled",
+  })
   await page.reload()
-  await expect(
-    page.getByText("The final answer is ready.", { exact: true }),
-  ).toBeVisible()
+  await expect(finalMessage).toBeVisible()
+  expect(await fontSize(finalMessage)).toBe(liveFinalFontSize)
   await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
+  await expect(response.getByText(interimText, { exact: true })).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Reasoning", exact: true }),
   ).toHaveCount(1)
   await page.getByRole("button", { name: "Reasoning", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
   await expect(
     page.getByText("Checking the complete reasoning body.", { exact: true }),

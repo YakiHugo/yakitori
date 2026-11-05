@@ -20,7 +20,7 @@ export function ToolDetailView({
 }>) {
   if (detail === undefined) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         {pending ? "Waiting for a result…" : "No output returned."}
       </p>
     )
@@ -40,13 +40,11 @@ export function ToolDetailView({
             workspaceRoot={workspaceRoot}
           />
           {detail.truncated ? (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-caption text-muted-foreground">
               Partial file view
             </p>
           ) : null}
-          <pre className="max-h-96 overflow-auto rounded-sm bg-background/55 px-3 py-2 font-mono text-xs leading-5 whitespace-pre-wrap">
-            {detail.content}
-          </pre>
+          <pre className="tool-output max-h-96">{detail.content}</pre>
         </div>
       )
     case "file_matches":
@@ -58,7 +56,7 @@ export function ToolDetailView({
                 target={{ kind: "file", path: group.path }}
                 workspaceRoot={workspaceRoot}
               />
-              <div className="space-y-0.5 font-mono text-xs">
+              <div className="space-y-0.5 font-mono text-code">
                 {group.matches.map((match) => (
                   <FileMatchRow
                     key={`${match.line ?? "line"}:${match.text ?? ""}`}
@@ -72,7 +70,9 @@ export function ToolDetailView({
             </div>
           ))}
           {detail.truncated ? (
-            <p className="text-[11px] text-muted-foreground">Partial results</p>
+            <p className="text-caption text-muted-foreground">
+              Partial results
+            </p>
           ) : null}
         </div>
       )
@@ -87,7 +87,7 @@ export function ToolDetailView({
             />
           ))}
           {detail.truncated ? (
-            <p className="pt-1 text-[11px] text-muted-foreground">
+            <p className="pt-1 text-caption text-muted-foreground">
               Partial results
             </p>
           ) : null}
@@ -114,7 +114,7 @@ export function ToolDetailView({
           {detail.changes.map((change) => (
             <div key={`${change.kind}:${change.path}`} className="space-y-2">
               <div className="flex items-center gap-2">
-                <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                <span className="text-caption font-medium tracking-wide text-muted-foreground uppercase">
                   {change.kind}
                 </span>
                 <FileLink
@@ -159,7 +159,7 @@ export function ToolDetailView({
       )
     case "collaboration":
       return detail.text === undefined ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           {pending ? "Waiting for a result…" : "No output returned."}
         </p>
       ) : (
@@ -253,8 +253,8 @@ function ActionButton({
       type="button"
       title={error ?? title}
       className={cn(
-        "group/action flex w-full min-w-0 items-baseline gap-2 rounded-sm px-1 py-0.5 text-left text-xs outline-none hover:bg-background/65 focus-visible:bg-background/80",
-        mono && "font-mono",
+        "group/action flex w-full min-w-0 items-baseline gap-2 rounded-sm px-1 py-0.5 text-left text-caption outline-none hover:bg-background/65 focus-visible:bg-background/80",
+        mono && "font-mono text-code",
         error !== undefined && "text-destructive",
       )}
       onClick={() => {
@@ -269,11 +269,18 @@ function ActionButton({
           {mutedPrefix}
         </span>
       )}
-      <span className="min-w-0 truncate text-foreground/85 group-hover/action:text-foreground">
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          error === undefined
+            ? "text-(--conversation-detail-foreground) group-hover/action:text-foreground"
+            : "text-destructive",
+        )}
+      >
         {error ?? label}
       </span>
       {secondary === undefined ? null : (
-        <span className="ml-auto hidden shrink-0 text-muted-foreground sm:inline">
+        <span className="ml-auto hidden shrink-0 text-caption text-muted-foreground sm:inline">
           {secondary}
         </span>
       )}
@@ -286,11 +293,7 @@ function ActionButton({
 }
 
 function TextOutput({ text }: { readonly text: string }) {
-  return (
-    <pre className="max-h-96 overflow-auto font-mono text-xs leading-5 whitespace-pre-wrap text-foreground/85">
-      {text}
-    </pre>
-  )
+  return <pre className="tool-output max-h-96">{text}</pre>
 }
 
 function CommandOutput({
@@ -303,11 +306,11 @@ function CommandOutput({
   errorMessage?: string | undefined
 }>) {
   return (
-    <pre className="max-h-96 overflow-auto rounded-sm bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
+    <pre className="tool-output max-h-96">
       {`$ ${command}`}
       {resultText === undefined ? "" : `\n${resultText}`}
       {errorMessage === undefined || errorMessage === resultText ? null : (
-        <span className="block text-red-300">{errorMessage}</span>
+        <span className="block text-destructive">{errorMessage}</span>
       )}
     </pre>
   )

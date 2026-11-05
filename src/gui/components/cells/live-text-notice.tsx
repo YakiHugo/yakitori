@@ -10,7 +10,7 @@ export function LiveTextNotice({
 }) {
   if (!entry.incomplete) return null
   return (
-    <p className="py-1 text-xs text-muted-foreground">
+    <p className="py-1 text-caption text-muted-foreground">
       {entry.status === "suspended"
         ? "Live text paused. Waiting to reconnect."
         : entry.status === "partial"

@@ -16,7 +16,7 @@ export function TurnTerminalCell({
   return (
     <div
       className={cn(
-        "flex items-center gap-2 text-sm",
+        "flex items-center gap-2 text-detail",
         entry.state === "failed" ? "text-destructive" : "text-muted-foreground",
       )}
     >

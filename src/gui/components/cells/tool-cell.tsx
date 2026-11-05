@@ -42,11 +42,13 @@ export function ToolCell({
   entry,
   workspaceRoot,
   onOpenSession,
+  onExpandedChange,
   apiBase: apiBaseOverride,
 }: Readonly<{
   entry: ToolEntry
   workspaceRoot?: string | undefined
   onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
+  onExpandedChange?: ((expanded: boolean) => void) | undefined
   apiBase?: string | undefined
 }>) {
   const storeApiBase = useAppStore((state) => state.apiBase)
@@ -63,6 +65,28 @@ export function ToolCell({
   const contentId = useId()
   const failed = entry.state === "failed" || entry.resultError === true
   const interrupted = entry.state === "interrupted"
+  const subject =
+    presentation.target?.kind === "file" &&
+    presentation.subject === presentation.target.path
+      ? (presentation.subject.split(/[\\/]/).filter(Boolean).at(-1) ??
+        presentation.subject)
+      : presentation.subject
+  const statusLabel = failed
+    ? "Failed"
+    : interrupted
+      ? "Interrupted"
+      : undefined
+  const triggerLabel =
+    subject === presentation.subject
+      ? undefined
+      : [
+          active ? presentation.activeVerb : presentation.verb,
+          presentation.subject,
+          statusLabel,
+          ...presentation.meta,
+        ]
+          .filter(Boolean)
+          .join(" ")
   const Icon = active
     ? LoaderCircle
     : failed
@@ -106,7 +130,10 @@ export function ToolCell({
   return (
     <Collapsible
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={(expanded) => {
+        setOpen(expanded)
+        onExpandedChange?.(expanded)
+      }}
       className={cn(
         "group/tool",
         "tool-cell",
@@ -115,9 +142,18 @@ export function ToolCell({
       data-status={
         failed ? "failed" : interrupted ? "interrupted" : entry.state
       }
+      data-notice={
+        presentation.meta.some(
+          (part) => part === "partial" || part === "timed out",
+        ) || undefined
+      }
     >
       <div className="tool-header">
-        <CollapsibleTrigger aria-controls={contentId} className="tool-trigger">
+        <CollapsibleTrigger
+          aria-controls={contentId}
+          aria-label={triggerLabel}
+          className="tool-trigger"
+        >
           <Icon
             aria-hidden="true"
             className={cn("tool-icon", active && "animate-spin")}
@@ -132,11 +168,10 @@ export function ToolCell({
                   title={presentation.subject}
                   className={cn(
                     "tool-subject",
-                    presentation.subjectTone === "code" &&
-                      "font-mono text-[0.8125rem]",
+                    presentation.subjectTone === "code" && "font-mono",
                   )}
                 >
-                  {presentation.subject}
+                  {subject}
                 </span>
               )}
             </span>
@@ -146,7 +181,7 @@ export function ToolCell({
               <span className="tool-meta">
                 {failed || interrupted ? (
                   <span className="tool-state" title={entry.resultErrorMessage}>
-                    {failed ? "Failed" : "Interrupted"}
+                    {statusLabel}
                   </span>
                 ) : null}
                 {(collaboration === undefined ? presentation.meta : []).map(
@@ -208,7 +243,7 @@ export function ToolCell({
             <p className="tool-error">{entry.resultErrorMessage}</p>
           )}
           {collaboration?.request === undefined ? null : (
-            <p className="mb-3 text-xs leading-5 whitespace-pre-wrap text-foreground/85">
+            <p className="tool-collaboration-request">
               {collaboration.request}
             </p>
           )}
@@ -257,6 +292,7 @@ function ResourceAction({
           ? "View trace"
           : `View trace for ${recipient}`
   const copied = label === "Copy path" && copiedPath === fileKey
+  const iconOnly = target.kind === "file" && !copied && error === undefined
   const Icon = copied ? Check : label === "Copy path" ? Copy : ExternalLink
   return (
     <button
@@ -264,11 +300,11 @@ function ResourceAction({
       aria-label={label}
       aria-description={error}
       title={error ?? label}
+      data-icon-only={iconOnly || undefined}
       className={cn(
-        target.kind === "session"
-          ? "agent-trace-link text-xs"
-          : "tool-resource-action",
-        error !== undefined && "text-destructive",
+        target.kind === "session" ? "agent-trace-link" : "tool-resource-action",
+        "text-muted-foreground hover:text-foreground",
+        error !== undefined && "text-destructive hover:text-destructive",
       )}
       onClick={async () => {
         setError(undefined)
@@ -302,7 +338,7 @@ function ResourceAction({
       ) : (
         <>
           <Icon aria-hidden="true" className="size-3.5" />
-          <span aria-live="polite">
+          <span aria-live="polite" className={iconOnly ? "sr-only" : undefined}>
             {error === undefined ? (copied ? "Copied" : label) : "Retry"}
           </span>
         </>

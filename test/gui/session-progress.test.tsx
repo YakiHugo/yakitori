@@ -89,11 +89,13 @@ it("renders a restored answered question without offering another submission", (
   expect(screen.queryByRole("textbox")).toBeNull()
 })
 
-it("shows persisted plan step states accessibly", () => {
+it("keeps plan updates compact and exposes persisted step states by keyboard", async () => {
+  const user = userEvent.setup()
   render(
     <PlanCell
       plan={{
         kind: "plan",
+        explanation: "The source is ready for implementation.",
         plan: [
           { step: "Inspect source", status: "completed" },
           { step: "Implement", status: "in_progress" },
@@ -102,7 +104,25 @@ it("shows persisted plan step states accessibly", () => {
       }}
     />,
   )
+  const trigger = screen.getByRole("button", {
+    name: "Updated plan · 1/3 completed",
+  })
+  expect(trigger.getAttribute("aria-expanded")).toBe("false")
+  expect(screen.queryByRole("listitem")).toBeNull()
+  expect(
+    screen.queryByText("The source is ready for implementation."),
+  ).toBeNull()
+  await user.tab()
+  expect(document.activeElement).toBe(trigger)
+  await user.keyboard("{Enter}")
+  expect(trigger.getAttribute("aria-expanded")).toBe("true")
   expect(screen.getAllByRole("listitem")).toHaveLength(3)
   expect(screen.getByLabelText("in progress")).toBeTruthy()
   expect(screen.getByText("Verify")).toBeTruthy()
+  expect(
+    screen.getByText("The source is ready for implementation."),
+  ).toBeTruthy()
+  await user.keyboard(" ")
+  expect(trigger.getAttribute("aria-expanded")).toBe("false")
+  expect(screen.queryByRole("listitem")).toBeNull()
 })
