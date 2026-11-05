@@ -360,37 +360,39 @@ export function WorkspaceFrame({
         data-workspace-expanded={open && expanded}
       >
         <SidebarFrame open={sidebarOpen} setOpen={setSidebarOpen} />
-        {children}
-        {!open && !settingsOpen && cwd && (
-          <aside className="workspace-overview" aria-label="Project overview">
-            <div className="workspace-project-card">
-              <div className="workspace-project-heading">
-                <span className="workspace-project-name" title={cwd}>
-                  {projectName ||
-                    cwd.split(/[\\/]/).filter(Boolean).at(-1) ||
-                    cwd}
-                </span>
+        <div className="workspace-main">
+          {children}
+          {!open && !settingsOpen && cwd && (
+            <aside className="workspace-overview" aria-label="Project overview">
+              <div className="workspace-project-card">
+                <div className="workspace-project-heading">
+                  <span className="workspace-project-name" title={cwd}>
+                    {projectName ||
+                      cwd.split(/[\\/]/).filter(Boolean).at(-1) ||
+                      cwd}
+                  </span>
+                  <button
+                    type="button"
+                    className="sidebar-icon"
+                    aria-label="Open project files"
+                    title="Open project files"
+                    onClick={() => addTab("files", sessionId)}
+                  >
+                    <FolderOpen size={16} />
+                  </button>
+                </div>
                 <button
                   type="button"
-                  className="sidebar-icon"
-                  aria-label="Open project files"
-                  title="Open project files"
-                  onClick={() => addTab("files", sessionId)}
+                  className="workspace-project-changes"
+                  onClick={() => addTab("changes", sessionId)}
                 >
-                  <FolderOpen size={16} />
+                  <GitCompareArrows size={18} />
+                  <span>Changes</span>
                 </button>
               </div>
-              <button
-                type="button"
-                className="workspace-project-changes"
-                onClick={() => addTab("changes", sessionId)}
-              >
-                <GitCompareArrows size={18} />
-                <span>Changes</span>
-              </button>
-            </div>
-          </aside>
-        )}
+            </aside>
+          )}
+        </div>
         <aside
           aria-label="Workspace"
           aria-hidden={!open}

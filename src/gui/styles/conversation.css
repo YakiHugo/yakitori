@@ -30,6 +30,9 @@
 .conversation-transcript-viewport > div {
   /* biome-ignore lint/complexity/noImportantStyles: Override Radix's inline display:table only for this vertical transcript. */
   display: block !important;
+  /* Reserve the project card's column inside the scroller so its scrollbar
+     remains at the page edge rather than beside the reading column. */
+  padding-inline-end: var(--project-overview-width, 0px);
 }
 .conversation-content {
   /* The transcript owns following and restoration. Native scroll anchoring
@@ -39,7 +42,8 @@
 }
 .conversation-dock {
   position: absolute;
-  inset-inline: 0;
+  left: 0;
+  right: var(--project-overview-width, 0px);
   bottom: 0;
   z-index: 30;
   pointer-events: none;
@@ -51,7 +55,7 @@
 }
 .conversation-surface[data-empty] > .conversation-dock {
   position: relative;
-  width: 100%;
+  width: calc(100% - var(--project-overview-width, 0px));
 }
 .conversation-dock > * {
   pointer-events: auto;
@@ -136,7 +140,7 @@
 .conversation-jump {
   position: absolute;
   bottom: calc(var(--conversation-dock-height, 0px) + 12px);
-  left: 50%;
+  left: calc((100% - var(--project-overview-width, 0px)) / 2);
   z-index: 10;
   display: grid;
   place-items: center;
@@ -277,4 +281,11 @@
   [data-slot="collapsible-content"][data-state] {
     animation: none;
   }
+}
+
+.engine-transcript {
+  padding-inline-end: calc(20px + var(--project-overview-width, 0px));
+}
+.engine-conversation > :not(.engine-transcript) {
+  margin-inline-end: var(--project-overview-width, 0px);
 }

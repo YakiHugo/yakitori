@@ -410,6 +410,97 @@ test("user messages expose only copy and edit actions", async ({
   })
 })
 
+test("conversation scrolls at the page edge while the project card stays fixed", async ({
+  page,
+  renderingApp,
+}, testInfo) => {
+  const prompt = "Check the conversation scroll layout."
+  await renderingApp.send(prompt)
+  await renderingApp.append(
+    prompt,
+    Array.from({ length: 40 }, (_, index) => `Paragraph ${index + 1}.`).join(
+      "\n\n",
+    ),
+  )
+  await renderingApp.finish(prompt)
+  const viewport = page.locator(".conversation-transcript-viewport")
+  const content = page.locator(".conversation-content")
+  const composer = page.locator(".conversation-composer")
+  const overview = page.getByRole("complementary", { name: "Project overview" })
+  for (const width of [1480, 1180, 1100]) {
+    await page.setViewportSize({ width, height: 960 })
+    await expect
+      .poll(async () => {
+        const box = await viewport.boundingBox()
+        return box ? Math.abs(box.x + box.width - width) : Infinity
+      })
+      .toBeLessThan(1)
+    const contentBox = await content.boundingBox()
+    const composerBox = await composer.boundingBox()
+    if (!contentBox || !composerBox) throw new Error("Conversation is missing.")
+    expect(contentBox.width).toBeLessThanOrEqual(768)
+    expect(Math.abs(contentBox.x - composerBox.x)).toBeLessThan(1)
+    expect(Math.abs(contentBox.width - composerBox.width)).toBeLessThan(1)
+    if (width >= 1180) {
+      const cardBox = await overview.boundingBox()
+      if (!cardBox) throw new Error("Project card is missing.")
+      expect(contentBox.x + contentBox.width).toBeLessThanOrEqual(cardBox.x)
+      // Wheel events in the card's column still belong to the conversation.
+      await viewport.evaluate((node) => {
+        node.scrollTop = 0
+      })
+      await page.mouse.move(width - 40, 400)
+      await page.mouse.wheel(0, 400)
+      await expect
+        .poll(() => viewport.evaluate((node) => node.scrollTop))
+        .toBeGreaterThan(0)
+      expect(await overview.boundingBox()).toEqual(cardBox)
+    } else await expect(overview).toBeHidden()
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(width)
+  }
+  await page.setViewportSize({ width: 1480, height: 960 })
+  await page.getByRole("button", { name: "Changes", exact: true }).click()
+  await expect(overview).toHaveCount(0)
+  const workspace = page.getByRole("complementary", {
+    name: "Workspace",
+    exact: true,
+  })
+  await expect
+    .poll(async () => {
+      const transcriptBox = await viewport.boundingBox()
+      const workspaceBox = await workspace.boundingBox()
+      return transcriptBox && workspaceBox
+        ? Math.abs(transcriptBox.x + transcriptBox.width - workspaceBox.x)
+        : Infinity
+    })
+    .toBeLessThan(1)
+  await page.getByRole("button", { name: "Expand workspace" }).click()
+  await expect(viewport).toBeHidden()
+  await page.getByRole("button", { name: "Restore workspace size" }).click()
+  await expect(viewport).toBeVisible()
+  await page.getByRole("button", { name: "Hide workspace" }).click()
+  await page.getByRole("textbox", { name: "Message the Mate" }).fill("/goal")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  const goalEditor = page.getByRole("complementary", { name: "Goal editor" })
+  await expect(goalEditor).toBeVisible()
+  const goalBox = await goalEditor.boundingBox()
+  const cardBox = await overview.boundingBox()
+  const transcriptBox = await viewport.boundingBox()
+  if (!goalBox || !cardBox || !transcriptBox)
+    throw new Error("Session panels are missing.")
+  expect(goalBox.x + goalBox.width).toBeLessThanOrEqual(cardBox.x)
+  expect(
+    Math.abs(transcriptBox.x + transcriptBox.width - goalBox.x),
+  ).toBeLessThan(1)
+  await page.getByRole("button", { name: "Close goal editor" }).click()
+  await viewport.hover()
+  await page.screenshot({
+    path: testInfo.outputPath("conversation-scroll-layout.png"),
+  })
+})
+
 test("new session composer stays centered through creation and docks after the first input", async ({
   page,
   renderingApp,

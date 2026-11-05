@@ -134,7 +134,7 @@ export function GoalEditor() {
   return (
     <aside
       aria-label="Goal editor"
-      className="flex w-[22rem] shrink-0 flex-col border-l bg-background"
+      className="goal-editor flex w-[22rem] shrink-0 flex-col border-l bg-background"
     >
       <div className="goal-editor-header flex h-12 items-center justify-between gap-2 border-b px-3">
         <span className="truncate text-sm text-muted-foreground">
