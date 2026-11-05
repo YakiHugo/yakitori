@@ -223,6 +223,8 @@ it("collapses completed process output and keeps the final answer visible", () =
   expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
   fireEvent.click(toggle)
   expect(screen.getByText("Checking the implementation")).toBeDefined()
+  expect(screen.queryByRole("button", { name: "Reasoning" })).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "1 read" }))
   expect(
     screen.getByRole("button", { name: /Read src\/index\.ts/ }),
   ).toBeDefined()
@@ -280,9 +282,9 @@ it("groups adjacent tool actions behind a deterministic collapsed summary", () =
       .closest('[aria-hidden="true"]'),
   ).toBeNull()
   const tools = screen.getByRole("button", {
-    name: "Used tools · Read 2",
+    name: "2 reads",
   })
-  expect(tools.textContent).toBe("Read 2 files")
+  expect(tools.textContent).toBe("2 reads")
   expect(tools.getAttribute("aria-expanded")).toBe("false")
   expect(
     screen.queryByRole("button", { name: /Read src\/first\.ts/ }),
@@ -298,7 +300,7 @@ it("groups adjacent tool actions behind a deterministic collapsed summary", () =
   ).toBeDefined()
 })
 
-it("surfaces a failed action instead of hiding it in a closed tool group", () => {
+it("shows a failed single action directly with its error visible", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -306,7 +308,7 @@ it("surfaces a failed action instead of hiding it in a closed tool group", () =>
       entries: [
         ...entries.slice(0, 2),
         readTool("tool_failed", "src/missing.ts", "failed"),
-        ...entries.slice(2),
+        ...entries.slice(3),
       ],
     },
   })
@@ -314,13 +316,62 @@ it("surfaces a failed action instead of hiding it in a closed tool group", () =>
 
   expect(
     screen
-      .getByRole("button", { name: "Tool failed · Read" })
+      .getByRole("button", { name: /Read src\/missing\.ts/ })
       .getAttribute("aria-expanded"),
   ).toBe("true")
-  expect(
-    screen.getByRole("button", { name: /Read src\/missing\.ts/ }),
-  ).toBeDefined()
+  expect(screen.queryByRole("button", { name: "1 read" })).toBeNull()
   expect(screen.getByText("Could not read file")).toBeDefined()
+})
+
+it("keeps a failed batch compact and preserves opened output across folds", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      activeTurnId: "turn_1",
+      entries: [
+        entries[0] as ExecutionEntry,
+        readTool("first", "src/first.ts"),
+        entries[2] as ExecutionEntry,
+        readTool("failed", "src/missing.ts", "failed"),
+        readTool("last", "src/last.ts"),
+        entries[3] as ExecutionEntry,
+      ],
+    },
+  })
+  render(<Transcript />)
+  const batch = screen.getByRole("button", { name: "3 reads Failed" })
+  expect(batch.getAttribute("aria-expanded")).toBe("false")
+  expect(screen.queryByText("Could not read file")).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: /Read src\/first\.ts/ }),
+  ).toBeNull()
+
+  fireEvent.click(batch)
+  const error = screen.getByText("Could not read file")
+  expect(error.closest("[hidden]")).toBeNull()
+  expect(
+    screen
+      .getByRole("button", { name: /Read src\/missing\.ts/ })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  const first = screen.getByRole("button", { name: /Read src\/first\.ts/ })
+  const last = screen.getByRole("button", { name: /Read src\/last\.ts/ })
+  expect(first.getAttribute("aria-expanded")).toBe("false")
+  expect(last.getAttribute("aria-expanded")).toBe("false")
+  expect(screen.queryByText("src/first.ts contents")).toBeNull()
+  expect(screen.queryByText("src/last.ts contents")).toBeNull()
+
+  fireEvent.click(first)
+  const output = screen.getByText("src/first.ts contents")
+  fireEvent.click(batch)
+  expect(error.closest("[hidden]")).not.toBeNull()
+  expect(output.closest("[hidden]")).not.toBeNull()
+  fireEvent.click(batch)
+  expect(screen.getByText("Could not read file")).toBe(error)
+  expect(screen.getByText("src/first.ts contents")).toBe(output)
+  expect(output.closest("[hidden]")).toBeNull()
+  expect(first.getAttribute("aria-expanded")).toBe("true")
+  expect(last.getAttribute("aria-expanded")).toBe("false")
 })
 
 it("keeps live process history available until the turn has a final answer", () => {
@@ -396,7 +447,9 @@ it("updates elapsed work time and collapses an open live trace when the turn com
   ).toBe("false")
   expect(screen.getByText("Final answer")).toBeDefined()
   expect(screen.queryByRole("list", { name: "Agent activity" })).toBeNull()
-  expect(screen.queryByText("Reasoning details")).toBeNull()
+  expect(
+    screen.getByText("Reasoning details").closest("[hidden]"),
+  ).not.toBeNull()
   act(() => vi.advanceTimersByTime(5000))
   expect(screen.getByText("Worked for", { exact: false }).textContent).toBe(
     "Worked for 1m 2s",
@@ -417,11 +470,11 @@ it("provides a completed activity disclosure when the turn has no reasoning", ()
   })
   render(<Transcript />)
   expect(screen.queryByText("Checking the implementation")).toBeNull()
-  expect(screen.queryByRole("button", { name: "Used tools · Read" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "1 read" })).toBeNull()
   expect(screen.getByText("Final answer")).toBeDefined()
   fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
   expect(screen.getByText("Checking the implementation")).toBeDefined()
-  expect(screen.queryByRole("button", { name: "Used tools · Read" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "1 read" })).toBeNull()
   expect(
     screen.getByRole("button", { name: /Read src\/index\.ts/ }),
   ).toBeDefined()
@@ -464,13 +517,22 @@ it("retains title-only reasoning and preserves headings when expanding full reas
     },
   })
   render(<Transcript />)
-  expect(screen.getByTitle("Checking the").textContent).toBe("· Checking the")
-  expect(screen.getByText("Implementing favicon fallback")).toBeDefined()
+  expect(screen.queryByTitle("Checking the")).toBeNull()
+  expect(screen.queryByText("Implementing favicon fallback")).toBeNull()
   expect(screen.queryByText("Reading rendering tests")).toBeNull()
   expect(screen.getAllByRole("button", { name: "Reasoning" })).toHaveLength(1)
   expect(screen.queryByText("meaningful emphasis")).toBeNull()
-  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  const batch = screen.getByRole("button", { name: "Reasoning" })
+  fireEvent.click(batch)
+  const batchContent = document.getElementById(
+    batch.getAttribute("aria-controls") ?? "",
+  )
+  if (!batchContent) throw new Error("Expected a reasoning batch")
   expect(screen.getByText("Implementing favicon fallback")).toBeDefined()
+  expect(screen.queryByText("Reading rendering tests")).toBeNull()
+  fireEvent.click(
+    within(batchContent).getByRole("button", { name: "Reasoning" }),
+  )
   expect(
     screen.getByRole("heading", { name: "Reading rendering tests" }),
   ).toBeDefined()
@@ -479,14 +541,24 @@ it("retains title-only reasoning and preserves headings when expanding full reas
   expect(screen.getByText("meaningful emphasis").tagName).toBe("STRONG")
   expect(screen.getAllByRole("heading")).toHaveLength(1)
   expect(screen.getByText("Checking the", { selector: "p" })).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: /^Working/ }))
+  expect(screen.getByTitle("Checking the").textContent).toBe("· Checking the")
 })
 
-it("expands commentary, tools, and substantive reasoning in their original order", () => {
+it("keeps raw reasoning inside tool batches and reveals the original process order", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
       entries: [
         ...entries.slice(0, 2),
+        {
+          kind: "reasoning",
+          itemId: "raw_before_tool",
+          turnId: "turn_1",
+          text: "First raw thought.",
+          status: "completed",
+          at,
+        },
         readTool("first_read", "src/first.ts"),
         {
           kind: "reasoning",
@@ -515,21 +587,32 @@ it("expands commentary, tools, and substantive reasoning in their original order
   const activity = screen.getByRole("list", { name: "Agent activity" })
   expect(Array.from(activity.children, (child) => child.textContent)).toEqual([
     "Checking the implementation",
-    expect.stringContaining("src/first.ts"),
-    "Inspecting filesComparing implementation",
-    "Reasoning",
+    "1 read",
     "Now checking the second file",
-    expect.stringContaining("src/second.ts"),
+    expect.stringContaining("second.ts"),
   ])
+  expect(screen.queryByRole("button", { name: "Reasoning" })).toBeNull()
+  expect(screen.queryByText("First raw thought.")).toBeNull()
+  const batch = screen.getByRole("button", { name: "1 read" })
+  fireEvent.click(batch)
+  const batchContent = document.getElementById(
+    batch.getAttribute("aria-controls") ?? "",
+  )
+  if (!batchContent) throw new Error("Expected a process batch")
   expect(screen.getByText("Inspecting files")).toBeDefined()
   expect(screen.getByText("Comparing implementation")).toBeDefined()
   expect(screen.queryByText("Reasoning details")).toBeNull()
-  fireEvent.click(within(activity).getByRole("button", { name: "Reasoning" }))
-  expect(activity.children[3]?.textContent).toContain("Reasoning details")
+  for (const reasoning of within(batchContent).getAllByRole("button", {
+    name: "Reasoning",
+  }))
+    fireEvent.click(reasoning)
+  expect(batchContent.textContent).toMatch(
+    /First raw thought\.[\s\S]*first\.ts[\s\S]*Inspecting files[\s\S]*Comparing implementation[\s\S]*Reasoning details/,
+  )
   expect(screen.getByText("Final answer").closest("ol")).toBeNull()
 })
 
-it("groups model actions under a reasoning title or deterministic action preview", () => {
+it("keeps narration and reasoning separate from adjacent tool batches", () => {
   const first = readTool("first", "src/one.ts")
   const second = readTool("second", "src/two.ts")
   const third = readTool("third", "src/three.ts")
@@ -542,31 +625,41 @@ it("groups model actions under a reasoning title or deterministic action preview
           kind: "reasoning",
           itemId: "thought_one",
           turnId: "turn_1",
-          source: { callId: "call_one", itemId: "thought_one" },
-          text: "**Inspecting output**",
+          source: { callId: "shared_call", itemId: "thought_one" },
+          text: "**Inspecting output**\n\nCompare the saved files.",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "assistant",
+          itemId: "progress_one",
+          turnId: "turn_1",
+          source: { callId: "shared_call", itemId: "progress_one" },
+          purpose: "commentary",
+          text: "I will compare the first two files.",
           status: "completed",
           at,
         },
         {
           ...first,
-          execution: { ...first.execution, modelCallId: "call_one" },
+          execution: { ...first.execution, modelCallId: "shared_call" },
         },
         {
-          kind: "reasoning",
-          itemId: "thought_two",
+          ...second,
+          execution: { ...second.execution, modelCallId: "shared_call" },
+        },
+        {
+          kind: "assistant",
+          itemId: "progress_two",
           turnId: "turn_1",
-          source: { callId: "call_two", itemId: "thought_two" },
-          text: "The user wants a change. I need to inspect the implementation and verify the result.",
+          source: { callId: "shared_call", itemId: "progress_two" },
+          text: "Now checking the third file.",
           status: "completed",
           at,
         },
         {
-          ...second,
-          execution: { ...second.execution, modelCallId: "call_two" },
-        },
-        {
           ...third,
-          execution: { ...third.execution, modelCallId: "call_two" },
+          execution: { ...third.execution, modelCallId: "shared_call" },
         },
         ...entries.slice(3),
       ],
@@ -574,28 +667,119 @@ it("groups model actions under a reasoning title or deterministic action preview
   })
   render(<Transcript />)
   fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
-  const titled = screen.getByRole("button", {
-    name: "Inspecting output 1 action",
-  })
-  const fallback = screen.getByRole("button", { name: "Read 2" })
-  expect(titled.getAttribute("aria-expanded")).toBe("false")
-  expect(fallback.getAttribute("aria-expanded")).toBe("false")
-  expect(screen.queryByRole("button", { name: /The user wants/ })).toBeNull()
-  fireEvent.click(fallback)
-  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  const batch = screen.getByRole("button", { name: "2 reads" })
+  expect(batch.getAttribute("aria-expanded")).toBe("false")
   expect(
-    screen.getByText(
-      "The user wants a change. I need to inspect the implementation and verify the result.",
-    ),
+    screen.getAllByText("I will compare the first two files."),
+  ).toHaveLength(1)
+  expect(screen.getAllByText("Now checking the third file.")).toHaveLength(1)
+  expect(screen.queryByRole("button", { name: /I will compare/ })).toBeNull()
+  expect(screen.queryByRole("button", { name: /Inspecting output/ })).toBeNull()
+  expect(
+    screen.getByRole("button", { name: /Read src\/three\.ts/ }),
   ).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Reasoning" }))
+  expect(screen.getByText("Compare the saved files.")).toBeDefined()
+  fireEvent.click(batch)
+  expect(
+    screen.getByRole("button", { name: /Read src\/one\.ts/ }),
+  ).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: /Read src\/two\.ts/ }),
+  ).toBeDefined()
+  expect(
+    screen.getAllByText("I will compare the first two files."),
+  ).toHaveLength(1)
   expect(screen.getByText("Final answer").closest("ol")).toBeNull()
   fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
   fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
   expect(
     screen
-      .getByRole("button", { name: "Read 2" })
+      .getByRole("button", { name: "2 reads" })
       .getAttribute("aria-expanded"),
   ).toBe("true")
+})
+
+it("preserves an opened single tool when its batch grows and the turn completes", () => {
+  const first = readTool("first", "src/one.ts")
+  const second = readTool("second", "src/two.ts", "requested")
+  const thought: Extract<ExecutionEntry, { kind: "reasoning" }> = {
+    kind: "reasoning",
+    itemId: "between_calls",
+    turnId: "turn_1",
+    text: "Check the next file before deciding.",
+    status: "completed",
+    at,
+  }
+  useAppStore.setState({
+    execution: {
+      ...createExecutionViewState(),
+      activeTurnId: "turn_1",
+      entries: [entries[0] as ExecutionEntry, first],
+      turnTimings: { turn_1: { startedAt: at } },
+    },
+  })
+  render(<Transcript />)
+  expect(screen.queryByRole("button", { name: "1 read" })).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: /Read src\/one\.ts/ }))
+  const originalOutput = screen.getByText("src/one.ts contents")
+
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        entries: [...state.execution.entries, thought, second],
+      },
+    })),
+  )
+  expect(
+    screen
+      .getByRole("button", { name: "2 reads" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  expect(screen.getByText("src/one.ts contents")).toBe(originalOutput)
+  expect(
+    screen
+      .getByRole("button", { name: /Read src\/one\.ts/ })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        activeTurnId: undefined,
+        entries: [
+          entries[0] as ExecutionEntry,
+          first,
+          thought,
+          { ...second, state: "completed" },
+          entries[3] as ExecutionEntry,
+        ],
+        turnTimings: {
+          turn_1: {
+            startedAt: at,
+            completedAt: "2026-09-12T00:01:49Z",
+            outcome: { status: "completed", answerItemIds: ["answer"] },
+          },
+        },
+      },
+    })),
+  )
+  expect(originalOutput.isConnected).toBe(true)
+  expect(screen.getAllByText("Final answer")).toHaveLength(1)
+  expect(screen.getAllByRole("button", { name: "Copy response" })).toHaveLength(
+    1,
+  )
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(
+    screen
+      .getByRole("button", { name: "2 reads" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  expect(screen.getByText("src/one.ts contents")).toBe(originalOutput)
+  expect(originalOutput.closest("[hidden]")).toBeNull()
+  expect(screen.getAllByText("Final answer")).toHaveLength(1)
 })
 
 it("selects final parts without hiding commentary from the same conversation item", () => {
@@ -1091,6 +1275,79 @@ it("keeps pending approvals visible alongside intent updates", () => {
   expect(
     screen.getByText("awaiting approval").closest("[aria-hidden]"),
   ).toBeNull()
+})
+
+it("keeps question cards visible outside completed history before and after answering", () => {
+  const question: Extract<ExecutionEntry, { kind: "tool" }> = {
+    kind: "tool",
+    toolCallId: "question_1",
+    turnId: "turn_1",
+    execution: {
+      type: "dynamic_tool_call",
+      itemId: "question_item",
+      toolCallId: "question_1",
+      name: "request_user_input_async",
+      input: {},
+      requiresPermission: false,
+    },
+    state: "completed",
+    output: {
+      questions: [{ title: "Which environment?", options: ["Local", "CI"] }],
+    },
+  }
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 3),
+        readTool("before_question", "src/before.ts"),
+        question,
+        readTool("after_question", "src/after.ts"),
+        entries[3] as ExecutionEntry,
+      ],
+    },
+  })
+  render(<Transcript />)
+  const card = screen.getByRole("form", { name: "Questions from your Mate" })
+  expect(card.closest("[hidden]")).toBeNull()
+  expect(within(card).getByLabelText("Which environment?")).toBeDefined()
+  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  const history = screen.getByRole("button", { name: "Worked for 1m 49s" })
+  fireEvent.click(history)
+  expect(screen.queryByRole("button", { name: "2 reads" })).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "1 read" }))
+  expect(
+    screen.getByRole("button", { name: /Read src\/before\.ts/ }),
+  ).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: /Read src\/after\.ts/ }),
+  ).toBeDefined()
+  fireEvent.click(history)
+  expect(card.closest("[hidden]")).toBeNull()
+
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        entries: [
+          ...state.execution.entries,
+          {
+            kind: "user_input",
+            inputId: "question_answer",
+            questionId: "question_1",
+            text: "Local",
+            content: inputParts("Local"),
+            at,
+          },
+        ],
+      },
+    })),
+  )
+  expect(within(card).getByText("Questions answered")).toBeDefined()
+  expect(card.closest("[hidden]")).toBeNull()
+  expect(
+    screen.getByText("Checking the implementation").closest("[hidden]"),
+  ).not.toBeNull()
 })
 
 it("promotes only the final answer of a completed turn split by another input", () => {

@@ -1211,12 +1211,9 @@ test("failed tools show their full error on narrow screens and command output st
     .getByRole("region", { name: "Response", exact: true })
     .last()
   await commandResponse.getByRole("button", { name: /^Worked for/ }).click()
-  await commandResponse
-    .getByRole("button", { name: "Run", exact: true })
-    .click()
   const command = commandResponse.locator(".tool-cell")
   await command.getByRole("button", { name: /Run/ }).click()
-  const output = command.locator(".tool-detail-surface .overflow-auto")
+  const output = command.locator(".tool-output")
   await expect(output).toContainText("output line")
   const geometry = await output.evaluate((node) => ({
     height: node.clientHeight,
@@ -1232,13 +1229,10 @@ test("failed tools show their full error on narrow screens and command output st
     node.scrollTop = node.scrollHeight
   })
   const scrollTop = await output.evaluate((node) => node.scrollTop)
-  const group = commandResponse.getByRole("button", {
-    name: "Run",
-    exact: true,
-  })
-  await group.click()
+  const history = commandResponse.getByRole("button", { name: /^Worked for/ })
+  await history.click()
   await expect(output).toBeHidden()
-  await group.click()
+  await history.click()
   expect(await original.evaluate((node) => node.isConnected)).toBe(true)
   expect(await output.evaluate((node) => node.scrollTop)).toBe(scrollTop)
   await expect(command.getByRole("button", { name: /Run/ })).toHaveAttribute(
@@ -1270,7 +1264,7 @@ test("long tool groups retain opened output across folds and reveal offscreen ro
   const response = page.getByRole("region", { name: "Response", exact: true })
   const root = response.getByRole("button", { name: /^Worked for/ })
   await root.click()
-  const group = response.getByRole("button", { name: "Read 24", exact: true })
+  const group = response.getByRole("button", { name: "24 reads", exact: true })
   await group.click()
   const rows = response.locator(".tool-cell")
   await expect(rows).toHaveCount(24)
@@ -1323,6 +1317,10 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     const response = page.getByRole("region", { name: "Response", exact: true })
     const toggle = response.getByRole("button", { name: /^Worked for/ })
     const panel = response.locator(".conversation-disclosure")
+    await expect(panel).toBeHidden()
+    await expect(panel.locator("ol")).toHaveCount(1)
+    await page.reload()
+    await expect(toggle).toBeVisible()
     await expect(panel.locator("ol")).toHaveCount(0)
     await toggle.click()
     const reasoning = response.getByRole("button", {
@@ -1389,8 +1387,17 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
 test("preserves streamed reasoning and the final answer through completion and reload", async ({
   page,
   renderingApp,
-}) => {
+}, testInfo) => {
   const prompt = "Check reasoning display identity"
+  const interimText = "I will inspect the saved file."
+  await writeFile(
+    join(renderingApp.workspace, "hierarchy.txt"),
+    "Saved file content.\n",
+  )
+  const fontSize = (locator: Locator) =>
+    locator.evaluate((node) =>
+      Number.parseFloat(getComputedStyle(node).fontSize),
+    )
   await renderingApp.send(prompt)
   await renderingApp.think(
     prompt,
@@ -1401,35 +1408,95 @@ test("preserves streamed reasoning and the final answer through completion and r
   ).toHaveCount(1)
   await page.getByRole("button", { name: "Reasoning…", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
   await expect(
     page.getByText("Checking the complete reasoning body.", { exact: true }),
   ).toBeVisible()
+  await renderingApp.append(prompt, interimText)
+  await renderingApp.callTool(prompt, "read_file", { path: "hierarchy.txt" })
   await renderingApp.append(prompt, "The final answer is ready.")
+  const finalMessage = page
+    .locator(".markdown")
+    .filter({ hasText: /^The final answer is ready\.$/ })
+  await expect(finalMessage).toBeVisible()
+  const liveFinalFontSize = await fontSize(finalMessage)
   await renderingApp.finish(prompt)
-  await expect(
-    page.getByText("The final answer is ready.", { exact: true }),
-  ).toBeVisible()
+  await expect(finalMessage).toBeVisible()
+  expect(await fontSize(finalMessage)).toBe(liveFinalFontSize)
+  const response = page.getByRole("region", { name: "Response", exact: true })
   await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
+  await expect(response.getByText(interimText, { exact: true })).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Reasoning", exact: true }),
   ).toHaveCount(1)
-  await page.getByRole("button", { name: "Reasoning", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page.getByRole("button", { name: "Reasoning", exact: true }),
+  ).toHaveAttribute("aria-expanded", "true")
+  await expect(
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
+  const processMessage = response
+    .locator(".markdown")
+    .filter({ hasText: interimText })
+  const reasoningBody = response.getByText(
+    "Checking the complete reasoning body.",
+    {
+      exact: true,
+    },
+  )
+  const processFontSize = await fontSize(processMessage)
+  const reasoningFontSize = await fontSize(reasoningBody)
+  expect(processFontSize).toBe(liveFinalFontSize)
+  expect(reasoningFontSize).toBeLessThan(liveFinalFontSize)
+  expect(
+    await fontSize(
+      response
+        .locator(".reasoning-trace")
+        .getByText("Inspecting output", { exact: true }),
+    ),
+  ).toBeLessThanOrEqual(reasoningFontSize)
+  const row = response.locator(".tool-cell")
+  const toolToggle = row.getByRole("button", { name: /Read.*hierarchy\.txt/ })
+  expect(await fontSize(toolToggle)).toBe(reasoningFontSize)
+  const metadataFontSize = await fontSize(
+    response.locator(".message-actions time"),
+  )
+  expect(metadataFontSize).toBeLessThan(processFontSize)
+  expect(metadataFontSize).toBeLessThan(reasoningFontSize)
+  expect(
+    await reasoningBody.evaluate((node) => getComputedStyle(node).color),
+  ).not.toBe(
+    await finalMessage.evaluate((node) => getComputedStyle(node).color),
+  )
+  await toolToggle.click()
+  await expect(row.getByText(/Saved file content\./)).toBeVisible()
+  expect(await fontSize(row.locator(".tool-output"))).toBeLessThanOrEqual(
+    reasoningFontSize,
+  )
+  await page.screenshot({
+    path: testInfo.outputPath("conversation-hierarchy-light.png"),
+    animations: "disabled",
+  })
   await page.reload()
-  await expect(
-    page.getByText("The final answer is ready.", { exact: true }),
-  ).toBeVisible()
+  await expect(finalMessage).toBeVisible()
+  expect(await fontSize(finalMessage)).toBe(liveFinalFontSize)
   await page.getByRole("button", { name: /^Worked for/ }).click()
+  await expect(response.getByText(interimText, { exact: true })).toHaveCount(1)
+  await expect(response.getByText(interimText, { exact: true })).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Reasoning", exact: true }),
   ).toHaveCount(1)
   await page.getByRole("button", { name: "Reasoning", exact: true }).click()
   await expect(
-    page.getByText("Inspecting output", { exact: true }),
+    page
+      .locator(".reasoning-trace")
+      .getByText("Inspecting output", { exact: true }),
   ).toBeVisible()
   await expect(
     page.getByText("Checking the complete reasoning body.", { exact: true }),

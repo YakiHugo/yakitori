@@ -9,10 +9,12 @@ export function ReasoningCell({
   entry,
   workspaceRoot,
   apiBase,
+  onExpandedChange,
 }: Readonly<{
   entry: Extract<ExecutionEntry, { kind: "reasoning" }>
   workspaceRoot?: string | undefined
   apiBase?: string | undefined
+  onExpandedChange?: (open: boolean) => void
 }>) {
   const [open, setOpen] = useState(false)
   const contentId = useId()
@@ -24,17 +26,26 @@ export function ReasoningCell({
     sections.every((section) => !section.body.trim())
   )
     return (
-      <div className="flex flex-col gap-1 text-detail text-muted-foreground">
+      <div className="reasoning-trace text-detail text-muted-foreground">
         {sections.map((section) => (
-          <p key={section.line}>{section.summary}</p>
+          <p key={section.line} className="font-medium">
+            {section.summary}
+          </p>
         ))}
       </div>
     )
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="group/reasoning">
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        onExpandedChange?.(next)
+      }}
+      className="group/reasoning"
+    >
       <CollapsibleTrigger
         aria-controls={contentId}
-        className="flex items-center gap-2 py-1 text-detail text-muted-foreground transition-colors hover:text-foreground"
+        className="reasoning-trigger transition-colors hover:text-foreground"
       >
         <span>{entry.status === "streaming" ? "Reasoning…" : "Reasoning"}</span>
         <ChevronRight className="size-3 transition-transform group-data-[state=open]/reasoning:rotate-90" />
@@ -42,7 +53,7 @@ export function ReasoningCell({
       <TranscriptDisclosureContent
         id={contentId}
         open={open}
-        className="max-h-96 overflow-y-auto pt-1 pb-2"
+        className="reasoning-content"
       >
         <ReasoningTrace
           apiBase={apiBase}

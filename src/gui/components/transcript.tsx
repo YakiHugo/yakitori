@@ -1,11 +1,4 @@
-import {
-  ArrowDown,
-  BookOpen,
-  ChevronRight,
-  Info,
-  Terminal,
-  Wrench,
-} from "lucide-react"
+import { ArrowDown, ChevronRight, Info } from "lucide-react"
 import {
   memo,
   type ReactNode,
@@ -18,6 +11,8 @@ import {
   useState,
 } from "react"
 import { answerTextParts } from "../../protocol/model-output.ts"
+import { parseUserQuestions } from "../../protocol/user-interaction.ts"
+import { groupConversationActivity } from "../conversation-activity.ts"
 import {
   type ActiveModelRetry,
   type ExecutionEntry,
@@ -29,8 +24,7 @@ import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
-import { presentTool } from "../tool-presentation.ts"
-import { ActivityGroup } from "./activity-group.tsx"
+import { ActivityBatch } from "./activity-batch.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -49,7 +43,6 @@ import { ResponseActions } from "./response-actions.tsx"
 import { SessionElicitation } from "./session-elicitation.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"
-import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 import "./activity-timeline.css"
@@ -291,7 +284,7 @@ export function Transcript({
         >
           <div
             ref={scroll.contentRef}
-            className="conversation-content mx-auto flex w-full flex-col gap-8 pt-8"
+            className="conversation-content mx-auto flex w-full flex-col"
           >
             {loading ? (
               <p
@@ -415,9 +408,6 @@ const TurnBlock = memo(
   }>) {
     const [liveActivityCollapsed, setLiveActivityCollapsed] = useState(false)
     const [activityExpanded, setActivityExpanded] = useState(false)
-    const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>(
-      {},
-    )
     const [sourceNavigation, setSourceNavigation] =
       useState<ContextSourceNavigation>()
     useEffect(() => {
@@ -465,7 +455,11 @@ const TurnBlock = memo(
           return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
         }
         return entry.kind === "turn_terminal" ||
-          (entry.kind === "permission" && entry.state !== "resolved")
+          (entry.kind === "permission" && entry.state !== "resolved") ||
+          (entry.kind === "tool" &&
+            entry.execution.name === "request_user_input_async" &&
+            !entry.resultError &&
+            parseUserQuestions(entry.output) !== undefined)
           ? [entry]
           : []
       })
@@ -473,19 +467,26 @@ const TurnBlock = memo(
         (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
           entry.kind === "reasoning",
       )
-      const timeline = groupTurnTimeline(
+      const timeline = groupConversationActivity(
         entries.filter(
           (entry) =>
-            !persistent.includes(entry) &&
-            (entry.kind !== "reasoning" ||
-              entry.incomplete ||
-              entry.text.trim().length > 0) &&
-            !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
+            entry.kind !== "reasoning" ||
+            entry.incomplete ||
+            entry.text.trim().length > 0,
         ),
-        completed,
+      ).filter(
+        // Persistent cards retain their original batch boundary even when
+        // rendered outside the process disclosure so they stay actionable.
+        (item) =>
+          item.kind === "batch" ||
+          (!persistent.includes(item.entry) &&
+            !(
+              item.entry.kind === "assistant" &&
+              answerItemIds.has(item.entry.itemId)
+            )),
       )
       return { visibleAnswer, persistent, reasoning, timeline }
-    }, [entries, finalAnswer, completed])
+    }, [entries, finalAnswer])
     const currentSummary = active
       ? reasoning
           .flatMap((entry) =>
@@ -511,55 +512,27 @@ const TurnBlock = memo(
             {timeline.map((item) => (
               <li
                 key={
-                  item.kind === "activity"
+                  item.kind === "batch"
                     ? item.id
-                    : executionEntryKey(
-                        item.kind === "entry" ? item.entry : item.entries[0],
-                      )
+                    : executionEntryKey(item.entry)
                 }
                 className="agent-timeline-item"
-                data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
+                data-kind={item.kind === "batch" ? "batch" : item.entry.kind}
               >
-                {item.kind === "entry" ? (
-                  <EntryCell entry={item.entry} />
-                ) : item.kind === "activity" ? (
-                  <ActivityGroup
-                    entries={item.entries}
-                    active={active && item === timeline.at(-1)}
-                    expanded={groupExpanded[item.id]}
-                    onExpandedChange={(expanded) =>
-                      setGroupExpanded((previous) => ({
-                        ...previous,
-                        [item.id]: expanded,
-                      }))
-                    }
-                    pendingApproval={entries.some(
-                      (entry) =>
-                        entry.kind === "permission" &&
-                        entry.state !== "resolved" &&
-                        item.entries.some(
-                          (candidate) =>
-                            candidate.kind === "tool" &&
-                            candidate.toolCallId === entry.toolCallId,
-                        ),
-                    )}
-                  >
-                    {item.entries.map((entry) => (
-                      <EntryCell key={executionEntryKey(entry)} entry={entry} />
-                    ))}
-                  </ActivityGroup>
+                {item.kind === "batch" ? (
+                  <ActivityBatch entries={item.entries} />
                 ) : (
-                  <ActionGroup entries={item.entries} />
+                  <EntryCell entry={item.entry} />
                 )}
               </li>
             ))}
           </ol>
         ) : null,
-      [timeline, active, groupExpanded, entries],
+      [timeline],
     )
     return (
       <section
-        className="flex flex-col gap-5"
+        className="conversation-response"
         aria-label={active ? "Current response" : "Response"}
       >
         {entries.length > 0 || active ? (
@@ -589,7 +562,7 @@ const TurnBlock = memo(
               ) : (
                 activityLabel
               )}
-              {currentSummary ? (
+              {currentSummary && !expanded ? (
                 <span className="min-w-0 truncate" title={currentSummary}>
                   · {currentSummary}
                 </span>
@@ -612,12 +585,14 @@ const TurnBlock = memo(
             {!hasDisclosure ? null : (
               // Completion moves the final answer outside this cached tree.
               <TranscriptDisclosureContent
-                key={completed ? "completed" : "live"}
                 id={contentId}
                 open={expanded}
                 className="conversation-disclosure"
+                refreshWhenClosed={completed}
               >
-                <div className="pt-4">{timelineContent}</div>
+                <div className="conversation-activity-content">
+                  {timelineContent}
+                </div>
               </TranscriptDisclosureContent>
             )}
           </div>
@@ -644,201 +619,6 @@ const TurnBlock = memo(
     previous.entries.length === next.entries.length &&
     previous.entries.every((entry, index) => entry === next.entries[index]),
 )
-
-type TurnTimelineItem =
-  | {
-      readonly kind: "activity"
-      readonly id: string
-      readonly entries: readonly [ExecutionEntry, ...ExecutionEntry[]]
-    }
-  | { readonly kind: "entry"; readonly entry: ExecutionEntry }
-  | {
-      readonly kind: "actions"
-      readonly entries: readonly [ExecutionEntry, ...ExecutionEntry[]]
-    }
-
-function groupTurnTimeline(
-  entries: readonly ExecutionEntry[],
-  completed: boolean,
-): readonly TurnTimelineItem[] {
-  const toolCalls = new Map(
-    entries.flatMap((entry) =>
-      entry.kind === "tool" && entry.execution.modelCallId !== undefined
-        ? [[entry.toolCallId, entry.execution.modelCallId] as const]
-        : [],
-    ),
-  )
-  const callIdOf = (entry: ExecutionEntry): string | undefined => {
-    switch (entry.kind) {
-      case "assistant":
-      case "reasoning":
-        return entry.source?.callId
-      case "tool":
-        return entry.execution.type === "collaboration_tool_call" ||
-          entry.execution.name === "request_user_input_async"
-          ? undefined
-          : entry.execution.modelCallId
-      case "permission":
-        return toolCalls.get(entry.toolCallId)
-      default:
-        return undefined
-    }
-  }
-  const runs: { callId: string | undefined; entries: ExecutionEntry[] }[] = []
-  for (const entry of entries) {
-    const callId = callIdOf(entry)
-    const previous = runs.at(-1)
-    if (callId !== undefined && previous?.callId === callId)
-      previous.entries.push(entry)
-    else runs.push({ callId, entries: [entry] })
-  }
-  const timeline: TurnTimelineItem[] = []
-  let actions: ExecutionEntry[] = []
-  const flushActions = () => {
-    const [first, ...rest] = actions
-    if (first === undefined) return
-    // Keep live groups stable as more calls arrive. Once complete, a lone
-    // tool can expose its own result directly without a redundant disclosure.
-    timeline.push(
-      completed && rest.length === 0 && first.kind === "tool"
-        ? { kind: "entry", entry: first }
-        : { kind: "actions", entries: [first, ...rest] },
-    )
-    actions = []
-  }
-  for (const run of runs) {
-    const [entry, ...rest] = run.entries
-    if (entry === undefined) continue
-    if (
-      run.callId !== undefined &&
-      run.entries.some((item) => item.kind === "tool")
-    ) {
-      flushActions()
-      timeline.push(
-        completed && rest.length === 0 && entry.kind === "tool"
-          ? { kind: "entry", entry }
-          : {
-              kind: "activity",
-              id: `${run.callId}:${executionEntryKey(entry)}`,
-              entries: [entry, ...rest],
-            },
-      )
-      continue
-    }
-    for (const entry of run.entries) {
-      if (
-        (entry.kind === "tool" &&
-          entry.execution.type !== "collaboration_tool_call" &&
-          entry.execution.name !== "request_user_input_async") ||
-        entry.kind === "permission"
-      ) {
-        actions.push(entry)
-        continue
-      }
-      flushActions()
-      timeline.push({ kind: "entry", entry })
-    }
-  }
-  flushActions()
-  return timeline
-}
-
-function ActionGroup({
-  entries,
-}: Readonly<{ entries: readonly ExecutionEntry[] }>) {
-  const tools = entries.filter(
-    (entry): entry is Extract<ExecutionEntry, { kind: "tool" }> =>
-      entry.kind === "tool",
-  )
-  const Icon =
-    tools[0]?.execution.type === "file_read"
-      ? BookOpen
-      : tools[0]?.execution.type === "command_execution"
-        ? Terminal
-        : Wrench
-  const active = tools.some((entry) => entry.state === "requested")
-  const failed = tools.some((entry) => entry.state === "failed")
-  const interrupted = tools.some((entry) => entry.state === "interrupted")
-  const hasProblem = failed || interrupted
-  const [open, setOpen] = useState(hasProblem)
-  const contentId = useId()
-  useEffect(() => {
-    if (hasProblem) setOpen(true)
-  }, [hasProblem])
-  const verbCounts = new Map<string, number>()
-  for (const tool of tools) {
-    const verb = presentTool(tool).verb
-    verbCounts.set(verb, (verbCounts.get(verb) ?? 0) + 1)
-  }
-  const summary = [
-    ...[...verbCounts].map(([verb, count]) =>
-      count === 1 ? verb : `${verb} ${count}`,
-    ),
-    ...(entries.some((entry) => entry.kind === "permission")
-      ? ["Approval"]
-      : []),
-  ].join(" · ")
-  const completedSummary = [
-    ...[...verbCounts].map(([verb, count]) => {
-      if (verb === "Read")
-        return count === 1 ? "Read file" : `Read ${count} files`
-      if (verb === "Run")
-        return count === 1 ? "Ran command" : `Ran ${count} commands`
-      return count === 1 ? verb : `${verb} ${count}`
-    }),
-    ...(entries.some((entry) => entry.kind === "permission")
-      ? ["Approval"]
-      : []),
-  ].join(" · ")
-  const statusLabel = failed
-    ? "Tool failed"
-    : interrupted
-      ? "Tool interrupted"
-      : active
-        ? "Using tools"
-        : "Used tools"
-  const completed = !active && !hasProblem
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen} className="group/actions">
-      <CollapsibleTrigger
-        aria-controls={contentId}
-        aria-label={
-          summary === "" ? statusLabel : `${statusLabel} · ${summary}`
-        }
-        className={cn(
-          "flex max-w-full items-center gap-2 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground",
-          hasProblem && "text-destructive hover:text-destructive",
-        )}
-      >
-        <Icon className="size-4 shrink-0" />
-        <span
-          className={cn("min-w-0 truncate", active && "tool-running-label")}
-        >
-          {completed ? completedSummary || statusLabel : statusLabel}
-        </span>
-        {completed || summary === "" ? null : (
-          <span
-            className={cn(
-              "min-w-0 truncate text-muted-foreground/80",
-              hasProblem && "text-destructive/80",
-            )}
-          >
-            · {summary}
-          </span>
-        )}
-        <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/actions:rotate-90" />
-      </CollapsibleTrigger>
-      <TranscriptDisclosureContent id={contentId} open={open} className="pt-2">
-        <div className="flex flex-col gap-1 pl-3">
-          {entries.map((entry) => (
-            <EntryCell key={executionEntryKey(entry)} entry={entry} />
-          ))}
-        </div>
-      </TranscriptDisclosureContent>
-    </Collapsible>
-  )
-}
 
 const EntryCell = memo(function EntryCell({
   entry,
