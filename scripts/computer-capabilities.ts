@@ -8,6 +8,7 @@ type FixtureState = {
   rich: string
   rich_bold: boolean
   changes: number
+  key_window: number
   hidden: boolean
   secondary_minimized: boolean
   pointer_down: number
@@ -228,9 +229,11 @@ export async function verifyComputerCapabilities(context: {
     },
   )
   await check(
-    "application menu actions retain their application identity",
+    "application menu actions retain their key-window identity",
     async () => {
       await regularFixture()
+      process.kill(pid, "SIGURG")
+      await waitFor(async () => (await state()).key_window === windowID)
       const observed = await call({
         action: "observe",
         scope: "app",
@@ -245,6 +248,7 @@ export async function verifyComputerCapabilities(context: {
       }[]
       const menu = rows.find((row) => row.title === "Delayed menu update")
       assert(menu, JSON.stringify(rows))
+      assert.equal(menu.anchor_window_id, windowID)
       assert(
         (observed.structuredContent?.windows as { window_id: number }[]).some(
           (item) => item.window_id === menu.anchor_window_id,
