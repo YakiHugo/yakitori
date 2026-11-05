@@ -93,7 +93,7 @@ function FencedCode({
       ? highlighted.html
       : undefined
   return (
-    <div className="group/code relative min-w-0">
+    <div className="markdown-code-block group/code relative min-w-0">
       <div className="absolute top-2 right-2 z-10 rounded-md bg-background/90 text-xs text-muted-foreground opacity-0 transition-opacity group-hover/code:opacity-100 focus-within:opacity-100">
         <CopyIconButton text={code} label="code" />
       </div>

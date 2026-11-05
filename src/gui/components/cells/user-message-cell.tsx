@@ -41,7 +41,7 @@ function MessageText({ text }: Readonly<{ text: string }>) {
             key={offset}
             title={node.attrs.path}
             aria-label={`View ${node.attrs.name} skill`}
-            className="mx-0.5 inline cursor-pointer rounded-md bg-primary-foreground/15 px-1.5 py-0.5 font-medium hover:bg-primary-foreground/25 focus-visible:outline-2 focus-visible:outline-offset-2"
+            className="mx-0.5 inline cursor-pointer rounded-md bg-current/10 px-1.5 py-0.5 font-medium hover:bg-current/15 focus-visible:outline-2 focus-visible:outline-offset-2"
             onClick={() =>
               useWorkspaceStore
                 .getState()
@@ -55,7 +55,7 @@ function MessageText({ text }: Readonly<{ text: string }>) {
             // biome-ignore lint/suspicious/noArrayIndexKey: ProseMirror supplies document offsets, not array indices; admitted messages are immutable.
             key={offset}
             title={node.attrs.path}
-            className="mx-0.5 inline rounded-md bg-primary-foreground/15 px-1.5 py-0.5 font-medium"
+            className="mx-0.5 inline rounded-md bg-current/10 px-1.5 py-0.5 font-medium"
           >
             @{node.attrs.name}
           </span>
@@ -67,7 +67,7 @@ function MessageText({ text }: Readonly<{ text: string }>) {
       <p key={paragraphOffset}>{content.length ? content : <br />}</p>,
     )
   })
-  return <div className="px-4 py-3 whitespace-pre-wrap">{paragraphs}</div>
+  return <div className="px-4 py-2.5 whitespace-pre-wrap">{paragraphs}</div>
 }
 
 export function UserMessageCell({
@@ -145,7 +145,7 @@ export function UserMessageCell({
             return part.text ? (
               <div
                 key={key}
-                className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-body text-primary-foreground"
+                className="message-bubble overflow-hidden"
                 {...contextSourceAttributes(
                   sessionId
                     ? {
@@ -162,14 +162,14 @@ export function UserMessageCell({
             ) : null
           })}
           {sentAsGoal ? (
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1 text-caption text-muted-foreground">
               <Target className="size-3" />
               <span>Sent as goal</span>
             </div>
           ) : null}
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}
-            <div className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+            <div className="message-actions opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
               <MessageTimestamp at={entry.at} />
               <CopyIconButton text={entry.text} label="message" />
               <button

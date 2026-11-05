@@ -60,16 +60,16 @@ export function ReasoningTrace({
   apiBase?: string | undefined
 }>) {
   return (
-    <div className="flex flex-col gap-3 text-detail text-muted-foreground">
+    <div className="reasoning-trace text-detail text-muted-foreground">
       {entries.map((entry) => {
         if (!entry.text.trim() && !entry.incomplete) return null
         return (
-          <div key={entry.itemId} className="flex flex-col gap-2">
+          <div key={entry.itemId} className="reasoning-entry">
             <LiveTextNotice entry={entry} />
             <MarkdownView
               text={entry.text}
               streaming={active && entry.status === "streaming"}
-              className="markdown-compact max-w-2xl text-muted-foreground"
+              className="markdown-compact"
               workspaceRoot={workspaceRoot}
               apiBase={apiBase}
             />
