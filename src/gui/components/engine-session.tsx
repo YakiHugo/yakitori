@@ -127,7 +127,10 @@ export function EngineConversation() {
     },
   })
   return (
-    <div {...interrupt} className="flex min-h-0 flex-1 flex-col">
+    <div
+      {...interrupt}
+      className="engine-conversation flex min-h-0 flex-1 flex-col"
+    >
       <section
         ref={scroll}
         onScroll={() => {
@@ -136,7 +139,7 @@ export function EngineConversation() {
             pinned.current =
               node.scrollHeight - node.scrollTop - node.clientHeight < 64
         }}
-        className="min-h-0 flex-1 overflow-y-auto px-5"
+        className="engine-transcript min-h-0 flex-1 overflow-y-auto px-5"
         aria-label="Engine conversation"
       >
         <div className="mx-auto max-w-3xl space-y-5 py-5">

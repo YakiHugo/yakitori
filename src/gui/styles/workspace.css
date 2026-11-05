@@ -24,7 +24,14 @@
 .workspace-frame[data-open="false"] {
   display: none;
 }
-.workspace-shell[data-workspace-expanded="true"] > main {
+.workspace-main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  --project-overview-width: 0px;
+}
+.workspace-shell[data-workspace-expanded="true"] > .workspace-main {
   display: none;
 }
 .workspace-frame[data-expanded="true"] {
@@ -340,8 +347,22 @@
 .workspace-frame[data-resizing="true"] {
   user-select: none;
 }
+.goal-editor {
+  margin-inline-end: var(--project-overview-width, 0px);
+}
+.workspace-main:has(.goal-editor) .conversation-surface {
+  --project-overview-width: 0px;
+}
+@media (min-width: 1180px) {
+  .workspace-main:has(> .workspace-overview) {
+    --project-overview-width: 300px;
+  }
+}
 .workspace-overview {
-  flex: 0 0 300px;
+  position: absolute;
+  top: 0;
+  right: 10px;
+  width: 290px;
   min-width: 0;
   padding: 12px 16px 16px 0;
 }
