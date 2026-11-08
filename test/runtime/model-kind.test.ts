@@ -13,6 +13,7 @@ it.each([
   ["gpt-4o-realtime-preview", "other"],
   ["gpt-realtime-whisper", "other"],
   ["gpt-image-1-mini", "image"],
+  ["chatgpt-image-latest", "image"],
   ["dall-e-3", "image"],
   ["sora-2-pro", "video"],
   ["babbage-002", "other"],

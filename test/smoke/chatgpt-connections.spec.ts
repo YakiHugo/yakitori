@@ -115,6 +115,11 @@ test("account setup shows reference models and retries authenticated discovery",
           return
         }
         result = [
+          { id: "gpt-6-astra" },
+          { id: "gpt-6.1-sol" },
+          { id: "gpt-5.6-sol" },
+          { id: "chatgpt-image-latest", kind: "image" },
+          { id: "private-deployment" },
           { id: "gpt-4o" },
           { id: "gpt-5-2025-08-07" },
           { id: "gpt-5" },
@@ -152,11 +157,37 @@ test("account setup shows reference models and retries authenticated discovery",
     page.getByRole("switch", { name: /Enable kimi-for-coding/ }),
   ).toHaveCount(0)
   await expect(page.locator(".provider-model-name")).toHaveText([
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-5.6-sol",
     "gpt-5",
     "gpt-5-2025-10-01",
     "gpt-5-2025-08-07",
     "gpt-4o",
+    "private-deployment",
   ])
+  await expect(
+    page.getByRole("switch", { name: "Enable chatgpt-image-latest" }),
+  ).toHaveCount(0)
+  const family = page.locator("summary", { hasText: /^GPT 6$/ })
+  const sol = page.getByRole("switch", {
+    name: "Enable gpt-6.1-sol",
+    exact: true,
+  })
+  await family.click()
+  await expect(sol).toBeHidden()
+  await family.click()
+  await expect(sol).toBeVisible()
+  await expect(sol).toHaveAttribute("aria-checked", "true")
+  await family.click()
+  await page.getByRole("searchbox", { name: "Filter models" }).fill("gpt-6.1")
+  await expect(sol).toBeVisible()
+  await page.getByRole("searchbox", { name: "Filter models" }).fill("private")
+  await expect(
+    page.getByRole("switch", { name: "Enable private-deployment" }),
+  ).toBeVisible()
+  await page.getByRole("searchbox", { name: "Filter models" }).fill("")
+  await expect(sol).toBeVisible()
   await page.screenshot({
     path: testInfo.outputPath("account-models.png"),
     fullPage: true,

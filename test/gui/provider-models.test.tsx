@@ -149,3 +149,39 @@ it("groups versions and snapshots without changing visibility or selected IDs", 
     id: "custom-10-2025-06-01",
   })
 })
+
+it("shows collapsible family sections and reopens matching results when searching", () => {
+  const onChange = vi.fn()
+  const { container } = render(
+    <ProviderModels
+      configuration={{ models: [] }}
+      available={[
+        { id: "gpt-5" },
+        { id: "gpt-6.1-sol" },
+        { id: "private-deployment" },
+        { id: "chatgpt-image-latest", kind: "image" },
+      ]}
+      onChange={onChange}
+      fetchingModels={false}
+    />,
+  )
+  expect(
+    [...container.querySelectorAll("summary")].map((item) => item.textContent),
+  ).toEqual(["GPT 6", "GPT 5", "Other models"])
+  expect(
+    screen.queryByRole("switch", { name: "Enable chatgpt-image-latest" }),
+  ).toBeNull()
+  const group = container.querySelector("details")
+  if (!group) throw new Error("Missing model group")
+  group.open = false
+  fireEvent.input(screen.getByRole("searchbox"), { target: { value: "gpt-6" } })
+  expect(container.querySelector("details")?.open).toBe(true)
+  expect(container.querySelectorAll("summary")).toHaveLength(1)
+  fireEvent.input(screen.getByRole("searchbox"), {
+    target: { value: "private" },
+  })
+  expect(
+    screen.getByRole("switch", { name: "Enable private-deployment" }),
+  ).toBeTruthy()
+  expect(onChange).not.toHaveBeenCalled()
+})

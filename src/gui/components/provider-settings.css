@@ -811,3 +811,16 @@ button.provider-model-main {
     margin-inline: auto;
   }
 }
+
+.provider-model-group > summary {
+  padding: 12px 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.provider-model-group > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}

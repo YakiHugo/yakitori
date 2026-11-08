@@ -1,6 +1,9 @@
 import { useState } from "react"
 import type { ConfiguredModel } from "../../protocol/providers.ts"
-import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
+import {
+  groupModelCatalog,
+  sortModelCatalog,
+} from "../../protocol/model-catalog-order.ts"
 import { Input } from "./ui/field.tsx"
 
 type ModelConfiguration = Readonly<{ models: readonly ConfiguredModel[] }>
@@ -38,6 +41,7 @@ export function ProviderModels({
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
   )
+  const groups = groupModelCatalog(filtered)
   return (
     <fieldset className="provider-models">
       <legend className="sr-only">Available models</legend>
@@ -55,73 +59,82 @@ export function ProviderModels({
       </div>
       {fetchingModels ? <p role="status">Loading models…</p> : null}
       <div className="provider-model-list">
-        {filtered.map((model) => {
-          const facts = [
-            model.contextWindowTokens
-              ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(model.contextWindowTokens)} ${model.contextWindowScope === "input" ? "input" : "context"}`
-              : undefined,
-            model.inputModalities?.includes("image") ? "Images" : undefined,
-            model.efforts?.length ? "Reasoning" : undefined,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-          const identity = (
-            <>
-              <span className="provider-model-name">
-                {model.displayName ?? model.id}
-              </span>
-              <code className="provider-model-id" title={model.id}>
-                {model.displayName && model.displayName !== model.id
-                  ? model.id
-                  : ""}
-              </code>
-              <span className="provider-model-facts" title={facts}>
-                {facts}
-              </span>
-            </>
-          )
-          return (
-            <div className="provider-model-item" key={model.id}>
-              {onEditModel ? (
-                <button
-                  type="button"
-                  className="provider-model-main"
-                  aria-label={`Edit settings for ${model.id}`}
-                  onClick={() => onEditModel(model)}
-                >
-                  {identity}
-                </button>
-              ) : (
-                <div className="provider-model-main">{identity}</div>
-              )}
-              <button
-                type="button"
-                role="switch"
-                aria-label={`Enable ${model.displayName ?? model.id}`}
-                aria-checked={model.visible !== false}
-                className="provider-switch provider-model-switch"
-                onClick={() =>
-                  onChange({
-                    models: [
-                      ...configuration.models.filter(
-                        (entry) =>
-                          entry.id.toLowerCase() !== model.id.toLowerCase(),
-                      ),
-                      {
-                        ...(overrides.get(model.id.toLowerCase()) ?? {
-                          id: model.id,
-                        }),
-                        visible: model.visible === false,
-                      },
-                    ],
-                  })
-                }
-              >
-                <span />
-              </button>
-            </div>
-          )
-        })}
+        {groups.map((group) => (
+          <details
+            className="provider-model-group"
+            key={`${group.label}:${query}`}
+            open
+          >
+            <summary>{group.label}</summary>
+            {group.models.map((model) => {
+              const facts = [
+                model.contextWindowTokens
+                  ? `${new Intl.NumberFormat("en", { notation: "compact" }).format(model.contextWindowTokens)} ${model.contextWindowScope === "input" ? "input" : "context"}`
+                  : undefined,
+                model.inputModalities?.includes("image") ? "Images" : undefined,
+                model.efforts?.length ? "Reasoning" : undefined,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+              const identity = (
+                <>
+                  <span className="provider-model-name">
+                    {model.displayName ?? model.id}
+                  </span>
+                  <code className="provider-model-id" title={model.id}>
+                    {model.displayName && model.displayName !== model.id
+                      ? model.id
+                      : ""}
+                  </code>
+                  <span className="provider-model-facts" title={facts}>
+                    {facts}
+                  </span>
+                </>
+              )
+              return (
+                <div className="provider-model-item" key={model.id}>
+                  {onEditModel ? (
+                    <button
+                      type="button"
+                      className="provider-model-main"
+                      aria-label={`Edit settings for ${model.id}`}
+                      onClick={() => onEditModel(model)}
+                    >
+                      {identity}
+                    </button>
+                  ) : (
+                    <div className="provider-model-main">{identity}</div>
+                  )}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label={`Enable ${model.displayName ?? model.id}`}
+                    aria-checked={model.visible !== false}
+                    className="provider-switch provider-model-switch"
+                    onClick={() =>
+                      onChange({
+                        models: [
+                          ...configuration.models.filter(
+                            (entry) =>
+                              entry.id.toLowerCase() !== model.id.toLowerCase(),
+                          ),
+                          {
+                            ...(overrides.get(model.id.toLowerCase()) ?? {
+                              id: model.id,
+                            }),
+                            visible: model.visible === false,
+                          },
+                        ],
+                      })
+                    }
+                  >
+                    <span />
+                  </button>
+                </div>
+              )
+            })}
+          </details>
+        ))}
         {!filtered.length && !fetchingModels ? (
           <p className="provider-field-hint">
             {query

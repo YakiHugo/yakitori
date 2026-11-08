@@ -21,14 +21,26 @@ function catalogKey(id: string) {
 // Alphabetical families, with numeric version components descending. This is
 // navigation order, not a claim about quality, capability, or release recency.
 function compareVersions(a: string, b: string): number {
-  const first = a.match(/\d+|\D+/g) ?? []
-  const second = b.match(/\d+|\D+/g) ?? []
+  const first = a.match(/\d+(?:\.\d+)*|\D+/g) ?? []
+  const second = b.match(/\d+(?:\.\d+)*|\D+/g) ?? []
   for (const [index, left] of first.entries()) {
     const right = second[index]
     if (right === undefined) break
-    const compared = textOrder.compare(left, right)
-    if (compared)
-      return /^\d+$/.test(left) && /^\d+$/.test(right) ? -compared : compared
+    if (/^\d/.test(left) && /^\d/.test(right)) {
+      const leftVersion = left.split(".").map(Number)
+      const rightVersion = right.split(".").map(Number)
+      for (
+        let part = 0;
+        part < Math.max(leftVersion.length, rightVersion.length);
+        part++
+      ) {
+        const compared = (rightVersion[part] ?? 0) - (leftVersion[part] ?? 0)
+        if (compared) return compared
+      }
+    } else {
+      const compared = textOrder.compare(left, right)
+      if (compared) return compared
+    }
   }
   return first.length - second.length
 }
@@ -52,4 +64,26 @@ export function sortModelCatalog<T extends { id: string }>(
       return a.model.id < b.model.id ? -1 : a.model.id > b.model.id ? 1 : 0
     })
     .map(({ model }) => model)
+}
+
+// These are navigation groups derived from IDs, not capability classifications.
+export function groupModelCatalog<T extends { id: string }>(
+  models: readonly T[],
+) {
+  const groups = new Map<string, { label: string; models: T[] }>()
+  for (const model of sortModelCatalog(models)) {
+    const match = model.id.toLowerCase().match(/^([^\d]+?)[-_.]?(\d+)/)
+    const prefix = match?.[1]?.replace(/[-_.]+$/, "")
+    const label =
+      prefix && match
+        ? `${prefix === "gpt" ? "GPT" : prefix} ${match[2]}`
+        : "Other models"
+    const group = groups.get(label) ?? { label, models: [] }
+    group.models.push(model)
+    groups.set(label, group)
+  }
+  // Unversioned aliases and custom IDs remain accessible after versioned groups.
+  return [...groups.values()].sort((a, b) =>
+    a.label === "Other models" ? 1 : b.label === "Other models" ? -1 : 0,
+  )
 }
