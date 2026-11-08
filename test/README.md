@@ -44,7 +44,7 @@ named `gui` does not imply that a contract needs a rendered component.
 - `pnpm test:browser`: Chromium smoke against built bundles.
 - `pnpm test:desktop-smoke`: packaged macOS Electron smoke. See the Desktop
   workflow for packaging and archive/restore prerequisites.
-- `pnpm check`, `pnpm build:gui`, `pnpm build:desktop`: aggregate local checks
+- `pnpm check`, `pnpm build`: aggregate local checks
   and both production bundles.
 
 Every PR runs both Vitest lanes, Chromium, and packaged macOS verification. The
