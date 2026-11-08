@@ -254,7 +254,7 @@ describe("sidebar", () => {
     expect(within(kimiCard).getByText("API key connection")).toBeDefined()
     expect(
       within(kimiCard).getByText(
-        "Subscription usage is not available for API key connections.",
+        "Balance and usage reporting is not supported for this connection.",
       ),
     ).toBeDefined()
   })

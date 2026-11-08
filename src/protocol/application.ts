@@ -218,6 +218,29 @@ export type ApiProviderSummary = Readonly<{
 // An account ID, not a vendor name. Usage belongs to the account actually used.
 export type ApiSubscriptionProvider = string
 
+// Monetary balances and key budgets are not subscription rate-limit percentages.
+export type ApiAccountFinancials =
+  | Readonly<{
+      status: "available"
+      metrics: readonly Readonly<{
+        kind:
+          | "balance"
+          | "granted_balance"
+          | "cash_balance"
+          | "key_remaining"
+          | "key_limit"
+          | "key_usage"
+        currency: string
+        amount: number
+      }>[]
+      unlimited?: boolean
+      keyLimitReset?: "daily" | "weekly" | "monthly"
+    }>
+  | Readonly<{
+      status: "unavailable"
+      reason: "temporarily_unavailable" | "permission_denied"
+    }>
+
 export type ApiSubscriptionSummary = Readonly<{
   provider: ApiSubscriptionProvider
   displayName: string
@@ -225,6 +248,7 @@ export type ApiSubscriptionSummary = Readonly<{
   credentialKind?: "api_key" | "oauth"
   plan?: string
   usage: ApiRateLimits
+  financials?: ApiAccountFinancials
 }>
 
 export type ApiReadSubscriptionRequest = Readonly<{

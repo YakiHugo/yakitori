@@ -168,7 +168,7 @@ export function ProviderUsage({
         means pricing is unavailable.
       </p>
       <div className="provider-usage-limits">
-        <h4>Subscription limits</h4>
+        <h4>Balance and usage</h4>
         {chatGPT ? (
           <ChatGPTUsageLink />
         ) : (

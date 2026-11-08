@@ -3,6 +3,7 @@ import type {
   ApiSubscriptionSummary,
 } from "../../protocol/application.ts"
 import { useAppStore, type SubscriptionUsageState } from "../store/app-store.ts"
+import { AccountFinancials } from "./account-financials.tsx"
 
 export function SubscriptionsSection() {
   const states = useAppStore((state) => state.subscriptionsByProvider)
@@ -12,7 +13,8 @@ export function SubscriptionsSection() {
       {error ? <p role="alert">{error}</p> : null}
       {!error && Object.keys(states).length === 0 ? (
         <p className="subscription-note">
-          Add an account in Providers to view its subscription limits.
+          Add an account in Providers to view its balance or subscription
+          limits.
         </p>
       ) : null}
       {Object.keys(states).map((provider) => (
@@ -104,6 +106,11 @@ function ProviderUsage({
 }: Readonly<{ provider: ApiSubscriptionSummary }>) {
   const connected = provider.availability === "available"
   const usage = provider.usage
+  const financials = provider.financials ? (
+    <div className="mt-4">
+      <AccountFinancials financials={provider.financials} />
+    </div>
+  ) : null
   if (!connected) {
     return (
       <p className="subscription-note">
@@ -113,55 +120,64 @@ function ProviderUsage({
   }
   if (usage.status !== "available") {
     return (
-      <p className="subscription-note">
-        {usage.reason === "temporarily_unavailable"
-          ? "Usage could not be refreshed. Try again in a moment."
-          : provider.credentialKind === "api_key"
-            ? "Subscription usage is not available for API key connections."
-            : "This provider does not currently expose subscription limits here."}
-      </p>
+      financials ?? (
+        <p className="subscription-note">
+          {usage.reason === "temporarily_unavailable"
+            ? "Usage could not be refreshed. Try again in a moment."
+            : provider.credentialKind === "api_key"
+              ? "Balance and usage reporting is not supported for this connection."
+              : "This provider does not currently expose subscription limits here."}
+        </p>
+      )
     )
   }
   if (usage.buckets.length === 0) {
-    return <p className="subscription-note">No usage limits were reported.</p>
+    return (
+      financials ?? (
+        <p className="subscription-note">No usage limits were reported.</p>
+      )
+    )
   }
   return (
-    <div className="subscription-buckets">
-      {usage.buckets.map((bucket) => {
-        const percent = Math.max(0, Math.min(100, bucket.usedPercent))
-        const nearLimit = percent >= 90
-        const reset = validDate(bucket.resetsAt)
-        return (
-          <div
-            className="subscription-bucket"
-            key={`${bucket.name}-${bucket.resetsAt ?? "no-reset"}`}
-          >
-            <div className="subscription-bucket-label">
-              <span>{bucket.name}</span>
-              <strong>
-                {Math.round(bucket.usedPercent)}% used
-                {nearLimit ? " · Near limit" : ""}
-              </strong>
+    <>
+      {financials}
+      <div className="subscription-buckets">
+        {usage.buckets.map((bucket) => {
+          const percent = Math.max(0, Math.min(100, bucket.usedPercent))
+          const nearLimit = percent >= 90
+          const reset = validDate(bucket.resetsAt)
+          return (
+            <div
+              className="subscription-bucket"
+              key={`${bucket.name}-${bucket.resetsAt ?? "no-reset"}`}
+            >
+              <div className="subscription-bucket-label">
+                <span>{bucket.name}</span>
+                <strong>
+                  {Math.round(bucket.usedPercent)}% used
+                  {nearLimit ? " · Near limit" : ""}
+                </strong>
+              </div>
+              <progress
+                className="subscription-progress"
+                data-near-limit={nearLimit}
+                max={100}
+                value={percent}
+                aria-label={`${bucket.name}: ${Math.round(bucket.usedPercent)}% used`}
+              />
+              {reset === undefined ? null : (
+                <time
+                  className="subscription-reset"
+                  dateTime={reset.toISOString()}
+                >
+                  Resets {formatResetTime(reset)}
+                </time>
+              )}
             </div>
-            <progress
-              className="subscription-progress"
-              data-near-limit={nearLimit}
-              max={100}
-              value={percent}
-              aria-label={`${bucket.name}: ${Math.round(bucket.usedPercent)}% used`}
-            />
-            {reset === undefined ? null : (
-              <time
-                className="subscription-reset"
-                dateTime={reset.toISOString()}
-              >
-                Resets {formatResetTime(reset)}
-              </time>
-            )}
-          </div>
-        )
-      })}
-    </div>
+          )
+        })}
+      </div>
+    </>
   )
 }
 
