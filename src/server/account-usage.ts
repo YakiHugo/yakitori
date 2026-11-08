@@ -1,3 +1,7 @@
+import {
+  accountFinancialEndpoint,
+  readApiAccountFinancials,
+} from "../runtime/api-account-financials.ts"
 import type { ApiReadSubscriptionResponse } from "../protocol/application.ts"
 import type { ProviderConfiguration } from "../protocol/providers.ts"
 import { resolveCodexAccessToken } from "../runtime/codex-credentials.ts"
@@ -28,6 +32,18 @@ export async function readAccountUsage(input: {
     usage: { status: "unavailable", reason: "not_supported" },
   }
   if (!input.connected) return { subscription, fetchedAt: Date.now() }
+  const financialEndpoint = accountFinancialEndpoint(config)
+  if (financialEndpoint && input.apiKey)
+    return {
+      subscription: {
+        ...subscription,
+        financials: await readApiAccountFinancials(
+          financialEndpoint,
+          input.apiKey,
+        ),
+      },
+      fetchedAt: Date.now(),
+    }
   const path = config.credentialPath
   if (oauth && !path)
     throw new ConfigurationError("The account has no credential source.")
