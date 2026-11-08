@@ -41,7 +41,7 @@ jobs:
         run: pnpm lint
 
       - name: Build renderer and desktop bundles
-        run: pnpm build:gui && pnpm build:desktop
+        run: pnpm build
 
       - name: Install Chromium
         run: |

@@ -52,20 +52,20 @@ Run the desktop app in production style. This builds the GUI and desktop
 bundle, spawns the bundled server as a sidecar, and serves the GUI same-origin:
 
 ```sh
-pnpm start:desktop
+pnpm start
 ```
 
 Run desktop development with Vite HMR for renderer changes. Restart the command
 to load server changes:
 
 ```sh
-pnpm dev:desktop
+pnpm dev
 ```
 
 Run the server and GUI in a browser instead:
 
 ```sh
-pnpm dev
+pnpm dev:web
 ```
 
 - GUI: `http://127.0.0.1:5173?api=http://127.0.0.1:4141`
@@ -126,7 +126,7 @@ credentials are used only after the user connects them from Accounts.
 For a scripted command flow that runs immediately with host authority:
 
 ```sh
-YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev
+YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev:web
 ```
 
 The model picker lists model identities across connected accounts. The host
@@ -168,14 +168,34 @@ pnpm test
 pnpm test:watch
 pnpm lint
 pnpm build:desktop
-pnpm package:desktop
+pnpm package
 ```
 
 The build writes the GUI to `dist/gui`, and the Electron main bundle plus
-sidecar server entry to `dist/desktop`. `pnpm package:desktop` produces an unsigned, unnotarized,
+sidecar server entry to `dist/desktop`. `pnpm package` produces an unsigned, unnotarized,
 unpacked app under `release/`.
 
-### Installing the latest main build
+### Installing the current workspace
+
+To build, package, and install the code in your current checkout, including
+uncommitted changes:
+
+```sh
+pnpm app:install
+```
+
+Quit Yakitori before installing, then reopen `/Applications/Yakitori.app`.
+This builds in the current checkout; packaging restores native modules for
+ordinary Node development and tests afterward. `pnpm package` only creates
+the app under `release/` without installing it.
+
+Installation currently targets Apple Silicon macOS 14+ and requires Xcode
+Command Line Tools for local builds. If the local signing identity is missing,
+run `pnpm setup:computer-signing` once to create it in your Keychain.
+Set `YAKITORI_INSTALL_TARGET` to use a destination other than
+`/Applications/Yakitori.app`.
+
+### Updating to the latest main build
 
 The Desktop workflow packages the app on every push to `main` and keeps the
 result as the `yakitori-macos-arm64` workflow artifact. With the `gh` CLI
@@ -183,14 +203,14 @@ authenticated, one command downloads that build and installs it to
 `/Applications`:
 
 ```sh
-pnpm install:main
+pnpm app:update
 ```
 
-When no CI build is available (or for a build straight from the local
-checkout's `origin/main`), append `--local` to package it in a throwaway git
-worktree instead; the current checkout and its native module builds stay
-untouched:
+To fetch the latest `origin/main` and build it on this computer instead of
+downloading CI output, append `--build`. This uses a throwaway git worktree,
+excludes current branch and uncommitted changes, and leaves the current
+checkout and its native module builds untouched:
 
 ```sh
-pnpm install:main --local
+pnpm app:update --build
 ```

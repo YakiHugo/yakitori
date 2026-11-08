@@ -1,10 +1,3 @@
-// Installs the latest main-branch desktop build into /Applications.
-//
-// Default mode downloads the yakitori-macos-arm64 artifact from the newest
-// successful CI main-push run on origin/main (requires the gh CLI).
-// `--local` skips CI and builds origin/main in a throwaway git worktree,
-// leaving the current checkout untouched.
-// YAKITORI_INSTALL_TARGET overrides the install destination.
 import { spawn } from "node:child_process"
 import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -13,11 +6,29 @@ import { basename, dirname, join } from "node:path"
 const artifactName = "yakitori-macos-arm64"
 const installTarget =
   process.env.YAKITORI_INSTALL_TARGET ?? "/Applications/Yakitori.app"
-const localBuild = process.argv.includes("--local")
+const [source, ...options] = process.argv.slice(2)
+if (
+  (source !== "workspace" && source !== "main") ||
+  (source === "workspace" && options.length !== 0) ||
+  (source === "main" &&
+    !(
+      options.length === 0 ||
+      (options.length === 1 && options[0] === "--build")
+    ))
+) {
+  throw new Error("Usage: pnpm app:install | pnpm app:update [--build]")
+}
+const localBuild = options.includes("--build")
 
 const staging = await mkdtemp(join(tmpdir(), "yakitori-install-"))
 try {
-  if (localBuild) await buildAndInstallFromMain(staging)
+  if (source === "workspace") {
+    console.log(
+      `Building current workspace at ${process.cwd()} (including local changes)…`,
+    )
+    await run("pnpm", ["package"])
+    await install(join(process.cwd(), "release", "mac-arm64", "Yakitori.app"))
+  } else if (localBuild) await buildAndInstallFromMain(staging)
   else await install(await download(staging))
   console.log(`Installed ${installTarget}. Restart Yakitori to run it.`)
 } catch (error) {
@@ -46,7 +57,7 @@ async function download(staging: string): Promise<string> {
   ]).catch(() => undefined)
   if (listed === undefined) {
     throw new Error(
-      "Could not query CI workflow runs. Check gh auth, or build locally with: pnpm install:main --local",
+      "Could not query CI workflow runs. Check gh auth, or build locally with: pnpm app:update --build",
     )
   }
   const workflowRun = (
@@ -57,7 +68,7 @@ async function download(staging: string): Promise<string> {
   )[0]
   if (workflowRun === undefined) {
     throw new Error(
-      "No successful CI main-push run yet. Build locally instead: pnpm install:main --local",
+      "No successful CI main-push run yet. Build locally instead: pnpm app:update --build",
     )
   }
   console.log(
@@ -78,11 +89,15 @@ async function download(staging: string): Promise<string> {
 
 async function buildAndInstallFromMain(staging: string): Promise<void> {
   await run("git", ["fetch", "origin", "main"])
+  const commit = (await capture("git", ["rev-parse", "origin/main"])).trim()
+  console.log(
+    `Building origin/main@${commit.slice(0, 7)} in an isolated worktree (excluding current workspace changes)…`,
+  )
   const worktree = join(staging, "worktree")
-  await run("git", ["worktree", "add", "--detach", worktree, "origin/main"])
+  await run("git", ["worktree", "add", "--detach", worktree, commit])
   try {
     await run("pnpm", ["install", "--frozen-lockfile"], worktree)
-    await run("pnpm", ["package:desktop"], worktree)
+    await run("pnpm", ["package"], worktree)
     // Install before the throwaway worktree is removed.
     await install(join(worktree, "release", "mac-arm64", "Yakitori.app"))
   } finally {

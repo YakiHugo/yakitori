@@ -37,7 +37,7 @@ jobs:
         run: pnpm test:computer
 
       - name: Package the desktop app
-        run: pnpm package:desktop
+        run: pnpm package
 
       - name: Archive and restore the desktop app
         # Artifact uploads do not preserve executable modes or symlinks. Verify
