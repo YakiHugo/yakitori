@@ -4,6 +4,7 @@ import type { ApiSubscriptionProvider } from "../../protocol/application.ts"
 import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import { AccountFinancials } from "./account-financials.tsx"
 
 type McpServers = RpcMethodResponses["mcp/status"]["servers"]
 type Subscription = RpcMethodResponses["subscription/read"]["subscription"]
@@ -36,6 +37,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
         apiBase: string
         provider: ApiSubscriptionProvider
         subscription?: Subscription
+        fetchedAt?: number
         error?: string
       }>
     >()
@@ -118,6 +120,7 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
               apiBase,
               provider: subscriptionProvider,
               subscription: response.subscription,
+              fetchedAt: response.fetchedAt,
             })
         },
         (cause: unknown) => {
@@ -242,9 +245,14 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
           <div className="pt-1">
             <h4 className="mb-2 text-xs font-medium text-muted-foreground">
               {subscriptionProvider
-                ? `${subscriptionProvider} usage limits`
+                ? subscription?.financials
+                  ? `${subscription.displayName} balance and usage`
+                  : `${subscriptionProvider} usage limits`
                 : "Usage limits"}
             </h4>
+            {subscription?.financials ? (
+              <AccountFinancials financials={subscription.financials} />
+            ) : null}
             {subscriptionProvider === undefined ? (
               <p className="text-xs text-muted-foreground">
                 This provider does not report subscription limits here.
@@ -254,13 +262,17 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                 {error ? "Usage limits unavailable." : "Loading usage limits…"}
               </p>
             ) : subscription.usage.status !== "available" ? (
-              <p className="text-xs text-muted-foreground">
-                Usage limits unavailable for this connection.
-              </p>
+              subscription.financials ? null : (
+                <p className="text-xs text-muted-foreground">
+                  Usage limits unavailable for this connection.
+                </p>
+              )
             ) : subscription.usage.buckets.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                No usage limits reported.
-              </p>
+              subscription.financials ? null : (
+                <p className="text-xs text-muted-foreground">
+                  No usage limits reported.
+                </p>
+              )
             ) : (
               <ul className="space-y-3">
                 {subscription.usage.buckets.map((bucket) => {
@@ -289,6 +301,24 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
                 })}
               </ul>
             )}
+            {subscription?.financials &&
+            currentSubscriptionResult?.fetchedAt !== undefined ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Updated{" "}
+                <time
+                  dateTime={new Date(
+                    currentSubscriptionResult.fetchedAt,
+                  ).toISOString()}
+                >
+                  {new Date(
+                    currentSubscriptionResult.fetchedAt,
+                  ).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </time>
+              </p>
+            ) : null}
           </div>
         </div>
       )}
