@@ -74,6 +74,20 @@
   background: currentColor;
   opacity: 0.6;
 }
+.provider-connection-open {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.provider-connection-open:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
 .provider-connection-chevron {
   flex: none;
   color: var(--muted-foreground);
@@ -335,7 +349,7 @@
   .provider-connection {
     gap: 10px;
   }
-  .provider-connection-chevron {
+  .provider-connection-open {
     display: none;
   }
   .provider-connection {

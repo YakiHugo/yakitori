@@ -119,3 +119,46 @@ it("keeps relay model capabilities unverified and honors native explicit overrid
   await relay.close?.()
   await native.close?.()
 })
+
+it("keeps non-chat native catalog entries out of account models and execution", async () => {
+  const ids = [
+    "whisper-1",
+    "gpt-image-1-mini",
+    "gpt-audio-1.5",
+    "gpt-realtime-whisper",
+    "gpt-4o-mini-tts",
+    "gpt-99",
+  ]
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ data: ids.map((id) => ({ id })) })),
+  )
+  const configuration: ProviderConfiguration = {
+    name: "OpenAI",
+    service: "openai",
+    baseURL: "https://api.openai.com/v1",
+    wireApi: "openai_responses",
+    models: [],
+  }
+  const models = await discoverProviderModels(configuration, "test")
+  expect(models).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: "whisper-1", kind: "other" }),
+      expect.objectContaining({ id: "gpt-image-1-mini", kind: "image" }),
+      expect.objectContaining({ id: "gpt-audio-1.5", kind: "other" }),
+    ]),
+  )
+  const provider = createConfiguredProvider(
+    "personal",
+    { ...configuration, models },
+    "test",
+  )
+  expect(
+    (await provider.models.listModels({ includeHidden: true })).map(
+      (model) => model.model,
+    ),
+  ).toEqual(["gpt-99"])
+  expect(() =>
+    provider.models.resolve({ provider: "personal", model: "whisper-1" }),
+  ).toThrow("not a chat model")
+  await provider.close?.()
+})

@@ -57,9 +57,9 @@ it("uses Step Code's typed account catalog and explicit capability fields", asyn
   expect(models.map((model) => model.id)).toEqual([
     "step-3.7-flash",
     "step-3.5-flash",
+    "step-generic-vision",
     "step-router-v1",
     "step-vision-unknown",
-    "step-generic-vision",
   ])
   const provider = createConfiguredProvider(
     "personal",

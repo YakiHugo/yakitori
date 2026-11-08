@@ -134,7 +134,7 @@ export function createProviderService(
       configuration.wireApi,
       configuration.service ?? "generic",
       configuration.authentication === "none",
-      "model-kinds-v1",
+      "model-kinds-v2",
     ])
     let catalog = catalogs.get(identity)
     if (!catalog) {

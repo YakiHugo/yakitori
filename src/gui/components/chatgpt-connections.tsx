@@ -228,7 +228,14 @@ export function ChatGPTAccountRows({
               </span>
             </span>
           </button>
-          <ChevronRight size={14} className="provider-connection-chevron" />
+          <button
+            type="button"
+            className="provider-connection-open"
+            aria-label={`Open ${account.label} details`}
+            onClick={() => onOpen(account.id)}
+          >
+            <ChevronRight size={14} className="provider-connection-chevron" />
+          </button>
         </div>
       ))}
     </>

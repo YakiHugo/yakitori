@@ -367,8 +367,8 @@ describe("provider configuration", () => {
         ),
       ).toEqual([
         { id: "coder-a", defaultVisible: true },
-        { id: "embedding", defaultVisible: false },
         { id: "coder-b", displayName: "Coder B", defaultVisible: true },
+        { id: "embedding", defaultVisible: false },
       ])
       expect(seen).toEqual([
         { path: "/v1/models", key: "catalog-key", version: "2023-06-01" },

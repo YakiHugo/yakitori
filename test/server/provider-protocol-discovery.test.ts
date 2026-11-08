@@ -346,7 +346,7 @@ it.each([
     },
     "test-key",
   )
-  expect(models.map((model) => model.id)).toEqual(["kimi-k2.6", "custom-model"])
+  expect(models.map((model) => model.id)).toEqual(["custom-model", "kimi-k2.6"])
 })
 
 it("does not substitute preset models when the requested protocol differs", async () => {
@@ -411,7 +411,7 @@ it("keeps old models available on an explicitly configured Chat connection", asy
     },
     "test-key",
   )
-  expect(models.map((model) => model.id)).toEqual(["kimi-k2.6", "kimi-k3"])
+  expect(models.map((model) => model.id)).toEqual(["kimi-k3", "kimi-k2.6"])
 })
 
 it.each([

@@ -3,6 +3,7 @@ import { configuredModelWithDefaults } from "../runtime/configured-model-default
 import { geminiModelMetadata } from "../runtime/gemini-models.ts"
 import { isMetaContributorModel } from "../runtime/meta-models.ts"
 import { parseOpenAiCompatibleModel } from "../runtime/model-discovery.ts"
+import { sortModelCatalog } from "../protocol/model-catalog-order.ts"
 import { discoveredModelKind } from "../runtime/model-kind.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { providerServiceForEndpoint } from "../runtime/provider-services.ts"
@@ -270,7 +271,11 @@ export async function discoverProviderModels(
               id: entry.id,
             })
           : {}
-      const kind = discoveredModelKind(entry, nativeProvider)
+      const kind = discoveredModelKind(
+        entry,
+        nativeProvider,
+        configuration.wireApi,
+      )
       const discovered: ConfiguredModel = {
         id: entry.id,
         defaultVisible,
@@ -338,14 +343,7 @@ export async function discoverProviderModels(
       "This service reports no chat models. Load a model in the local service, or check this account's access.",
     )
   const preferred = officialPreset?.models.map((model) => model.id) ?? []
-  return [...models.values()].sort((a, b) => {
-    const first = preferred.indexOf(a.id)
-    const second = preferred.indexOf(b.id)
-    return (
-      (first < 0 ? preferred.length : first) -
-      (second < 0 ? preferred.length : second)
-    )
-  })
+  return sortModelCatalog([...models.values()], preferred)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

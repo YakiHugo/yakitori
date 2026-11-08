@@ -454,3 +454,30 @@ it.each([
     ...(chatOnly ? { toolPolicy: "chat_only" } : {}),
   })
 })
+
+it("does not resurrect native non-chat models from settings when discovery omits them", async () => {
+  const source = createConfiguredModelsManager({
+    provider: "personal",
+    serviceId: "openai",
+    catalogProvider: "openai",
+    wireApi: "openai_responses",
+    models: [],
+  })
+  const manager = createModelSettingsManager(source, () => ({
+    "whisper-1": { visible: true },
+    "gpt-image-1": { visible: true },
+    "custom-future-model": { visible: true },
+  }))
+  expect(
+    (await manager.listModels({ includeHidden: true })).map(
+      (model) => model.model,
+    ),
+  ).toEqual(["custom-future-model"])
+  expect(() =>
+    manager.resolve({ provider: "personal", model: "whisper-1" }),
+  ).toThrow("not a chat model")
+  expect(
+    manager.resolve({ provider: "personal", model: "custom-future-model" })
+      .model,
+  ).toBe("custom-future-model")
+})

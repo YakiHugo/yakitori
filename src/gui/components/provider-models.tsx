@@ -1,5 +1,6 @@
 import { useState } from "react"
 import type { ConfiguredModel } from "../../protocol/providers.ts"
+import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
 import { Input } from "./ui/field.tsx"
 
 type ModelConfiguration = Readonly<{ models: readonly ConfiguredModel[] }>
@@ -23,13 +24,15 @@ export function ProviderModels({
   const overrides = new Map(
     configuration.models.map((model) => [model.id.toLowerCase(), model]),
   )
-  const choices = available
-    .filter((model) => model.kind === undefined || model.kind === "chat")
-    .map((model) => ({
-      ...model,
-      ...overrides.get(model.id.toLowerCase()),
-      id: model.id,
-    }))
+  const choices = sortModelCatalog(
+    available
+      .filter((model) => model.kind === undefined || model.kind === "chat")
+      .map((model) => ({
+        ...model,
+        ...overrides.get(model.id.toLowerCase()),
+        id: model.id,
+      })),
+  )
   const filtered = choices.filter((model) =>
     `${model.id} ${model.displayName ?? ""}`
       .toLowerCase()
