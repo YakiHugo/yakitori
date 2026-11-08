@@ -19,7 +19,11 @@ import {
   resolveFallbackModel,
   resolveModel,
 } from "./model-catalog.ts"
-import { isChatModel, NonChatModelError } from "./model-kind.ts"
+import {
+  discoveredModelKind,
+  isChatModel,
+  NonChatModelError,
+} from "./model-kind.ts"
 import { modelVisibleByDefault } from "./model-policy.ts"
 import type { ModelSelectionInput, ModelsManager } from "./models-manager.ts"
 import type { ConfiguredModel, ProviderPreset } from "./provider-presets.ts"
@@ -40,7 +44,10 @@ export function createConfiguredModelsManager(input: {
   wireApi?: ProviderPreset["wireApi"]
   models: readonly ConfiguredModel[]
 }): ModelsManager {
-  const configuredModels = structuredClone(input.models)
+  const configuredModels = structuredClone(input.models).map((model) => {
+    const kind = discoveredModelKind(model, input.serviceId, input.wireApi)
+    return kind === undefined ? model : { ...model, kind }
+  })
   const catalog = new Map(
     (input.catalogProvider === undefined
       ? []
@@ -192,7 +199,12 @@ export function createConfiguredModelsManager(input: {
     const configured = configuredModels.find(
       (model) => model.id.toLowerCase() === selection.model.toLowerCase(),
     )
-    if (configured && !isChatModel(configured))
+    const kind = discoveredModelKind(
+      configured ?? { id: selection.model },
+      input.serviceId,
+      input.wireApi,
+    )
+    if (kind !== undefined && !isChatModel({ kind }))
       throw new NonChatModelError(input.provider, selection.model)
     const model = models.get(selection.model)
     if (model === undefined) {

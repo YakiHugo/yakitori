@@ -108,3 +108,44 @@ it("keeps a hidden model disabled while enabling later catalog discoveries", () 
       .getAttribute("aria-checked"),
   ).toBe("true")
 })
+
+it("groups versions and snapshots without changing visibility or selected IDs", () => {
+  const onEditModel = vi.fn()
+  render(
+    <ProviderModels
+      configuration={{ models: [{ id: "custom-10", visible: false }] }}
+      available={[
+        { id: "custom-2" },
+        { id: "custom-10-2025-01-01" },
+        { id: "custom-10" },
+        { id: "custom-10-2025-06-01" },
+      ]}
+      onChange={vi.fn()}
+      onEditModel={onEditModel}
+      fetchingModels={false}
+    />,
+  )
+  expect(
+    screen
+      .getAllByRole("switch")
+      .map((item) => item.getAttribute("aria-label")),
+  ).toEqual([
+    "Enable custom-10",
+    "Enable custom-10-2025-06-01",
+    "Enable custom-10-2025-01-01",
+    "Enable custom-2",
+  ])
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable custom-10" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Edit settings for custom-10-2025-06-01",
+    }),
+  )
+  expect(onEditModel).toHaveBeenCalledExactlyOnceWith({
+    id: "custom-10-2025-06-01",
+  })
+})

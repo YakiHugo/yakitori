@@ -114,7 +114,12 @@ test("account setup shows reference models and retries authenticated discovery",
           )
           return
         }
-        result = [{ id: "account-coder", displayName: "Account coder" }]
+        result = [
+          { id: "gpt-4o" },
+          { id: "gpt-5-2025-08-07" },
+          { id: "gpt-5" },
+          { id: "gpt-5-2025-10-01" },
+        ]
       }
       route.send(JSON.stringify({ id: input.id, result }))
     })
@@ -141,11 +146,17 @@ test("account setup shows reference models and retries authenticated discovery",
   )
   await page.getByRole("button", { name: "Retry models" }).click()
   await expect(
-    page.getByRole("switch", { name: /Enable Account coder/ }),
+    page.getByRole("switch", { name: "Enable gpt-5", exact: true }),
   ).toHaveAttribute("aria-checked", "true")
   await expect(
     page.getByRole("switch", { name: /Enable kimi-for-coding/ }),
   ).toHaveCount(0)
+  await expect(page.locator(".provider-model-name")).toHaveText([
+    "gpt-5",
+    "gpt-5-2025-10-01",
+    "gpt-5-2025-08-07",
+    "gpt-4o",
+  ])
   await page.screenshot({
     path: testInfo.outputPath("account-models.png"),
     fullPage: true,
@@ -321,8 +332,24 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
           result = {
             provider: input.params.provider,
             version: "test",
-            models: [{ id: "qa-model", displayName: "QA model" }],
+            models: [
+              { id: "qa-model", displayName: "QA model" },
+              { id: "gpt-4o" },
+              { id: "gpt-5-2025-08-07" },
+              { id: "gpt-5" },
+              { id: "gpt-5-2025-10-01" },
+            ],
             settings: {},
+          }
+          break
+        case "config/read":
+          result = {
+            configuration: {},
+            effective: {},
+            origins: {},
+            layers: [
+              { source: "user", path: "/home/config.toml", version: "test" },
+            ],
           }
           break
         case "usage/read":
@@ -484,12 +511,41 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
     path: testInfo.outputPath("chatgpt-accounts.png"),
     fullPage: true,
   })
-  await accounts.getByRole("button", { name: /^Personal/ }).click()
+  await accounts
+    .getByRole("button", { name: "Open Personal details", exact: true })
+    .click()
   await expect(
     page
       .getByRole("region", { name: "Account models" })
       .getByRole("switch", { name: /Enable QA model/ }),
   ).toHaveAttribute("aria-checked", "true")
+  const modelRows = page.getByRole("region", { name: "Account models" })
+  await expect(modelRows.locator(".provider-model-name")).toHaveText([
+    "gpt-5",
+    "gpt-5-2025-10-01",
+    "gpt-5-2025-08-07",
+    "gpt-4o",
+    "QA model",
+  ])
+  await modelRows
+    .getByRole("button", {
+      name: "Edit settings for gpt-5-2025-08-07",
+      exact: true,
+    })
+    .click()
+  const configuration = page.getByRole("complementary", {
+    name: "Model configuration",
+  })
+  await expect(
+    configuration.locator(".model-configuration-description strong"),
+  ).toHaveText("gpt-5-2025-08-07")
+  await expect(configuration.locator(".cm-content")).toContainText(
+    "[models.chatgpt-personal.gpt-5-2025-08-07]",
+  )
+  await page
+    .getByRole("button", { name: "Close model configuration", exact: true })
+    .click()
+  await expect(configuration).toHaveCount(0)
   await expect(page.getByRole("tab")).toHaveCount(0)
   expect(
     calls

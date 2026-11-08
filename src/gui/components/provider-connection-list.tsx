@@ -124,7 +124,14 @@ export function ProviderConnectionList({
             >
               <span />
             </button>
-            <ChevronRight size={14} className="provider-connection-chevron" />
+            <button
+              type="button"
+              className="provider-connection-open"
+              aria-label={`Open ${config.name} details`}
+              onClick={() => onOpen(provider)}
+            >
+              <ChevronRight size={14} className="provider-connection-chevron" />
+            </button>
           </div>
         )
       })}

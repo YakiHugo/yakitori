@@ -270,7 +270,11 @@ export async function discoverProviderModels(
               id: entry.id,
             })
           : {}
-      const kind = discoveredModelKind(entry, nativeProvider)
+      const kind = discoveredModelKind(
+        entry,
+        nativeProvider,
+        configuration.wireApi,
+      )
       const discovered: ConfiguredModel = {
         id: entry.id,
         defaultVisible,

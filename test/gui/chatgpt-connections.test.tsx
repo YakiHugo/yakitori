@@ -847,3 +847,25 @@ it("ignores a failed browser launch after the sign-in was dismissed", async () =
     screen.getByRole("button", { name: "Continue with ChatGPT" }),
   ).toHaveProperty("disabled", false)
 })
+
+it("opens saved account details from the arrow by pointer and keyboard", async () => {
+  state = { ...empty, accounts: [account] }
+  const onOpen = vi.fn()
+  function Rows() {
+    const connection = useChatGPTConnections("", true)
+    return <ChatGPTAccountRows connection={connection} onOpen={onOpen} />
+  }
+  const user = userEvent.setup()
+  render(<Rows />)
+  const open = await screen.findByRole("button", {
+    name: "Open Personal details",
+  })
+  await user.click(open)
+  await user.keyboard("{Enter}")
+  await user.keyboard(" ")
+  expect(onOpen).toHaveBeenCalledTimes(3)
+  expect(onOpen).toHaveBeenLastCalledWith(account.id)
+  expect(
+    request.mock.calls.every(([method]) => method === "chatgpt/read"),
+  ).toBe(true)
+})

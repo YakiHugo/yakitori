@@ -1,3 +1,4 @@
+import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
 import type { ModelRoutePreview } from "../../protocol/model-routing.ts"
 import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { Check, ChevronDown, ChevronLeft, Zap } from "lucide-react"
@@ -140,7 +141,9 @@ export function ModelSelector({
     .filter((provider) => provider.availability !== "requires_login")
     .map((provider) => ({
       ...provider,
-      models: provider.models.filter((model) => model.visible !== false),
+      models: sortModelCatalog(
+        provider.models.filter((model) => model.visible !== false),
+      ),
     }))
   const effective = resolveEffectiveModel({
     sessionCurrent: current,
