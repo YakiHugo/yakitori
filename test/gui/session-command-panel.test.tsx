@@ -8,6 +8,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import type { ApiReadSubscriptionResponse } from "../../src/protocol/application.ts"
 
 const { request } = vi.hoisted(() => ({
   request: vi.fn<(method: string, params: object) => Promise<unknown>>(),
@@ -219,4 +220,83 @@ it("keeps quota values and errors with their provider while the same status pane
   expect(screen.getByText("kimi-code usage limits")).toBeDefined()
   expect(screen.getByText("Kimi quota")).toBeDefined()
   expect(screen.queryByText("Stale ChatGPT quota")).toBeNull()
+})
+
+it("shows the active API key's reported budget and refresh time in session status", async () => {
+  const response: ApiReadSubscriptionResponse = {
+    fetchedAt: Date.UTC(2026, 10, 8, 12, 30),
+    subscription: {
+      provider: "router-work",
+      displayName: "OpenRouter work",
+      availability: "available",
+      credentialKind: "api_key",
+      usage: { status: "unavailable", reason: "not_supported" },
+      financials: {
+        status: "available",
+        metrics: [
+          { kind: "key_remaining", currency: "USD", amount: -0.25 },
+          { kind: "key_limit", currency: "USD", amount: 10 },
+          { kind: "key_usage", currency: "USD", amount: 10.25 },
+        ],
+      },
+    },
+  }
+  request.mockResolvedValue(response)
+  useAppStore.setState({
+    accounts: [{ name: "router-work", models: [] }],
+    selection: { sessionId: "session_a" },
+    commandPanel: { kind: "status", sessionId: "session_a" },
+    execution: {
+      ...createExecutionViewState(),
+      lastModel: { provider: "router-work", model: "router-model" },
+    },
+  })
+  const { container } = render(<SessionCommandPanel />)
+
+  expect(await screen.findByText("USD -0.25")).toBeDefined()
+  expect(screen.getByText("API key remaining budget")).toBeDefined()
+  expect(screen.getByText("USD 10.25")).toBeDefined()
+  expect(screen.getByText("OpenRouter work balance and usage")).toBeDefined()
+  expect(screen.queryByText("Account balance")).toBeNull()
+  expect(screen.queryByText(/Usage limits unavailable/)).toBeNull()
+  expect(screen.queryByText(/%/)).toBeNull()
+  expect(container.querySelector("time")?.getAttribute("datetime")).toBe(
+    "2026-11-08T12:30:00.000Z",
+  )
+  expect(request).toHaveBeenCalledWith("subscription/read", {
+    provider: "router-work",
+  })
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "Close" }))
+  expect(screen.queryByRole("region", { name: "Session status" })).toBeNull()
+})
+
+it("renders a financial permission failure as unknown in session status", async () => {
+  const response: ApiReadSubscriptionResponse = {
+    fetchedAt: 0,
+    subscription: {
+      provider: "deepseek-work",
+      displayName: "DeepSeek work",
+      availability: "available",
+      credentialKind: "api_key",
+      usage: { status: "unavailable", reason: "not_supported" },
+      financials: { status: "unavailable", reason: "permission_denied" },
+    },
+  }
+  request.mockResolvedValue(response)
+  useAppStore.setState({
+    accounts: [{ name: "deepseek-work", models: [] }],
+    selection: { sessionId: "session_a" },
+    commandPanel: { kind: "status", sessionId: "session_a" },
+    execution: {
+      ...createExecutionViewState(),
+      lastModel: { provider: "deepseek-work", model: "deepseek-chat" },
+    },
+  })
+  render(<SessionCommandPanel />)
+
+  expect(await screen.findByText(/Balance and budget unknown/)).toBeDefined()
+  expect(screen.getByText(/does not have permission/)).toBeDefined()
+  expect(screen.queryByText(/Usage limits unavailable/)).toBeNull()
+  expect(screen.queryByText(/0\.00/)).toBeNull()
 })
