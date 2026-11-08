@@ -1,5 +1,3 @@
-import type { ConfiguredModel } from "./providers.ts"
-
 const textOrder = new Intl.Collator("en", {
   numeric: true,
   sensitivity: "base",
@@ -35,32 +33,15 @@ function compareVersions(a: string, b: string): number {
   return first.length - second.length
 }
 
-export function sortModelCatalog<
-  T extends Pick<ConfiguredModel, "id" | "kind">,
->(models: readonly T[], preferredIds: readonly string[] = []): T[] {
-  const preferredFamilies = new Map<string, number>()
-  const preferredBases = new Map<string, number>()
-  for (const [index, id] of preferredIds.entries()) {
-    const { family, base } = catalogKey(id)
-    if (!preferredFamilies.has(family)) preferredFamilies.set(family, index)
-    if (!preferredBases.has(base)) preferredBases.set(base, index)
-  }
-  const purpose = { chat: 0, image: 1, video: 2, other: 3 }
-  const rank = (map: Map<string, number>, key: string) =>
-    map.get(key) ?? preferredIds.length
+export function sortModelCatalog<T extends { id: string }>(
+  models: readonly T[],
+): T[] {
   return models
     .map((model) => ({ model, ...catalogKey(model.id) }))
     .sort((a, b) => {
-      const group =
-        purpose[a.model.kind ?? "chat"] - purpose[b.model.kind ?? "chat"]
-      if (group) return group
-      const family =
-        rank(preferredFamilies, a.family) - rank(preferredFamilies, b.family) ||
-        textOrder.compare(a.family, b.family)
+      const family = textOrder.compare(a.family, b.family)
       if (family) return family
-      const base =
-        rank(preferredBases, a.base) - rank(preferredBases, b.base) ||
-        compareVersions(a.base, b.base)
+      const base = compareVersions(a.base, b.base)
       if (base) return base
       // Undated alias first; every dated ID remains separately selectable.
       if (a.date !== b.date) {

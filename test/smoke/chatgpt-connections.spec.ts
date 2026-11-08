@@ -511,13 +511,9 @@ test("ChatGPT settings render account lifecycle with fake RPC only", async ({
     path: testInfo.outputPath("chatgpt-accounts.png"),
     fullPage: true,
   })
-  const arrow = await accounts
-    .getByRole("button", { name: /^Personal/ })
-    .locator(".provider-connection-chevron")
-    .boundingBox()
-  if (!arrow) throw new Error("Missing account details arrow")
-  // Exercise the actual trailing hit area, not the label's button center.
-  await page.mouse.click(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2)
+  await accounts
+    .getByRole("button", { name: "Open Personal details", exact: true })
+    .click()
   await expect(
     page
       .getByRole("region", { name: "Account models" })

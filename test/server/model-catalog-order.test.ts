@@ -3,7 +3,7 @@ import { discoverProviderModels } from "../../src/server/provider-model-discover
 
 afterEach(() => vi.unstubAllGlobals())
 
-it("orders discoveries independently of remote catalog order while retaining all exact IDs", async () => {
+it("preserves native directory order for default selection rather than applying display sorting", async () => {
   const models = [
     "my-model-2",
     "my-model-10-2025-04-01",
@@ -26,9 +26,9 @@ it("orders discoveries independently of remote catalog order while retaining all
     undefined,
   )
   expect(discovered.map((model) => model.id)).toEqual([
+    "my-model-2",
+    "my-model-10-2025-04-01",
     "my-model-10",
     "my-model-10-2025-06-01",
-    "my-model-10-2025-04-01",
-    "my-model-2",
   ])
 })
