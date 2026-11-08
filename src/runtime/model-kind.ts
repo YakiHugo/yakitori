@@ -22,7 +22,8 @@ export function discoveredModelKind(
   // https://platform.openai.com/docs/guides/audio
   if (provider === "openai" && typeof entry.id === "string") {
     const id = entry.id.toLowerCase()
-    if (/^(?:dall-e-|gpt-image-)/.test(id)) return "image"
+    if (/^(?:dall-e-|gpt-image-)/.test(id) || id === "chatgpt-image-latest")
+      return "image"
     if (/^sora(?:-|$)/.test(id)) return "video"
     if (
       /^(?:whisper-|tts-|text-embedding-|text-moderation-|omni-moderation-)/.test(
