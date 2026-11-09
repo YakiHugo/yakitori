@@ -151,6 +151,10 @@ export function requireProviderConfiguration(
       "Request warmup is supported only by the official OpenAI Responses API endpoint.",
     )
   const models = requireConfiguredModels(record.models)
+  const titleModel =
+    record.titleModel === undefined
+      ? undefined
+      : requireString(record.titleModel, "titleModel")
   return {
     name,
     service,
@@ -163,6 +167,7 @@ export function requireProviderConfiguration(
       ? {}
       : { credentialPath, credentialOwner }),
     models,
+    ...(titleModel === undefined ? {} : { titleModel }),
     ...(envKey === undefined ? {} : { envKey }),
     ...(preset === undefined ? {} : { preset }),
     ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
@@ -407,6 +412,7 @@ export function providersFromConfig(
         preset: record.preset,
         service: record.service,
         models: record.models,
+        titleModel: record.title_model,
         enabled: record.enabled,
         requestWarmup: record.request_warmup,
       })
@@ -468,6 +474,9 @@ export function providerConfigValue(
                 ? "bedrock_converse"
                 : "chat_completions",
     models: configuration.models,
+    ...(configuration.titleModel === undefined
+      ? {}
+      : { title_model: configuration.titleModel }),
     ...(configuration.enabled === undefined
       ? {}
       : { enabled: configuration.enabled }),

@@ -27,6 +27,7 @@ export default defineConfig({
         "chatgpt-connections.spec.ts",
         "rendering.spec.ts",
         "account-financials.spec.ts",
+        "title-model.spec.ts",
       ],
       use: { ...devices["Desktop Chrome"] },
     },

@@ -573,6 +573,16 @@ button.provider-model-main {
 .provider-model-name {
   font-weight: 500;
 }
+.provider-model-title {
+  margin-left: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+.provider-model-item .sidebar-row-action {
+  flex: none;
+  opacity: 1;
+}
 .provider-model-id,
 .provider-model-facts {
   color: var(--muted-foreground);
@@ -810,17 +820,4 @@ button.provider-model-main {
     width: 100%;
     margin-inline: auto;
   }
-}
-
-.provider-model-group > summary {
-  padding: 12px 8px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-}
-.provider-model-group > summary:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
 }

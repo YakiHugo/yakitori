@@ -824,6 +824,9 @@ export async function createYakitoriApplication(
               accountId: name,
               namespace,
               serviceName,
+              ...(config?.titleModel === undefined
+                ? {}
+                : { titleModel: config.titleModel }),
               summary,
               identities: Object.fromEntries(
                 (config?.models ?? []).flatMap((model) =>
@@ -1529,7 +1532,7 @@ export async function createYakitoriApplication(
               const choice = selection ?? initialSelection
               if (!choice || injectedProviderNames.has(choice.provider))
                 return choice
-              return modelRouter.route(choice)
+              return modelRouter.routeTitle(choice)
             },
             notifySidebarChanged: () =>
               broadcastNotification?.(sidebarChangedMethod, {}),

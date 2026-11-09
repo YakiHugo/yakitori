@@ -10,6 +10,11 @@ export type ProviderRpcParams = {
     version: string
   }>
   "provider/models/refresh": Readonly<{ provider: string }>
+  "provider/title-model/write": Readonly<{
+    provider: string
+    titleModel: string | null
+    version: string
+  }>
   "provider/configuration/read": Record<string, never>
   "provider/configuration/write": ProviderWriteInput
   "provider/configuration/delete": Readonly<{ id: string }>
@@ -30,6 +35,7 @@ export type ProviderRpcResponses = {
   "provider/models/read": import("./providers.ts").ModelCatalogResponse
   "provider/models/write": import("./providers.ts").ModelCatalogResponse
   "provider/models/refresh": import("./providers.ts").ModelCatalogResponse
+  "provider/title-model/write": import("./providers.ts").ModelCatalogResponse
   "provider/configuration/read": ProviderConfigurationResponse
   "provider/configuration/write": ProviderConfigurationResponse
   "provider/configuration/delete": ProviderConfigurationResponse

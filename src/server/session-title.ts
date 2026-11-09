@@ -29,7 +29,9 @@ const TITLE_INPUT_MAX_CHARS = 2_000
 // Half-width display columns: CJK/full-width/emoji count as 2, latin as 1.
 const TITLE_MAX_DISPLAY_WIDTH = 36
 const TITLE_TIMEOUT_MS = 30_000
-const TITLE_MAX_OUTPUT_TOKENS = 128
+// Reasoning and visible output share this budget on reasoning models. A
+// title-sized budget can be exhausted before the JSON text begins.
+const TITLE_MAX_OUTPUT_TOKENS = 1_024
 
 export function resolveTitleTarget(
   modelSelection: ModelSelection | undefined,

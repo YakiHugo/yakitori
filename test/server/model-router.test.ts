@@ -400,4 +400,206 @@ describe("account model routing", () => {
       await registry.close()
     }
   })
+
+  it("uses the configured account title model with minimal reasoning", async () => {
+    const registry = createProviderRegistry({
+      personal: account("personal", [
+        {
+          id: "gpt-6-sol",
+          efforts: ["none", "low", "high"],
+          defaultEffort: "high",
+        },
+        { id: "gpt-6-luna", efforts: ["low", "high"], defaultEffort: "low" },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("personal", "openai", "gpt-6-sol", {
+          titleModel: "gpt-6-luna",
+          summary: {
+            name: "personal",
+            availability: "available",
+            models: [
+              {
+                id: "gpt-6-sol",
+                instructionProfileId: "default",
+                effortStyle: "levels",
+                efforts: ["none", "low", "high"],
+                defaultEffort: "high",
+              },
+              {
+                id: "gpt-6-luna",
+                instructionProfileId: "default",
+                effortStyle: "levels",
+                efforts: ["low", "high"],
+                defaultEffort: "low",
+              },
+            ],
+          },
+        }),
+      ],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.routeTitle({
+          provider: "openai",
+          model: "gpt-6-sol",
+          effort: "high",
+        }),
+      ).toEqual({ provider: "personal", model: "gpt-6-luna", effort: "low" })
+    } finally {
+      await registry.close()
+    }
+  })
+
+  it("routes titles to a no-reasoning model in the current account", async () => {
+    const registry = createProviderRegistry({
+      personal: account("personal", [
+        {
+          id: "model-x",
+          efforts: ["low", "high", "max"],
+          defaultEffort: "high",
+        },
+        { id: "title-model", efforts: [] },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("personal", "vendor", "model-x", {
+          summary: {
+            name: "personal",
+            availability: "available",
+            models: [
+              {
+                id: "model-x",
+                instructionProfileId: "default",
+                effortStyle: "levels",
+                efforts: ["low", "high", "max"],
+                defaultEffort: "high",
+              },
+              {
+                id: "title-model",
+                instructionProfileId: "default",
+                effortStyle: "none",
+                efforts: [],
+              },
+            ],
+          },
+        }),
+      ],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.routeTitle({
+          provider: "vendor",
+          model: "model-x",
+          effort: "high",
+        }),
+      ).toEqual({ provider: "personal", model: "title-model" })
+    } finally {
+      await registry.close()
+    }
+  })
+
+  it("falls back to the current model when the configured title model is unavailable", async () => {
+    const registry = createProviderRegistry({
+      personal: account("personal", [
+        {
+          id: "model-x",
+          efforts: ["off", "low", "high"],
+          defaultEffort: "high",
+          speeds: ["standard", "fast"],
+        },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("personal", "vendor", "model-x", {
+          titleModel: "removed-model",
+          summary: {
+            name: "personal",
+            availability: "available",
+            models: [
+              {
+                id: "model-x",
+                instructionProfileId: "default",
+                effortStyle: "levels",
+                efforts: ["off", "low", "high"],
+                defaultEffort: "high",
+                speeds: ["standard", "fast"],
+              },
+            ],
+          },
+        }),
+      ],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.routeTitle({
+          provider: "vendor",
+          model: "model-x",
+          effort: "high",
+          speed: "fast",
+        }),
+      ).toEqual({ provider: "personal", model: "model-x", effort: "off" })
+    } finally {
+      await registry.close()
+    }
+  })
+
+  it.each([
+    { efforts: ["low", "high", "max"], expected: "low" },
+    { efforts: ["high", "max"], expected: undefined },
+  ])("bounds title reasoning instead of inheriting high effort: $efforts", async ({
+    efforts,
+    expected,
+  }) => {
+    const registry = createProviderRegistry({
+      personal: account("personal", [
+        { id: "model-x", efforts, defaultEffort: "high" },
+      ]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("personal", "vendor", "model-x", {
+          summary: {
+            name: "personal",
+            availability: "available",
+            models: [
+              {
+                id: "model-x",
+                instructionProfileId: "default",
+                effortStyle: "levels",
+                efforts,
+                defaultEffort: "high",
+              },
+            ],
+          },
+        }),
+      ],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.routeTitle({
+          provider: "vendor",
+          model: "model-x",
+          effort: "high",
+        }),
+      ).toEqual(
+        expected === undefined
+          ? undefined
+          : { provider: "personal", model: "model-x", effort: expected },
+      )
+    } finally {
+      await registry.close()
+    }
+  })
 })

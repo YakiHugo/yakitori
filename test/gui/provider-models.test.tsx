@@ -1,5 +1,11 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { useState } from "react"
 import { afterEach, expect, it, vi } from "vitest"
 import { ProviderModels } from "../../src/gui/components/provider-models.tsx"
@@ -109,7 +115,7 @@ it("keeps a hidden model disabled while enabling later catalog discoveries", () 
   ).toBe("true")
 })
 
-it("groups versions and snapshots without changing visibility or selected IDs", () => {
+it("sorts versions and snapshots without changing visibility or selected IDs", () => {
   const onEditModel = vi.fn()
   render(
     <ProviderModels
@@ -150,7 +156,7 @@ it("groups versions and snapshots without changing visibility or selected IDs", 
   })
 })
 
-it("shows collapsible family sections and reopens matching results when searching", () => {
+it("shows a flat sorted list and filters across model families", () => {
   const onChange = vi.fn()
   const { container } = render(
     <ProviderModels
@@ -166,17 +172,20 @@ it("shows collapsible family sections and reopens matching results when searchin
     />,
   )
   expect(
-    [...container.querySelectorAll("summary")].map((item) => item.textContent),
-  ).toEqual(["GPT 6", "GPT 5", "Other models"])
+    screen
+      .getAllByRole("switch")
+      .map((item) => item.getAttribute("aria-label")),
+  ).toEqual(["Enable gpt-6.1-sol", "Enable gpt-5", "Enable private-deployment"])
+  expect(container.querySelector("details, summary")).toBeNull()
   expect(
     screen.queryByRole("switch", { name: "Enable chatgpt-image-latest" }),
   ).toBeNull()
-  const group = container.querySelector("details")
-  if (!group) throw new Error("Missing model group")
-  group.open = false
   fireEvent.input(screen.getByRole("searchbox"), { target: { value: "gpt-6" } })
-  expect(container.querySelector("details")?.open).toBe(true)
-  expect(container.querySelectorAll("summary")).toHaveLength(1)
+  expect(
+    screen
+      .getAllByRole("switch")
+      .map((item) => item.getAttribute("aria-label")),
+  ).toEqual(["Enable gpt-6.1-sol"])
   fireEvent.input(screen.getByRole("searchbox"), {
     target: { value: "private" },
   })
@@ -184,4 +193,91 @@ it("shows collapsible family sections and reopens matching results when searchin
     screen.getByRole("switch", { name: "Enable private-deployment" }),
   ).toBeTruthy()
   expect(onChange).not.toHaveBeenCalled()
+})
+
+it("selects a title model and resets it to automatic selection without changing visibility", async () => {
+  const onTitleModelChange = vi.fn()
+  const onChange = vi.fn()
+  function Editor() {
+    const [titleModel, setTitleModel] = useState<string>()
+    return (
+      <ProviderModels
+        configuration={{ models: [{ id: "model-a", visible: false }] }}
+        available={available}
+        fetchingModels={false}
+        onChange={onChange}
+        titleModel={titleModel}
+        onTitleModelChange={(next) => {
+          onTitleModelChange(next)
+          setTitleModel(next)
+        }}
+      />
+    )
+  }
+  render(<Editor />)
+  expect(screen.queryByText("Title model")).toBeNull()
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model actions for model-a" }),
+  )
+  const select = screen.getByRole("menuitemradio", {
+    name: "Set as title model",
+  })
+  expect(select.getAttribute("aria-checked")).toBe("false")
+  expect(
+    screen.queryByRole("menuitem", { name: "Use automatic selection" }),
+  ).toBeNull()
+  fireEvent.click(select)
+  expect(onTitleModelChange).toHaveBeenCalledExactlyOnceWith("model-a")
+  expect(screen.getByText("Title model")).toBeDefined()
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable Model A" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model actions for model-b" }),
+  )
+  expect(
+    screen
+      .getByRole("menuitemradio", { name: "Set as title model" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  expect(
+    screen.queryByRole("menuitem", { name: "Use automatic selection" }),
+  ).toBeNull()
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model actions for model-b" }),
+  )
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model actions for model-a" }),
+  )
+  expect(
+    screen
+      .getByRole("menuitemradio", { name: "Set as title model" })
+      .getAttribute("aria-checked"),
+  ).toBe("true")
+  fireEvent.click(
+    screen.getByRole("menuitem", { name: "Use automatic selection" }),
+  )
+  expect(onTitleModelChange).toHaveBeenNthCalledWith(2, undefined)
+  expect(screen.queryByText("Title model")).toBeNull()
+  expect(onChange).not.toHaveBeenCalled()
+})
+
+it("shows the current title model without exposing actions when selection is unavailable", () => {
+  render(
+    <ProviderModels
+      configuration={{ models: [] }}
+      available={available}
+      fetchingModels={false}
+      onChange={vi.fn()}
+      titleModel="model-b"
+    />,
+  )
+  expect(screen.getByText("Title model")).toBeDefined()
+  expect(
+    screen.queryByRole("button", { name: /^Model actions for / }),
+  ).toBeNull()
 })

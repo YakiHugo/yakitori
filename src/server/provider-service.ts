@@ -1,4 +1,3 @@
-import { createModelSettingsManager } from "../runtime/model-settings-manager.ts"
 import type {
   ModelCatalogResponse,
   ModelSettingsConfiguration,
@@ -6,6 +5,7 @@ import type {
   ProviderModelSettings,
   ProviderWriteInput,
 } from "../protocol/providers.ts"
+import { createModelSettingsManager } from "../runtime/model-settings-manager.ts"
 import type { ProviderRegistry } from "../runtime/provider-registry.ts"
 import {
   requireModelSettingsProvider,
@@ -54,6 +54,11 @@ export type ProviderService = {
   writeModels(
     provider: string,
     settings: ProviderModelSettings,
+    version: string,
+  ): Promise<ModelCatalogResponse>
+  writeTitleModel(
+    provider: string,
+    titleModel: string | null,
     version: string,
   ): Promise<ModelCatalogResponse>
   refreshCatalog(provider: string): Promise<ModelCatalogResponse>
@@ -401,6 +406,8 @@ export function createProviderService(
       input.userConfig.readSnapshot(),
       manager.listModels({ includeHidden: true }),
     ])
+    const titleModel =
+      snapshot.configuration.modelProviders?.[provider]?.titleModel
     const models = listed.map((model) => {
       const capacity = manager.capacity({ provider, model: model.model })
       return {
@@ -434,6 +441,7 @@ export function createProviderService(
     })
     return {
       provider,
+      ...(titleModel === undefined ? {} : { titleModel }),
       models,
       settings: Object.fromEntries(
         Object.entries(snapshot.configuration.models?.[provider] ?? {}).filter(
@@ -461,6 +469,57 @@ export function createProviderService(
     },
     read,
     readModels,
+    async writeTitleModel(provider, titleModel, version) {
+      const manager = modelManager(provider)
+      const snapshot = await input.userConfig.readSnapshot()
+      const configuration = snapshot.configuration.modelProviders?.[provider]
+      if (configuration === undefined)
+        throw new ConfigurationError("Account does not exist.")
+      let canonicalModel: string | null = null
+      if (titleModel !== null) {
+        const id = titleModel.trim()
+        if (!id)
+          throw new ConfigurationError(
+            "Title model must be a non-empty model ID or null.",
+          )
+        const models = await manager.listModels({ includeHidden: true })
+        const model = models.find(
+          (model) => model.model.toLowerCase() === id.toLowerCase(),
+        )
+        try {
+          manager.resolve({ provider, model: model?.model ?? id })
+        } catch (error) {
+          if (
+            error instanceof NonChatModelError ||
+            error instanceof ModelNotConfiguredError
+          )
+            throw new ConfigurationError(error.message)
+          throw error
+        }
+        if (model === undefined)
+          throw new ConfigurationError(
+            `Model ${provider}/${id} is not in the provider model catalog.`,
+          )
+        canonicalModel = model.model
+      }
+      if (canonicalModel === null) {
+        const value = providerConfigValue(configuration)
+        delete value.title_model
+        await input.userConfig.writeValue({
+          keyPath: ["model_providers", provider],
+          value,
+          expectedVersion: version,
+        })
+      } else
+        await input.userConfig.writeValue({
+          keyPath: ["model_providers", provider, "title_model"],
+          value: canonicalModel,
+          expectedVersion: version,
+        })
+      await reload()
+      input.changed?.()
+      return readModels(provider)
+    },
     async writeModels(provider, value, version) {
       const manager = modelManager(provider)
       const settings = requireProviderModelSettings(value)

@@ -6,19 +6,32 @@ import type {
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { createSettingsWriter } from "../lib/settings-writer.ts"
 import { useAppStore } from "../store/app-store.ts"
-import { ProviderModels } from "./provider-models.tsx"
 import { ModelConfigurationPanel } from "./model-configuration-panel.tsx"
+import { ProviderModels } from "./provider-models.tsx"
 import { Button } from "./ui/button.tsx"
+
+type ModelEdits = {
+  settings: ProviderModelSettings
+  titleModel: string | undefined
+  settingsRevision: number
+  titleRevision: number
+}
 
 export function ModelCatalogSettings({
   apiBase,
   provider,
-}: Readonly<{ apiBase: string; provider: string }>) {
+  titleModelConfigurable = true,
+}: Readonly<{
+  apiBase: string
+  provider: string
+  titleModelConfigurable?: boolean
+}>) {
   return (
     <AccountModels
       key={`${apiBase}:${provider}`}
       apiBase={apiBase}
       provider={provider}
+      titleModelConfigurable={titleModelConfigurable}
     />
   )
 }
@@ -26,9 +39,21 @@ export function ModelCatalogSettings({
 function AccountModels({
   apiBase,
   provider,
-}: Readonly<{ apiBase: string; provider: string }>) {
+  titleModelConfigurable,
+}: Readonly<{
+  apiBase: string
+  provider: string
+  titleModelConfigurable: boolean
+}>) {
   const [catalog, setCatalog] = useState<ModelCatalogResponse>()
-  const [settings, setSettings] = useState<ProviderModelSettings>({})
+  const [edits, setEdits] = useState<ModelEdits>({
+    settings: {},
+    titleModel: undefined,
+    settingsRevision: 0,
+    titleRevision: 0,
+  })
+  const savedRevisions = useRef({ settings: 0, title: 0 })
+  const { settings, titleModel } = edits
   const [writeError, setWriteError] = useState<string>()
   const [error, setError] = useState<string>()
   const [revision, setRevision] = useState(0)
@@ -48,19 +73,39 @@ function AccountModels({
       ) ?? editing.id)
     : undefined
   const [writer] = useState(() =>
-    createSettingsWriter<ProviderModelSettings>({
+    createSettingsWriter<ModelEdits>({
       async write(next) {
         if (!snapshot.current) throw new Error("Model settings are not loaded.")
-        const response = await getAppRpcClient(apiBase).request(
-          "provider/models/write",
-          {
-            provider,
-            settings: next,
-            version: snapshot.current.version,
-          },
-        )
-        snapshot.current = response
-        if (mounted.current) setCatalog(response)
+        const client = getAppRpcClient(apiBase)
+        // Revisions retain edits queued during a save, and prevent conflict
+        // retries from overwriting the other control's external changes.
+        if (next.settingsRevision !== savedRevisions.current.settings) {
+          if (
+            JSON.stringify(next.settings) !==
+            JSON.stringify(snapshot.current.settings)
+          ) {
+            snapshot.current = await client.request("provider/models/write", {
+              provider,
+              settings: next.settings,
+              version: snapshot.current.version,
+            })
+          }
+          savedRevisions.current.settings = next.settingsRevision
+        }
+        if (next.titleRevision !== savedRevisions.current.title) {
+          if (next.titleModel !== snapshot.current.titleModel) {
+            snapshot.current = await client.request(
+              "provider/title-model/write",
+              {
+                provider,
+                titleModel: next.titleModel ?? null,
+                version: snapshot.current.version,
+              },
+            )
+          }
+          savedRevisions.current.title = next.titleRevision
+        }
+        if (mounted.current) setCatalog(snapshot.current)
         await useAppStore.getState().loadProviders()
       },
       changed(next) {
@@ -101,7 +146,11 @@ function AccountModels({
             return
           snapshot.current = response
           setCatalog(response)
-          setSettings(response.settings)
+          setEdits((current) => ({
+            ...current,
+            settings: response.settings,
+            titleModel: response.titleModel,
+          }))
           setError(undefined)
         },
         (cause: unknown) => {
@@ -149,6 +198,21 @@ function AccountModels({
         }}
         available={catalog.models}
         fetchingModels={false}
+        titleModel={titleModel}
+        onTitleModelChange={
+          titleModelConfigurable
+            ? (modelId) => {
+                request.current++
+                const next = {
+                  ...edits,
+                  titleModel: modelId,
+                  titleRevision: edits.titleRevision + 1,
+                }
+                setEdits(next)
+                writer.update(next)
+              }
+            : undefined
+        }
         onEditModel={(model) => {
           if (page.kind === "account") navigate({ ...page, modelId: model.id })
         }}
@@ -157,8 +221,13 @@ function AccountModels({
           const next = Object.fromEntries(
             patch.models.map(({ id, ...value }) => [id, value]),
           )
-          setSettings(next)
-          writer.update(next)
+          const nextEdits = {
+            ...edits,
+            settings: next,
+            settingsRevision: edits.settingsRevision + 1,
+          }
+          setEdits(nextEdits)
+          writer.update(nextEdits)
         }}
       />
       {editing && editingKey && page.kind === "account" ? (
@@ -178,8 +247,13 @@ function AccountModels({
           onChange={(override) => {
             request.current++
             const next = { ...settings, [editingKey]: override }
-            setSettings(next)
-            writer.update(next)
+            const nextEdits = {
+              ...edits,
+              settings: next,
+              settingsRevision: edits.settingsRevision + 1,
+            }
+            setEdits(nextEdits)
+            writer.update(nextEdits)
           }}
         />
       ) : null}

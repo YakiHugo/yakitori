@@ -135,17 +135,30 @@ describe("session title generator", () => {
       stream,
       store,
       notifySidebarChanged,
+      resolveSelection: () => ({
+        provider: "kimi-code",
+        model: "title-model",
+      }),
     })
     generator.openSession(sessionId)
     await generator.generate({
-      modelSelection: { provider: "kimi-code", model: "title-model" },
+      modelSelection: {
+        provider: "kimi-code",
+        model: "k3.1-pro",
+        effort: "high",
+      },
       sessionId,
       text: "Fix the login button on mobile",
     })
     expect(await sidebarTitle(store, sessionId)).toBe("Fix login button")
     expect(notifySidebarChanged).toHaveBeenCalledOnce()
     const request = stream.mock.calls[0]?.[0]
-    expect(request?.target).toMatchObject({ provider: "kimi-code" })
+    expect(request?.target).toEqual({
+      provider: "kimi-code",
+      model: "title-model",
+      instructionProfileId: "title-model",
+    })
+    expect(request?.maxOutputTokens).toBe(1_024)
     expect(JSON.stringify(request?.system)).not.toContain(
       "Fix the login button on mobile",
     )
