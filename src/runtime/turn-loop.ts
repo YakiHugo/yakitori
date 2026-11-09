@@ -1751,8 +1751,12 @@ async function executeTurnModelLoop(
       modelCalls += 1
       const response = await consumeModelStream({
         request: { ...request, signal: samplingSignal },
-        discardOutput: (itemIds) =>
-          input.session.discardModelOutput(input.execution, itemIds),
+        discardOutput: (itemIds) => {
+          // Steering replaces provisional output in the same Turn. Explicit
+          // interruption retains its partial prefix for the stopped transcript.
+          if (!input.signal.aborted)
+            input.session.discardModelOutput(input.execution, itemIds)
+        },
         stream,
         attempt,
         async onOutputItem(content, itemId, native) {

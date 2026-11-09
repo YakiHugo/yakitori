@@ -725,7 +725,7 @@ describe("goal runtime", () => {
     expect(provider.requests).toHaveLength(4)
   })
 
-  it("rejects completion for the old objective until the updated developer context is delivered", async () => {
+  it("preempts the old objective and completes only after the updated developer context is delivered", async () => {
     const release = deferred<void>()
     const first = step(complete, release)
     const finishRelease = deferred<void>()
@@ -760,9 +760,10 @@ describe("goal runtime", () => {
         objective: "Updated objective",
       }),
     )
-    expect(active.signal?.aborted).toBe(false)
-    release.resolve()
+    // Updating the objective steers the current turn. The old response must
+    // abort without releasing its gate or executing its stale completion call.
     const request = await finish.entered.promise
+    expect(active.signal?.aborted).toBe(true)
     expect((await readGoal(application, sessionId))?.status).toBe("active")
     finishRelease.resolve()
     await wrap.entered.promise
@@ -778,6 +779,13 @@ describe("goal runtime", () => {
       ),
     ).toBe(true)
     const stored = await application.threadStore.readThread(sessionId)
+    const completedCalls = stored?.rollout.flatMap(({ item }) =>
+      item.type === "item_completed" && "toolCallId" in item.item
+        ? [item.item.toolCallId]
+        : [],
+    )
+    expect(completedCalls).not.toContain("complete_goal")
+    expect(completedCalls).toContain("complete_updated_goal")
     expect(
       stored?.rollout.filter(({ item }) => item.type === "turn_started"),
     ).toHaveLength(1)

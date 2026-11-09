@@ -1910,10 +1910,7 @@ describe("thread server handlers", () => {
     expect(restored.value.session.counts).toMatchObject({ items: 2, tools: 0 })
   })
 
-  it.each([
-    "steer",
-    "interrupt",
-  ] as const)("discards preempted output without stale replay on %s", async (action) => {
+  it("discards steering-preempted output without stale replay", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-discard-"))
     const store = new MemoryThreadStore()
     const entered = deferred<void>()
@@ -1981,19 +1978,13 @@ describe("thread server handlers", () => {
     })
     if (!admitted.ok) throw new Error(admitted.error.message)
     await entered.promise
-    if (action === "steer") {
-      const result = await handlers.steerInput({
-        sessionId,
-        requestId: "correction",
-        expectedTurnId: "initial",
-        content: createUserInput("change direction"),
-      })
-      expect(result.ok).toBe(true)
-    } else {
-      const thread = manager.getThread(sessionId)
-      if (!thread) throw new Error("Missing thread")
-      await thread.interrupt("test")
-    }
+    const result = await handlers.steerInput({
+      sessionId,
+      requestId: "correction",
+      expectedTurnId: "initial",
+      content: createUserInput("change direction"),
+    })
+    expect(result.ok).toBe(true)
     await waitForValue(
       () =>
         events.some((event) => event.type === "item.discarded") || undefined,
