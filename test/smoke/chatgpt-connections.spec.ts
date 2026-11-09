@@ -169,17 +169,13 @@ test("account setup shows reference models and retries authenticated discovery",
   await expect(
     page.getByRole("switch", { name: "Enable chatgpt-image-latest" }),
   ).toHaveCount(0)
-  const family = page.locator("summary", { hasText: /^GPT 6$/ })
   const sol = page.getByRole("switch", {
     name: "Enable gpt-6.1-sol",
     exact: true,
   })
-  await family.click()
-  await expect(sol).toBeHidden()
-  await family.click()
+  await expect(page.locator(".provider-model-list details")).toHaveCount(0)
   await expect(sol).toBeVisible()
   await expect(sol).toHaveAttribute("aria-checked", "true")
-  await family.click()
   await page.getByRole("searchbox", { name: "Filter models" }).fill("gpt-6.1")
   await expect(sol).toBeVisible()
   await page.getByRole("searchbox", { name: "Filter models" }).fill("private")

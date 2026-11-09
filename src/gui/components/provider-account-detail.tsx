@@ -41,7 +41,11 @@ export function ProviderAccountDetail({
       </header>
       <section className="model-catalog-settings" aria-label="Account models">
         {modelsAvailable ? (
-          <ModelCatalogSettings apiBase={apiBase} provider={accountId} />
+          <ModelCatalogSettings
+            apiBase={apiBase}
+            provider={accountId}
+            titleModelConfigurable={!chatGPT}
+          />
         ) : (
           <p className="provider-field-hint">
             Reconnect this account to manage its models.

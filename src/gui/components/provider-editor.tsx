@@ -126,8 +126,16 @@ export function ProviderEditor({
     onFetchModels,
   ])
   const custom = draft.configuration.preset === undefined
-  const update = (patch: Partial<ProviderConfiguration>) => {
-    const configuration = { ...draft.configuration, ...patch }
+  const update = (
+    patch: Partial<Omit<ProviderConfiguration, "titleModel">> & {
+      titleModel?: string | undefined
+    },
+  ) => {
+    const { titleModel, ...values } = { ...draft.configuration, ...patch }
+    const configuration = {
+      ...values,
+      ...(titleModel === undefined ? {} : { titleModel }),
+    }
     if (
       configuration.requestWarmup === true &&
       (configuration.wireApi !== "openai_responses" ||
@@ -341,6 +349,8 @@ export function ProviderEditor({
                       : "No chat models returned by this account. Check account access or add a model ID."
                   }
                   onChange={update}
+                  titleModel={draft.configuration.titleModel}
+                  onTitleModelChange={(titleModel) => update({ titleModel })}
                   fetchingModels={fetchingModels}
                 />
               </details>

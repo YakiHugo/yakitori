@@ -8,15 +8,15 @@ import {
   waitFor,
 } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import type {
-  ModelCatalogResponse,
-  ProviderModelSettings,
-} from "../../src/protocol/providers.ts"
 import { ModelCatalogSettings } from "../../src/gui/components/model-catalog-settings.tsx"
 import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import type {
+  ModelCatalogResponse,
+  ProviderModelSettings,
+} from "../../src/protocol/providers.ts"
 
 const { request, listeners } = vi.hoisted(() => ({
   request:
@@ -109,6 +109,225 @@ it("applies edits without save or refresh actions", async () => {
   expect(
     screen.queryByRole("button", { name: /Save|Refresh|Discard/ }),
   ).toBeNull()
+})
+
+it("autosaves title selection and restores the returned catalog selection on remount", async () => {
+  let catalog = source
+  request.mockImplementation(async (method, params) => {
+    if (method === "provider/title-model/write") {
+      const { titleModel: _titleModel, ...withoutTitleModel } = catalog
+      catalog = {
+        ...withoutTitleModel,
+        ...(typeof params.titleModel === "string"
+          ? { titleModel: params.titleModel }
+          : {}),
+        version: params.titleModel === null ? "third" : "second",
+      }
+    }
+    return catalog
+  })
+  const view = render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Model actions for future-coder",
+    }),
+  )
+  fireEvent.click(
+    screen.getByRole("menuitemradio", { name: "Set as title model" }),
+  )
+  expect(screen.getByText("Title model")).toBeDefined()
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("provider/title-model/write", {
+      provider: "codex",
+      titleModel: "future-coder",
+      version: "first",
+    }),
+  )
+  view.unmount()
+  const reloaded = render(
+    <ModelCatalogSettings apiBase="/api" provider="codex" />,
+  )
+  expect(await screen.findByText("Title model")).toBeDefined()
+  fireEvent.click(
+    screen.getByRole("button", { name: "Model actions for future-coder" }),
+  )
+  expect(
+    screen
+      .getByRole("menuitemradio", { name: "Set as title model" })
+      .getAttribute("aria-checked"),
+  ).toBe("true")
+  fireEvent.click(
+    screen.getByRole("menuitem", { name: "Use automatic selection" }),
+  )
+  expect(screen.queryByText("Title model")).toBeNull()
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("provider/title-model/write", {
+      provider: "codex",
+      titleModel: null,
+      version: "second",
+    }),
+  )
+  reloaded.unmount()
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  await screen.findByRole("switch", { name: "Enable future-coder" })
+  expect(screen.queryByText("Title model")).toBeNull()
+  expect(
+    request.mock.calls.filter(([method]) => method === "provider/models/write"),
+  ).toHaveLength(0)
+  expect(
+    screen.queryByRole("button", { name: /Save|Refresh|Discard/ }),
+  ).toBeNull()
+})
+
+it("hides title actions for accounts without title-model configuration while retaining model editing", async () => {
+  render(
+    <ModelCatalogSettings
+      apiBase="/api"
+      provider="codex"
+      titleModelConfigurable={false}
+    />,
+  )
+  await screen.findByRole("switch", { name: "Enable future-coder" })
+  expect(
+    screen.queryByRole("button", { name: /^Model actions for / }),
+  ).toBeNull()
+  expect(
+    screen.getByRole("button", {
+      name: "Edit settings for future-coder",
+    }),
+  ).toBeDefined()
+  fireEvent.click(screen.getByRole("switch", { name: "Enable future-coder" }))
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("provider/models/write", {
+      provider: "codex",
+      version: "first",
+      settings: { "future-coder": { visible: false } },
+    }),
+  )
+})
+
+it.each([
+  "title",
+  "visibility",
+])("keeps title and visibility edits when the %s write is already in flight", async (firstEdit) => {
+  let finishFirstWrite: (() => void) | undefined
+  let catalog = source
+  let writes = 0
+  request.mockImplementation(async (method, params) => {
+    if (
+      method !== "provider/models/write" &&
+      method !== "provider/title-model/write"
+    )
+      return catalog
+    writes++
+    if (writes === 1)
+      await new Promise<void>((resolve) => {
+        finishFirstWrite = resolve
+      })
+    catalog = {
+      ...catalog,
+      ...(method === "provider/models/write"
+        ? { settings: params.settings as ProviderModelSettings }
+        : { titleModel: params.titleModel as string }),
+      version: writes === 1 ? "second" : "third",
+    }
+    return catalog
+  })
+  const view = render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  await screen.findByRole("switch", { name: "Enable future-coder" })
+  const selectTitle = () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Model actions for future-coder" }),
+    )
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: "Set as title model" }),
+    )
+  }
+  const hideModel = () =>
+    fireEvent.click(screen.getByRole("switch", { name: "Enable future-coder" }))
+  if (firstEdit === "title") selectTitle()
+  else hideModel()
+  await waitFor(() => expect(finishFirstWrite).toBeDefined())
+  if (firstEdit === "title") hideModel()
+  else selectTitle()
+  act(() => {
+    for (const notify of listeners) notify()
+  })
+  // Let the second edit's coalescing timer expire while the first RPC is held.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300))
+  })
+  expect(
+    request.mock.calls.filter(([method]) => method.endsWith("/write")),
+  ).toHaveLength(1)
+  expect(
+    request.mock.calls.filter(([method]) => method === "provider/models/read"),
+  ).toHaveLength(1)
+  expect(screen.getByText("Title model")).toBeDefined()
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable future-coder" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  await act(async () => finishFirstWrite?.())
+  await waitFor(() => expect(writes).toBe(2))
+  expect(
+    request.mock.calls.filter(([method]) => method.endsWith("/write")),
+  ).toEqual(
+    firstEdit === "title"
+      ? [
+          [
+            "provider/title-model/write",
+            {
+              provider: "codex",
+              titleModel: "future-coder",
+              version: "first",
+            },
+          ],
+          [
+            "provider/models/write",
+            {
+              provider: "codex",
+              settings: { "future-coder": { visible: false } },
+              version: "second",
+            },
+          ],
+        ]
+      : [
+          [
+            "provider/models/write",
+            {
+              provider: "codex",
+              settings: { "future-coder": { visible: false } },
+              version: "first",
+            },
+          ],
+          [
+            "provider/title-model/write",
+            {
+              provider: "codex",
+              titleModel: "future-coder",
+              version: "second",
+            },
+          ],
+        ],
+  )
+  await waitFor(() =>
+    expect(
+      request.mock.calls.filter(
+        ([method]) => method === "provider/models/read",
+      ),
+    ).toHaveLength(2),
+  )
+  view.unmount()
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  expect(await screen.findByText("Title model")).toBeDefined()
+  expect(
+    screen
+      .getByRole("switch", { name: "Enable future-coder" })
+      .getAttribute("aria-checked"),
+  ).toBe("false")
+  expect(screen.queryByRole("alert")).toBeNull()
 })
 
 it("serializes rapid edits against the last committed configuration version", async () => {
@@ -233,6 +452,133 @@ it("retains failed edits and retries them with a fresh configuration version", a
     }),
   )
   await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+})
+
+it("retains a title selection after a conflict and retries it with the current version", async () => {
+  let writes = 0
+  request.mockImplementation(async (method, params) => {
+    if (method === "provider/models/read")
+      return { ...source, version: writes ? "external-change" : "first" }
+    if (method !== "provider/title-model/write")
+      throw new Error(`Unexpected RPC: ${method}`)
+    writes++
+    if (writes === 1) throw new Error("Configuration changed elsewhere.")
+    return { ...source, titleModel: params.titleModel, version: "third" }
+  })
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Model actions for future-coder",
+    }),
+  )
+  fireEvent.click(
+    screen.getByRole("menuitemradio", { name: "Set as title model" }),
+  )
+  await screen.findByText("Configuration changed elsewhere.")
+  expect(screen.getByText("Title model")).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Retry changes" }))
+  await waitFor(() =>
+    expect(request).toHaveBeenCalledWith("provider/title-model/write", {
+      provider: "codex",
+      titleModel: "future-coder",
+      version: "external-change",
+    }),
+  )
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+  expect(screen.getByText("Title model")).toBeDefined()
+})
+
+it("retains an external title selection when retrying only model settings", async () => {
+  let catalog = source
+  let modelWrites = 0
+  request.mockImplementation(async (method, params) => {
+    if (method === "provider/models/write") {
+      modelWrites++
+      if (modelWrites === 1) {
+        catalog = {
+          ...source,
+          titleModel: "future-coder",
+          version: "external-title",
+        }
+        throw new Error("Configuration changed elsewhere.")
+      }
+      catalog = {
+        ...catalog,
+        settings: params.settings as ProviderModelSettings,
+        version: "local-model-settings",
+      }
+    }
+    if (method === "provider/title-model/write") {
+      const { titleModel: _titleModel, ...withoutTitleModel } = catalog
+      catalog = {
+        ...withoutTitleModel,
+        ...(typeof params.titleModel === "string"
+          ? { titleModel: params.titleModel }
+          : {}),
+        version: "local-title",
+      }
+    }
+    return catalog
+  })
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  fireEvent.click(await screen.findByRole("switch", { name: /Enable/ }))
+  await screen.findByText("Configuration changed elsewhere.")
+  fireEvent.click(screen.getByRole("button", { name: "Retry changes" }))
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+  expect(catalog.titleModel).toBe("future-coder")
+  expect(catalog.settings).toEqual({ "future-coder": { visible: false } })
+  expect(
+    request.mock.calls.filter(
+      ([method]) => method === "provider/title-model/write",
+    ),
+  ).toHaveLength(0)
+})
+
+it("retains external model settings when retrying only a title selection", async () => {
+  let catalog = source
+  let titleWrites = 0
+  request.mockImplementation(async (method, params) => {
+    if (method === "provider/title-model/write") {
+      titleWrites++
+      if (titleWrites === 1) {
+        catalog = {
+          ...source,
+          settings: { "future-coder": { visible: false } },
+          version: "external-model-settings",
+        }
+        throw new Error("Configuration changed elsewhere.")
+      }
+      catalog = {
+        ...catalog,
+        titleModel: String(params.titleModel),
+        version: "local-title",
+      }
+    }
+    if (method === "provider/models/write")
+      catalog = {
+        ...catalog,
+        settings: params.settings as ProviderModelSettings,
+        version: "local-model-settings",
+      }
+    return catalog
+  })
+  render(<ModelCatalogSettings apiBase="/api" provider="codex" />)
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Model actions for future-coder",
+    }),
+  )
+  fireEvent.click(
+    screen.getByRole("menuitemradio", { name: "Set as title model" }),
+  )
+  await screen.findByText("Configuration changed elsewhere.")
+  fireEvent.click(screen.getByRole("button", { name: "Retry changes" }))
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+  expect(catalog.titleModel).toBe("future-coder")
+  expect(catalog.settings).toEqual({ "future-coder": { visible: false } })
+  expect(
+    request.mock.calls.filter(([method]) => method === "provider/models/write"),
+  ).toHaveLength(0)
 })
 
 it("flushes edits when switching accounts without applying a late response to the new account", async () => {

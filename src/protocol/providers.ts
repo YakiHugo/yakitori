@@ -20,6 +20,8 @@ export type ProviderConfiguration = Readonly<{
   enabled?: boolean
   // Explicit opt-in: request preparation may have provider-reported usage.
   requestWarmup?: boolean
+  // Optional account-local model for automatic session titles.
+  titleModel?: string
   models: readonly ConfiguredModel[]
 }>
 
@@ -138,6 +140,7 @@ export type ModelSettingsConfiguration = Readonly<
 >
 export type ModelCatalogResponse = Readonly<{
   provider: string
+  titleModel?: string
   models: readonly (ConfiguredModel & { visible: boolean })[]
   settings: ProviderModelSettings
   version: string

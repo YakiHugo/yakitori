@@ -1,4 +1,3 @@
-import type { ResolvedModel } from "../runtime/model-catalog.ts"
 import type {
   ApiProviderModel,
   ApiProviderSummary,
@@ -11,6 +10,7 @@ import type {
 } from "../protocol/model-routing.ts"
 import type { ConfiguredModel } from "../protocol/providers.ts"
 import { ModelNotConfiguredError } from "../runtime/configured-models-manager.ts"
+import type { ResolvedModel } from "../runtime/model-catalog.ts"
 import { NonChatModelError } from "../runtime/model-kind.ts"
 import type { ProviderRegistry } from "../runtime/provider-registry.ts"
 
@@ -18,6 +18,7 @@ export type AccountModelSource = Readonly<{
   accountId: string
   namespace: string
   serviceName: string
+  titleModel?: string
   summary: ApiProviderSummary
   identities?: Readonly<
     Record<string, NonNullable<ConfiguredModel["identity"]>>
@@ -51,6 +52,7 @@ export function createModelRouter(input: {
   let directory: readonly ApiProviderSummary[] = []
   let accounts: readonly ApiProviderSummary[] = []
   let bindings = new Map<string, readonly Binding[]>()
+  let titleModels = new Map<string, string>()
   const namespaces: string[] = []
   const key = (selection: Pick<ModelSelection, "provider" | "model">) =>
     JSON.stringify([selection.provider, selection.model])
@@ -70,7 +72,10 @@ export function createModelRouter(input: {
       }
     >()
     const nextBindings = new Map<string, Binding[]>()
+    const nextTitleModels = new Map<string, string>()
     for (const account of sources) {
+      if (account.titleModel !== undefined)
+        nextTitleModels.set(account.accountId, account.titleModel)
       const available =
         account.summary.availability !== "requires_login" &&
         input.registry.providers.includes(account.accountId)
@@ -174,6 +179,7 @@ export function createModelRouter(input: {
         : {}),
     }))
     bindings = nextBindings
+    titleModels = nextTitleModels
     accounts = sources.map((source) => source.summary)
     namespaces.splice(0, namespaces.length, ...groups.keys())
   }
@@ -335,6 +341,99 @@ export function createModelRouter(input: {
     )
   }
 
+  function selectionFor(
+    accountId: string,
+    model: string,
+  ): ModelSelection | undefined {
+    for (const [identity, candidates] of bindings) {
+      if (
+        candidates.some(
+          (candidate) =>
+            candidate.accountId === accountId && candidate.model === model,
+        )
+      ) {
+        const [provider, id] = JSON.parse(identity) as [string, string]
+        return { provider, model: id }
+      }
+    }
+    return undefined
+  }
+
+  // An account-local title model wins when configured. Otherwise title traffic
+  // stays on the main request's account without inheriting its reasoning or
+  // speed controls. Forced high reasoning alone is not a suitable fallback.
+  function routeTitle(selection: ModelSelection): ModelSelection | undefined {
+    const current = evaluate(selection).find(
+      (result) => result.model !== undefined,
+    )
+    if (current === undefined) {
+      route(selection)
+      return undefined
+    }
+    const accountId = current.target.provider
+    const account = accounts.find((entry) => entry.name === accountId)
+    if (account === undefined) return undefined
+    const rows = account.models.flatMap((model) => {
+      const identity = selectionFor(accountId, model.id)
+      if (identity === undefined) return []
+      const effort = ["off", "none", "minimal", "low"].find((effort) =>
+        model.efforts?.includes(effort),
+      )
+      const noReasoning =
+        model.effortStyle === "none" || model.efforts?.length === 0
+      return [
+        {
+          model,
+          selection: {
+            ...identity,
+            ...(effort === undefined ? {} : { effort }),
+          },
+          noReasoning,
+          disablesReasoning: effort === "off" || effort === "none",
+        },
+      ]
+    })
+    const routeSameAccount = (candidate: ModelSelection) =>
+      evaluate(candidate, { preferredAccount: accountId }).find(
+        (result) =>
+          result.model !== undefined && result.target.provider === accountId,
+      )?.target
+    const configuredRow = rows.find(
+      (row) => row.model.id === titleModels.get(accountId),
+    )
+    if (configuredRow !== undefined) {
+      const routed = routeSameAccount(configuredRow.selection)
+      if (routed !== undefined) return routed
+    }
+    const currentRow = rows.find((row) => row.model.id === current.target.model)
+    const candidates = [
+      ...(currentRow !== undefined &&
+      (currentRow.noReasoning || currentRow.disablesReasoning)
+        ? [currentRow.selection]
+        : []),
+      ...rows.filter((row) => row.noReasoning).map((row) => row.selection),
+      ...rows
+        .filter((row) => row.disablesReasoning)
+        .map((row) => row.selection),
+    ]
+    for (const candidate of candidates) {
+      const routed = routeSameAccount(candidate)
+      if (routed !== undefined) return routed
+    }
+    const fallbackEffort = currentRow?.selection.effort
+    // Catalogs may omit reasoning metadata for custom deployments. Preserve
+    // their default behavior without treating them as known high-only models.
+    const unknownReasoning =
+      currentRow?.model.effortStyle === undefined &&
+      currentRow?.model.efforts === undefined
+    return currentRow !== undefined &&
+      (fallbackEffort === "minimal" ||
+        fallbackEffort === "low" ||
+        unknownReasoning)
+      ? routeSameAccount(currentRow.selection)
+      : undefined
+  }
+
   return {
     namespaces,
     async refresh() {
@@ -351,20 +450,8 @@ export function createModelRouter(input: {
     list: () => directory,
     accounts: () => accounts,
     route,
+    routeTitle,
     preview,
-    selectionFor(accountId: string, model: string): ModelSelection | undefined {
-      for (const [identity, candidates] of bindings) {
-        if (
-          candidates.some(
-            (candidate) =>
-              candidate.accountId === accountId && candidate.model === model,
-          )
-        ) {
-          const [provider, id] = JSON.parse(identity) as [string, string]
-          return { provider, model: id }
-        }
-      }
-      return undefined
-    },
+    selectionFor,
   }
 }

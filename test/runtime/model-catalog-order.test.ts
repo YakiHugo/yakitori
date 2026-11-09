@@ -1,8 +1,5 @@
 import { expect, it } from "vitest"
-import {
-  groupModelCatalog,
-  sortModelCatalog,
-} from "../../src/protocol/model-catalog-order.ts"
+import { sortModelCatalog } from "../../src/protocol/model-catalog-order.ts"
 
 const ids = (models: readonly { id: string }[]) =>
   models.map((model) => model.id)
@@ -93,34 +90,5 @@ it("compares full version numbers before variants and undotted base releases", (
     "gpt-5.6-sol",
     "gpt-5",
     "gpt-5-mini",
-  ])
-})
-
-it("groups major-version families while preserving custom IDs and snapshot rows", () => {
-  const models = [
-    "custom",
-    "gpt-5",
-    "gpt-6.1-sol",
-    "gpt-5.6-sol",
-    "gpt-5-2025-08-07",
-    "o3",
-    "chat-latest",
-    "gpt-6-astra",
-  ].map((id) => ({ id }))
-  expect(groupModelCatalog(models)).toEqual([
-    { label: "GPT 6", models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6-astra" }] },
-    {
-      label: "GPT 5",
-      models: [
-        { id: "gpt-5.6-sol" },
-        { id: "gpt-5" },
-        { id: "gpt-5-2025-08-07" },
-      ],
-    },
-    { label: "o 3", models: [{ id: "o3" }] },
-    {
-      label: "Other models",
-      models: [{ id: "chat-latest" }, { id: "custom" }],
-    },
   ])
 })

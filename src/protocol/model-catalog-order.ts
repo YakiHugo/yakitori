@@ -65,25 +65,3 @@ export function sortModelCatalog<T extends { id: string }>(
     })
     .map(({ model }) => model)
 }
-
-// These are navigation groups derived from IDs, not capability classifications.
-export function groupModelCatalog<T extends { id: string }>(
-  models: readonly T[],
-) {
-  const groups = new Map<string, { label: string; models: T[] }>()
-  for (const model of sortModelCatalog(models)) {
-    const match = model.id.toLowerCase().match(/^([^\d]+?)[-_.]?(\d+)/)
-    const prefix = match?.[1]?.replace(/[-_.]+$/, "")
-    const label =
-      prefix && match
-        ? `${prefix === "gpt" ? "GPT" : prefix} ${match[2]}`
-        : "Other models"
-    const group = groups.get(label) ?? { label, models: [] }
-    group.models.push(model)
-    groups.set(label, group)
-  }
-  // Unversioned aliases and custom IDs remain accessible after versioned groups.
-  return [...groups.values()].sort((a, b) =>
-    a.label === "Other models" ? 1 : b.label === "Other models" ? -1 : 0,
-  )
-}

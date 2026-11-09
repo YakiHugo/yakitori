@@ -2,6 +2,7 @@ import {
   requireModelSettingsProvider,
   requireProviderModelSettings,
 } from "../model-settings.ts"
+
 export type {
   ProviderRpcParams,
   ProviderRpcResponses,
@@ -51,6 +52,26 @@ export const providerMethods: readonly RpcMethodDefinition[] = [
         result: await requireService(context.providerConfiguration).writeModels(
           requireModelSettingsProvider(record.provider),
           requireProviderModelSettings(record.settings),
+          record.version,
+        ),
+      }
+    },
+  },
+  {
+    method: "provider/title-model/write",
+    scope: () => ({ kind: "global", name: "config" }),
+    async invoke(params, context) {
+      const record = requireRecord(params)
+      if (typeof record.version !== "string")
+        throw new ConfigurationError("Title model version is required.")
+      if (record.titleModel !== null && typeof record.titleModel !== "string")
+        throw new ConfigurationError("Title model must be a model ID or null.")
+      return {
+        result: await requireService(
+          context.providerConfiguration,
+        ).writeTitleModel(
+          requireModelSettingsProvider(record.provider),
+          record.titleModel,
           record.version,
         ),
       }

@@ -16,7 +16,10 @@ import {
 } from "../../src/server/provider-configuration.ts"
 import { discoverProviderModels } from "../../src/server/provider-model-discovery.ts"
 import { createProviderService } from "../../src/server/provider-service.ts"
-import { createUserConfigStore } from "../../src/server/user-config.ts"
+import {
+  ConfigVersionConflictError,
+  createUserConfigStore,
+} from "../../src/server/user-config.ts"
 
 const directories: string[] = []
 afterEach(async () => {
@@ -37,15 +40,27 @@ async function fixture() {
   const userConfig = createUserConfigStore({ configPath })
   const registry = createProviderRegistry({})
   const registrySource = registry.register("test", {})
+  const applied = vi.fn()
+  const changed = vi.fn()
   const service = createProviderService({
     userConfig,
     credentialDirectory,
     registry: () => registry,
-    apply: (providers) => {
+    changed,
+    apply: (providers, configurations) => {
+      applied(configurations)
       void registrySource.replace(providers)
     },
   })
-  return { service, registry, userConfig, configPath, credentialDirectory }
+  return {
+    service,
+    registry,
+    userConfig,
+    configPath,
+    credentialDirectory,
+    applied,
+    changed,
+  }
 }
 
 const configuration = {
@@ -96,7 +111,7 @@ describe("provider configuration", () => {
     ).rejects.toThrow("Network unavailable")
   })
 
-  it("preserves explicit request warmup through saved configuration and reload", async () => {
+  it("preserves title model and request warmup through saved configuration and reload", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation(
@@ -116,18 +131,26 @@ describe("provider configuration", () => {
         wireApi: "openai_responses",
         baseURL: "https://api.openai.com/v1",
         requestWarmup: true,
+        titleModel: "gpt-test",
         models: [{ id: "gpt-test" }],
       },
       apiKey: "fixture-key",
     })
     expect(saved.providers[0]?.configuration.requestWarmup).toBe(true)
+    expect(saved.providers[0]?.configuration.titleModel).toBe("gpt-test")
     expect(await readFile(configPath, "utf8")).toContain(
       "request_warmup = true",
+    )
+    expect(await readFile(configPath, "utf8")).toContain(
+      'title_model = "gpt-test"',
     )
     expect(
       (await userConfig.readConfiguration()).modelProviders?.warmup
         ?.requestWarmup,
     ).toBe(true)
+    expect(
+      (await userConfig.readConfiguration()).modelProviders?.warmup?.titleModel,
+    ).toBe("gpt-test")
     const providers = await service.reload()
     const turn = providers.warmup?.startTurn()
     try {
@@ -135,6 +158,168 @@ describe("provider configuration", () => {
     } finally {
       await turn?.close()
     }
+  })
+
+  it("persists canonical hidden title models and resets only the account title setting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          data: [{ id: "coding-model" }, { id: "Title-Model", kind: "chat" }],
+        }),
+      ),
+    )
+    const {
+      service,
+      userConfig,
+      registry,
+      configPath,
+      credentialDirectory,
+      applied,
+      changed,
+    } = await fixture()
+    await service.write({
+      id: "personal",
+      configuration: {
+        ...configuration,
+        models: [
+          ...configuration.models,
+          { id: "Title-Model", visible: false },
+        ],
+      },
+      apiKey: "fixture-key",
+    })
+    await userConfig.writeValue({
+      keyPath: ["models", "personal"],
+      value: { "coding-model": { visible: true, contextWindowTokens: 32000 } },
+    })
+    const before = await userConfig.readConfiguration()
+    const account = before.modelProviders?.personal
+    if (!account) throw new Error("Missing account")
+    const credentialFiles = await readdir(credentialDirectory)
+    const credentialBytes = await Promise.all(
+      credentialFiles.map((file) => readFile(join(credentialDirectory, file))),
+    )
+    const initial = await service.readModels("personal")
+    expect(initial.titleModel).toBeUndefined()
+    expect(initial.models.find((model) => model.id === "Title-Model")).toEqual(
+      expect.objectContaining({ visible: false }),
+    )
+    const write = vi.spyOn(userConfig, "writeValue")
+    applied.mockClear()
+    changed.mockClear()
+    const selected = await service.writeTitleModel(
+      "personal",
+      "title-model",
+      initial.version,
+    )
+    expect(selected.titleModel).toBe("Title-Model")
+    expect(selected.version).not.toBe(initial.version)
+    expect(selected.models).toEqual(initial.models)
+    expect(selected.settings).toEqual(initial.settings)
+    expect(write).toHaveBeenLastCalledWith({
+      keyPath: ["model_providers", "personal", "title_model"],
+      value: "Title-Model",
+      expectedVersion: initial.version,
+    })
+    expect(await userConfig.readConfiguration()).toEqual({
+      ...before,
+      modelProviders: {
+        ...before.modelProviders,
+        personal: {
+          ...before.modelProviders?.personal,
+          titleModel: "Title-Model",
+        },
+      },
+    })
+    expect(
+      (await createUserConfigStore({ configPath }).readConfiguration())
+        .modelProviders?.personal?.titleModel,
+    ).toBe("Title-Model")
+    expect(applied).toHaveBeenCalledOnce()
+    expect(applied).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        personal: expect.objectContaining({ titleModel: "Title-Model" }),
+      }),
+    )
+    expect(changed).toHaveBeenCalledOnce()
+
+    await expect(
+      service.writeTitleModel("personal", null, initial.version),
+    ).rejects.toBeInstanceOf(ConfigVersionConflictError)
+    expect((await service.readModels("personal")).titleModel).toBe(
+      "Title-Model",
+    )
+    expect(applied).toHaveBeenCalledOnce()
+    expect(changed).toHaveBeenCalledOnce()
+
+    const reset = await service.writeTitleModel(
+      "personal",
+      null,
+      selected.version,
+    )
+    expect(reset).not.toHaveProperty("titleModel")
+    expect(reset.version).not.toBe(selected.version)
+    expect(write).toHaveBeenLastCalledWith({
+      keyPath: ["model_providers", "personal"],
+      value: providerConfigValue(account),
+      expectedVersion: selected.version,
+    })
+    expect(await userConfig.readConfiguration()).toEqual(before)
+    expect(await readFile(configPath, "utf8")).not.toContain("title_model")
+    expect(applied).toHaveBeenCalledTimes(2)
+    expect(changed).toHaveBeenCalledTimes(2)
+    expect(await readdir(credentialDirectory)).toEqual(credentialFiles)
+    expect(
+      await Promise.all(
+        credentialFiles.map((file) =>
+          readFile(join(credentialDirectory, file)),
+        ),
+      ),
+    ).toEqual(credentialBytes)
+    expect(await service.resolveCredential("personal")).toBe("fixture-key")
+    await registry.close()
+  })
+
+  it("rejects disconnected, missing and non-chat title models without changing persisted state", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          data: [
+            { id: "coding-model", kind: "chat" },
+            { id: "image-model", kind: "image" },
+          ],
+        }),
+      ),
+    )
+    const { service, userConfig, configPath, applied, changed, registry } =
+      await fixture()
+    await service.write({
+      id: "personal",
+      configuration,
+      apiKey: "fixture-key",
+    })
+    const { version } = await service.readModels("personal")
+    const content = await readFile(configPath, "utf8")
+    const write = vi.spyOn(userConfig, "writeValue")
+    applied.mockClear()
+    changed.mockClear()
+    for (const [provider, model, message] of [
+      ["disconnected", "coding-model", "Provider is not connected."],
+      ["personal", "missing", "Model missing is not configured for personal."],
+      ["personal", "IMAGE-MODEL", "is not a chat model"],
+      ["personal", "  ", "non-empty model ID"],
+    ] as const) {
+      await expect(
+        service.writeTitleModel(provider, model, version),
+      ).rejects.toThrow(message)
+    }
+    expect(write).not.toHaveBeenCalled()
+    expect(applied).not.toHaveBeenCalled()
+    expect(changed).not.toHaveBeenCalled()
+    expect(await readFile(configPath, "utf8")).toBe(content)
+    await registry.close()
   })
 
   it("uses documented preset models only when the official catalog endpoint is unsupported", async () => {
