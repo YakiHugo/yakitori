@@ -401,6 +401,30 @@ describe("account model routing", () => {
     }
   })
 
+  it("keeps automatic titles available when the current model has no reasoning metadata", async () => {
+    const registry = createProviderRegistry({
+      local: account("local", [{ id: "private-deployment", speeds: ["fast"] }]),
+    })
+    const router = createModelRouter({
+      registry,
+      readAccounts: async () => [
+        source("local", "local-vendor", "private-deployment"),
+      ],
+    })
+    try {
+      await router.refresh()
+      expect(
+        router.routeTitle({
+          provider: "local-vendor",
+          model: "private-deployment",
+          speed: "fast",
+        }),
+      ).toEqual({ provider: "local", model: "private-deployment" })
+    } finally {
+      await registry.close()
+    }
+  })
+
   it("uses the configured account title model with minimal reasoning", async () => {
     const registry = createProviderRegistry({
       personal: account("personal", [

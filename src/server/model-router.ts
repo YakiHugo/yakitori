@@ -1,4 +1,3 @@
-import type { ResolvedModel } from "../runtime/model-catalog.ts"
 import type {
   ApiProviderModel,
   ApiProviderSummary,
@@ -11,6 +10,7 @@ import type {
 } from "../protocol/model-routing.ts"
 import type { ConfiguredModel } from "../protocol/providers.ts"
 import { ModelNotConfiguredError } from "../runtime/configured-models-manager.ts"
+import type { ResolvedModel } from "../runtime/model-catalog.ts"
 import { NonChatModelError } from "../runtime/model-kind.ts"
 import type { ProviderRegistry } from "../runtime/provider-registry.ts"
 
@@ -421,8 +421,15 @@ export function createModelRouter(input: {
       if (routed !== undefined) return routed
     }
     const fallbackEffort = currentRow?.selection.effort
+    // Catalogs may omit reasoning metadata for custom deployments. Preserve
+    // their default behavior without treating them as known high-only models.
+    const unknownReasoning =
+      currentRow?.model.effortStyle === undefined &&
+      currentRow?.model.efforts === undefined
     return currentRow !== undefined &&
-      (fallbackEffort === "minimal" || fallbackEffort === "low")
+      (fallbackEffort === "minimal" ||
+        fallbackEffort === "low" ||
+        unknownReasoning)
       ? routeSameAccount(currentRow.selection)
       : undefined
   }
