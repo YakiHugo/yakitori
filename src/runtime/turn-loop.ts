@@ -774,6 +774,8 @@ async function executeTurnModelLoop(
     let warmupEndedAt: number | undefined
     let warmupController: AbortController | undefined
     let warmupWork: Promise<PromiseSettledResult<void>> | undefined
+    const samplingAbort = new AbortController()
+    let stopObservingSteering: (() => void) | undefined
     try {
       throwIfAborted(input.signal)
       if (!continuingAnswer) answerItemIds.length = 0
@@ -1514,6 +1516,7 @@ async function executeTurnModelLoop(
             const toolsStartedAt = Date.now()
             const results = executeToolCalls({
               calls,
+              startSignal: samplingAbort.signal,
               onScheduled,
               threadId: metadata.id,
               rolloutId: metadata.rolloutId,
@@ -1734,12 +1737,30 @@ async function executeTurnModelLoop(
             answerItemIds.push(item.id)
         }
       }
+      // Steering cancels this sampling attempt, not the Turn or tool effects.
+      // Completed streamed calls retain matching tool results before resampling.
+      stopObservingSteering = input.session.observeSteering(
+        input.execution,
+        () => samplingAbort.abort(),
+      )
+      const samplingSignal = AbortSignal.any([
+        input.signal,
+        samplingAbort.signal,
+      ])
+      throwIfAborted(samplingSignal)
+      modelCalls += 1
       const response = await consumeModelStream({
-        request,
+        request: { ...request, signal: samplingSignal },
+        discardOutput: (itemIds) => {
+          // Steering replaces provisional output in the same Turn. Explicit
+          // interruption retains its partial prefix for the stopped transcript.
+          if (!input.signal.aborted)
+            input.session.discardModelOutput(input.execution, itemIds)
+        },
         stream,
         attempt,
         async onOutputItem(content, itemId, native) {
-          throwIfAborted(input.signal)
+          throwIfAborted(samplingSignal)
           committedBytes +=
             utf8Bytes(JSON.stringify(content)) +
             (native === undefined ? 0 : utf8Bytes(JSON.stringify(native)))
@@ -1819,15 +1840,15 @@ async function executeTurnModelLoop(
           budget?.recordUsage(usage)
         },
         setActiveStream: input.setActiveStream,
+      }).finally(() => {
+        modelDurationMs += Date.now() - modelStartedAt
+        if (firstTokenAt !== undefined) {
+          timeToFirstTokenTotalMs += firstTokenAt - modelStartedAt
+          timeToFirstTokenSamples += 1
+        }
       })
       input.setActiveStream(undefined)
-      modelCalls += 1
-      modelDurationMs += Date.now() - modelStartedAt
-      if (firstTokenAt !== undefined) {
-        timeToFirstTokenTotalMs += firstTokenAt - modelStartedAt
-        timeToFirstTokenSamples += 1
-      }
-      throwIfAborted(input.signal)
+      throwIfAborted(samplingSignal)
 
       const calls = response.content.filter(
         (block): block is ModelToolCallBlock => block.type === "tool_call",
@@ -2267,6 +2288,20 @@ async function executeTurnModelLoop(
       return finish(reason)
     } catch (error) {
       if (
+        samplingAbort.signal.aborted &&
+        !input.signal.aborted &&
+        isAbortError(error)
+      ) {
+        // Already-started side effects must settle once with their real result.
+        const outcomes = await Promise.all(pendingTools)
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") throw outcome.reason
+        }
+        continuingAnswer = false
+        continuationNeedsCompaction = false
+        continue
+      }
+      if (
         modelCalls === 0 &&
         !input.input.manualCompact &&
         !input.signal.aborted
@@ -2289,6 +2324,7 @@ async function executeTurnModelLoop(
       }
       throw error
     } finally {
+      stopObservingSteering?.()
       backgroundAbort.abort()
       warmupController?.abort()
       await backgroundWork
@@ -2310,6 +2346,7 @@ async function executeTurnModelLoop(
 }
 
 async function consumeModelStream(input: {
+  readonly discardOutput?: (itemIds: readonly string[]) => void
   readonly request: ModelRequest
   readonly toolPolicy?: "chat_only" | undefined
   readonly stream: StreamFn
@@ -2564,6 +2601,8 @@ async function consumeModelStream(input: {
       throw new TaskCleanupError(error)
     if (error instanceof TaskCleanupError) throw error
     if (input.request.signal?.aborted) {
+      if (provisionalItems.size > 0)
+        input.discardOutput?.([...provisionalItems])
       throw abortError()
     }
     throw error

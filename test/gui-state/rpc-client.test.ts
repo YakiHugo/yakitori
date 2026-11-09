@@ -784,3 +784,52 @@ it("ignores malformed envelopes without consuming the pending response", async (
   await expect(pending).resolves.toEqual({ providers: [] })
   client.close()
 })
+
+it.each([
+  "session/input/steer",
+  "session/question/answer",
+] as const)("bounds %s acknowledgement waiting even when heartbeats still succeed", async (method) => {
+  vi.useFakeTimers()
+  const client = createAppRpcClient({ apiBase: "http://api.test" })
+  const pending =
+    method === "session/question/answer"
+      ? client.request(method, {
+          sessionId: "session_1",
+          toolCallId: "question_1",
+          answers: ["new direction"],
+        })
+      : client.request(method, {
+          sessionId: "session_1",
+          requestId: "request_1",
+          expectedTurnId: "turn_1",
+          content: {
+            kind: "input",
+            text: "change direction",
+            elements: [],
+            attachments: [],
+          },
+        })
+  const result = pending.catch((error: unknown) => error)
+  const socket = completeHandshake(FakeWebSocket.instances[0])
+  await flushMicrotasks()
+  await vi.advanceTimersByTimeAsync(15_000)
+  const ping = socket.sentFrames().at(-1)
+  socket.emitMessage({ id: ping?.id, result: {} })
+  await flushMicrotasks()
+  await vi.advanceTimersByTimeAsync(15_000)
+  const error = await result
+  expect(error).toBeInstanceOf(ApiRequestError)
+  expect(error).toMatchObject({
+    code: undefined,
+    message: "Input acknowledgement timed out; delivery is unknown.",
+  })
+  expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+  socket.emitMessage({
+    id: 1,
+    result: { requestId: "request_1", turnId: "turn_1" },
+  })
+  expect(
+    socket.sentFrames().filter((frame) => frame.method === method),
+  ).toHaveLength(1)
+  client.close()
+})

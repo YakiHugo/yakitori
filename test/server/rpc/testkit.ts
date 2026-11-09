@@ -207,6 +207,13 @@ export function createFakeHandlers(
         inputId: "input_1",
         content: inputFixture([]),
       }),
+    admitQuestionAnswer: async () =>
+      okResult({
+        requestId: "request_1",
+        turnId: "turn_1",
+        inputId: "input_1",
+        content: inputFixture([]),
+      }),
     queueInput: async () =>
       okResult({
         requestId: "request_1",

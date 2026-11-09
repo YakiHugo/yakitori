@@ -445,7 +445,16 @@ describe("structured context and ephemeral forks", () => {
     })
     const context = await fixture(async function* (request) {
       requests.push(request)
-      if (route !== "direct" && requests.length === 1) await gate
+      if (route !== "direct" && requests.length === 1) {
+        await new Promise<void>((resolve) => {
+          const stop = () => resolve()
+          if (request.signal?.aborted) resolve()
+          else request.signal?.addEventListener("abort", stop, { once: true })
+          void gate
+            .then(resolve)
+            .finally(() => request.signal?.removeEventListener("abort", stop))
+        })
+      }
       yield {
         type: "response",
         response: {

@@ -131,6 +131,12 @@ export type SessionOp =
 
 export type SessionEvent =
   | Readonly<{
+      type: "model.output_discarded"
+      threadId: string
+      turnId: string
+      itemIds: readonly string[]
+    }>
+  | Readonly<{
       type: "rollout.appended"
       threadId: string
       throughSeq: number

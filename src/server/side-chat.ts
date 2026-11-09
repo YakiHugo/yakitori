@@ -788,6 +788,15 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
       })
     return true
   }
+  if (event.type === "model.output_discarded") {
+    state.messages = state.messages.filter(
+      (message) =>
+        !event.itemIds.includes(message.id) ||
+        message.turnId !== event.turnId ||
+        !message.streaming,
+    )
+    return true
+  }
   if (event.type === "runtime.warning" && event.code === "model.retry") {
     const itemIds = event.details?.discardedResponseItemIds
     const discarded = Array.isArray(itemIds) ? itemIds : []

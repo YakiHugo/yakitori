@@ -309,22 +309,22 @@ describe("bounded length recovery", () => {
   })
 
   it("admits buffered steering instead of ending when the checkpoint exceeds its limit", async () => {
-    const terminalYielded = deferred()
-    const closeInitialStream = deferred()
+    const checkpointEntered = deferred()
+    const closeCheckpoint = deferred()
     let samples = 0
     let compactions = 0
     const runtime = await createRuntime(
       async function* (request) {
         if (request.compaction === "local") {
           compactions += 1
+          checkpointEntered.resolve()
+          await closeCheckpoint.promise
           yield response("X".repeat(8_000))
           return
         }
         samples += 1
         if (samples === 1) {
           yield truncated("Previous partial answer", "context")
-          terminalYielded.resolve()
-          await closeInitialStream.promise
         } else {
           expect(request.messages).toContainEqual({
             role: "user",
@@ -339,7 +339,7 @@ describe("bounded length recovery", () => {
       content: inputFixture([{ type: "text" as const, text: "Explain." }]),
     })
     if (started.type !== "started") throw new Error("Turn did not start.")
-    await terminalYielded.promise
+    await checkpointEntered.promise
     try {
       await expect(
         runtime.thread.steer(
@@ -352,7 +352,7 @@ describe("bounded length recovery", () => {
         ),
       ).resolves.toMatchObject({ type: "steered" })
     } finally {
-      closeInitialStream.resolve()
+      closeCheckpoint.resolve()
     }
     await expect
       .poll(() => runtime.thread.agentStatus)

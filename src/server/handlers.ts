@@ -202,10 +202,10 @@ export type ServerHandlers = {
   forkSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiForkSessionResponse>>
-  admitInput(
+  admitInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  admitQuestionAnswer(
     input: unknown,
-    purpose?: "question_answer",
-  ): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  ): Promise<ApplicationResult<ApiAdmitInputResponse | ApiSteerInputResponse>>
   queueInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
   listQueuedInputs(
     input: unknown,
@@ -555,6 +555,20 @@ export function createThreadServerHandlers(
             })
             continue
           }
+          if (event.type === "model.output_discarded") {
+            for (const publisher of streams.values()) publisher.flush()
+            for (const itemId of event.itemIds) {
+              streams.delete(itemId)
+              options.eventHub?.publishTransient({
+                type: "item.discarded",
+                sessionId: event.threadId,
+                turnId: event.turnId,
+                itemId,
+                createdAt: new Date().toISOString(),
+              })
+            }
+            continue
+          }
           if (event.type === "item.started") {
             options.eventHub?.publishTransient({
               type: "item.started",
@@ -885,7 +899,11 @@ export function createThreadServerHandlers(
           })
         }
         if (submitted.type === "steered") {
-          throw internalError("Admission unexpectedly returned steering.")
+          return ok({
+            requestId: request.requestId,
+            turnId: submitted.turnId,
+            content,
+          })
         }
         const hasAttachments =
           inputContentAttachments(request.content).length !== 0
@@ -1581,7 +1599,7 @@ export function createThreadServerHandlers(
       }
     },
 
-    async admitInput(input, purpose) {
+    async admitInput(input) {
       try {
         const request = requireAdmitInputRequest(
           input,
@@ -1595,27 +1613,82 @@ export function createThreadServerHandlers(
             },
           )
         }
+        const result = await admitTurnInput(
+          request,
+          async (thread, content) => {
+            // Attachment promotion can outlive a closed actor. Route through
+            // the manager again before submitting to the current Session.
+            const current = await resumeRequired(thread.id)
+            return current.startIfIdle({
+              submissionId: request.requestId,
+              content,
+              ...(request.modelSelection === undefined
+                ? {}
+                : { modelSelection: request.modelSelection }),
+              ...(request.metadata === undefined
+                ? {}
+                : { metadata: request.metadata }),
+              ...(request.parentInputId === undefined
+                ? {}
+                : { parentInputId: request.parentInputId }),
+            })
+          },
+        )
+        if (!result.ok) return result
+        if (
+          !("inputId" in result.value) ||
+          typeof result.value.inputId !== "string"
+        )
+          throw internalError("Admission unexpectedly returned steering.")
+        return ok({ ...result.value, inputId: result.value.inputId })
+      } catch (error) {
+        return fail(error, reporter, "admit-input")
+      }
+    },
+
+    async admitQuestionAnswer(input) {
+      try {
+        const request = requireAdmitInputRequest(
+          input,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
+        )
         return await admitTurnInput(request, async (thread, content) => {
-          // Attachment promotion can outlive a closed actor. Route through
-          // the manager again before submitting to the current Session.
           const current = await resumeRequired(thread.id)
-          return current.startIfIdle({
+          const answer: TurnInput = {
             submissionId: request.requestId,
-            ...(purpose === undefined ? {} : { purpose }),
+            purpose: "question_answer",
             content,
-            ...(request.modelSelection === undefined
-              ? {}
-              : { modelSelection: request.modelSelection }),
             ...(request.metadata === undefined
               ? {}
               : { metadata: request.metadata }),
-            ...(request.parentInputId === undefined
-              ? {}
-              : { parentInputId: request.parentInputId }),
+          }
+          const submitted = await current.startOrSteer(answer)
+          if (
+            submitted.type !== "not_submitted" ||
+            submitted.reason !== "turn_finishing"
+          )
+            return submitted
+          // Completion owns the Session briefly after closing steering. Wait for
+          // that handoff, not for a running model or tool. Bound this wait so a
+          // stuck persistence barrier cannot retain an RPC indefinitely; retries
+          // keep the same question identity and remain safe.
+          const QUESTION_HANDOFF_WAIT_MS = 5_000
+          await new Promise<void>((resolve) => {
+            const finish = () => {
+              clearTimeout(timeout)
+              unsubscribe()
+              resolve()
+            }
+            const unsubscribe = current.subscribeStatus((status) => {
+              if (status !== "active") finish()
+            })
+            const timeout = setTimeout(finish, QUESTION_HANDOFF_WAIT_MS)
+            if (current.status !== "active") finish()
           })
+          return (await resumeRequired(thread.id)).startOrSteer(answer)
         })
       } catch (error) {
-        return fail(error, reporter, "admit-input")
+        return fail(error, reporter, "admit-question-answer")
       }
     },
 

@@ -5,12 +5,13 @@ import {
   CircleDot,
   ListChecks,
 } from "lucide-react"
-import { useId, useState } from "react"
+import { useEffect, useId, useState } from "react"
 import type {
   SessionPlan,
   UserQuestions,
 } from "../../../protocol/user-interaction.ts"
-import { getAppRpcClient } from "../../lib/rpc-client.ts"
+import { ApiRequestError, getAppRpcClient } from "../../lib/rpc-client.ts"
+import { questionAnswerMemory } from "../../question-answer-memory.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { Button } from "../ui/button.tsx"
@@ -31,12 +32,23 @@ export function UserQuestionsCell({
       (entry) => entry.kind === "user_input" && entry.questionId === toolCallId,
     ),
   )
-  const [answers, setAnswers] = useState(() => request.questions.map(() => ""))
+  const recovered =
+    sessionId === undefined
+      ? undefined
+      : questionAnswerMemory.read(apiBase, sessionId, toolCallId)
+  const [answers, setAnswers] = useState(
+    () => recovered?.slice() ?? request.questions.map(() => ""),
+  )
   const [submitting, setSubmitting] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
+  const [pending, setPending] = useState(recovered !== undefined)
+  const [received, setReceived] = useState(false)
   const [error, setError] = useState<string>()
   const id = useId()
-  const done = answered || submitted
+  const done = answered
+  useEffect(() => {
+    if (answered && sessionId !== undefined)
+      questionAnswerMemory.acknowledge(apiBase, sessionId, toolCallId)
+  }, [answered, apiBase, sessionId, toolCallId])
   return (
     <form
       aria-label="Questions from your Mate"
@@ -46,14 +58,24 @@ export function UserQuestionsCell({
         if (!sessionId || submitting || done) return
         setSubmitting(true)
         setError(undefined)
+        questionAnswerMemory.reserve(apiBase, sessionId, toolCallId, answers)
+        setPending(true)
         void getAppRpcClient(apiBase)
           .request("session/question/answer", {
             sessionId,
             toolCallId,
             answers,
           })
-          .then(() => setSubmitted(true))
+          .then(() => setReceived(true))
           .catch((reason: unknown) => {
+            if (
+              reason instanceof ApiRequestError &&
+              reason.code !== undefined &&
+              reason.code !== "internal_error"
+            ) {
+              questionAnswerMemory.acknowledge(apiBase, sessionId, toolCallId)
+              setPending(false)
+            }
             setError(
               reason instanceof Error
                 ? reason.message
@@ -87,7 +109,7 @@ export function UserQuestionsCell({
                       ),
                     )
                   }
-                  disabled={submitting || sessionId === undefined}
+                  disabled={submitting || pending || sessionId === undefined}
                   placeholder={
                     question.options
                       ? "Choose a suggestion or type your answer"
@@ -108,7 +130,14 @@ export function UserQuestionsCell({
           </Field>
         ))}
       </FieldGroup>
-      {error ? (
+      {!done && pending ? (
+        <p role="status" className="text-detail text-muted-foreground">
+          {received
+            ? "Answers received; waiting for confirmation."
+            : "Answer delivery is unconfirmed. Retry sends the same answers, not a new submission."}
+        </p>
+      ) : null}
+      {!done && error ? (
         <p role="alert" className="text-detail text-destructive">
           {error}
         </p>
@@ -124,7 +153,11 @@ export function UserQuestionsCell({
               answers.some((answer) => !answer.trim())
             }
           >
-            {submitting ? "Sending…" : "Send answers"}
+            {submitting
+              ? "Sending…"
+              : pending
+                ? "Retry same answers"
+                : "Send answers"}
           </Button>
         </div>
       ) : null}

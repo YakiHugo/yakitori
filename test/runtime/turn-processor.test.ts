@@ -3949,16 +3949,24 @@ describe("Turn processor", () => {
     expect(thread.snapshot().configuration?.modelTransport?.maxAttempts).toBe(2)
   })
 
-  it("consumes steering in the active task and aborts the underlying stream", async () => {
+  it("preempts sampling for steering without interrupting the active turn", async () => {
     const firstCallEntered = deferred<void>()
-    const releaseFirst = deferred<void>()
+    let samplingAborted = false
     let calls = 0
     const stream: StreamFn = async function* (request) {
       calls += 1
       if (calls === 1) {
+        yield { type: "delta", text: "Unfinished old direction" }
         firstCallEntered.resolve()
-        await releaseFirst.promise
-        yield responseEvent("first")
+        await new Promise<void>((resolve) => {
+          const stop = () => {
+            samplingAborted = true
+            resolve()
+          }
+          if (request.signal?.aborted) stop()
+          else request.signal?.addEventListener("abort", stop, { once: true })
+        })
+        yield responseEvent("discarded old direction")
         return
       }
       expect(
@@ -3990,10 +3998,25 @@ describe("Turn processor", () => {
         started.turnId,
       ),
     ).resolves.toMatchObject({ type: "steered" })
-    releaseFirst.resolve()
-    await nextLifecycleEvent(thread)
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    const observed: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) throw new Error("Missing completion")
+      observed.push(event)
+      if (event.type === "turn.completed") break
+    }
+    const streamed = observed.find((event) => event.type === "model.stream")
+    expect(streamed?.type).toBe("model.stream")
+    expect(observed).toContainEqual(
+      expect.objectContaining({
+        type: "model.output_discarded",
+        itemIds: [
+          streamed?.type === "model.stream" ? streamed.itemId : "missing",
+        ],
+      }),
+    )
     expect(calls).toBe(2)
+    expect(samplingAborted).toBe(true)
 
     const aborting = createFauxProvider([{ waitForAbort: true }])
     const abortRuntime = await createRuntime(aborting.stream)
@@ -4013,6 +4036,154 @@ describe("Turn processor", () => {
           entry.item.outcome === "interrupted",
       ),
     ).toBe(true)
+  })
+
+  it("drains started tools but skips queued effects before consecutive steering", async () => {
+    const toolEntered = deferred<void>()
+    const releaseTool = deferred<void>()
+    const samplingStopped = deferred<void>()
+    let effects = 0
+    let calls = 0
+    let toolAborted = false
+    const call = {
+      type: "tool_call" as const,
+      id: "effect_1",
+      name: "effect",
+      input: {},
+    }
+    const runtime = await createRuntime(
+      async function* (request) {
+        calls += 1
+        if (calls === 1) {
+          yield {
+            type: "output_item",
+            itemId: "effect_item",
+            content: [call, { ...call, id: "queued_effect" }],
+          }
+          await toolEntered.promise
+          await new Promise<void>((resolve) => {
+            const stop = () => {
+              samplingStopped.resolve()
+              resolve()
+            }
+            if (request.signal?.aborted) stop()
+            else request.signal?.addEventListener("abort", stop, { once: true })
+          })
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.ToolUse,
+              content: [call, { ...call, id: "late_effect" }],
+            },
+          }
+          return
+        }
+        expect(effects).toBe(1)
+        expect(
+          request.messages.filter((message) => message.role === "tool"),
+        ).toHaveLength(2)
+        expect(JSON.stringify(request.messages)).toContain("first correction")
+        expect(JSON.stringify(request.messages)).toContain("second correction")
+        yield responseEvent("redirected")
+      },
+      createToolRegistry([
+        {
+          toolName: plainToolName("effect"),
+          description: "One effect",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute(_input, context) {
+            toolEntered.resolve()
+            await releaseTool.promise
+            toolAborted = context.signal?.aborted ?? false
+            effects += 1
+            return { ok: true, output: effects, content: "Effect completed" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+    const started = await thread.startIfIdle({
+      content: createUserInput("start"),
+    })
+    if (started.type !== "started") throw new Error("Missing turn")
+    await toolEntered.promise
+    await thread.steer(
+      { content: createUserInput("first correction") },
+      started.turnId,
+    )
+    await samplingStopped.promise
+    expect(calls).toBe(1)
+    await thread.steer(
+      { content: createUserInput("second correction") },
+      started.turnId,
+    )
+    releaseTool.resolve()
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "redirected" })
+    expect(calls).toBe(2)
+    expect(effects).toBe(1)
+    expect(toolAborted).toBe(false)
+    expect(JSON.stringify(thread.snapshot().context.history)).not.toContain(
+      "late_effect",
+    )
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "Tool was not executed: new user input arrived before it started.",
+    )
+  })
+
+  it("steers past a tool waiting for permission without executing its effect", async () => {
+    const permissionGate = createPermissionGate()
+    let effects = 0
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id: "old_command", name: "approved", input: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "new direction" }] },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("approved"),
+          description: "Requires approval",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: {
+            kind: "approval",
+            action: "command_execution",
+          },
+          async execute() {
+            effects += 1
+            return { ok: true, output: null, content: "done" }
+          },
+        },
+      ]),
+      { permissionGate, approvalPolicy: "auto_file_tools" },
+    )
+    const thread = await runtime.createThread()
+    const started = await thread.startIfIdle({
+      content: createUserInput("start"),
+    })
+    if (started.type !== "started") throw new Error("Missing turn")
+    await waitForValue(() => permissionGate.list(thread.id)[0])
+    await thread.steer(
+      { content: createUserInput("Do not run that command") },
+      started.turnId,
+    )
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "new direction" })
+    expect(effects).toBe(0)
+    expect(permissionGate.list(thread.id)).toHaveLength(0)
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "Do not run that command",
+    )
   })
 
   it.each([
@@ -5801,6 +5972,7 @@ async function nextLifecycleEvent(thread: {
       event === undefined ||
       (event.type !== "rollout.appended" &&
         event.type !== "model.stream" &&
+        event.type !== "model.output_discarded" &&
         event.type !== "item.started" &&
         event.type !== "permission" &&
         event.type !== "runtime.warning")

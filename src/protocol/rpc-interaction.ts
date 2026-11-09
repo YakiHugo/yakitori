@@ -1,4 +1,7 @@
-import type { ApiAdmitInputResponse } from "./application.ts"
+import type {
+  ApiAdmitInputResponse,
+  ApiSteerInputResponse,
+} from "./application.ts"
 import type {
   AnswerQuestionRequest,
   PendingElicitation,
@@ -14,7 +17,7 @@ export type InteractionRpcParams = {
 }
 
 export type InteractionRpcResponses = {
-  "session/question/answer": ApiAdmitInputResponse
+  "session/question/answer": ApiAdmitInputResponse | ApiSteerInputResponse
   "session/elicitation/list": { requests: readonly PendingElicitation[] }
   "session/elicitation/answer": Record<string, never>
 }

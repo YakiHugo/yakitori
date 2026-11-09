@@ -562,18 +562,33 @@ describe("composer", () => {
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
   })
 
-  it("blocks send and slash execution while the session is busy", async () => {
+  it("allows sending while unrelated application work is busy", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(() => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts("new direction"),
+      busy: true,
+      inFlightActions: new Set(["admit:other_session"]),
+    })
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    expect(admitInput).toHaveBeenCalledOnce()
+  })
+
+  it("blocks send and slash execution while this session is submitting", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_parts: InputDraft) => Promise.resolve())
     useAppStore.setState({
       admitInput,
       selection: { sessionId: "session_1" },
       promptDraft: inputParts("hello"),
-      busy: true,
+      inFlightActions: new Set(["admit:session_1"]),
     })
     render(<Composer />)
 
-    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+    expect(screen.getByRole("button", { name: "Sending" })).toHaveProperty(
       "disabled",
       true,
     )
@@ -581,11 +596,11 @@ describe("composer", () => {
     await user.keyboard("{Enter}")
     expect(admitInput).not.toHaveBeenCalled()
 
-    // A picked slash command only completes as text while busy.
+    // An in-flight submission prevents replacing its editor content.
     await pastePrompt(screen.getByRole("textbox"), "/com", true)
     await user.keyboard("{Enter}")
     expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toEqual(inputParts("/compact"))
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
   })
 
   it("attaches an image and sends without exposing image quality", async () => {

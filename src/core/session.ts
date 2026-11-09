@@ -98,6 +98,7 @@ type ActiveTurn = {
   readonly definition: SessionTask
   readonly abort: AbortController
   readonly steering: TurnInput[]
+  readonly steeringListeners: Set<() => void>
   readonly steeringFingerprints: Map<string, string>
   acceptingSteering: boolean
   finishing: boolean
@@ -604,12 +605,15 @@ export class Session {
     }
     const previousSteering = active.steeringFingerprints.get(input.submissionId)
     if (previousSteering !== undefined) {
-      return inputSource(input) !== "human" && previousSteering === fingerprint
+      return (inputSource(input) !== "human" ||
+        inputPurpose(input) === "question_answer") &&
+        previousSteering === fingerprint
         ? { type: "steered", turnId: active.input.submissionId }
         : notSubmitted(Reason.RequestConflict)
     }
     await this.#acceptSteering(active, input)
     active.steeringFingerprints.set(input.submissionId, fingerprint)
+    for (const listener of active.steeringListeners) listener()
     return { type: "steered", turnId: active.input.submissionId }
   }
 
@@ -708,6 +712,7 @@ export class Session {
       definition,
       abort,
       steering: [],
+      steeringListeners: new Set(),
       steeringFingerprints: new Map(),
       acceptingSteering: true,
       usage: undefined,
@@ -1114,6 +1119,18 @@ export class Session {
     return active
   }
 
+  // Register and inspect pending input atomically so arrivals between request
+  // preparation and sampling cannot miss the wakeup.
+  observeSteering(
+    execution: ExecutionContext,
+    listener: () => void,
+  ): () => void {
+    const active = this.#requireExecution(execution)
+    active.steeringListeners.add(listener)
+    if (active.steering.length > 0) listener()
+    return () => active.steeringListeners.delete(listener)
+  }
+
   takeSteering(execution: ExecutionContext): readonly TurnInput[] {
     return this.#requireExecution(execution).steering.splice(0)
   }
@@ -1340,6 +1357,19 @@ export class Session {
       threadId: this.id,
       turnId: active.input.submissionId,
       ...input,
+    })
+  }
+
+  discardModelOutput(
+    execution: ExecutionContext,
+    itemIds: readonly string[],
+  ): void {
+    const active = this.#requireExecution(execution, true)
+    this.#events.send({
+      type: "model.output_discarded",
+      threadId: this.id,
+      turnId: active.input.submissionId,
+      itemIds,
     })
   }
 

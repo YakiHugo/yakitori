@@ -158,6 +158,9 @@ const reconnectMaxDelayMs = 5_000
 const connectionTimeoutMs = 10_000
 const heartbeatIntervalMs = 15_000
 const heartbeatTimeoutMs = 10_000
+// Bound acknowledgement waiting, not server execution. These operations carry
+// stable request IDs; a timeout remains an unknown outcome, never a rejection.
+const inputAcknowledgementTimeoutMs = 30_000
 
 // One client per API origin: the store asks for the client on every action so
 // tests can substitute a fake between runs without resetting module state.
@@ -581,13 +584,34 @@ export function createAppRpcClient(options: {
     }
     const id = nextId++
     return new Promise<RpcMethodResponses[M]>((resolve, reject) => {
+      const deadline =
+        method === "session/input" ||
+        method === "session/input/queue" ||
+        method === "session/input/steer" ||
+        method === "session/question/answer"
+          ? setTimeout(() => {
+              inflight.delete(id)
+              reject(
+                new ApiRequestError(
+                  "Input acknowledgement timed out; delivery is unknown.",
+                ),
+              )
+            }, inputAcknowledgementTimeoutMs)
+          : undefined
       inflight.set(id, {
-        resolve: (value) => resolve(value as RpcMethodResponses[M]),
-        reject,
+        resolve: (value) => {
+          clearTimeout(deadline)
+          resolve(value as RpcMethodResponses[M])
+        },
+        reject: (error) => {
+          clearTimeout(deadline)
+          reject(error)
+        },
       })
       try {
         ws.send(JSON.stringify({ id, method, params }))
       } catch (error) {
+        clearTimeout(deadline)
         inflight.delete(id)
         reject(error)
         dropSocket(ws)
