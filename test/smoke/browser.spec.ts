@@ -1435,6 +1435,11 @@ test("reconnect confirms a lost input acknowledgement without resending or clear
       ),
     ).toBeVisible()
     await expect(composer).toHaveText("An accepted input with a lost reply.")
+    await page.getByRole("button", { name: "Dismiss reminder" }).click()
+    await expect(
+      page.getByRole("button", { name: "Dismiss reminder" }),
+    ).toHaveCount(0)
+    await expect(composer).toHaveText("An accepted input with a lost reply.")
     await composer.fill("A later draft must survive reconnect.")
     release?.()
     await expect(
@@ -1646,6 +1651,60 @@ test("Nova setup discloses buffered API-key limitations without making a paid re
       .click()
     await expect(note).toBeVisible()
     await expect(page.getByLabel("API key", { exact: true })).toHaveValue("")
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
+test("accepted input releases the composer while sidebar metadata is stalled", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  let sends = 0
+  let holdSidebar = false
+  let heldReads = 0
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const peer = socket.connectToServer()
+    peer.onMessage((message) => socket.send(message))
+    socket.onMessage((message) => {
+      if (typeof message === "string") {
+        const frame = JSON.parse(message) as { method?: string }
+        if (
+          frame.method === "session/input" ||
+          frame.method === "session/input/steer"
+        ) {
+          sends += 1
+          holdSidebar = true
+        }
+        if (holdSidebar && frame.method === "sidebar/read") {
+          heldReads += 1
+          return
+        }
+      }
+      peer.send(message)
+    })
+  })
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    const composer = page.getByRole("textbox", { name: "Message the Mate" })
+    await composer.fill("First message")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect.poll(() => heldReads).toBeGreaterThan(0)
+    await composer.fill("Second message")
+    await expect(
+      page.getByRole("button", { name: "Send", exact: true }),
+    ).toBeEnabled()
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect.poll(() => sends).toBe(2)
   } finally {
     await server?.stop()
     await environment.cleanup()

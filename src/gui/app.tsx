@@ -16,6 +16,7 @@ import { Transcript } from "./components/transcript.tsx"
 import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
+import { UNCONFIRMED_INPUT_NOTICE } from "./input-recovery-memory.ts"
 import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 import { useEngineStore } from "./store/engine-store.ts"
@@ -106,7 +107,19 @@ export function App() {
               role="alert"
               className="border-b bg-destructive/10 px-4 py-2 text-sm text-destructive"
             >
-              {message}
+              <span>{message}</span>
+              {message === UNCONFIRMED_INPUT_NOTICE && (
+                <button
+                  type="button"
+                  className="ml-3 underline"
+                  title="Hide this reminder only. The input may still be delivered; nothing is cancelled or resent."
+                  onClick={() =>
+                    useAppStore.getState().dismissInputRecoveryNotice()
+                  }
+                >
+                  Dismiss reminder
+                </button>
+              )}
             </div>
           )}
           {settingsOpen ? (

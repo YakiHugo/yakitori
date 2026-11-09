@@ -11,13 +11,14 @@ export type AdmissionDraft = Readonly<{
 }>
 
 export type PendingAdmission = AdmissionDraft &
-  Readonly<{ requestId: string; restored: boolean }>
+  Readonly<{ requestId: string; restored: boolean; noticeDismissed?: boolean }>
 
 export type StoredSteer = Readonly<{
   requestId: string
   turnId: string
   content: InputContent
   restored: boolean
+  noticeDismissed?: boolean
 }>
 
 export type InputRecoveryMemory = {
@@ -41,6 +42,7 @@ export type InputRecoveryMemory = {
     sessionId: string,
     update: (pending: readonly StoredSteer[]) => readonly StoredSteer[],
   ): void
+  dismissNotices(apiBase: string, sessionId: string): void
   clear(): void
 }
 
@@ -126,6 +128,20 @@ export function createInputRecoveryMemory(
       updateSteers(apiBase, sessionId, (pending) => [...pending, steer])
     },
     updateSteers,
+    dismissNotices(apiBase: string, sessionId: string): void {
+      for (const admission of listAdmissionsForSession(apiBase, sessionId)) {
+        if (admission.restored)
+          admissions.set(admission.requestId, {
+            ...admission,
+            noticeDismissed: true,
+          })
+      }
+      updateSteers(apiBase, sessionId, (pending) =>
+        pending.map((steer) =>
+          steer.restored ? { ...steer, noticeDismissed: true } : steer,
+        ),
+      )
+    },
     clear(): void {
       admissions.clear()
       steers.clear()

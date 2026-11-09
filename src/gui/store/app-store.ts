@@ -201,6 +201,7 @@ export type AppStoreData = {
 }
 
 export type AppStoreActions = {
+  dismissInputRecoveryNotice(): void
   boot(): Promise<void>
   loadSessions(
     projectId: string | undefined,
@@ -895,16 +896,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
   const syncInputRecoveryNotice = (sessionId: string): void => {
     if (get().selection.sessionId !== sessionId) return
-    const unresolved =
-      inputRecoveryMemory
-        .listAdmissionsForSession(get().apiBase, sessionId)
-        .some((input) => input.restored) ||
-      inputRecoveryMemory
-        .readSteers(get().apiBase, sessionId)
-        .some((input) => input.restored)
-    if (unresolved) set({ message: UNCONFIRMED_INPUT_NOTICE })
+    const restored = [
+      ...inputRecoveryMemory.listAdmissionsForSession(get().apiBase, sessionId),
+      ...inputRecoveryMemory.readSteers(get().apiBase, sessionId),
+    ].filter((input) => input.restored)
+    if (restored.some((input) => !input.noticeDismissed))
+      set({ message: UNCONFIRMED_INPUT_NOTICE })
     else {
-      recoveredDrafts.delete(`${get().apiBase}\0${sessionId}`)
+      if (restored.length === 0)
+        recoveredDrafts.delete(`${get().apiBase}\0${sessionId}`)
       if (get().message === UNCONFIRMED_INPUT_NOTICE)
         set({ message: undefined })
     }
@@ -2489,11 +2489,32 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               }
               promotedContent = response.content
             } catch (error) {
+              const confirmed =
+                committedSteerRequests.has(requestId) ||
+                (isCurrentSelection(selection) &&
+                  get().execution.admittedRequestIds[requestId] === true)
               inFlightSteerRequests.delete(requestId)
               committedSteerRequests.delete(requestId)
+              if (confirmed) {
+                if (isCurrentSelection(selection)) {
+                  set((state) => ({
+                    promptDraft: sameResolvedDraft(
+                      trimInputDraft(state.promptDraft ?? textInputDraft("")),
+                      parts,
+                    )
+                      ? undefined
+                      : state.promptDraft,
+                    promptExcerpts: state.promptExcerpts.filter(
+                      (excerpt) => !excerpts.includes(excerpt),
+                    ),
+                  }))
+                }
+                return
+              }
               if (
                 error instanceof ApiRequestError &&
-                error.code === "conflict"
+                error.code !== undefined &&
+                error.code !== "internal_error"
               ) {
                 inputRecoveryMemory.updateSteers(
                   get().apiBase,
@@ -2509,9 +2530,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                     ).filter((steer) => steer.requestId !== requestId),
                   },
                 }))
-                rejected = true
-                queueAdmission = true
-                return
+                if (error.code === "conflict") {
+                  rejected = true
+                  queueAdmission = true
+                  return
+                }
+                throw error
               }
               if (reserved)
                 restoreUncommittedSteers(selection.sessionId, activeTurnId)
@@ -2640,6 +2664,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
           },
           () => isCurrentSelection(selection),
+          true,
+          false,
         )
         if (!rejected) {
           set((state) => {
@@ -2680,6 +2706,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
           },
           () => isCurrentSelection(selection),
+          true,
+          false,
         )
         set((state) => {
           const inFlightActions = new Set(state.inFlightActions)
@@ -2738,8 +2766,27 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             )
           } catch (error) {
             if (
+              isCurrentSelection(selection) &&
+              get().execution.admittedRequestIds[pendingAdmission.requestId]
+            ) {
+              inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
+              set((state) => ({
+                promptDraft: sameResolvedDraft(
+                  trimInputDraft(state.promptDraft ?? textInputDraft("")),
+                  parts,
+                )
+                  ? undefined
+                  : state.promptDraft,
+                promptExcerpts: state.promptExcerpts.filter(
+                  (excerpt) => !excerpts.includes(excerpt),
+                ),
+              }))
+              return
+            }
+            if (
               !(error instanceof ApiRequestError) ||
-              error.code === undefined
+              error.code === undefined ||
+              error.code === "internal_error"
             ) {
               restoreUncommittedAdmission(
                 selection.sessionId,
@@ -2747,6 +2794,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               )
               throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
             }
+            inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
             throw error
           } finally {
             inFlightAdmissions.delete(pendingAdmission.requestId)
@@ -2788,10 +2836,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             return { inFlightActions }
           })
           if (!isCurrentSelection(selection)) return
-          if (queueAdmission) await get().refreshQueuedInputs()
-          await get().refreshSidebar()
+          if (queueAdmission) void get().refreshQueuedInputs()
+          void get().refreshSidebar()
         },
         () => isCurrentSelection(selection),
+        true,
+        false,
       )
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
@@ -3069,6 +3119,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       })
     },
 
+    dismissInputRecoveryNotice: () => {
+      const sessionId = get().selection.sessionId
+      if (sessionId === undefined) return
+      // Dismiss only the reminder, never the unresolved request or its draft.
+      // A late durable acknowledgement must still reconcile the original ID.
+      inputRecoveryMemory.dismissNotices(get().apiBase, sessionId)
+      if (get().message === UNCONFIRMED_INPUT_NOTICE)
+        set({ message: undefined })
+    },
     setPromptDraft: (parts) => {
       set({ promptDraft: parts })
     },

@@ -1910,6 +1910,116 @@ describe("thread server handlers", () => {
     expect(restored.value.session.counts).toMatchObject({ items: 2, tools: 0 })
   })
 
+  it.each([
+    "steer",
+    "interrupt",
+  ] as const)("discards preempted output without stale replay on %s", async (action) => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-discard-"))
+    const store = new MemoryThreadStore()
+    const entered = deferred<void>()
+    const holdNext = deferred<void>()
+    let calls = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          provider: "faux",
+          model: "faux",
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          stream: async function* (request) {
+            calls += 1
+            if (calls === 1) {
+              yield { type: "delta", text: "stale provisional output" }
+              entered.resolve()
+              await new Promise<void>((resolve) => {
+                if (request.signal?.aborted) resolve()
+                else
+                  request.signal?.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  })
+              })
+              yield { type: "cancelled" }
+              return
+            }
+            await holdNext.promise
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [{ type: "text", text: "new output" }],
+              },
+            }
+          },
+        }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({ manager, store, eventHub })
+    cleanups.push(async () => {
+      holdNext.resolve()
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
+    const events: import("../../src/runtime/live-events.ts").LiveSessionEvent[] =
+      []
+    const subscription = eventHub.subscribe(sessionId, (delivery) => {
+      if (delivery.kind === "transient") events.push(delivery.event)
+    })
+    cleanups.push(async () => subscription.close())
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "initial",
+      content: createUserInput("start"),
+    })
+    if (!admitted.ok) throw new Error(admitted.error.message)
+    await entered.promise
+    if (action === "steer") {
+      const result = await handlers.steerInput({
+        sessionId,
+        requestId: "correction",
+        expectedTurnId: "initial",
+        content: createUserInput("change direction"),
+      })
+      expect(result.ok).toBe(true)
+    } else {
+      const thread = manager.getThread(sessionId)
+      if (!thread) throw new Error("Missing thread")
+      await thread.interrupt("test")
+    }
+    await waitForValue(
+      () =>
+        events.some((event) => event.type === "item.discarded") || undefined,
+    )
+    const delta = events.find((event) => event.type === "assistant.delta")
+    const discarded = events.find((event) => event.type === "item.discarded")
+    expect(delta).toBeDefined()
+    expect(discarded).toMatchObject({
+      itemId: delta && "itemId" in delta ? delta.itemId : "missing",
+    })
+    expect(events.indexOf(discarded!)).toBeGreaterThan(events.indexOf(delta!))
+    expect(
+      events.some(
+        (event) =>
+          event.type === "runtime.warning" && event.code === "model.retry",
+      ),
+    ).toBe(false)
+    const replay: unknown[] = []
+    const reconnect = eventHub.subscribe(sessionId, (delivery) => {
+      if (delivery.kind === "transient") replay.push(delivery.event)
+    })
+    cleanups.push(async () => reconnect.close())
+    expect(JSON.stringify(replay)).not.toContain("stale provisional output")
+    holdNext.resolve()
+  })
+
   it("publishes structured model retry diagnostics as a runtime warning", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-retry-"))
     const store = new MemoryThreadStore()

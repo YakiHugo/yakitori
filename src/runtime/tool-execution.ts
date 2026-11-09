@@ -41,6 +41,7 @@ type ToolExecutionScope = Readonly<{
   turnId: string
   workspaceRoot: string
   signal: AbortSignal
+  startSignal?: AbortSignal | undefined
   toolPlan: ReturnType<ToolRegistry["finalize"]>
   permissionGate: PermissionGate
   recordToolStarted: (item: ToolExecutionItem) => Promise<void>
@@ -86,6 +87,10 @@ export async function* executeToolCalls(
     result: ToolExecutionResult
   }>
 > {
+  const startSignal =
+    input.startSignal === undefined
+      ? input.signal
+      : AbortSignal.any([input.signal, input.startSignal])
   const prepared = await Promise.all(
     input.calls.map(async (call): Promise<PreparedToolCall> => {
       let invocation = input.toolPlan.resolveInvocation(call.name, call.input)
@@ -105,7 +110,7 @@ export async function* executeToolCalls(
             tool_input: invocation.input,
           },
           cwd: input.workspaceRoot,
-          signal: input.signal,
+          signal: startSignal,
         })
         if (hookOutcome?.updatedInput !== undefined) {
           invocation = input.toolPlan.resolveInvocation(
@@ -178,7 +183,7 @@ export async function* executeToolCalls(
     item,
     reservation: input.toolExecutionGate.reserve(
       input.toolPlan.supportsParallelToolCalls(item.invocation.name),
-      input.signal,
+      startSignal,
     ),
   }))
   // Like Codex's ordered in-flight drain, commit each available result in call
@@ -287,6 +292,7 @@ async function executeComposedTool(
     try {
       for await (const outcome of executeToolCalls({
         ...input,
+        startSignal: undefined,
         signal: lifetime,
         calls: [call],
         parentToolCallId: prepared.call.id,
@@ -387,6 +393,11 @@ async function executePreparedTool(
   prepared: PreparedToolCall,
   reservation: ToolExecutionReservation,
 ): Promise<ToolExecutionResult> {
+  const startSignal =
+    input.startSignal === undefined
+      ? input.signal
+      : AbortSignal.any([input.signal, input.startSignal])
+  let started = false
   try {
     const hookContext = [...(prepared.hookContext ?? [])]
     if (prepared.preparationError !== undefined) {
@@ -426,7 +437,7 @@ async function executePreparedTool(
           permission_mode: input.approvalPolicy,
         },
         cwd: input.workspaceRoot,
-        signal: input.signal,
+        signal: startSignal,
       })
       hookContext.push(...(permissionHook?.additionalContext ?? []))
       if (permissionHook?.continue === false) {
@@ -451,7 +462,7 @@ async function executePreparedTool(
         ...(prepared.permission.reason === undefined
           ? {}
           : { reason: prepared.permission.reason }),
-        signal: input.signal,
+        signal: startSignal,
         timeoutMs: input.permissionTimeoutMs,
         publish: input.publishPermissionEvent,
       })
@@ -470,11 +481,14 @@ async function executePreparedTool(
     await waitForTurnReadiness(
       input.toolPlan.waitUntilReady(prepared.invocation.name, {
         workspaceRoot: input.workspaceRoot,
-        signal: input.signal,
+        signal: startSignal,
       }),
-      input.signal,
+      startSignal,
     )
     return await reservation.run(async () => {
+      // Steering cancels waiting calls, not already-started tool effects.
+      if (startSignal.aborted) throw abortError()
+      started = true
       const context: ToolExecutionContext = {
         workspaceRoot: input.workspaceRoot,
         threadId: input.threadId,
@@ -591,6 +605,21 @@ async function executePreparedTool(
   } catch (error) {
     reservation.cancel()
     if (error instanceof TaskCleanupError) throw error
+    if (
+      !started &&
+      input.startSignal?.aborted &&
+      !input.signal.aborted &&
+      isAbortError(error)
+    ) {
+      return {
+        ok: false,
+        code: "steered_before_start",
+        message:
+          "Tool skipped because new user input changed the current direction.",
+        content:
+          "Tool was not executed: new user input arrived before it started.",
+      }
+    }
     if (input.signal.aborted || isAbortError(error)) throw abortError()
     input.reportOperationalFailure(error)
     const message = error instanceof Error ? error.message : "Tool failed."

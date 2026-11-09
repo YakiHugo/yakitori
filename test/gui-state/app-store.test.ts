@@ -5396,3 +5396,209 @@ describe("selected queue ownership", () => {
     }
   })
 })
+
+it("releases input submission before an unrelated sidebar refresh completes", async () => {
+  const sidebar = deferredResponse()
+  fakeRef.current.respond = (method, params) => {
+    if (method === "session/input") {
+      const { requestId, content } = params as {
+        requestId: string
+        content: InputContent
+      }
+      return { requestId, content, inputId: "input_accepted" }
+    }
+    if (method === "sidebar/read") return sidebar.promise
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  useAppStore.setState({ selection: { sessionId: "session_1" } })
+  await useAppStore.getState().admitInput(inputParts("first"))
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    false,
+  )
+  await useAppStore.getState().admitInput(inputParts("second"))
+  expect(fakeRef.current.requestsFor("session/input")).toHaveLength(2)
+  sidebar.resolve({ sections: [], entries: {} })
+})
+
+it.each([
+  "session/input",
+  "session/input/steer",
+] as const)("keeps an explicit %s rejection out of unknown-delivery recovery", async (method) => {
+  fakeRef.current.respond = () => {
+    throw new ApiRequestError("Invalid model selection", "invalid_input")
+  }
+  useAppStore.setState({
+    selection: { sessionId: "session_1" },
+    promptDraft: inputParts("hello"),
+    execution: {
+      ...createExecutionViewState(),
+      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+    },
+  })
+  await useAppStore.getState().admitInput(inputParts("hello"))
+  expect(useAppStore.getState().message).toBe("Invalid model selection")
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("hello"))
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toEqual([])
+  expect(
+    inputRecoveryMemory.readSteers(useAppStore.getState().apiBase, "session_1"),
+  ).toEqual([])
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    false,
+  )
+})
+
+it("dismisses an old reminder without resending or losing late acknowledgement recovery", async () => {
+  fakeRef.current.respond = (method) =>
+    method === "session/queue/list"
+      ? { items: [] }
+      : method === "session/skills"
+        ? { skills: [] }
+        : notFound()
+  const admission = inputRecoveryMemory.reserveAdmission({
+    apiBase: useAppStore.getState().apiBase,
+    sessionId: "session_1",
+    content: inputFixture(inputParts("earlier")),
+  })
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream)
+  stream?.emitReplayComplete()
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().message).toContain("unconfirmed"),
+  )
+  useAppStore.getState().dismissInputRecoveryNotice()
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("earlier"))
+  stream?.emitReplayComplete()
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toHaveLength(1)
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: admission.requestId,
+          inputId: "confirmed",
+          role: InputRole.User,
+          content: admission.content,
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toEqual([])
+  expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+})
+
+it.each([
+  "session/input",
+  "session/input/steer",
+] as const)("retains unknown delivery after %s returns an internal commit error", async (method) => {
+  fakeRef.current.respond = () => {
+    throw new ApiRequestError("Durability fence failed", "internal_error")
+  }
+  useAppStore.setState({
+    selection: { sessionId: "session_1" },
+    promptDraft: inputParts("hello"),
+    execution: {
+      ...createExecutionViewState(),
+      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+    },
+  })
+  await useAppStore.getState().admitInput(inputParts("hello"))
+  expect(useAppStore.getState().message).toContain("unconfirmed")
+  const records = method.endsWith("steer")
+    ? inputRecoveryMemory.readSteers(
+        useAppStore.getState().apiBase,
+        "session_1",
+      )
+    : inputRecoveryMemory.listAdmissionsForSession(
+        useAppStore.getState().apiBase,
+        "session_1",
+      )
+  expect(records).toHaveLength(1)
+  expect(records[0]?.restored).toBe(true)
+})
+
+it.each([
+  "session/input",
+  "session/input/steer",
+] as const)("trusts durable confirmation when the %s acknowledgement later fails", async (method) => {
+  const reply = deferredResponse()
+  fakeRef.current.respond = (name) =>
+    name === method
+      ? reply.promise
+      : name === "session/queue/list"
+        ? { items: [] }
+        : name === "session/skills"
+          ? { skills: [] }
+          : notFound()
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream)
+  stream?.emitReplayComplete()
+  useAppStore.setState({
+    promptDraft: inputParts("change direction"),
+    execution: {
+      ...createExecutionViewState(),
+      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+    },
+  })
+  const sending = useAppStore
+    .getState()
+    .admitInput(inputParts("change direction"))
+  await vi.waitFor(() =>
+    expect(fakeRef.current.requestsFor(method)).toHaveLength(1),
+  )
+  const params = fakeRef.current.requestsFor(method)[0]?.params as {
+    requestId: string
+    content: InputContent
+  }
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: params.requestId,
+          inputId: "confirmed",
+          role: InputRole.User,
+          content: params.content,
+        },
+      },
+    }),
+  )
+  reply.reject(new ApiRequestError("Acknowledgement timed out"))
+  await sending
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      useAppStore.getState().apiBase,
+      "session_1",
+    ),
+  ).toEqual([])
+  expect(
+    inputRecoveryMemory.readSteers(useAppStore.getState().apiBase, "session_1"),
+  ).toEqual([])
+})

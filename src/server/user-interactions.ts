@@ -20,7 +20,10 @@ import { createUserInput } from "../core/user-input.ts"
 import { parseUserQuestions } from "../kernel/user-interaction.ts"
 import type { ApplicationResult } from "./application-result.ts"
 import type { ServerHandlers } from "./handlers.ts"
-import type { ApiAdmitInputResponse } from "./protocol.ts"
+import type {
+  ApiAdmitInputResponse,
+  ApiSteerInputResponse,
+} from "./protocol.ts"
 
 export class UserInteractionError extends Error {}
 
@@ -100,14 +103,16 @@ export type ElicitationBroker = ReturnType<typeof createElicitationBroker>
 
 export function createSessionInteractions(
   store: ThreadStore,
-  handlers: Pick<ServerHandlers, "admitInput">,
+  handlers: Pick<ServerHandlers, "admitQuestionAnswer">,
   elicitations: ElicitationBroker,
 ) {
   return {
     elicitations,
     async answer(
       request: AnswerQuestionRequest,
-    ): Promise<ApplicationResult<ApiAdmitInputResponse>> {
+    ): Promise<
+      ApplicationResult<ApiAdmitInputResponse | ApiSteerInputResponse>
+    > {
       const stored = await store.readThread(request.sessionId)
       const completed = stored?.rollout.find(
         ({ item }) =>
@@ -136,26 +141,23 @@ export function createSessionInteractions(
         )
       // A typed question response retains one delivery identity across reconnect
       // and restart; ordinary composer sends remain separate human inputs.
-      return handlers.admitInput(
-        {
-          sessionId: request.sessionId,
-          requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
-          role: "user",
-          content: createUserInput(
-            questions.questions
-              .map(
-                (question, index) =>
-                  `${question.title}\n${request.answers[index]}`,
-              )
-              .join("\n\n"),
-          ),
-          metadata: {
-            userQuestionId: request.toolCallId,
-            userQuestionAnswers: request.answers,
-          },
+      return handlers.admitQuestionAnswer({
+        sessionId: request.sessionId,
+        requestId: `question_${createHash("sha256").update(request.toolCallId).digest("hex")}`,
+        role: "user",
+        content: createUserInput(
+          questions.questions
+            .map(
+              (question, index) =>
+                `${question.title}\n${request.answers[index]}`,
+            )
+            .join("\n\n"),
+        ),
+        metadata: {
+          userQuestionId: request.toolCallId,
+          userQuestionAnswers: request.answers,
         },
-        "question_answer",
-      )
+      })
     },
   }
 }
