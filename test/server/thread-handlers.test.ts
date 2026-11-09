@@ -1995,7 +1995,9 @@ describe("thread server handlers", () => {
     expect(discarded).toMatchObject({
       itemId: delta && "itemId" in delta ? delta.itemId : "missing",
     })
-    expect(events.indexOf(discarded!)).toBeGreaterThan(events.indexOf(delta!))
+    if (delta === undefined || discarded === undefined)
+      throw new Error("Missing output discard sequence")
+    expect(events.indexOf(discarded)).toBeGreaterThan(events.indexOf(delta))
     expect(
       events.some(
         (event) =>
