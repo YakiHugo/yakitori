@@ -1,9 +1,9 @@
 .conversation-find {
   position: absolute;
   top: 8px;
-  right: calc(20px + var(--project-overview-width, 0px));
+  right: 20px;
   z-index: 35;
-  width: min(420px, calc(100% - var(--project-overview-width, 0px) - 32px));
+  width: min(420px, calc(100% - 32px));
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--popover);

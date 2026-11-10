@@ -8,6 +8,7 @@ import {
   Minimize2,
   Monitor,
   Plus,
+  SlidersHorizontal,
   Users,
   X,
 } from "lucide-react"
@@ -157,6 +158,9 @@ export function WorkspaceFrame({
     useState<Extract<WorkspaceTab, { kind: "file" }>>()
   const [adding, setAdding] = useState(false)
   const [resizing, setResizing] = useState(false)
+  const [overviewOpen, setOverviewOpen] = useState(false)
+  const overviewTrigger = useRef<HTMLButtonElement>(null)
+  const overview = useRef<HTMLElement>(null)
   const apiBase = useAppStore((state) => state.apiBase)
   const nativeCwd = useAppStore((state) =>
     state.selection.sessionId === undefined
@@ -261,6 +265,42 @@ export function WorkspaceFrame({
       localStorage.setItem("yakitori.workspaceSplit", String(widthRatio))
   }, [widthRatio, resizing])
   useEffect(() => {
+    if (open || settingsOpen) setOverviewOpen(false)
+  }, [open, settingsOpen])
+  // A transient popover must not reappear in a different conversation.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing sessions closes the popover without being read by the effect.
+  useEffect(() => {
+    setOverviewOpen(false)
+  }, [sessionId])
+
+  useEffect(() => {
+    if (!overviewOpen) return
+    overview.current?.focus()
+    const inside = (target: EventTarget | null) =>
+      target instanceof Node &&
+      (overview.current?.contains(target) ||
+        overviewTrigger.current?.contains(target))
+    const dismissOutside = (event: Event) => {
+      if (!inside(event.target)) setOverviewOpen(false)
+    }
+    const dismissEscape = (event: KeyboardEvent) => {
+      if (!isUnmodifiedEscape(event)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setOverviewOpen(false)
+      overviewTrigger.current?.focus()
+    }
+    document.addEventListener("pointerdown", dismissOutside)
+    document.addEventListener("focusin", dismissOutside)
+    document.addEventListener("keydown", dismissEscape)
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside)
+      document.removeEventListener("focusin", dismissOutside)
+      document.removeEventListener("keydown", dismissEscape)
+    }
+  }, [overviewOpen])
+
+  useEffect(() => {
     const bridge = window.yakitoriDesktop?.browser
     if (!bridge) return
     return connectBrowserViewRequests(bridge)
@@ -352,6 +392,31 @@ export function WorkspaceFrame({
         heading={heading}
         workspaceOpen={open}
         onToggleWorkspace={() => setOpen(!open)}
+        actions={
+          cwd && !settingsOpen ? (
+            <button
+              ref={overviewTrigger}
+              type="button"
+              className="sidebar-icon workspace-overview-trigger"
+              aria-label={
+                overviewOpen ? "Hide project overview" : "Show project overview"
+              }
+              aria-expanded={overviewOpen}
+              aria-controls={
+                overviewOpen ? "workspace-project-overview" : undefined
+              }
+              title={
+                overviewOpen ? "Hide project overview" : "Show project overview"
+              }
+              onClick={() => {
+                if (open) setOpen(false)
+                setOverviewOpen(!overviewOpen)
+              }}
+            >
+              <SlidersHorizontal size={16} />
+            </button>
+          ) : undefined
+        }
       />
       <div
         ref={shell}
@@ -362,8 +427,15 @@ export function WorkspaceFrame({
         <SidebarFrame open={sidebarOpen} setOpen={setSidebarOpen} />
         <div className="workspace-main">
           {children}
-          {!open && !settingsOpen && cwd && (
-            <aside className="workspace-overview" aria-label="Project overview">
+          {overviewOpen && !open && !settingsOpen && cwd && (
+            <aside
+              ref={overview}
+              id="workspace-project-overview"
+              className="workspace-overview"
+              role="dialog"
+              aria-label="Project overview"
+              tabIndex={-1}
+            >
               <div className="workspace-project-card">
                 <div className="workspace-project-heading">
                   <span className="workspace-project-name" title={cwd}>
@@ -376,7 +448,10 @@ export function WorkspaceFrame({
                     className="sidebar-icon"
                     aria-label="Open project files"
                     title="Open project files"
-                    onClick={() => addTab("files", sessionId)}
+                    onClick={() => {
+                      setOverviewOpen(false)
+                      addTab("files", sessionId)
+                    }}
                   >
                     <FolderOpen size={16} />
                   </button>
@@ -384,7 +459,10 @@ export function WorkspaceFrame({
                 <button
                   type="button"
                   className="workspace-project-changes"
-                  onClick={() => addTab("changes", sessionId)}
+                  onClick={() => {
+                    setOverviewOpen(false)
+                    addTab("changes", sessionId)
+                  }}
                 >
                   <GitCompareArrows size={18} />
                   <span>Changes</span>
