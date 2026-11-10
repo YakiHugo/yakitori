@@ -2111,6 +2111,120 @@ describe("model selection", () => {
     })
   })
 
+  it("projects a sent prompt immediately and reconciles its durable admission", async () => {
+    const optimisticSessionId = "session_optimistic"
+    const admission = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input") return admission.promise
+      if (method === "session/list") return { sessions: [] }
+      if (method === "session/skills") return { skills: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession(optimisticSessionId)
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, id: optimisticSessionId })
+    stream?.emitReplayComplete()
+
+    const sending = useAppStore
+      .getState()
+      .admitInput(inputParts("Show immediately"))
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
+    )
+    const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+    }
+    expect(useAppStore.getState().execution.entries).toEqual([
+      expect.objectContaining({
+        kind: "user_input",
+        requestId: request.requestId,
+        text: "Show immediately",
+      }),
+    ])
+
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: optimisticSessionId,
+        seq: 2,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: request.requestId, inputId: "input_1" },
+        },
+      }),
+    )
+    stream?.emitTransient({
+      type: "item.started",
+      sessionId: optimisticSessionId,
+      turnId: request.requestId,
+      item: { type: "agent_message", itemId: "item_1" },
+      createdAt: sessionDetail.createdAt,
+    })
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: optimisticSessionId,
+        seq: 3,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: request.requestId,
+            inputId: "input_1",
+            role: InputRole.User,
+            content: inputFixture(inputParts("Show immediately")),
+          },
+        },
+      }),
+    )
+
+    expect(useAppStore.getState().execution.entries).toEqual([
+      expect.objectContaining({ kind: "user_input", inputId: "input_1" }),
+      expect.objectContaining({ kind: "assistant", itemId: "item_1" }),
+    ])
+    expect(
+      useAppStore
+        .getState()
+        .execution.entries.filter((entry) => entry.kind === "user_input"),
+    ).toHaveLength(1)
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: optimisticSessionId,
+        seq: 4,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: request.requestId,
+            outcome: { status: "completed" },
+          },
+        },
+      }),
+    )
+    admission.resolve({
+      content: requestedInputContent(request.requestId),
+      requestId: request.requestId,
+      inputId: "input_1",
+    })
+    await sending
+  })
+
+  it("discards an optimistic prompt when the server rejects its admission", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input") {
+        throw new ApiRequestError("Input rejected", "invalid_input")
+      }
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts("Rejected prompt"),
+    })
+
+    await useAppStore.getState().admitInput(inputParts("Rejected prompt"))
+
+    expect(useAppStore.getState().execution.entries).toEqual([])
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("Rejected prompt"),
+    )
+  })
+
   it("submits inline skill mentions unchanged and clears the admitted draft", async () => {
     globalThis.localStorage.clear()
     fakeRef.current.respond = admissionResponder()

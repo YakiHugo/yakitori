@@ -887,6 +887,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         ? {
             promptDraft: restored.content,
             promptExcerpts: restored.excerpts,
+            execution: reduceExecutionView(state.execution, {
+              type: "input_pending_discarded",
+              requestId,
+            }),
           }
         : {
             sessionDrafts: { ...state.sessionDrafts, [sessionId]: restored },
@@ -2745,6 +2749,16 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 }),
           })
           inFlightAdmissions.add(pendingAdmission.requestId)
+          if (!queueAdmission) {
+            set((current) => ({
+              execution: reduceExecutionView(current.execution, {
+                type: "input_pending",
+                requestId: pendingAdmission.requestId,
+                content: pendingAdmission.content,
+                at: new Date().toISOString(),
+              }),
+            }))
+          }
           let response: ApiAdmitInputResponse
           try {
             if (firstInputAdmission !== undefined) {
@@ -2765,6 +2779,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               },
             )
           } catch (error) {
+            if (!queueAdmission && isCurrentSelection(selection)) {
+              set((current) => ({
+                execution: reduceExecutionView(current.execution, {
+                  type: "input_pending_discarded",
+                  requestId: pendingAdmission.requestId,
+                }),
+              }))
+            }
             if (
               isCurrentSelection(selection) &&
               get().execution.admittedRequestIds[pendingAdmission.requestId]

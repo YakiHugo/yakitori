@@ -417,12 +417,11 @@
 }
 
 @keyframes tool-running-shimmer {
-  0%,
-  100% {
-    background-position: 180% 50%;
+  from {
+    background-position: 0% 50%;
   }
-  50% {
-    background-position: -80% 50%;
+  to {
+    background-position: -200% 50%;
   }
 }
 
@@ -434,9 +433,9 @@
     var(--foreground) 48%,
     color-mix(in oklab, var(--muted-foreground) 72%, transparent) 72%
   );
-  background-size: 240% 100%;
+  background-size: 200% 100%;
   background-clip: text;
-  animation: tool-running-shimmer 1.8s ease-in-out infinite;
+  animation: tool-running-shimmer 1.8s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

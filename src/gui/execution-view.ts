@@ -16,7 +16,7 @@ import type { ContextExcerpt } from "../protocol/input-context.ts"
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
 import type { ModelFailureKind } from "../protocol/model-failure.ts"
 import type { ModelOutputPresentation } from "../protocol/model-output.ts"
-import type { InputDraft } from "../protocol/user-input.ts"
+import type { InputContent, InputDraft } from "../protocol/user-input.ts"
 import { inputContentText } from "../protocol/user-input.ts"
 import { type CitationSource, citationSources } from "./citation-sources.ts"
 
@@ -25,6 +25,7 @@ export type ExecutionEntry =
       readonly kind: "user_input"
       readonly contextAttachments?: readonly ContextExcerpt[]
       readonly inputId: string
+      readonly requestId?: string
       readonly questionId?: string
       readonly steered?: boolean
       readonly text: string
@@ -189,6 +190,13 @@ export type ExecutionViewAction =
   | { readonly type: "snapshot"; readonly session: ApiSessionDetail }
   | { readonly type: "replay_completed"; readonly session: ApiSessionDetail }
   | { readonly type: "stream_unavailable" }
+  | {
+      readonly type: "input_pending"
+      readonly requestId: string
+      readonly content: InputContent
+      readonly at: string
+    }
+  | { readonly type: "input_pending_discarded"; readonly requestId: string }
   | { readonly type: "durable"; readonly event: AppSessionEventEnvelope }
   | { readonly type: "transient"; readonly event: LiveSessionEvent }
   | {
@@ -264,6 +272,34 @@ export function reduceExecutionView(
   state: ExecutionViewState,
   action: ExecutionViewAction,
 ): ExecutionViewState {
+  if (action.type === "input_pending") {
+    return {
+      ...state,
+      entries: [
+        ...state.entries,
+        {
+          kind: "user_input",
+          inputId: `pending_${action.requestId}`,
+          requestId: action.requestId,
+          text: inputContentText(action.content),
+          content: action.content,
+          ...(action.content.references === undefined
+            ? {}
+            : { contextAttachments: action.content.references }),
+          at: action.at,
+        },
+      ],
+    }
+  }
+  if (action.type === "input_pending_discarded") {
+    const entries = state.entries.filter(
+      (entry) =>
+        entry.kind !== "user_input" || entry.requestId !== action.requestId,
+    )
+    return entries.length === state.entries.length
+      ? state
+      : { ...state, entries, ...indexEntries(entries) }
+  }
   if (action.type === "snapshot") return applySnapshot(state, action.session)
   if (action.type === "replay_completed") {
     // History describes past execution. At the replay boundary, the resident
@@ -731,6 +767,25 @@ function applyDurable(
     case "session.created":
       return next
     case "input.admitted": {
+      const pendingIndex = next.entries.findIndex(
+        (entry) =>
+          entry.kind === "user_input" &&
+          entry.requestId === event.data.requestId,
+      )
+      const input: ExecutionEntry = {
+        kind: "user_input",
+        inputId: event.data.inputId,
+        ...(event.data.steered === true ? { steered: true } : {}),
+        ...(typeof event.data.metadata?.userQuestionId === "string"
+          ? { questionId: event.data.metadata.userQuestionId }
+          : {}),
+        text: inputContentText(event.data.content),
+        content: event.data.content,
+        ...(event.data.content.references === undefined
+          ? {}
+          : { contextAttachments: event.data.content.references }),
+        at: event.createdAt,
+      }
       return {
         ...next,
         admittedRequestIds: {
@@ -738,27 +793,11 @@ function applyDurable(
           [event.data.requestId]: true,
         },
         entries:
-          event.data.role === "user"
-            ? [
-                ...next.entries,
-                {
-                  kind: "user_input",
-                  inputId: event.data.inputId,
-                  ...(event.data.steered === true ? { steered: true } : {}),
-                  ...(typeof event.data.metadata?.userQuestionId === "string"
-                    ? { questionId: event.data.metadata.userQuestionId }
-                    : {}),
-                  text: inputContentText(event.data.content),
-                  content: event.data.content,
-                  ...(event.data.content.references === undefined
-                    ? {}
-                    : {
-                        contextAttachments: event.data.content.references,
-                      }),
-                  at: event.createdAt,
-                },
-              ]
-            : next.entries,
+          event.data.role !== "user"
+            ? next.entries
+            : pendingIndex === -1
+              ? [...next.entries, input]
+              : replaceAt(next.entries, pendingIndex, input),
       }
     }
     case "turn.started":
