@@ -31,10 +31,12 @@ const done = {
 it.each([
   "boundary",
   "preempt",
+  "preempt_reordered",
 ] as const)("accepts and deduplicates an answer during %s sampling and replays it after restart", async (mode) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-question-active-"))
   const entered = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
+  const consumed = Promise.withResolvers<void>()
   let calls = 0
   let aborted = false
   const observed: string[] = []
@@ -42,7 +44,7 @@ it.each([
     calls++
     if (calls === 2) {
       entered.resolve()
-      if (mode === "preempt") {
+      if (mode !== "boundary") {
         const signal = request.signal
         if (!signal) throw new Error("Missing model cancellation signal")
         const cancelled = Promise.withResolvers<void>()
@@ -63,6 +65,7 @@ it.each([
       }
     }
     if (calls === 3) {
+      consumed.resolve()
       observed.push(
         ...request.messages.flatMap((message) =>
           message.role === "user"
@@ -102,23 +105,50 @@ it.each([
       app.handlers,
       broker,
     )
+    const delayedService = createSessionInteractions(
+      app.threadStore,
+      {
+        async admitQuestionAnswer(input) {
+          // Delay this specific caller, regardless of readThread completion
+          // order, until the other caller's steer has been consumed.
+          await consumed.promise
+          return app.handlers.admitQuestionAnswer(input)
+        },
+      },
+      broker,
+    )
     const params = {
       sessionId,
       toolCallId: "ask_location",
       answers: ["Workspace"],
     }
     const [first, retry] = await Promise.all([
-      service.answer(params),
+      (mode === "preempt_reordered" ? delayedService : service).answer(params),
       service.answer(params),
     ])
     expect(first.ok).toBe(true)
-    expect(retry).toMatchObject(first)
     if (!first.ok) throw new Error(first.error.message)
-    expect(first.value.turnId).toBe("initial")
+    const identity = {
+      requestId: first.value.requestId,
+      turnId: "initial",
+      content: inputFixture([{ type: "text", text: "Where?\nWorkspace" }]),
+    }
+    // Pending steering and consumed replay share delivery identity, but only
+    // replay has an inputId. Neither response order implies consumption order.
+    expect(retry).toMatchObject({ ok: true, value: identity })
+    if (mode === "boundary") {
+      expect(first.value).not.toHaveProperty("inputId")
+      if (retry.ok) expect(retry.value).not.toHaveProperty("inputId")
+    }
+    if (mode === "preempt_reordered") {
+      expect(first.value).toHaveProperty("inputId", expect.any(String))
+      if (retry.ok) expect(retry.value).not.toHaveProperty("inputId")
+    }
+    expect(first.value).toMatchObject(identity)
     expect(
       await service.answer({ ...params, answers: ["Downloads"] }),
     ).toMatchObject({ ok: false })
-    if (mode === "preempt") {
+    if (mode !== "boundary") {
       // Do not release the old response: the answer itself must cancel it and
       // enter another model request containing the new direction.
       await vi.waitFor(() => {
@@ -133,7 +163,7 @@ it.each([
     )
     expect(observed).toEqual(["Where?\nWorkspace"])
     const recorded = await service.answer(params)
-    expect(recorded).toMatchObject({ ok: true, value: first.value })
+    expect(recorded).toMatchObject({ ok: true, value: identity })
     const stored = await app.threadStore.readThread(sessionId)
     expect(
       stored?.rollout.filter(
@@ -143,6 +173,21 @@ it.each([
             "ask_location",
       ),
     ).toHaveLength(1)
+    const answer = stored?.rollout.find(
+      ({ item }) =>
+        item.type === "response_item" &&
+        item.item.submissionMetadata?.metadata?.userQuestionId ===
+          "ask_location",
+    )?.item
+    if (answer?.type !== "response_item") throw new Error("Missing answer")
+    expect(recorded).toMatchObject({
+      ok: true,
+      value: { ...identity, inputId: answer.item.id },
+    })
+    for (const result of [first, retry]) {
+      if (result.ok && "inputId" in result.value)
+        expect(result.value.inputId).toBe(answer.item.id)
+    }
     await app.close()
     app = await createYakitoriApplication(options)
     expect(
