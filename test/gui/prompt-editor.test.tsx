@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { createRef, useState } from "react"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import type { InputDraft } from "../../src/core/user-input.ts"
 import { inputContentText } from "../../src/core/user-input.ts"
 import {
@@ -10,6 +10,7 @@ import {
 } from "../../src/gui/components/prompt-editor.tsx"
 import { inputAttachmentOwnership } from "../../src/gui/input-attachment-ownership.ts"
 import { textInputDraft } from "../../src/gui/input-draft.ts"
+import { clearThreadScopes } from "../../src/gui/store/thread-scope-store.ts"
 import {
   selectWorkspacePresentation,
   useWorkspaceStore,
@@ -21,6 +22,9 @@ import type {
 } from "../../src/kernel/events.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 
+beforeEach(() => {
+  clearThreadScopes()
+})
 afterEach(cleanup)
 
 function Fixture() {
@@ -155,6 +159,50 @@ it("resets the document and undo history when the value changes externally", () 
   fireEvent.keyDown(editor, { key: "z", ctrlKey: true })
   expect(screen.getByTestId("serialized").textContent).toBe("Restored draft")
   expect(editor.textContent).toBe("Restored draft")
+})
+
+it("restores each thread's document and undo history after remounting", () => {
+  const drafts: Record<string, string> = {}
+  function ScopedFixture({ scopeKey }: Readonly<{ scopeKey: string }>) {
+    const [, refresh] = useState(0)
+    const text = drafts[scopeKey] ?? ""
+    return (
+      <>
+        <PromptEditor
+          key={scopeKey}
+          scopeKey={scopeKey}
+          apiBase="http://localhost"
+          label="Prompt"
+          value={textInputDraft(text)}
+          onChange={(parts) => {
+            drafts[scopeKey] = inputContentText(inputFixture(parts))
+            refresh((value) => value + 1)
+          }}
+        />
+        <output data-testid="scoped-text">{text}</output>
+      </>
+    )
+  }
+  const paste = (text: string) => {
+    const editor = screen.getByRole("textbox")
+    editor.focus()
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [],
+        getData: (type: string) => (type === "text/plain" ? text : ""),
+      },
+    })
+  }
+  const { rerender } = render(<ScopedFixture scopeKey="thread-a" />)
+  paste("Alpha")
+  rerender(<ScopedFixture scopeKey="thread-b" />)
+  paste("Beta")
+  rerender(<ScopedFixture scopeKey="thread-a" />)
+  expect(screen.getByTestId("scoped-text").textContent).toBe("Alpha")
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "z", ctrlKey: true })
+  expect(screen.getByTestId("scoped-text").textContent).toBe("")
+  rerender(<ScopedFixture scopeKey="thread-b" />)
+  expect(screen.getByTestId("scoped-text").textContent).toBe("Beta")
 })
 
 it("does not delegate Enter to onKeyDown during IME composition", () => {

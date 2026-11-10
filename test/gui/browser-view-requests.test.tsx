@@ -89,6 +89,27 @@ it("changes workspace selection only after the native owner grants its claim", a
   expect(f.bridge.completeShow).toHaveBeenCalledTimes(1)
 })
 
+it("maps a promoted session owner to its draft workspace", async () => {
+  useAppStore.setState({ sessionThreadIds: { owned: "draft-owned" } })
+  useWorkspaceStore.setState({
+    sessionId: "draft-owned",
+    tabs: [
+      { id: "changes", kind: "changes", workspaceSessionId: "draft-owned" },
+      { id: "browser", kind: "browser", workspaceSessionId: "draft-owned" },
+    ],
+    presentationBySession: {
+      "draft-owned": { open: false, expanded: false, activeId: "changes" },
+    },
+  })
+  const f = fixture()
+  f.emit()
+  f.claim.resolve(true)
+  expect(await f.acked.promise).toBe("applied")
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).activeId).toBe(
+    "browser",
+  )
+})
+
 it("does not apply a display request whose native claim expired or was cancelled", async () => {
   const f = fixture()
   f.emit()

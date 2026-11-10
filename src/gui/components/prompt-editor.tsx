@@ -26,6 +26,11 @@ import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import { appendDraftImages, sameInputDraft } from "../input-draft.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { useAppStore } from "../store/app-store.ts"
+import {
+  readThreadScopeValue,
+  registerThreadScopeDisposer,
+  writeThreadScopeValue,
+} from "../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
   parsePrompt,
@@ -69,6 +74,7 @@ function attachmentInsertionBookmark(position: number): SelectionBookmark {
 
 type Props = Readonly<{
   ref?: Ref<PromptEditorHandle>
+  scopeKey?: string | undefined
   value: InputDraft
   // History recall temporarily parks the unsent draft outside this document.
   parkedParts?: InputDraft | undefined
@@ -273,29 +279,39 @@ export function PromptEditor(props: Props) {
       latest.current.value.attachments.filter(isDraftImage)
     rememberAttachments(latest.current.value)
     const doc = parsePromptParts(latest.current.value)
-    const view = new EditorView(host.current, {
-      state: EditorState.create({
-        doc,
-        selection: TextSelection.atEnd(doc),
-        plugins: [
-          history(),
-          keymap({
-            Backspace: (state, dispatch) => {
-              const { empty, from, $from } = state.selection
-              if (!empty || $from.nodeBefore?.type.name !== "skill")
-                return false
-              dispatch?.(state.tr.delete(from - 1, from))
-              return true
-            },
-            "Mod-z": undo,
-            "Mod-Shift-z": redo,
-            "Mod-y": redo,
-            "Mod-a": selectAll,
-            "Shift-Enter": splitBlock,
-          }),
-          keymap(baseKeymap),
-        ],
+    const plugins = [
+      history(),
+      keymap({
+        Backspace: (state, dispatch) => {
+          const { empty, from, $from } = state.selection
+          if (!empty || $from.nodeBefore?.type.name !== "skill") return false
+          dispatch?.(state.tr.delete(from - 1, from))
+          return true
+        },
+        "Mod-z": undo,
+        "Mod-Shift-z": redo,
+        "Mod-y": redo,
+        "Mod-a": selectAll,
+        "Shift-Enter": splitBlock,
       }),
+      keymap(baseKeymap),
+    ]
+    const scopeKey = latest.current.scopeKey
+    const restored = scopeKey
+      ? readThreadScopeValue<EditorState | undefined>(
+          scopeKey,
+          "prompt-editor.state",
+          undefined,
+        )
+      : undefined
+    const view = new EditorView(host.current, {
+      state:
+        restored ??
+        EditorState.create({
+          doc,
+          selection: TextSelection.atEnd(doc),
+          plugins,
+        }),
       editable: () => !latest.current.disabled,
       dispatchTransaction(tr) {
         const inserted: { from: number; to: number } | undefined = tr.getMeta(
@@ -478,10 +494,16 @@ export function PromptEditor(props: Props) {
         },
       },
     })
+    if (scopeKey)
+      registerThreadScopeDisposer(scopeKey, "prompt-editor", () =>
+        releaseUnusedAttachments(currentDraft(view)),
+      )
     editor.current = view
     return () => {
       insertions.current.clear()
-      releaseUnusedAttachments(currentDraft(view))
+      if (scopeKey)
+        writeThreadScopeValue(scopeKey, "prompt-editor.state", view.state)
+      else releaseUnusedAttachments(currentDraft(view))
       view.destroy()
       editor.current = null
     }

@@ -27,7 +27,11 @@ import {
   openUrlTarget,
 } from "../../lib/open-resource.ts"
 import { cn } from "../../lib/utils.ts"
-import { useAppStore } from "../../store/app-store.ts"
+import {
+  selectCurrentThreadId,
+  useAppStore,
+} from "../../store/app-store.ts"
+import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
 import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
@@ -58,7 +62,10 @@ export function ToolCell({
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
       : undefined
-  const [open, setOpen] = useState(
+  const threadId = useAppStore(selectCurrentThreadId)
+  const [open, setOpen] = useThreadScopeState(
+    threadId,
+    `tool:${entry.toolCallId}`,
     entry.state === "failed" || entry.state === "interrupted",
   )
   const active = entry.state === "requested"
@@ -107,7 +114,7 @@ export function ToolCell({
     if (entry.state === "failed" || entry.state === "interrupted") {
       setOpen(true)
     }
-  }, [entry.state])
+  }, [entry.state, setOpen])
 
   if (!entry.resultError && entry.output !== undefined) {
     if (entry.execution.name === "request_user_input_async") {

@@ -14,8 +14,12 @@ import {
   trimInputDraft,
 } from "../../input-draft.ts"
 import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
-import { useAppStore } from "../../store/app-store.ts"
+import {
+  selectCurrentThreadId,
+  useAppStore,
+} from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
+import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { ContextExcerpts } from "../context-excerpts.tsx"
 import { ImageLightbox } from "../image-lightbox.tsx"
@@ -86,8 +90,17 @@ export function UserMessageCell({
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(entry.content)
+  const threadId = useAppStore(selectCurrentThreadId)
+  const [editing, setEditing] = useThreadScopeState(
+    threadId,
+    `message:${entry.inputId}:editing`,
+    false,
+  )
+  const [draft, setDraft] = useThreadScopeState(
+    threadId,
+    `message:${entry.inputId}:draft`,
+    entry.content,
+  )
   const [previewIndex, setPreviewIndex] = useState<number>()
   const [openError, setOpenError] = useState<string>()
   const edited = trimInputDraft(draft)

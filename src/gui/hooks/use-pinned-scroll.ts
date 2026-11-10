@@ -1,4 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react"
+import {
+  readThreadScopeValue,
+  writeThreadScopeValue,
+} from "../store/thread-scope-store.ts"
 
 // Codex's thread scroll controller distinguishes layout restoration, following,
 // and a cancelable 260ms user jump. Native scroll events alone cannot tell them apart.
@@ -136,14 +140,40 @@ export function usePinnedScroll(sessionId?: string) {
   }, [writeScrollTop])
 
   useLayoutEffect(() => {
-    if (sessionId === undefined) return
+    const scopeId = sessionId ?? "draft"
+    const saved = readThreadScopeValue<
+      | Readonly<{
+          scrollTop: number
+          following: boolean
+          followingPaused: boolean
+          atBottom: boolean
+        }>
+      | undefined
+    >(scopeId, "scroll.position", undefined)
     cancelAnimation()
-    following.current = true
-    followingPaused.current = false
+    following.current = saved?.following ?? true
+    followingPaused.current = saved?.followingPaused ?? false
     const viewport = viewportRef.current
-    if (viewport) writeScrollTop(viewport, viewport.scrollHeight)
-    setAtBottom(true)
+    if (viewport)
+      writeScrollTop(viewport, saved?.scrollTop ?? viewport.scrollHeight)
+    setAtBottom(saved?.atBottom ?? true)
   }, [sessionId, cancelAnimation, writeScrollTop])
+
+  useLayoutEffect(() => {
+    const scopeId = sessionId ?? "draft"
+    return () => {
+      const viewport = viewportRef.current
+      writeThreadScopeValue(scopeId, "scroll.position", {
+        scrollTop: viewport?.scrollTop ?? 0,
+        following: following.current,
+        followingPaused: followingPaused.current,
+        atBottom: viewport
+          ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
+            24
+          : true,
+      })
+    }
+  }, [sessionId])
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current

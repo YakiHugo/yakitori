@@ -16,6 +16,7 @@ import {
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import type { ApiSearchSessionOccurrencesResponse } from "../../src/server/protocol.ts"
+import { clearThreadScopes } from "../../src/gui/store/thread-scope-store.ts"
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }))
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
@@ -87,6 +88,7 @@ function Fixture({ sessionId = "session" }: Readonly<{ sessionId?: string }>) {
 }
 
 beforeEach(() => {
+  clearThreadScopes()
   request.mockReset()
   jump.mockReset()
   highlights.clear()
@@ -192,7 +194,7 @@ it("reveals an older logical message inside a closed disclosure before jumping",
   expect(jump).toHaveBeenCalledOnce()
 })
 
-it("ignores a response for an earlier query and resets when the selected session changes", async () => {
+it("ignores a response for an earlier query and restores find when returning to its session", async () => {
   let resolveOld:
     | ((value: ApiSearchSessionOccurrencesResponse) => void)
     | undefined
@@ -217,6 +219,9 @@ it("ignores a response for an earlier query and resets when the selected session
   rerender(<Fixture sessionId="other" />)
   expect(screen.queryByRole("search")).toBeNull()
   expect(highlights.size).toBe(0)
+  rerender(<Fixture />)
+  expect(screen.getByRole("searchbox")).toHaveProperty("value", "needle")
+  expect(screen.getByText("1 of 3")).toBeDefined()
 })
 
 it("shows an operational failure with retry, and distinguishes a completed empty search", async () => {

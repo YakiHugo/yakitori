@@ -17,10 +17,12 @@ import {
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
   resolveEffectiveModel,
+  selectCurrentThreadId,
   useAppStore,
   useExecutionView,
 } from "../store/app-store.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
+import { useThreadScopeState } from "../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
   type ComposerAttachmentImport,
@@ -60,6 +62,7 @@ export function Composer() {
   const selectionRevision = useAppStore(
     (state) => state.sessionSelectionIntentRevision,
   )
+  const threadId = useAppStore(selectCurrentThreadId)
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? state.draftModelSelection
@@ -74,7 +77,9 @@ export function Composer() {
   const openGoalDialog = useAppStore((state) => state.openGoalDialog)
   const view = useExecutionView()
   const lastTurn = Object.entries(view.turnTimings).at(-1)
-  const [attachmentError, setAttachmentError] = useState<string>()
+  const [attachmentError, setAttachmentError] = useThreadScopeState<
+    string | undefined
+  >(`${apiBase}:${threadId}`, "composer.attachment-error", undefined)
   const [readingAttachments, setReadingAttachments] = useState(false)
   const fileSearchCwd = useAppStore(
     (state) =>
@@ -242,8 +247,8 @@ export function Composer() {
   return (
     <ComposerSurface
       sessionId={sessionId}
-      editorKey={selectionRevision}
-      excerptOwnerId={`main:${selectionRevision}`}
+      editorKey={threadId}
+      excerptOwnerId={`main:${threadId}`}
       draft={draft}
       excerpts={excerpts}
       sessionSkills={sessionSkills}

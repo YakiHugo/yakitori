@@ -144,6 +144,27 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       set({ sessionId })
       return
     }
+    const draft = current.presentationBySession[""]
+    if (
+      sessionId !== undefined &&
+      draft !== undefined &&
+      current.tabs.some((tab) => tab.workspaceSessionId === undefined)
+    ) {
+      // Claim early tabs without losing the unallocated draft's empty presentation.
+      set({
+        sessionId,
+        tabs: current.tabs.map((tab) =>
+          tab.workspaceSessionId === undefined
+            ? { ...tab, workspaceSessionId: sessionId }
+            : tab,
+        ),
+        presentationBySession: {
+          ...current.presentationBySession,
+          [sessionId]: draft,
+        },
+      })
+      return
+    }
     const existing = current.tabs.find(
       (tab) => tab.workspaceSessionId === sessionId,
     )
@@ -159,8 +180,8 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       presentationBySession: {
         ...current.presentationBySession,
         [key]: {
-          open,
-          expanded,
+          open: sessionId?.startsWith("draft_") ? false : open,
+          expanded: sessionId?.startsWith("draft_") ? false : expanded,
           activeId: initialTab.id,
         },
       },
@@ -243,17 +264,25 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     const index = current.tabs.findIndex((tab) => tab.id === id)
     if (index === -1) return
     const remaining = current.tabs.filter((tab) => tab.id !== id)
-    const owner = current.tabs[index]?.workspaceSessionId
-    const ownerTabs = remaining.filter(
-      (tab) => tab.workspaceSessionId === owner,
-    )
-    const key = owner ?? ""
-    const presentation = current.presentationBySession[key]
     set({
       tabs: remaining,
-      ...(presentation?.activeId === id
-        ? updatePresentation(current, { activeId: ownerTabs.at(-1)?.id }, key)
-        : {}),
+      presentationBySession: Object.fromEntries(
+        Object.entries(current.presentationBySession).map(
+          ([session, presentation]) => [
+            session,
+            presentation.activeId === id
+              ? {
+                  ...presentation,
+                  activeId: remaining.filter(
+                    (tab) =>
+                      tab.workspaceSessionId ===
+                      (session === "" ? undefined : session),
+                  ).at(-1)?.id,
+                }
+              : presentation,
+          ],
+        ),
+      ),
     })
   },
   openFile(path, cwd) {

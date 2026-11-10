@@ -48,11 +48,13 @@ vi.mock("../../src/gui/components/workspace-files.tsx", () => ({
   WorkspaceFilePreview: ({
     path,
     onDirtyChange,
+    skillSessionId,
   }: {
     path: string
     onDirtyChange?(dirty: boolean): void
+    skillSessionId?: string
   }) => (
-    <div>
+    <div data-skill-session-id={skillSessionId}>
       <p>File {path}</p>
       <button type="button" onClick={() => onDirtyChange?.(true)}>
         Change file
@@ -448,6 +450,67 @@ it("restores each session's workspace tabs and roots across selection changes", 
   act(() => useAppStore.setState({ selection: {}, selectedSession: undefined }))
   expect(screen.getByText("Changes at /project/two")).toBeDefined()
   expect(screen.queryByRole("tab", { name: "Files" })).toBeNull()
+})
+
+it("keeps the draft workspace and scope identity through session promotion", async () => {
+  useAppStore.setState({
+    threadId: "draft-one",
+    newSessionThreadId: "draft-next",
+  })
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  await addView(user, "Files")
+
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-one" },
+      selectedSession: session("session-one", "/session/one"),
+      sessionThreadIds: { "session-one": "draft-one" },
+    }),
+  )
+
+  expect(useAppStore.getState().threadId).toBe("draft-one")
+  expect(useWorkspaceStore.getState().sessionId).toBe("draft-one")
+  expect(
+    screen.getByRole("tab", { name: "Files", selected: true }),
+  ).toBeDefined()
+  expect(screen.getByText("Files at /session/one")).toBeDefined()
+})
+
+it("keeps a hidden skill tab bound to its owning session", () => {
+  useAppStore.setState({
+    selection: { sessionId: "session-one" },
+    selectedSession: session("session-one", "/session/one"),
+    threadId: "draft-one",
+    sessionThreadIds: { "session-one": "draft-one" },
+  })
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  act(() => useWorkspaceStore.getState().openSkill("review.md", "Review"))
+  expect(
+    document
+      .querySelector("[data-skill-session-id]")
+      ?.getAttribute("data-skill-session-id"),
+  ).toBe("session-one")
+
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-two" },
+      selectedSession: session("session-two", "/session/two"),
+    }),
+  )
+  expect(
+    document
+      .querySelector("[data-skill-session-id]")
+      ?.getAttribute("data-skill-session-id"),
+  ).toBe("session-one")
 })
 
 it("does not show the previous session's root while the next session hydrates", () => {

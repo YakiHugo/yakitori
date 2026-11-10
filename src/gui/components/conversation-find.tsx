@@ -5,16 +5,22 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
-  useState,
 } from "react"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiSearchSessionOccurrencesResponse } from "../../protocol/application.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { useThreadScopeState } from "../store/thread-scope-store.ts"
 import { conversationFindRanges } from "./conversation-find-text.ts"
 import "./conversation-find.css"
 
 type Occurrence = ApiSearchSessionOccurrencesResponse["data"][number]
+type FindResult = Readonly<{
+  term: string
+  data: readonly Occurrence[]
+  loading: boolean
+  error?: string
+}>
 const emptyMatches: readonly Occurrence[] = []
 
 export function ConversationFind({
@@ -31,24 +37,39 @@ export function ConversationFind({
     (state) => state.selectedSession?.counts.inputs,
   )
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState("")
-  const [active, setActive] = useState(0)
-  const [revision, setRevision] = useState(0)
-  const [result, setResult] =
-    useState<
-      Readonly<{
-        term: string
-        data: readonly Occurrence[]
-        loading: boolean
-        error?: string
-      }>
-    >()
-  const [unlocated, setUnlocated] = useState(false)
+  const scopeId = `${apiBase}:${sessionId}`
+  const [open, setOpen] = useThreadScopeState(scopeId, "find.open", false)
+  const [query, setQuery] = useThreadScopeState(scopeId, "find.query", "")
+  const [active, setActive] = useThreadScopeState(scopeId, "find.active", 0)
+  const [revision, setRevision] = useThreadScopeState(
+    scopeId,
+    "find.revision",
+    0,
+  )
+  const [result, setResult] = useThreadScopeState<FindResult | undefined>(
+    scopeId,
+    "find.result",
+    undefined,
+  )
+  const [unlocated, setUnlocated] = useThreadScopeState(
+    scopeId,
+    "find.unlocated",
+    false,
+  )
   const inputRef = useRef<HTMLInputElement>(null)
   const restoreFocus = useRef<HTMLElement | null>(null)
   const lastJump = useRef<string | undefined>(undefined)
+  const completedRequest = useRef<string | undefined>(undefined)
   const term = query.trim()
+  const requestKey = JSON.stringify([
+    open,
+    term,
+    apiBase,
+    sessionId,
+    inputCount,
+    activeTurnId,
+    revision,
+  ])
   const current = result?.term === term ? result : undefined
   const matches = current?.data ?? emptyMatches
   const index = Math.min(active, Math.max(0, matches.length - 1))
@@ -63,7 +84,7 @@ export function ConversationFind({
   const close = useCallback(() => {
     setOpen(false)
     if (restoreFocus.current?.isConnected) restoreFocus.current.focus()
-  }, [])
+  }, [setOpen])
   useEffect(() => {
     const show = () => {
       if (!open)
@@ -110,7 +131,7 @@ export function ConversationFind({
       window.removeEventListener("keydown", keydown)
       document.removeEventListener("keydown", dismissEscape)
     }
-  }, [open, close])
+  }, [open, close, setOpen])
   useLayoutEffect(() => {
     if (open) {
       inputRef.current?.focus()
@@ -123,6 +144,16 @@ export function ConversationFind({
   // biome-ignore lint/correctness/useExhaustiveDependencies: admissions, turn boundaries and Retry refresh the persisted search projection.
   useEffect(() => {
     if (!open || term === "") return
+    if (completedRequest.current === requestKey) return
+    if (
+      completedRequest.current === undefined &&
+      result?.term === term &&
+      !result.loading
+    ) {
+      completedRequest.current = requestKey
+      return
+    }
+    completedRequest.current = requestKey
     let disposed = false
     setResult({ term, data: [], loading: true })
     const timer = window.setTimeout(async () => {
@@ -267,7 +298,16 @@ export function ConversationFind({
         CSS.highlights.delete("conversation-find-current")
       }
     }
-  }, [open, term, matches, selected, occurrenceIndex, contentRef, onJump])
+  }, [
+    open,
+    term,
+    matches,
+    selected,
+    occurrenceIndex,
+    contentRef,
+    onJump,
+    setUnlocated,
+  ])
 
   if (!open) return null
   const navigate = (direction: number) => {

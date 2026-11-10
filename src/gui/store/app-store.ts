@@ -60,12 +60,14 @@ import {
   type SessionStream,
 } from "../lib/rpc-client.ts"
 import { useWorkspaceStore } from "./workspace-store.ts"
+import { removeThreadScope } from "./thread-scope-store.ts"
 
 type SessionSelection = {
   readonly revision: number
   readonly sessionId: string
 }
 
+const createDraftThreadId = (): string => `draft_${crypto.randomUUID()}`
 const firstInputDraftSessionId = "draft_first_input"
 
 export type SessionDraft = Readonly<{
@@ -176,6 +178,10 @@ export type AppStoreData = {
   selection: { readonly sessionId?: string }
   sessionSelectionIntentRevision: number
   selectedSession: ApiSessionDetail | undefined
+  // Stable across draft creation, navigation and promotion to a server session.
+  threadId: string
+  newSessionThreadId: string
+  sessionThreadIds: Readonly<Record<string, string>>
   sessionsByProject: Record<string, ProjectSessionList>
   stream: SessionStream | undefined
   // The Project new sessions are created in (entity-based since the C8-D2
@@ -218,7 +224,9 @@ export type AppStoreActions = {
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
-  clearSessionSelection(input?: { projectId: string | undefined }): void
+  clearSessionSelection(
+    input?: { projectId: string | undefined; threadId?: string },
+  ): void
   startNewSession(projectId?: string): void
   setNewSessionProject(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
@@ -285,6 +293,18 @@ export type AppStoreActions = {
 
 export type AppStore = AppStoreData & AppStoreActions
 
+export function selectCurrentThreadId(
+  state: Pick<
+    AppStoreData,
+    "selection" | "threadId" | "sessionThreadIds"
+  >,
+): string {
+  const sessionId = state.selection.sessionId
+  return sessionId === undefined
+    ? state.threadId
+    : (state.sessionThreadIds[sessionId] ?? sessionId)
+}
+
 function subscriptionUsageLoading(
   state: SubscriptionUsageState = { loading: false },
 ): SubscriptionUsageState {
@@ -298,6 +318,7 @@ function subscriptionUsageLoading(
 }
 
 export function createInitialAppState(): AppStoreData {
+  const newSessionThreadId = createDraftThreadId()
   return {
     sidebar: { sections: [], entries: {} },
     collapsedSections: initialCollapsedFlags("yakitori.collapsedSections"),
@@ -335,6 +356,9 @@ export function createInitialAppState(): AppStoreData {
     selection: {},
     sessionSelectionIntentRevision: 0,
     selectedSession: undefined,
+    threadId: newSessionThreadId,
+    newSessionThreadId,
+    sessionThreadIds: {},
     sessionsByProject: {},
     stream: undefined,
     currentProject: undefined,
@@ -584,7 +608,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
   const activateSession = (sessionId: string): SessionSelection => {
     queueReadRevision += 1
-    set({ selection: { sessionId }, queuedItems: [] })
+    const threadId = get().sessionThreadIds[sessionId] ?? sessionId
+    set({ selection: { sessionId }, threadId, queuedItems: [] })
     return {
       revision: get().sessionSelectionIntentRevision,
       sessionId,
@@ -1833,6 +1858,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         currentProject:
           input === undefined ? state.currentProject : input.projectId,
         selection: {},
+        threadId: input?.threadId ?? state.newSessionThreadId,
+        newSessionThreadId: input?.threadId ?? state.newSessionThreadId,
         selectedSession: undefined,
         execution: createExecutionViewState(),
         queuedItems: [],
@@ -1866,6 +1893,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         sessionDrafts: stashSessionDraft(state),
         currentProject: projectId,
         selection: {},
+        threadId: state.newSessionThreadId,
         selectedSession: undefined,
         execution: createExecutionViewState(),
         queuedItems: [],
@@ -1908,6 +1936,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     createSession: async (title) => {
       if (pendingCreateIntents.has(get().sessionSelectionIntentRevision)) return
       let createdId: string | undefined
+      const threadId = get().threadId
       const intentRevision = get().sessionSelectionIntentRevision + 1
       pendingCreateIntents.add(intentRevision)
       set({ sessionSelectionIntentRevision: intentRevision })
@@ -1963,13 +1992,28 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             set({ modelSelections })
             persistModelSelections(modelSelections)
           }
-          set({ newSessionPrompt: undefined, newSessionExcerpts: [] })
+          set((state) => ({
+            newSessionPrompt: undefined,
+            newSessionExcerpts: [],
+            newSessionThreadId:
+              state.newSessionThreadId === threadId
+                ? createDraftThreadId()
+                : state.newSessionThreadId,
+            sessionThreadIds: {
+              ...state.sessionThreadIds,
+              [response.session.id]: threadId,
+            },
+          }))
           const draftAtCreation =
-            get().selection.sessionId === undefined
+            get().selection.sessionId === undefined &&
+            get().threadId === threadId
               ? get().promptDraft
               : undefined
           const excerptsAtCreation =
-            get().selection.sessionId === undefined ? get().promptExcerpts : []
+            get().selection.sessionId === undefined &&
+            get().threadId === threadId
+              ? get().promptExcerpts
+              : []
           const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
@@ -2088,7 +2132,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         await getAppRpcClient(get().apiBase).request("session/delete", {
           sessionId,
         })
-        useWorkspaceStore.getState().removeSession(sessionId)
+        const removedThreadId = get().sessionThreadIds[sessionId] ?? sessionId
+        useWorkspaceStore.getState().removeSession(removedThreadId)
+        removeThreadScope(removedThreadId)
+        removeThreadScope(`${get().apiBase}:${removedThreadId}`)
         if (get().selection.sessionId === sessionId) {
           closeStream()
           set((state) => {
@@ -2096,22 +2143,38 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             delete sessionDrafts[sessionId]
             return {
               selection: {},
+              threadId: state.newSessionThreadId,
+              sessionThreadIds: Object.fromEntries(
+                Object.entries(state.sessionThreadIds).filter(
+                  ([id]) => id !== sessionId,
+                ),
+              ),
               sessionSelectionIntentRevision:
                 state.sessionSelectionIntentRevision + 1,
               selectedSession: undefined,
               execution: createExecutionViewState(),
               queuedItems: [],
-              promptDraft: undefined,
-              promptExcerpts: [],
+              promptDraft: state.newSessionPrompt,
+              promptExcerpts: state.newSessionExcerpts,
               sessionSkills: [],
               sessionDrafts,
             }
           })
-        } else if (get().sessionDrafts[sessionId] !== undefined) {
+        } else if (
+          get().sessionDrafts[sessionId] !== undefined ||
+          get().sessionThreadIds[sessionId] !== undefined
+        ) {
           set((state) => {
             const sessionDrafts = { ...state.sessionDrafts }
             delete sessionDrafts[sessionId]
-            return { sessionDrafts }
+            return {
+              sessionDrafts,
+              sessionThreadIds: Object.fromEntries(
+                Object.entries(state.sessionThreadIds).filter(
+                  ([id]) => id !== sessionId,
+                ),
+              ),
+            }
           })
         }
         await get().refreshSidebar()
@@ -2330,6 +2393,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         set({
           newSessionPrompt: get().promptDraft,
           newSessionExcerpts: get().promptExcerpts,
+          newSessionThreadId: get().threadId,
         })
       if (summary !== undefined) {
         set({ currentProject: summary.projectId })

@@ -18,15 +18,18 @@ export function connectBrowserViewRequests(
   const handle = async (request: WorkspaceBrowserShowRequest) => {
     const eligible = () => {
       const workspace = useWorkspaceStore.getState()
+      const app = useAppStore.getState()
+      const ownerThreadId =
+        app.sessionThreadIds[request.ownerSessionId] ?? request.ownerSessionId
       return (
         mounted &&
-        useAppStore.getState().settingsSection === undefined &&
-        workspace.sessionId === request.ownerSessionId &&
+        app.settingsSection === undefined &&
+        workspace.sessionId === ownerThreadId &&
         workspace.tabs.some(
           (tab) =>
             tab.id === request.tabId &&
             tab.kind === "browser" &&
-            tab.workspaceSessionId === request.ownerSessionId,
+            tab.workspaceSessionId === ownerThreadId,
         )
       )
     }
