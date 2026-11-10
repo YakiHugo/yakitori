@@ -16,12 +16,14 @@ export function WindowChrome({
   heading,
   workspaceOpen,
   onToggleWorkspace,
+  actions,
 }: Readonly<{
   sidebarOpen: boolean
   onToggleSidebar(): void
   heading?: ReactNode
   workspaceOpen: boolean
   onToggleWorkspace(): void
+  actions?: ReactNode
 }>) {
   const settingsOpen = useAppStore(
     (state) => state.settingsSection !== undefined,
@@ -106,18 +108,21 @@ export function WindowChrome({
           </button>
         </nav>
         <div className="window-heading">{heading}</div>
-        {!settingsOpen && (
-          <button
-            type="button"
-            className="sidebar-icon"
-            aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
-            aria-expanded={workspaceOpen}
-            title={`${workspaceOpen ? "Hide" : "Show"} workspace (⌘⇧B)`}
-            onClick={onToggleWorkspace}
-          >
-            <PanelRight size={16} />
-          </button>
-        )}
+        <div className="window-titlebar-actions">
+          {actions}
+          {!settingsOpen && (
+            <button
+              type="button"
+              className="sidebar-icon"
+              aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}
+              aria-expanded={workspaceOpen}
+              title={`${workspaceOpen ? "Hide" : "Show"} workspace (⌘⇧B)`}
+              onClick={onToggleWorkspace}
+            >
+              <PanelRight size={16} />
+            </button>
+          )}
+        </div>
       </header>
       <nav className="window-rail" aria-label="App navigation">
         <button

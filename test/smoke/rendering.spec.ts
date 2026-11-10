@@ -410,7 +410,7 @@ test("user messages expose only copy and edit actions", async ({
   })
 })
 
-test("conversation scrolls at the page edge while the project card stays fixed", async ({
+test("conversation scrolls at the page edge while the project overview stays on demand", async ({
   page,
   renderingApp,
 }, testInfo) => {
@@ -426,7 +426,8 @@ test("conversation scrolls at the page edge while the project card stays fixed",
   const viewport = page.locator(".conversation-transcript-viewport")
   const content = page.locator(".conversation-content")
   const composer = page.locator(".conversation-composer")
-  const overview = page.getByRole("complementary", { name: "Project overview" })
+  const overview = page.getByRole("dialog", { name: "Project overview" })
+  await expect(overview).toHaveCount(0)
   for (const width of [1480, 1180, 1100]) {
     await page.setViewportSize({ width, height: 960 })
     await expect
@@ -441,26 +442,29 @@ test("conversation scrolls at the page edge while the project card stays fixed",
     expect(contentBox.width).toBeLessThanOrEqual(768)
     expect(Math.abs(contentBox.x - composerBox.x)).toBeLessThan(1)
     expect(Math.abs(contentBox.width - composerBox.width)).toBeLessThan(1)
-    if (width >= 1180) {
-      const cardBox = await overview.boundingBox()
-      if (!cardBox) throw new Error("Project card is missing.")
-      expect(contentBox.x + contentBox.width).toBeLessThanOrEqual(cardBox.x)
-      // Wheel events in the card's column still belong to the conversation.
-      await viewport.evaluate((node) => {
-        node.scrollTop = 0
-      })
-      await page.mouse.move(width - 40, 400)
-      await page.mouse.wheel(0, 400)
-      await expect
-        .poll(() => viewport.evaluate((node) => node.scrollTop))
-        .toBeGreaterThan(0)
-      expect(await overview.boundingBox()).toEqual(cardBox)
-    } else await expect(overview).toBeHidden()
+    await expect(overview).toHaveCount(0)
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width)
   }
   await page.setViewportSize({ width: 1480, height: 960 })
+  const transcriptBeforeOverview = await viewport.boundingBox()
+  await page
+    .getByRole("button", { name: "Show project overview", exact: true })
+    .click()
+  await expect(overview).toBeVisible()
+  await overview.screenshot({
+    path: testInfo.outputPath("project-overview.png"),
+  })
+  expect(await viewport.boundingBox()).toEqual(transcriptBeforeOverview)
+  await viewport.evaluate((node) => {
+    node.scrollTop = 0
+  })
+  await page.mouse.move(1440, 400)
+  await page.mouse.wheel(0, 400)
+  await expect
+    .poll(() => viewport.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0)
   await page.getByRole("button", { name: "Changes", exact: true }).click()
   await expect(overview).toHaveCount(0)
   const workspace = page.getByRole("complementary", {
@@ -486,11 +490,9 @@ test("conversation scrolls at the page edge while the project card stays fixed",
   const goalEditor = page.getByRole("complementary", { name: "Goal editor" })
   await expect(goalEditor).toBeVisible()
   const goalBox = await goalEditor.boundingBox()
-  const cardBox = await overview.boundingBox()
   const transcriptBox = await viewport.boundingBox()
-  if (!goalBox || !cardBox || !transcriptBox)
-    throw new Error("Session panels are missing.")
-  expect(goalBox.x + goalBox.width).toBeLessThanOrEqual(cardBox.x)
+  if (!goalBox || !transcriptBox) throw new Error("Session panels are missing.")
+  await expect(overview).toHaveCount(0)
   expect(
     Math.abs(transcriptBox.x + transcriptBox.width - goalBox.x),
   ).toBeLessThan(1)

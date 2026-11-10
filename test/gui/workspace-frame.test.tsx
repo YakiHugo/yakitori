@@ -186,7 +186,7 @@ async function addView(user: ReturnType<typeof userEvent.setup>, name: string) {
   )
 }
 
-it("opens the selected session's changes and files from its project card", async () => {
+it("opens project actions in a dismissible overview instead of a persistent card", async () => {
   const user = userEvent.setup()
   useAppStore.setState({
     selection: { sessionId: "session-two" },
@@ -203,25 +203,61 @@ it("opens the selected session's changes and files from its project card", async
   useWorkspaceStore.getState().setOpen(false)
   render(
     <WorkspaceFrame>
-      <main>Conversation</main>
+      <main>
+        <button type="button">Conversation action</button>
+      </main>
     </WorkspaceFrame>,
   )
-  const card = screen.getByRole("complementary", { name: "Project overview" })
+  expect(screen.queryByRole("dialog", { name: "Project overview" })).toBeNull()
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
+  const card = screen.getByRole("dialog", { name: "Project overview" })
   expect(within(card).getByText("project-two")).toBeDefined()
   await user.click(within(card).getByRole("button", { name: "Changes" }))
   expect(screen.getByText("Changes at /project/two")).toBeDefined()
   expect(
     screen.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected"),
   ).toBe("true")
-  expect(
-    screen.queryByRole("complementary", { name: "Project overview" }),
-  ).toBeNull()
+  expect(screen.queryByRole("dialog", { name: "Project overview" })).toBeNull()
   await user.click(screen.getByRole("button", { name: "Hide workspace" }))
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
+  fireEvent.pointerDown(document.body)
+  expect(screen.queryByRole("dialog", { name: "Project overview" })).toBeNull()
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
+  fireEvent.keyDown(document, { key: "Escape" })
+  expect(screen.queryByRole("dialog", { name: "Project overview" })).toBeNull()
+  expect(
+    document.activeElement ===
+      screen.getByRole("button", { name: "Show project overview" }),
+  ).toBe(true)
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
+  await user.tab({ shift: true })
+  expect(screen.queryByRole("dialog", { name: "Project overview" })).toBeNull()
+  expect(document.activeElement).toBe(
+    screen.getByRole("button", { name: "Conversation action" }),
+  )
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
   await user.click(screen.getByRole("button", { name: "Open project files" }))
   expect(
     screen.getByRole("tab", { name: "Files" }).getAttribute("aria-selected"),
   ).toBe("true")
   expect(screen.getByText("Files at /project/two")).toBeDefined()
+  await user.click(
+    screen.getByRole("button", { name: "Show project overview" }),
+  )
+  expect(screen.getByRole("dialog", { name: "Project overview" })).toBeDefined()
+  expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
+    false,
+  )
 })
 
 it("keeps a dirty file tab until its edits are explicitly discarded", async () => {

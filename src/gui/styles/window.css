@@ -31,6 +31,12 @@
   font-size: 14px;
   font-weight: 500;
 }
+.window-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .window-titlebar[data-sidebar-open="true"] .window-navigation {
   width: calc(var(--sidebar-width, 275px) - 14px);
 }
