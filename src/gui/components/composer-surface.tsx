@@ -54,6 +54,10 @@ import { textInputDraft, trimInputDraft } from "../input-draft.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
+  registerThreadScopeDisposer,
+  useThreadScopeState,
+} from "../store/thread-scope-store.ts"
+import {
   type ComposerSuggestion,
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
@@ -230,6 +234,7 @@ export function ComposerSurface({
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const draft = promptPartsText(parts)
   const attachments = inputContentAttachments(parts)
+  const composerScopeId = `${apiBase}:${editorKey ?? sessionId}`
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const importTail = useRef(Promise.resolve())
   const importCount = useRef(0)
@@ -240,14 +245,14 @@ export function ComposerSurface({
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [addHighlight, setAddHighlight] = useState(0)
   const [previewIndex, setPreviewIndex] = useState<number>()
-  const [historyNavigation, setHistoryNavigation] =
-    useState<
-      Readonly<{
+  const [historyNavigation, setHistoryNavigation] = useThreadScopeState<
+    | Readonly<{
         sessionId: string | undefined
         stepsBack: number
         savedDraft: InputDraft
       }>
-    >()
+    | undefined
+  >(composerScopeId, "composer.history", undefined)
   // A recalled input temporarily replaces the editor, but this surface still
   // owns the unsent snapshot, including across session-keyed editor remounts.
   const parkedOwner = useRef<InputDraft | undefined>(undefined)
@@ -289,18 +294,21 @@ export function ComposerSurface({
     },
     [],
   )
+  const historyScope = useRef(composerScopeId)
   useLayoutEffect(() => {
     const previous = parkedOwner.current
     const next = historyNavigation?.savedDraft
+    const scopeChanged = historyScope.current !== composerScopeId
+    historyScope.current = composerScopeId
     parkedOwner.current = next
-    if (previous && previous !== next) releaseParked(previous, next)
-  }, [historyNavigation?.savedDraft, releaseParked])
-  useEffect(
-    () => () => {
+    if (previous && previous !== next && !scopeChanged)
+      releaseParked(previous, next)
+  }, [composerScopeId, historyNavigation?.savedDraft, releaseParked])
+  useEffect(() => {
+    registerThreadScopeDisposer(composerScopeId, "composer-history", () => {
       if (parkedOwner.current) releaseParked(parkedOwner.current)
-    },
-    [releaseParked],
-  )
+    })
+  }, [composerScopeId, releaseParked])
   const [dismissedQuery, setDismissedQuery] = useState<string>()
   const [highlight, setHighlight] = useState<{ query: string; index: number }>()
   const [selection, setSelection] = useState({
@@ -904,6 +912,7 @@ export function ComposerSurface({
 
           <PromptEditor
             key={editorKey ?? sessionId}
+            scopeKey={composerScopeId}
             ref={editorRef}
             label={label}
             value={parts}

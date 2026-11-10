@@ -22,7 +22,12 @@ import {
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { cn } from "../lib/utils.ts"
-import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import {
+  selectCurrentThreadId,
+  useAppStore,
+  useExecutionView,
+} from "../store/app-store.ts"
+import { useThreadScopeState } from "../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { ActivityBatch } from "./activity-batch.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
@@ -95,7 +100,8 @@ export function Transcript({
 }>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
-  const scroll = usePinnedScroll(sessionId)
+  const threadId = useAppStore(selectCurrentThreadId)
+  const scroll = usePinnedScroll(threadId)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const dockRef = useRef<HTMLDivElement>(null)
   const anchors = useRef(new Map<string, HTMLDivElement>())
@@ -406,8 +412,15 @@ const TurnBlock = memo(
     finalAnswer: FinalAnswer | undefined
     retry: ActiveModelRetry | undefined
   }>) {
-    const [liveActivityCollapsed, setLiveActivityCollapsed] = useState(false)
-    const [activityExpanded, setActivityExpanded] = useState(false)
+    const threadId = useAppStore(selectCurrentThreadId)
+    const blockKey = entries[0] ? executionEntryKey(entries[0]) : "active"
+    const [liveActivityCollapsed, setLiveActivityCollapsed] =
+      useThreadScopeState(threadId, `turn:${blockKey}:live-collapsed`, false)
+    const [activityExpanded, setActivityExpanded] = useThreadScopeState(
+      threadId,
+      `turn:${blockKey}:activity-expanded`,
+      false,
+    )
     const [sourceNavigation, setSourceNavigation] =
       useState<ContextSourceNavigation>()
     useEffect(() => {
@@ -431,7 +444,7 @@ const TurnBlock = memo(
       window.addEventListener(revealContextSourceEvent, revealSource)
       return () =>
         window.removeEventListener(revealContextSourceEvent, revealSource)
-    }, [entries])
+    }, [entries, setActivityExpanded, setLiveActivityCollapsed])
     useLayoutEffect(() => {
       // Navigation can only scroll after the collapsed source has mounted.
       if (sourceNavigation)

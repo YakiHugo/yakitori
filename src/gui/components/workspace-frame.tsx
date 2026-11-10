@@ -25,7 +25,10 @@ import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { connectBrowserViewRequests } from "../browser-view-requests.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
-import { useAppStore } from "../store/app-store.ts"
+import {
+  selectCurrentThreadId,
+  useAppStore,
+} from "../store/app-store.ts"
 import { useEngineStore } from "../store/engine-store.ts"
 import {
   isSideChatExpired,
@@ -82,6 +85,8 @@ export function WorkspaceFrame({
   const setOpen = useWorkspaceStore((state) => state.setOpen)
   const tabs = useWorkspaceStore((state) => state.tabs)
   const nativeSessionId = useAppStore((state) => state.selection.sessionId)
+  const nativeThreadId = useAppStore(selectCurrentThreadId)
+  const sessionThreadIds = useAppStore((state) => state.sessionThreadIds)
   const externalEngine = useEngineStore((state) => state.engineId)
   const externalSessionId = useEngineStore((state) => state.sessionId)
   const externalCwd = useEngineStore(
@@ -113,7 +118,19 @@ export function WorkspaceFrame({
   const sessionId = external
     ? (externalSessionId ?? `engine-draft:${externalEngine}`)
     : nativeSessionId
-  const visibleTabs = tabs.filter((tab) => tab.workspaceSessionId === sessionId)
+  const workspaceSessionId = external ? sessionId : nativeThreadId
+  const visibleTabs = tabs.filter(
+    (tab) => tab.workspaceSessionId === workspaceSessionId,
+  )
+  const sessionIdForTab = (tab: WorkspaceTab) => {
+    const owner = tab.workspaceSessionId
+    if (owner === undefined) return undefined
+    if (owner === workspaceSessionId) return sessionId
+    return (
+      Object.entries(sessionThreadIds).find(([, threadId]) => threadId === owner)?.[0] ??
+      owner
+    )
+  }
   const activeFile = visibleTabs.find(
     (tab): tab is Extract<WorkspaceTab, { kind: "file" }> =>
       tab.id === activeId && tab.kind === "file",
@@ -228,8 +245,8 @@ export function WorkspaceFrame({
   }, [external, cwd])
 
   useLayoutEffect(() => {
-    useWorkspaceStore.getState().setSession(sessionId)
-  }, [sessionId])
+    useWorkspaceStore.getState().setSession(workspaceSessionId)
+  }, [workspaceSessionId])
 
   useLayoutEffect(() => {
     const element = shell.current
@@ -271,7 +288,7 @@ export function WorkspaceFrame({
   // biome-ignore lint/correctness/useExhaustiveDependencies: changing sessions closes the popover without being read by the effect.
   useEffect(() => {
     setOverviewOpen(false)
-  }, [sessionId])
+  }, [workspaceSessionId])
 
   useEffect(() => {
     if (!overviewOpen) return
@@ -662,11 +679,11 @@ export function WorkspaceFrame({
                 className="workspace-content"
                 hidden={
                   !open ||
-                  tab.workspaceSessionId !== sessionId ||
+                  tab.workspaceSessionId !== workspaceSessionId ||
                   activeId !== tab.id
                 }
               >
-                {tab.workspaceSessionId !== sessionId &&
+                {tab.workspaceSessionId !== workspaceSessionId &&
                 (tab.kind === "changes" ||
                   tab.kind === "files" ||
                   tab.kind === "computer") ? null : tab.kind === "agents" ? (
@@ -712,7 +729,7 @@ export function WorkspaceFrame({
                         !workspace.open ||
                         workspace.activeId !== tab.id ||
                         tab.workspaceSessionId !==
-                          useAppStore.getState().selection.sessionId
+                          selectCurrentThreadId(useAppStore.getState())
                       )
                         return
                       const excerpt: ContextExcerpt = {
@@ -735,8 +752,8 @@ export function WorkspaceFrame({
                     path={tab.path}
                     apiBase={apiBase}
                     skill
-                    {...(tab.workspaceSessionId
-                      ? { skillSessionId: tab.workspaceSessionId }
+                    {...(sessionIdForTab(tab)
+                      ? { skillSessionId: sessionIdForTab(tab) as string }
                       : {})}
                     {...(tab.projectId
                       ? { skillProjectId: tab.projectId }
@@ -758,14 +775,14 @@ export function WorkspaceFrame({
                     </div>
                     {tab.kind === "files" ? (
                       <WorkspaceFiles
-                        key={sessionId ?? "draft"}
+                        key={workspaceSessionId}
                         cwd={cwd}
                         apiBase={apiBase}
                         onOpenFile={(path) => openFile(path, cwd)}
                       />
                     ) : (
                       <WorkspaceChanges
-                        key={sessionId ?? "draft"}
+                        key={workspaceSessionId}
                         cwd={cwd}
                         apiBase={apiBase}
                       />
@@ -831,7 +848,7 @@ export function WorkspaceFrame({
                 ...excerpts.map((excerpt, index) => ({
                   excerpt,
                   number: index + 1,
-                  ownerId: `main:${selectionRevision}`,
+                  ownerId: `main:${nativeThreadId}`,
                   conversation: "main conversation",
                 })),
                 ...visibleTabs.flatMap((tab) =>
@@ -872,7 +889,7 @@ export function WorkspaceFrame({
                 requestExcerptEdit({
                   ownerId: sideChatId
                     ? `side:${sideChatId}`
-                    : `main:${selectionRevision}`,
+                    : `main:${nativeThreadId}`,
                   excerptId: excerpt.id,
                   creating: true,
                 })

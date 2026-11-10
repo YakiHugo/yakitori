@@ -29,6 +29,7 @@ import {
   defaultPreferences,
   usePreferencesStore,
 } from "../../src/gui/store/preferences-store.ts"
+import { removeThreadScope } from "../../src/gui/store/thread-scope-store.ts"
 import {
   createEventEnvelope,
   EventType,
@@ -1631,6 +1632,7 @@ describe("history navigation", () => {
       screen.getByRole("button", { name: `Remove ${image.name}` }),
     )
     view.unmount()
+    removeThreadScope(`${useAppStore.getState().apiBase}:session_1`)
     expect(
       window.yakitoriDesktop?.discardDraftAttachments,
     ).toHaveBeenCalledExactlyOnceWith([image])
@@ -3164,6 +3166,7 @@ describe("PDF attachment composer", () => {
     expect(useAppStore.getState().promptDraft).toEqual(parts)
     await user.click(screen.getByRole("button", { name: "Remove manual.pdf" }))
     view.unmount()
+    removeThreadScope(`${useAppStore.getState().apiBase}:session_1`)
     expect(bridge?.discardDraftAttachments).toHaveBeenCalledExactlyOnceWith([
       undoPdf,
     ])

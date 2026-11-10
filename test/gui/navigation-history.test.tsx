@@ -42,6 +42,8 @@ it("returns to project drafts without creating sessions", async () => {
   useAppStore.setState({
     currentProject: "project-a",
     sessionSelectionIntentRevision: 1,
+    threadId: "draft-a",
+    newSessionThreadId: "draft-a",
     createSession,
   })
   const { result } = renderHook(useNavigationHistory)
@@ -50,8 +52,10 @@ it("returns to project drafts without creating sessions", async () => {
   )
   await act(async () => result.current.back())
   expect(useAppStore.getState().currentProject).toBe("project-a")
+  expect(useAppStore.getState().threadId).toBe("draft-a")
   await act(async () => result.current.forward())
   expect(useAppStore.getState().currentProject).toBe("project-b")
+  expect(useAppStore.getState().threadId).toBe("draft-a")
   expect(createSession).not.toHaveBeenCalled()
 })
 

@@ -24,5 +24,9 @@ if (typeof window !== "undefined") {
       ) as Partial<AppStore>
     }
     useAppStore.setState({ ...createInitialAppState(), ...realActions })
+    const { clearThreadScopes } = await import(
+      "../../src/gui/store/thread-scope-store.ts"
+    )
+    clearThreadScopes()
   })
 }

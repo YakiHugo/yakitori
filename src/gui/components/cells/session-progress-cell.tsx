@@ -12,7 +12,11 @@ import type {
 } from "../../../protocol/user-interaction.ts"
 import { ApiRequestError, getAppRpcClient } from "../../lib/rpc-client.ts"
 import { questionAnswerMemory } from "../../question-answer-memory.ts"
-import { useAppStore } from "../../store/app-store.ts"
+import {
+  selectCurrentThreadId,
+  useAppStore,
+} from "../../store/app-store.ts"
+import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { Button } from "../ui/button.tsx"
 import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
@@ -36,13 +40,24 @@ export function UserQuestionsCell({
     sessionId === undefined
       ? undefined
       : questionAnswerMemory.read(apiBase, sessionId, toolCallId)
-  const [answers, setAnswers] = useState(
+  const threadId = useAppStore(selectCurrentThreadId)
+  const [answers, setAnswers] = useThreadScopeState(
+    threadId,
+    `questions:${toolCallId}:answers`,
     () => recovered?.slice() ?? request.questions.map(() => ""),
   )
   const [submitting, setSubmitting] = useState(false)
-  const [pending, setPending] = useState(recovered !== undefined)
+  const [pending, setPending] = useThreadScopeState(
+    threadId,
+    `questions:${toolCallId}:pending`,
+    recovered !== undefined,
+  )
   const [received, setReceived] = useState(false)
-  const [error, setError] = useState<string>()
+  const [error, setError] = useThreadScopeState<string | undefined>(
+    threadId,
+    `questions:${toolCallId}:error`,
+    undefined,
+  )
   const id = useId()
   const done = answered
   useEffect(() => {

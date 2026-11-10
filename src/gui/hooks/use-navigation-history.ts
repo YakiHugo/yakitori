@@ -12,8 +12,8 @@ import {
 } from "../store/engine-store.ts"
 
 type Destination =
-  | { kind: "session"; sessionId: string }
-  | { kind: "draft"; projectId: string | undefined }
+  | { kind: "session"; sessionId: string; threadId: string }
+  | { kind: "draft"; projectId: string | undefined; threadId: string }
   | {
       kind: "engine"
       engineId: string
@@ -44,8 +44,16 @@ function currentVisit(): Visit {
           projectId: app.currentProject,
         }
       : app.selection.sessionId
-        ? { kind: "session", sessionId: app.selection.sessionId }
-        : { kind: "draft", projectId: app.currentProject },
+        ? {
+            kind: "session",
+            sessionId: app.selection.sessionId,
+            threadId: app.threadId,
+          }
+        : {
+            kind: "draft",
+            projectId: app.currentProject,
+            threadId: app.threadId,
+          },
     settings:
       app.settingsSection === undefined
         ? undefined
@@ -160,7 +168,11 @@ export function useNavigationHistory() {
       } else {
         clearEngineSelection()
         if (target.kind === "session") void app.selectSession(target.sessionId)
-        else app.clearSessionSelection({ projectId: target.projectId })
+        else
+          app.clearSessionSelection({
+            projectId: target.projectId,
+            threadId: target.threadId,
+          })
       }
     }
     if (visit.settings) {

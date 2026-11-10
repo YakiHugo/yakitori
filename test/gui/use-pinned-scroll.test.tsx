@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { usePinnedScroll } from "../../src/gui/hooks/use-pinned-scroll.ts"
+import { clearThreadScopes } from "../../src/gui/store/thread-scope-store.ts"
 
 let scroll: ReturnType<typeof usePinnedScroll>
 let resize: () => void
@@ -23,6 +24,7 @@ function frame(now: number) {
   })
 }
 beforeEach(() => {
+  clearThreadScopes()
   frames = new Map()
   nextFrame = 0
   vi.spyOn(performance, "now").mockReturnValue(0)
@@ -65,7 +67,7 @@ function geometry() {
   })
   return viewport
 }
-it("restores at the bottom without animating and keeps layout growth pinned", () => {
+it("restores each thread's scroll position without animating and keeps layout growth pinned", () => {
   const { rerender } = render(<Fixture />)
   const viewport = geometry()
   act(() => resize())
@@ -75,6 +77,8 @@ it("restores at the bottom without animating and keeps layout growth pinned", ()
   rerender(<Fixture sessionId="two" />)
   expect(viewport.scrollTop).toBe(800)
   expect(frames.size).toBe(0)
+  rerender(<Fixture />)
+  expect(viewport.scrollTop).toBe(300)
 })
 it("scrolling up inside the bottom threshold stays detached", () => {
   render(<Fixture />)

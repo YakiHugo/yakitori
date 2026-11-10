@@ -3651,10 +3651,12 @@ describe("new session drafts", () => {
 
   it("keeps the new-session draft separate from an existing session draft", async () => {
     useAppStore.getState().startNewSession()
+    const newSessionThreadId = useAppStore.getState().threadId
     useAppStore.getState().setPromptDraft(inputParts("new task"))
     await useAppStore.getState().selectSession("session_1")
     useAppStore.getState().setPromptDraft(inputParts("existing task"))
     useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().threadId).toBe(newSessionThreadId)
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("new task"))
     await useAppStore.getState().selectSession("session_1")
     expect(useAppStore.getState().promptDraft).toEqual(
@@ -3679,6 +3681,7 @@ describe("new session drafts", () => {
       return respond(method, params)
     }
     useAppStore.getState().startNewSession()
+    const threadId = useAppStore.getState().threadId
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     useAppStore
       .getState()
@@ -3698,6 +3701,9 @@ describe("new session drafts", () => {
       modelSelection: { provider: "faux", model: "scripted" },
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().threadId).toBe(threadId)
+    expect(useAppStore.getState().sessionThreadIds.session_1).toBe(threadId)
+    expect(useAppStore.getState().newSessionThreadId).not.toBe(threadId)
   })
 
   it("keeps an unavailable ChatGPT draft account on its first admission instead of the API default", async () => {
