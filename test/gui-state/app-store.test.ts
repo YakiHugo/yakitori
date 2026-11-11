@@ -422,6 +422,51 @@ describe("app store event stream", () => {
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
   })
 
+  it("does not reload a session that is already open", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream)
+    stream?.emitReplayComplete()
+    const opened = fakeRef.current.streams.length
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams).toHaveLength(opened)
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+  })
+
+  it("shows a previously opened session without replaying from the start", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream)
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request:1",
+            inputId: "input_1",
+            role: InputRole.User,
+            content: inputFixture(inputParts("hello")),
+          },
+        },
+      }),
+    )
+    stream?.emitReplayComplete()
+    await useAppStore.getState().selectSession("session_other")
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(2)
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([
+      expect.objectContaining({
+        kind: "user_input",
+        text: "hello",
+      }),
+    ])
+  })
+
   it("keeps an acknowledged interrupt pending until its turn completes without touching draft or queue", async () => {
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]
@@ -3357,6 +3402,18 @@ describe("model selection", () => {
     })
   })
 
+  it("does not write a preference when the selected model is unchanged", async () => {
+    const current = { provider: "faux", model: "scripted", effort: "low" }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      modelSelections: { session_1: current },
+    })
+    useAppStore.getState().setModelSelection("session_1", { ...current })
+    await Promise.resolve()
+    expect(fakeRef.current.requestsFor("userPreference/write")).toEqual([])
+    expect(useAppStore.getState().modelSelections.session_1).toBe(current)
+  })
+
   it("keeps a failed preference write scoped to the current Session", async () => {
     globalThis.localStorage.clear()
     fakeRef.current.respond = () => notFound()
@@ -3663,6 +3720,45 @@ describe("new session drafts", () => {
       inputParts("existing task"),
     )
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
+  })
+
+  it("keeps a typed draft on the created session when new session is opened again", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return {
+          session: sessionDetail,
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 1,
+            event: { type: EventType.SessionCreated, data: {} },
+          }),
+        }
+      return notFound()
+    }
+    useAppStore.getState().startNewSession()
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_1"),
+    )
+    useAppStore.getState().setPromptDraft(inputParts("keep this"))
+
+    useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("keep this"))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+
+    await useAppStore.getState().selectSession("session_existing")
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    useAppStore.getState().startNewSession()
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_1"),
+    )
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("keep this"))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(
+      useAppStore
+        .getState()
+        .sessionsByProject[""]?.sessions.map((session) => session.id),
+    ).toContain("session_1")
   })
 
   it("creates on opening and carries the draft model into first admission", async () => {

@@ -222,6 +222,10 @@ export function ModelSelector({
     const entry = providers
       .find((candidate) => candidate.name === provider)
       ?.models.find((candidate) => candidate.id === model)
+    if (effective?.provider === provider && effective.model === model) {
+      setMenu(hasEffortControls(entry) ? "effort" : undefined)
+      return
+    }
     const keepEffort =
       effective?.effort !== undefined &&
       entry?.effortStyle !== "none" &&

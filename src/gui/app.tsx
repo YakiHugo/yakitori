@@ -91,7 +91,7 @@ export function App() {
             <span>Settings</span>
           ) : externalSession !== undefined ? (
             <EngineSessionHeading />
-          ) : hasSession && !hydrating && !emptySession ? (
+          ) : hasSession && !emptySession ? (
             <SessionHeader />
           ) : (
             <span>{hydrating ? "Loading conversation…" : "New session"}</span>
