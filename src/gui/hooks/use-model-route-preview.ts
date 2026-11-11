@@ -16,14 +16,30 @@ export function useModelRoutePreview(
 ) {
   const apiBase = useAppStore((state) => state.apiBase)
   const providers = useAppStore((state) => state.providers)
-  const sessionRevision = useAppStore((state) =>
-    state.selectedSession?.id === sessionId &&
-    state.selectedSession?.activeTurnId === undefined
-      ? state.selectedSession?.seq
-      : undefined,
+  // Session-scoped preview reads stored history. Keying it on every durable
+  // seq retriggers that read for each replayed event and stalls session load.
+  // Wait until hydration finishes, then refresh once per completed turn.
+  const sessionReady = useAppStore(
+    (state) =>
+      sessionId === undefined || state.hydratingSessionId !== sessionId,
   )
+  const turnEpoch = useAppStore((state) => {
+    if (
+      sessionId === undefined ||
+      state.selection.sessionId !== sessionId ||
+      state.hydratingSessionId === sessionId
+    )
+      return undefined
+    let last: string | undefined
+    for (const [turnId, timing] of Object.entries(
+      state.execution.turnTimings,
+    )) {
+      if (timing.completedAt !== undefined) last = turnId
+    }
+    return last
+  })
   const key =
-    selection === undefined
+    selection === undefined || !sessionReady
       ? undefined
       : JSON.stringify([
           {
@@ -31,7 +47,7 @@ export function useModelRoutePreview(
             requirements,
             ...(sessionId === undefined ? {} : { sessionId }),
           },
-          contextRevision ?? sessionRevision,
+          contextRevision ?? turnEpoch,
         ])
   const [result, setResult] =
     useState<

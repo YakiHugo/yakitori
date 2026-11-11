@@ -69,6 +69,36 @@ type SessionSelection = {
 
 const createDraftThreadId = (): string => `draft_${crypto.randomUUID()}`
 const firstInputDraftSessionId = "draft_first_input"
+const unsentProjectKey = (projectId: string | undefined): string =>
+  projectId ?? ""
+
+// In-memory transcript for sessions the user has already opened. Switching
+// back shows this immediately and subscribes only for the tail. Test resets
+// call createInitialAppState, which clears it.
+const executionViews = new Map<
+  string,
+  Readonly<{
+    execution: ExecutionViewState
+    selectedSession: ApiSessionDetail | undefined
+    queuedItems: readonly QueuedInput[]
+  }>
+>()
+
+function executionViewKey(apiBase: string, sessionId: string): string {
+  return `${apiBase}\0${sessionId}`
+}
+
+function rememberExecutionView(state: AppStoreData): void {
+  const sessionId = state.selection.sessionId
+  if (sessionId === undefined) return
+  if (state.execution.lastSeq === 0 && state.execution.entries.length === 0)
+    return
+  executionViews.set(executionViewKey(state.apiBase, sessionId), {
+    execution: state.execution,
+    selectedSession: state.selectedSession,
+    queuedItems: state.queuedItems,
+  })
+}
 
 export type SessionDraft = Readonly<{
   content: InputDraft | undefined
@@ -181,6 +211,9 @@ export type AppStoreData = {
   // Stable across draft creation, navigation and promotion to a server session.
   threadId: string
   newSessionThreadId: string
+  // Eagerly created sessions that have not admitted input yet, keyed by project.
+  // New-session navigation returns here instead of discarding the composer.
+  unsentSessionByProject: Readonly<Record<string, string>>
   sessionThreadIds: Readonly<Record<string, string>>
   sessionsByProject: Record<string, ProjectSessionList>
   stream: SessionStream | undefined
@@ -318,6 +351,7 @@ function subscriptionUsageLoading(
 }
 
 export function createInitialAppState(): AppStoreData {
+  executionViews.clear()
   const newSessionThreadId = createDraftThreadId()
   return {
     sidebar: { sections: [], entries: {} },
@@ -358,6 +392,7 @@ export function createInitialAppState(): AppStoreData {
     selectedSession: undefined,
     threadId: newSessionThreadId,
     newSessionThreadId,
+    unsentSessionByProject: {},
     sessionThreadIds: {},
     sessionsByProject: {},
     stream: undefined,
@@ -985,7 +1020,23 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     else set({ sessionSkills: [], sessionSkillsError: undefined })
   }
 
-  const connectEvents = (selection: SessionSelection, after: number): void => {
+  const releaseUnsentSession = (sessionId: string): void => {
+    set((state) => {
+      const projectKey = Object.entries(state.unsentSessionByProject).find(
+        ([, id]) => id === sessionId,
+      )?.[0]
+      if (projectKey === undefined) return state
+      const unsentSessionByProject = { ...state.unsentSessionByProject }
+      delete unsentSessionByProject[projectKey]
+      return { unsentSessionByProject }
+    })
+  }
+
+  const connectEvents = (
+    selection: SessionSelection,
+    after: number,
+    options: Readonly<{ blockUntilReplay?: boolean }> = {},
+  ): void => {
     if (!isCurrentSelection(selection)) return
     closeStream()
     authoritativeTurns.delete(selection.sessionId)
@@ -997,7 +1048,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           .filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
       },
     }))
-    if (after === 0) set({ hydratingSessionId: selection.sessionId })
+    // A cached resume already has its transcript. Every other subscribe,
+    // including a newly created session's tail, waits for replay before the
+    // composer accepts input.
+    const blockUntilReplay = options.blockUntilReplay !== false
+    if (blockUntilReplay) set({ hydratingSessionId: selection.sessionId })
 
     let replaySnapshot: ApiSessionDetail | undefined
     const goalAtSubscribe = goalSnapshots.get(selection.sessionId)
@@ -1032,7 +1087,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
             set({
               selectedSession: response.session,
-              hydratingSessionId: selection.sessionId,
+              hydratingSessionId: blockUntilReplay
+                ? selection.sessionId
+                : undefined,
               currentProject: response.session.projectId,
               modelSelections,
               restoringModelSelectionFor,
@@ -1189,6 +1246,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
             if (event.sessionId !== selection.sessionId) return
             if (isInputAdmittedEvent(event)) {
+              releaseUnsentSession(event.sessionId)
               if (
                 event.type === "input.admitted" &&
                 inFlightSteerRequests.has(event.data.requestId)
@@ -1558,6 +1616,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           })
           set((state) => {
             const current = state.sessionsByProject[key]
+            const unsentIds = new Set(
+              Object.values(state.unsentSessionByProject),
+            )
+            const preserved = (current?.sessions ?? []).filter(
+              (session) =>
+                unsentIds.has(session.id) &&
+                !sessions.some((entry) => entry.id === session.id),
+            )
             return {
               sessionsByProject: {
                 ...state.sessionsByProject,
@@ -1573,7 +1639,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                           ),
                         ).values(),
                       ]
-                    : sessions,
+                    : [...preserved, ...sessions],
                   ...(response.nextCursor === undefined
                     ? {}
                     : { nextCursor: response.nextCursor }),
@@ -1852,6 +1918,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     },
 
     clearSessionSelection: (input) => {
+      rememberExecutionView(get())
       closeStream()
       set((state) => ({
         sessionDrafts: stashSessionDraft(state),
@@ -1881,6 +1948,19 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       }))
     },
     startNewSession: (projectId = get().currentProject) => {
+      const unsent = get().unsentSessionByProject[unsentProjectKey(projectId)]
+      if (unsent !== undefined) {
+        if (get().selection.sessionId === unsent) {
+          set((state) => ({
+            composerFocusRevision: state.composerFocusRevision + 1,
+          }))
+          return
+        }
+        // The created session still owns the unsent composer. Return to it
+        // instead of opening a blank draft and orphaning the text.
+        void get().selectSession(unsent)
+        return
+      }
       if (
         get().selection.sessionId === undefined &&
         get().currentProject === projectId &&
@@ -1888,6 +1968,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       )
         return
       const state = get()
+      rememberExecutionView(state)
       closeStream()
       set({
         sessionDrafts: stashSessionDraft(state),
@@ -1992,18 +2073,41 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             set({ modelSelections })
             persistModelSelections(modelSelections)
           }
-          set((state) => ({
-            newSessionPrompt: undefined,
-            newSessionExcerpts: [],
-            newSessionThreadId:
-              state.newSessionThreadId === threadId
-                ? createDraftThreadId()
-                : state.newSessionThreadId,
-            sessionThreadIds: {
-              ...state.sessionThreadIds,
-              [response.session.id]: threadId,
-            },
-          }))
+          set((state) => {
+            const projectKey = unsentProjectKey(response.session.projectId)
+            const listKey = sessionListKey(response.session.projectId)
+            const list = state.sessionsByProject[listKey]
+            const known = (list?.sessions ?? []).some(
+              (entry) => entry.id === response.session.id,
+            )
+            return {
+              newSessionPrompt: undefined,
+              newSessionExcerpts: [],
+              newSessionThreadId:
+                state.newSessionThreadId === threadId
+                  ? createDraftThreadId()
+                  : state.newSessionThreadId,
+              unsentSessionByProject: {
+                ...state.unsentSessionByProject,
+                [projectKey]: response.session.id,
+              },
+              sessionThreadIds: {
+                ...state.sessionThreadIds,
+                [response.session.id]: threadId,
+              },
+              ...(known
+                ? {}
+                : {
+                    sessionsByProject: {
+                      ...state.sessionsByProject,
+                      [listKey]: {
+                        ...list,
+                        sessions: [response.session, ...(list?.sessions ?? [])],
+                      },
+                    },
+                  }),
+            }
+          })
           const draftAtCreation =
             get().selection.sessionId === undefined &&
             get().threadId === threadId
@@ -2136,6 +2240,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         useWorkspaceStore.getState().removeSession(removedThreadId)
         removeThreadScope(removedThreadId)
         removeThreadScope(`${get().apiBase}:${removedThreadId}`)
+        executionViews.delete(executionViewKey(get().apiBase, sessionId))
+        releaseUnsentSession(sessionId)
         if (get().selection.sessionId === sessionId) {
           closeStream()
           set((state) => {
@@ -2349,6 +2455,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     },
 
     selectSession: async (sessionId, suppliedSummary) => {
+      if (
+        get().selection.sessionId === sessionId &&
+        (get().stream !== undefined || get().hydratingSessionId === sessionId)
+      )
+        return
       const summary = suppliedSummary ?? findSessionSummary(get(), sessionId)
       if (suppliedSummary !== undefined) {
         const key = sessionListKey(suppliedSummary.projectId, {
@@ -2402,28 +2513,40 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           summary.projectId ?? "",
         )
       }
+      rememberExecutionView(get())
+      const storedView = executionViews.get(
+        executionViewKey(get().apiBase, sessionId),
+      )
+      const cached =
+        storedView !== undefined && storedView.execution.lastSeq > 0
+          ? storedView
+          : undefined
+      queueReadRevision += 1
+      const selection = {
+        revision: get().sessionSelectionIntentRevision + 1,
+        sessionId,
+      }
+      closeStream()
       set((state) => ({
-        sessionSelectionIntentRevision:
-          state.sessionSelectionIntentRevision + 1,
-        sessionDrafts: stashSessionDraft(state),
-      }))
-      set({
+        sessionSelectionIntentRevision: selection.revision,
+        selection: { sessionId },
+        threadId: state.sessionThreadIds[sessionId] ?? sessionId,
         restoringModelSelectionFor:
-          get().modelSelections[sessionId] === undefined
+          state.modelSelections[sessionId] === undefined
             ? sessionId
             : undefined,
-      })
-      const selection = activateSession(sessionId)
-      closeStream()
-      set({
-        execution: createExecutionViewState(),
-        selectedSession: undefined,
+        hydratingSessionId: cached ? undefined : sessionId,
+        execution: cached?.execution ?? createExecutionViewState(),
+        selectedSession: cached?.selectedSession,
+        queuedItems: cached?.queuedItems ?? [],
         sessionSkills: [],
         commandPanel: undefined,
         settingsSection: undefined,
-        ...takeSessionDraft(get().sessionDrafts, sessionId),
+        ...takeSessionDraft(stashSessionDraft(state), sessionId),
+      }))
+      connectEvents(selection, cached?.execution.lastSeq ?? 0, {
+        blockUntilReplay: cached === undefined,
       })
-      connectEvents(selection, 0)
       void get().refreshQueuedInputs()
       loadSessionSkills(sessionId)
     },
@@ -2889,6 +3012,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             throw new Error("Admission response did not match the request.")
           }
           recordPromotedContent(pendingAdmission.content, response.content)
+          releaseUnsentSession(selection.sessionId)
           if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
           // Queue storage has committed before its response. Direct starts
           // still wait for input.admitted from the rollout stream.
@@ -3247,7 +3371,13 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
     setModelSelection: (sessionId, selection) => {
       if (sessionId === undefined) {
+        if (sameModelSelection(get().draftModelSelection, selection)) return
         set({ draftModelSelection: selection })
+        return
+      }
+      if (sameModelSelection(get().modelSelections[sessionId], selection)) {
+        if (get().restoringModelSelectionFor === sessionId)
+          set({ restoringModelSelectionFor: undefined })
         return
       }
       const apiBase = get().apiBase
