@@ -521,6 +521,10 @@ describe("structured context and ephemeral forks", () => {
     }
     const accepted = await submit(content)
     if (!accepted.ok) throw new Error(accepted.error.message)
+    const promoteRetry = vi.spyOn(
+      context.app.rolloutAssets,
+      "promoteAttachments",
+    )
     expect(await submit(content)).toMatchObject(
       route === "queue"
         ? { ok: true, value: accepted.value }
@@ -539,6 +543,8 @@ describe("structured context and ephemeral forks", () => {
         ),
       }),
     ).toMatchObject({ ok: false, error: { code: "conflict" } })
+    if (route === "steer") expect(promoteRetry).not.toHaveBeenCalled()
+    promoteRetry.mockRestore()
     release()
     await until(
       () =>
@@ -588,6 +594,18 @@ describe("structured context and ephemeral forks", () => {
     expect(await context.app.rolloutAssets.read(storedPdf.file)).toEqual(
       pdfBytes,
     )
+    if (route === "steer") {
+      const promoteAfterRestart = vi.spyOn(
+        context.app.rolloutAssets,
+        "promoteAttachments",
+      )
+      expect(await submit(content)).toMatchObject({
+        ok: false,
+        error: { code: "conflict", details: { reason: "request_conflict" } },
+      })
+      expect(promoteAfterRestart).not.toHaveBeenCalled()
+      promoteAfterRestart.mockRestore()
+    }
     expect(
       await context.app.handlers.admitInput({
         sessionId: id,

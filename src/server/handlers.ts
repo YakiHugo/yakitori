@@ -2028,70 +2028,95 @@ export function createThreadServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const thread = await resumeRequired(request.sessionId)
-        const rolloutId = thread.snapshot().metadata.rolloutId
-        const promoted = await promoteRequestAttachments(
-          rolloutId,
+        return await withAdmissionLock(
+          request.sessionId,
           request.requestId,
-          request.content,
-        )
-        const steerKey = `${request.sessionId}\0${request.requestId}`
-        const submitted = await thread
-          .steer(
-            {
-              submissionId: request.requestId,
-              content: promoted.content,
-              ...(request.modelSelection === undefined
-                ? {}
-                : { modelSelection: request.modelSelection }),
-              ...(request.metadata === undefined
-                ? {}
-                : { metadata: request.metadata }),
-            },
-            request.expectedTurnId,
-          )
-          .catch(async (error: unknown) => {
-            await promoted.rollback?.()
-            throw error
-          })
-        if (submitted.type === "not_submitted") {
-          await promoted.rollback?.()
-          throw conflict(`Input was not submitted: ${submitted.reason}.`, {
-            reason: submitted.reason,
-          })
-        }
-        if (inputContentAttachments(request.content).length !== 0) {
-          pendingSteerDrafts.set(steerKey, [
-            ...(pendingSteerDrafts.get(steerKey) ?? []),
-            request.content,
-          ])
-          const stored = await options.store.readThread(request.sessionId)
-          const recorded = stored?.rollout.some(
-            ({ item }) =>
-              item.type === "response_item" &&
-              item.item.turnId === request.requestId &&
-              item.item.item.role === "user" &&
-              item.item.item.context === undefined,
-          )
-          if (recorded) {
-            const drafts = pendingSteerDrafts.get(steerKey) ?? []
-            pendingSteerDrafts.delete(steerKey)
-            for (const draft of drafts)
-              await discardAdmittedDraftAttachments(
-                request.sessionId,
-                request.requestId,
-                draft,
+          async () => {
+            const thread = await resumeRequired(request.sessionId)
+            const steerKey = `${request.sessionId}\0${request.requestId}`
+            // A consumed steering draft can disappear while attachment promotion
+            // reads it. Reject accepted human request IDs before touching assets.
+            const stored = await options.store.readThread(request.sessionId)
+            if (
+              pendingSteerDrafts.has(steerKey) ||
+              stored?.rollout.some(
+                ({ item }) =>
+                  (item.type === "turn_started" &&
+                    item.turnId === request.requestId) ||
+                  (item.type === "response_item" &&
+                    item.item.turnId === request.requestId &&
+                    item.item.item.role === "user" &&
+                    item.item.item.context === undefined),
               )
-          }
-        }
-        // Steering acceptance is ephemeral. Preserve draft assets until the
-        // model records this input, so a lost response or an interrupted Turn
-        // leaves the client's draft retryable.
-        return ok({
-          requestId: request.requestId,
-          turnId: submitted.turnId,
-          content: promoted.content,
-        })
+            ) {
+              throw conflict("Input was not submitted: request_conflict.", {
+                reason: "request_conflict",
+              })
+            }
+            const rolloutId = thread.snapshot().metadata.rolloutId
+            const promoted = await promoteRequestAttachments(
+              rolloutId,
+              request.requestId,
+              request.content,
+            )
+            const submitted = await thread
+              .steer(
+                {
+                  submissionId: request.requestId,
+                  content: promoted.content,
+                  ...(request.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: request.modelSelection }),
+                  ...(request.metadata === undefined
+                    ? {}
+                    : { metadata: request.metadata }),
+                },
+                request.expectedTurnId,
+              )
+              .catch(async (error: unknown) => {
+                await promoted.rollback?.()
+                throw error
+              })
+            if (submitted.type === "not_submitted") {
+              await promoted.rollback?.()
+              throw conflict(`Input was not submitted: ${submitted.reason}.`, {
+                reason: submitted.reason,
+              })
+            }
+            if (inputContentAttachments(request.content).length !== 0) {
+              pendingSteerDrafts.set(steerKey, [
+                ...(pendingSteerDrafts.get(steerKey) ?? []),
+                request.content,
+              ])
+              const stored = await options.store.readThread(request.sessionId)
+              const recorded = stored?.rollout.some(
+                ({ item }) =>
+                  item.type === "response_item" &&
+                  item.item.turnId === request.requestId &&
+                  item.item.item.role === "user" &&
+                  item.item.item.context === undefined,
+              )
+              if (recorded) {
+                const drafts = pendingSteerDrafts.get(steerKey) ?? []
+                pendingSteerDrafts.delete(steerKey)
+                for (const draft of drafts)
+                  await discardAdmittedDraftAttachments(
+                    request.sessionId,
+                    request.requestId,
+                    draft,
+                  )
+              }
+            }
+            // Steering acceptance is ephemeral. Preserve draft assets until the
+            // model records this input, so a lost response or an interrupted Turn
+            // leaves the client's draft retryable.
+            return ok({
+              requestId: request.requestId,
+              turnId: submitted.turnId,
+              content: promoted.content,
+            })
+          },
+        )
       } catch (error) {
         return fail(error, reporter, "steer-input")
       }
