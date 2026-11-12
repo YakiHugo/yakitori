@@ -12,6 +12,7 @@ import type {
   ApiSessionDetail,
   ApiSessionSummary,
 } from "../../src/protocol/application.ts"
+import type { SessionSidebar } from "../../src/protocol/sidebar.ts"
 import { FakeRpcClient } from "../gui/fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -427,5 +428,120 @@ describe("sidebar session discovery", () => {
     expect(useAppStore.getState().sessionsByProject[""]?.nextCursor).toBe(
       "page_2",
     )
+  })
+
+  it("keeps confirmed archive membership when a summary read predates the mutation", async () => {
+    const row = sessionSummary({ projectId: "project_1" })
+    await boot([row])
+    useAppStore.setState({
+      sessionsByProject: {
+        "": { sessions: [row], nextCursor: "all_page_2" },
+        project_1: { sessions: [row], nextCursor: "project_page_2" },
+        "sidebar:archived": { sessions: [], nextCursor: "archive_page_2" },
+      },
+    })
+    const staleSummary = deferred<ApiSessionSummary>()
+    const update = deferred<SessionSidebar>()
+    fakeRef.current.respond = (method) =>
+      method === "session/summary" ? staleSummary.promise : update.promise
+    fakeRef.current.emitSidebarChanged({ sessionId: session.id })
+    const changing = useAppStore.getState().changeSidebar({
+      type: "session",
+      sessionId: session.id,
+      archived: true,
+    })
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("sidebar/update")).toHaveLength(1),
+    )
+    const sidebar: SessionSidebar = {
+      sections: [],
+      entries: { [session.id]: { archived: true } },
+    }
+    fakeRef.current.emitSidebarChanged({ sessionId: session.id, sidebar })
+    update.resolve(sidebar)
+    await changing
+    staleSummary.resolve(row)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    const lists = useAppStore.getState().sessionsByProject
+    expect(lists[""]?.sessions).toEqual([])
+    expect(lists.project_1?.sessions).toEqual([])
+    expect(lists["sidebar:archived"]?.sessions).toMatchObject([
+      { id: session.id, archived: true },
+    ])
+    expect(lists.project_1?.nextCursor).toBe("project_page_2")
+    expect(lists["sidebar:archived"]?.nextCursor).toBe("archive_page_2")
+
+    fakeRef.current.respond = () => ({
+      ...row,
+      archived: true,
+      status: "waiting",
+    })
+    fakeRef.current.emitSidebarChanged({ sessionId: session.id })
+    await vi.waitFor(() =>
+      expect(
+        useAppStore.getState().sessionsByProject["sidebar:archived"]
+          ?.sessions[0]?.status,
+      ).toBe("waiting"),
+    )
+    expect(
+      useAppStore.getState().sessionsByProject.project_1?.sessions,
+    ).toEqual([])
+  })
+
+  it("keeps optimistic and confirmed pin membership when summary reads start during the mutation", async () => {
+    const row = sessionSummary({ projectId: "project_1" })
+    await boot([row])
+    useAppStore.setState({
+      sessionsByProject: {
+        project_1: { sessions: [row], nextCursor: "project_page_2" },
+        "sidebar:section:pinned": { sessions: [], nextCursor: "pinned_page_2" },
+      },
+    })
+    const firstSummary = deferred<ApiSessionSummary>()
+    const secondSummary = deferred<ApiSessionSummary>()
+    const update = deferred<SessionSidebar>()
+    let summaryReads = 0
+    fakeRef.current.respond = (method) =>
+      method === "sidebar/update"
+        ? update.promise
+        : ++summaryReads === 1
+          ? firstSummary.promise
+          : secondSummary.promise
+    const changing = useAppStore.getState().changeSidebar({
+      type: "session",
+      sessionId: session.id,
+      sectionId: "pinned",
+    })
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("sidebar/update")).toHaveLength(1),
+    )
+    fakeRef.current.emitSidebarChanged({ sessionId: session.id })
+    firstSummary.resolve(row)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(
+      useAppStore.getState().sessionsByProject.project_1?.sessions,
+    ).toEqual([])
+    expect(
+      useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+        ?.sessions,
+    ).toMatchObject([{ id: session.id, sectionId: "pinned" }])
+
+    fakeRef.current.emitSidebarChanged({ sessionId: session.id })
+    update.resolve({
+      sections: [],
+      entries: { [session.id]: { sectionId: "pinned", sectionPosition: 1 } },
+    })
+    await changing
+    secondSummary.resolve(row)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    const lists = useAppStore.getState().sessionsByProject
+    expect(lists.project_1?.sessions).toEqual([])
+    expect(lists["sidebar:section:pinned"]?.sessions).toMatchObject([
+      { id: session.id, sectionId: "pinned", sectionPosition: 1 },
+    ])
+    expect(lists.project_1?.nextCursor).toBe("project_page_2")
+    expect(lists["sidebar:section:pinned"]?.nextCursor).toBe("pinned_page_2")
   })
 })

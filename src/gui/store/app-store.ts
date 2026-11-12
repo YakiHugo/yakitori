@@ -1467,9 +1467,17 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           if (sidebar === undefined && sessionId !== undefined) {
             const revision = (summaryReadRevisions.get(sessionId) ?? 0) + 1
             summaryReadRevisions.set(sessionId, revision)
+            // Discovery must not restore membership captured before a sidebar
+            // change or while its optimistic presentation is still pending.
+            const presentationRevision = sidebarReadRevision
+            const startedDuringMutation =
+              pendingSidebarSessionIds.has(sessionId)
             const isCurrent = () =>
               getAppRpcClient(get().apiBase) === client &&
-              summaryReadRevisions.get(sessionId) === revision
+              summaryReadRevisions.get(sessionId) === revision &&
+              sidebarReadRevision === presentationRevision &&
+              !startedDuringMutation &&
+              !pendingSidebarSessionIds.has(sessionId)
             // Runtime status notifications must not reload the first page of
             // every list: those lists may already contain paginated rows.
             void runTask(
