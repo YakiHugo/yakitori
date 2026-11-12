@@ -727,7 +727,15 @@ describe("goal runtime", () => {
     expect(application.threadManager.getThread(sessionId)).not.toBe(
       originalActor,
     )
-    expect(await readGoal(application, sessionId)).toEqual(originalGoal)
+    const revertedGoal = await readGoal(application, sessionId)
+    expect(revertedGoal).toEqual({
+      ...originalGoal,
+      timeUsedSeconds: expect.any(Number),
+      updatedAt: expect.any(String),
+    })
+    expect(revertedGoal?.timeUsedSeconds).toBeGreaterThanOrEqual(
+      originalGoal?.timeUsedSeconds ?? 0,
+    )
     expect(provider.requests).toHaveLength(3)
     body(
       await application.handlers.admitInput({
