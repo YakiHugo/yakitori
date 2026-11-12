@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { expect, it } from "vitest"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
+import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   BrowserControlError,
   type DesktopBrowser,
@@ -106,6 +107,51 @@ catch(error){process.send({error:error.message})}
     await rm(root, { recursive: true, force: true })
   }
 }, 15_000)
+
+it.each([
+  "src/server/start.ts",
+  "src/server/desktop-entry.ts",
+])("enables the supplied browser bridge through the real %s entry", async (entry) => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-browser-entry-"))
+  const closed: string[] = []
+  let server: Awaited<ReturnType<typeof spawnServerProcess>> | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve(entry)],
+      cwd: root,
+      env: {
+        ...process.env,
+        YAKITORI_STORE_DIR: join(root, "store"),
+        YAKITORI_WORKSPACE: root,
+        YAKITORI_PROVIDER: "faux",
+        HOST: "127.0.0.1",
+        PORT: "0",
+      },
+      desktopBrowser: {
+        async request() {
+          return {}
+        },
+        async finishTurn() {},
+        async closeSession(sessionId) {
+          closed.push(sessionId)
+        },
+      },
+    })
+    client = createAppRpcClient({ apiBase: server.url })
+    const { session } = await client.request("session/create", {})
+    await client.request("session/close", { sessionId: session.id })
+    expect(closed).toEqual([session.id])
+    client.close()
+    await server.stop()
+    expect(server.child.exitCode).toBe(0)
+  } finally {
+    client?.close()
+    await server?.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 async function fixture(
   browser:

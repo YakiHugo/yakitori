@@ -17,6 +17,7 @@ const guiStaticDir = process.env.YAKITORI_GUI_DIR
 await runYakitoriServerProcess({
   host,
   port,
+  desktopBrowserIpc: process.env.YAKITORI_DESKTOP_BROWSER === "1",
   application: {
     rootDir,
     ...(guiStaticDir === undefined ? {} : { guiStaticDir }),
