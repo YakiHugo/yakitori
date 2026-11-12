@@ -68,4 +68,120 @@ describe("model failure diagnostics", () => {
       }),
     ).toBe("OpenAI-shaped reason")
   })
+
+  it.each([
+    "UND_ERR_INVALID_ARG",
+    "UND_ERR_CLOSED",
+    "UND_ERR_DESTROYED",
+    "ERR_INVALID_URL",
+    "ERR_INVALID_ARG_VALUE",
+    "CERT_HAS_EXPIRED",
+  ])("makes wrapped local transport error %s terminal despite the adapter's connection classification", (code) => {
+    const failure = modelFailureFromUnknown(
+      Object.assign(
+        new Error("Connection error.", {
+          cause: new TypeError("fetch failed", {
+            cause: Object.assign(new Error("unselected private argument"), {
+              code,
+            }),
+          }),
+        }),
+        { code: "SDK_CONNECTION_ERROR" },
+      ),
+      {
+        provider: "test",
+        wireApi: "openai_responses",
+        stage: "connect",
+        fallbackMessage: "Request failed.",
+        kind: "connection_failed",
+        serverShouldRetry: true,
+      },
+    )
+    expect(failure).toMatchObject({
+      kind: "invalid_request",
+      serverShouldRetry: false,
+      details: { causeCode: code },
+    })
+    expect(failure.message).toContain("local transport or configuration")
+    expect(failure.message).not.toContain("private argument")
+  })
+
+  it.each([
+    new TypeError("Invalid header value"),
+    new RangeError("Invalid timeout"),
+    new ReferenceError("Missing configuration"),
+  ])("makes a wrapped programmer error terminal: %s", (cause) => {
+    expect(
+      modelFailureFromUnknown(new Error("Connection error.", { cause }), {
+        provider: "test",
+        wireApi: "openai_responses",
+        stage: "connect",
+        kind: "connection_failed",
+        fallbackMessage: "Request failed.",
+      }),
+    ).toMatchObject({ kind: "invalid_request", serverShouldRetry: false })
+  })
+
+  it("keeps a fetch TypeError caused by a socket disconnect retryable", () => {
+    expect(
+      modelFailureFromUnknown(
+        new TypeError("terminated", {
+          cause: Object.assign(new Error("other side closed"), {
+            code: "UND_ERR_SOCKET",
+          }),
+        }),
+        {
+          provider: "test",
+          wireApi: "openai_responses",
+          stage: "response_body",
+          fallbackMessage: "Request failed.",
+        },
+      ),
+    ).toMatchObject({
+      kind: "stream_disconnected",
+      details: { causeCode: "UND_ERR_SOCKET" },
+    })
+  })
+
+  it("finds a socket error code beneath an SDK wrapper code without interpreting messages", () => {
+    const failure = modelFailureFromUnknown(
+      Object.assign(
+        new Error("outer diagnostic", {
+          cause: new TypeError("fetch diagnostic", {
+            cause: Object.assign(new Error("socket diagnostic"), {
+              code: "UND_ERR_SOCKET",
+            }),
+          }),
+        }),
+        { code: "SDK_CONNECTION_ERROR" },
+      ),
+      {
+        provider: "test",
+        wireApi: "openai_responses",
+        stage: "response_body",
+        fallbackMessage: "Request failed.",
+      },
+    )
+    expect(failure).toMatchObject({
+      kind: "stream_disconnected",
+      details: { causeCode: "UND_ERR_SOCKET" },
+    })
+  })
+
+  it.each([
+    "terminated",
+    "socket hang up",
+    "connection closed",
+    "connection reset",
+    "other side closed",
+  ])("does not infer a transport failure from the diagnostic %j", (message) => {
+    expect(
+      modelFailureFromUnknown(new Error(message), {
+        provider: "test",
+        wireApi: "openai_responses",
+        stage: "response_body",
+        fallbackMessage: "Request failed.",
+      }),
+    ).toMatchObject({ kind: "provider_error", message: "Request failed." })
+  })
 })

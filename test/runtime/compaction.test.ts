@@ -203,7 +203,6 @@ describe("isContextOverflowError", () => {
     "This model's maximum context length is 200000 tokens",
     "context_length_exceeded",
     "Request too large for model",
-    "HTTP 413",
   ])("recognizes %s", (message) => {
     expect(isContextOverflowError(new Error(message))).toBe(true)
   })

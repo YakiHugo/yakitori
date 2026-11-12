@@ -1,4 +1,4 @@
-import { Agent as UndiciAgent } from "undici"
+import { fetch as grokFetch, Agent as UndiciAgent } from "undici"
 import {
   GROK_API_BASE_URL,
   resolveGrokModelCredentials,
@@ -104,7 +104,12 @@ export function createGrokProvider(
             baseURL: GROK_API_BASE_URL,
             ...(dispatcher === undefined
               ? {}
-              : { fetchOptions: { dispatcher } }),
+              : {
+                  // A dispatcher must use its own Undici's fetch: Node's
+                  // bundled version may use a different handler contract.
+                  fetch: grokFetch as unknown as typeof globalThis.fetch,
+                  fetchOptions: { dispatcher },
+                }),
           })({
             ...request,
             continuationScope: scope,
