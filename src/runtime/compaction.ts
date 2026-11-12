@@ -39,13 +39,31 @@ export function isContextOverflowError(error: unknown): boolean {
   )
 }
 
+const compactionBillingCodes = new Set([
+  "credit_balance_exhausted",
+  "insufficient_quota",
+  "usage_limit_reached",
+])
+
+// Billing and reachability failures mean the previous model cannot prepare a
+// checkpoint. A portable history can move to the selected model; an opaque
+// native checkpoint cannot.
+export function isCompactionSourceUnavailable(error: unknown): boolean {
+  if (!(error instanceof ModelFailureError)) return false
+  const { kind, providerCode } = error.failure
+  return (
+    kind === "connection_failed" ||
+    kind === "rate_limited" ||
+    (providerCode !== undefined && compactionBillingCodes.has(providerCode))
+  )
+}
+
 export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
   if (!(error instanceof ModelFailureError)) return false
   const status = error.failure.status
   return (
     isContextOverflowError(error) ||
-    error.failure.kind === "connection_failed" ||
-    error.failure.kind === "rate_limited" ||
+    isCompactionSourceUnavailable(error) ||
     error.failure.kind === "server_error" ||
     error.failure.kind === "stream_disconnected" ||
     (typeof status === "number" && status >= 400 && status !== 401) ||
@@ -54,7 +72,6 @@ export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
       "model_not_found",
       "context_length_exceeded",
       "rate_limit_exceeded",
-      "usage_limit_reached",
       "server_error",
       "server_overloaded",
     ].includes(error.failure.providerCode ?? "")

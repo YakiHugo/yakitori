@@ -1073,21 +1073,12 @@ async function executeTurnModelLoop(
               compactedAtModelCall !== modelCalls
             ? { provider: previousModel.provider, model: previousModel.model }
             : undefined
-      if (sourceSelection !== undefined) {
+      const ownerUnavailable =
+        foreignCheckpoint !== undefined &&
+        !input.options.modelClient?.hasProvider(foreignCheckpoint.provider)
+      let ownerUnconfigured = false
+      if (sourceSelection !== undefined && !ownerUnavailable) {
         const client = input.options.modelClient
-        if (
-          foreignCheckpoint !== undefined &&
-          !client?.hasProvider(sourceSelection.provider)
-        ) {
-          throw new ModelFailureError({
-            kind: "invalid_request",
-            stage: "request_build",
-            provider: step.target.provider,
-            wireApi: wireApi ?? "unknown",
-            providerCode: "history_incompatible",
-            message: `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
-          })
-        }
         const sourceSession =
           sourceSelection.provider === step.target.provider
             ? modelSession
@@ -1128,17 +1119,7 @@ async function executeTurnModelLoop(
                   block.model === sourceSelection.model,
               )
             ) {
-              throw new ModelFailureError(
-                {
-                  kind: "invalid_request",
-                  stage: "request_build",
-                  provider: step.target.provider,
-                  wireApi: wireApi ?? "unknown",
-                  providerCode: "history_incompatible",
-                  message: `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
-                },
-                { cause: error },
-              )
+              ownerUnconfigured = true
             }
             // Ordinary history is portable. A removed prior model cannot prepare
             // a checkpoint; let the selected model's admission use its transport.
@@ -1154,6 +1135,9 @@ async function executeTurnModelLoop(
               previousModel.compactionHash !== undefined &&
               step.modelInfo.compactionHash !== undefined &&
               previousModel.compactionHash !== step.modelInfo.compactionHash
+            // The previous model still prepares the checkpoint when the window
+            // shrinks past what it can see, or past the selected model's compact
+            // limit. Failure falls back to the selected model below.
             const downshift =
               (sourceSelection.model !== step.target.model ||
                 sourceSelection.provider !== step.target.provider) &&
@@ -1179,6 +1163,11 @@ async function executeTurnModelLoop(
                   ? {}
                   : { toolCapabilities: sourceSession.toolCapabilities }),
               })
+              // The selected model is the fallback whenever this preflight uses
+              // another model, including an encrypted checkpoint it cannot read.
+              const fallbackToSelectedModel =
+                sourceSelection.provider !== step.target.provider ||
+                sourceSelection.model !== step.target.model
               try {
                 await compactLiveHistory({
                   session: input.session,
@@ -1196,10 +1185,7 @@ async function executeTurnModelLoop(
                     sourceSelection.provider === step.target.provider &&
                     sourceSelection.model === step.target.model &&
                     (sourceSession?.remoteCompaction ?? false),
-                  ...(sourceSelection.provider === step.target.provider &&
-                  remoteCompaction === "codex_remote" &&
-                  sourceSelection.model !== step.target.model &&
-                  nativeCheckpoints.length === 0
+                  ...(fallbackToSelectedModel
                     ? { fallback: { step, stream } }
                     : {}),
                   signal: input.signal,
@@ -1225,6 +1211,33 @@ async function executeTurnModelLoop(
           if (sourceSession !== modelSession)
             await settleTaskResources(() => sourceSession?.close())
         }
+      }
+      if (ownerUnavailable || ownerUnconfigured) {
+        await compactLiveHistory({
+          session: input.session,
+          execution: input.execution,
+          turnId: input.input.submissionId,
+          step,
+          worldState,
+          history: historyReadableBy(compactionHistory, step.target),
+          injectWorldState: modelCalls !== 0,
+          stream,
+          remoteCompaction: false,
+          wireApi,
+          signal: input.signal,
+          rolloutAssets: input.options.rolloutAssets,
+          assetUrl: input.options.assetUrl,
+          usages,
+          onModelTiming: onCompactionModelTiming,
+          rolloutBudget: budget,
+          onOperationalFailure: input.options.onOperationalFailure,
+          ...(input.options.hookRunner === undefined
+            ? {}
+            : { hookRunner: input.options.hookRunner }),
+          setActiveStream: input.setActiveStream,
+        })
+        compactedAtModelCall = modelCalls
+        continue
       }
       if (
         (admission.shouldCompact || continuationNeedsCompaction) &&
@@ -2899,17 +2912,27 @@ async function compactLiveHistory(
           fallbackSourceError = error
           compactionStep = input.fallback.step
           compactionStream = input.fallback.stream
+          const readable = historyReadableBy(
+            input.history,
+            compactionStep.target,
+          ).map(({ item }) => item)
           source = input.remoteCompaction
             ? trimRemoteCompactionToolTail(
-                input.history.map(({ item }) => item),
+                readable,
                 compactionStep.configuration.baseInstructions.text,
                 compactionStep.configuration.modelCapacity
                   ?.effectiveContextWindowTokens,
               )
-            : input.history.map(({ item }) => item)
+            : readable
           continue
         }
-        if (usedFallback && fallbackSourceError !== undefined) {
+        // A selected-model fallback still trims an over-long portable history.
+        // Any other fallback failure keeps the source model's error.
+        if (
+          usedFallback &&
+          fallbackSourceError !== undefined &&
+          (input.remoteCompaction || !isContextOverflowError(error))
+        ) {
           throw fallbackSourceError
         }
         if (
@@ -2965,15 +2988,24 @@ async function compactLiveHistory(
           })
     if (summaryItem === undefined)
       throw new Error("Missing compaction checkpoint.")
-    const replacement =
-      input.remoteCompaction === "responses_compact"
+    const replacement = [
+      ...(input.remoteCompaction === "responses_compact"
         ? [summaryItem, ...generated.slice(0, -1)]
         : [
             ...retained.slice(0, -1),
             ...generated.slice(0, -1),
             ...retained.slice(-1),
             summaryItem,
+          ]),
+      ...(omittedEncryptedCheckpoint(input.history, compactionStep.target)
+        ? [
+            envelope(input.turnId, {
+              role: "developer",
+              content: [{ type: "text", text: OMITTED_ENCRYPTED_CONTEXT }],
+            }),
           ]
+        : []),
+    ]
     await input.session.checkpointHistory(input.execution, {
       replacement,
       summary: result.summary,
@@ -3265,6 +3297,93 @@ function completeToolCallHistory(
   }
   if (pending.length > 0) flushMissing()
   return completed
+}
+
+const OMITTED_ENCRYPTED_CONTEXT =
+  "<filtered_context>\nSome earlier context was filtered out because it was stored in an encrypted checkpoint that this model cannot read.\n</filtered_context>"
+
+function omittedEncryptedCheckpoint(
+  history: readonly ResponseItemEnvelope[],
+  target: { provider: string; model: string },
+): boolean {
+  return history.some((entry) => {
+    const message = entry.item
+    if (
+      message.role === "developer" &&
+      message.content.some(
+        (block) =>
+          block.type === "text" && block.text === OMITTED_ENCRYPTED_CONTEXT,
+      )
+    ) {
+      return true
+    }
+    if (message.role !== "assistant") return false
+    return (
+      message.content.some(
+        (block) =>
+          block.type === "compaction" &&
+          (block.provider !== target.provider || block.model !== target.model),
+      ) ||
+      (message.native?.some(
+        (item) =>
+          item.value.type === "compaction" &&
+          (item.provider !== target.provider || item.model !== target.model),
+      ) ??
+        false)
+    )
+  })
+}
+
+function historyReadableBy(
+  history: readonly ResponseItemEnvelope[],
+  target: { provider: string; model: string },
+): ResponseItemEnvelope[] {
+  let omitted = false
+  const readable = history.flatMap((envelope) => {
+    const message = envelope.item
+    if (message.role !== "assistant") return [envelope]
+    const content = message.content.filter((block) => {
+      const foreign =
+        block.type === "compaction" &&
+        (block.provider !== target.provider || block.model !== target.model)
+      if (foreign) omitted = true
+      return !foreign
+    })
+    const native = message.native?.filter((item) => {
+      const foreign =
+        item.value.type === "compaction" &&
+        (item.provider !== target.provider || item.model !== target.model)
+      if (foreign) omitted = true
+      return !foreign
+    })
+    if (
+      content.length === message.content.length &&
+      native?.length === message.native?.length
+    ) {
+      return [envelope]
+    }
+    if (content.length === 0 && (native === undefined || native.length === 0)) {
+      return []
+    }
+    return [
+      {
+        ...envelope,
+        item: {
+          ...message,
+          content,
+          ...(message.native === undefined ? {} : { native: native ?? [] }),
+        },
+      },
+    ]
+  })
+  if (!omitted) return readable
+  return [
+    ...readable,
+    envelope(history.at(-1)?.turnId ?? "turn", {
+      role: "developer",
+      content: [{ type: "text", text: OMITTED_ENCRYPTED_CONTEXT }],
+    }),
+  ]
 }
 
 function previousModelId(
