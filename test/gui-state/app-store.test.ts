@@ -2044,7 +2044,7 @@ describe("revert session", () => {
     })
     expect(
       inputRecoveryMemory.listAdmissionsForApiBase("http://api.test"),
-    ).toEqual([])
+    ).toHaveLength(2)
     await useAppStore.getState().selectSession("session_1")
     expect(fakeRef.current.streams.at(-1)?.after).toBe(0)
     expect(useAppStore.getState().promptDraft).toEqual(
@@ -2059,6 +2059,88 @@ describe("revert session", () => {
       session_1: 2,
       session_other: 1,
     })
+    expect(
+      inputRecoveryMemory.listAdmissionsForSession(
+        "http://api.test",
+        "session_1",
+      ),
+    ).toEqual([])
+  })
+
+  it.each([
+    false,
+    true,
+  ])("keeps reconnect recovery until its rollout is confirmed (changed: %s)", async (changed) => {
+    await useAppStore.getState().boot()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/queue/list") return { items: [] }
+      if (method === "session/skills") return { skills: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    const original = fakeRef.current.streams.at(-1)
+    emitSnapshot(original)
+    original?.emitReplayComplete()
+    const admission = inputRecoveryMemory.reserveAdmission({
+      apiBase: "http://api.test",
+      sessionId: "session_1",
+      content: inputFixture(inputParts("unconfirmed")),
+    })
+    fakeRef.current.emitHistoryReset()
+    expect(
+      inputRecoveryMemory.listAdmissionsForSession(
+        "http://api.test",
+        "session_1",
+      ),
+    ).toHaveLength(1)
+    const reconnect = fakeRef.current.streams.at(-1)
+    expect(reconnect?.after).toBe(0)
+    expect(reconnect?.options?.recent).toBe(false)
+    emitSnapshot(reconnect, {
+      ...sessionDetail,
+      rolloutId: changed ? "rollout_reverted" : sessionDetail.rolloutId,
+    })
+    if (changed) {
+      expect(reconnect?.closed).toBe(true)
+      expect(
+        inputRecoveryMemory.listAdmissionsForSession(
+          "http://api.test",
+          "session_1",
+        ),
+      ).toEqual([])
+      expect(useAppStore.getState().promptDraft).toBeUndefined()
+    } else {
+      reconnect?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: admission.requestId,
+              inputId: "confirmed_input",
+              role: InputRole.User,
+              content: admission.content,
+            },
+          },
+        }),
+      )
+      reconnect?.emitReplayComplete()
+      await vi.waitFor(() =>
+        expect(
+          inputRecoveryMemory.listAdmissionsForSession(
+            "http://api.test",
+            "session_1",
+          ),
+        ).toEqual([]),
+      )
+      expect(useAppStore.getState().promptDraft).toBeUndefined()
+      expect(
+        useAppStore.getState().execution.admittedRequestIds[
+          admission.requestId
+        ],
+      ).toBe(true)
+    }
   })
 
   it.each([
@@ -4025,6 +4107,23 @@ describe("model selection", () => {
     expect(params).toContainEqual(
       expect.objectContaining({ modelSelection: picked }),
     )
+  })
+
+  it("persists a draft model choice before a session has been created", async () => {
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      userPreference: { provider: "removed-account", model: "retired-model" },
+    })
+    const picked = { provider: "faux", model: "scripted" }
+    useAppStore.getState().setModelSelection(undefined, picked)
+    expect(useAppStore.getState().draftModelSelection).toEqual(picked)
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().userPreference).toEqual(picked),
+    )
+    expect(fakeRef.current.requestsFor("userPreference/write")).toEqual([
+      { method: "userPreference/write", params: picked },
+    ])
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
   })
 
   it("restores old session current from its last turn without leaking across sessions", async () => {
@@ -6208,6 +6307,47 @@ it.each([
   expect(
     useAppStore.getState().execution.admittedRequestIds[request.requestId],
   ).toBeUndefined()
+})
+
+it("keeps an unconfirmed delivery notice when older background requests fail", async () => {
+  const list = deferredResponse()
+  const admission = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "goal/clear")
+      throw new ApiRequestError("Could not clear goal.", "internal_error")
+    if (method === "session/list") return list.promise
+    if (method === "session/input") return admission.promise
+    if (method === "session/queue/list") return { items: [] }
+    if (method === "session/skills") return { skills: [] }
+    return notFound()
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams.at(-1)
+  emitSnapshot(stream)
+  stream?.emitReplayComplete()
+  const loading = useAppStore.getState().loadSessions(undefined)
+  useAppStore.getState().setPromptDraft(inputParts("Unconfirmed input"))
+  const sending = useAppStore
+    .getState()
+    .admitInput(inputParts("Unconfirmed input"))
+  admission.reject(
+    new ApiRequestError("The connection to the server was lost."),
+  )
+  await sending
+  const notice =
+    "Sending status is unconfirmed. This input has not been resent."
+  expect(useAppStore.getState().message).toBe(notice)
+  list.reject(new ApiRequestError("The connection to the server was lost."))
+  await loading
+  stream?.disconnect(
+    new ApiRequestError("The connection to the server was lost."),
+  )
+  expect(useAppStore.getState().message).toBe(notice)
+  expect(useAppStore.getState().promptDraft).toEqual(
+    inputParts("Unconfirmed input"),
+  )
+  await useAppStore.getState().clearGoal("session_1")
+  expect(useAppStore.getState().message).toBe("Could not clear goal.")
 })
 
 it("keeps an unconfirmed notice across replay and preserves a later draft with identical text", async () => {

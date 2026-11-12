@@ -284,7 +284,10 @@ export type AppStoreActions = {
     reason: "undo" | "edit",
     content?: InputContent,
   ): Promise<void>
-  resetSessionHistory(sessionId?: string): void
+  resetSessionHistory(
+    sessionId?: string,
+    options?: Readonly<{ preserveRecovery?: boolean }>,
+  ): void
   toggleProject(projectId: string): Promise<void>
   addProject(path: string, name?: string): Promise<boolean>
   updateProject(
@@ -480,6 +483,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   let usageReadRevision = 0
   let queueReadRevision = 0
   const historyRevisions = new Map<string, number>()
+  const recoveryRollouts = new Map<string, string | undefined>()
   const pendingHistoryResets = new Set<string>()
   const historyRevision = (apiBase: string, sessionId: string): number =>
     historyRevisions.get(executionViewKey(apiBase, sessionId)) ?? 0
@@ -488,17 +492,33 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     isCurrent: () => boolean = () => true,
     clearMessage = true,
     tracksBusy = true,
+    options: Readonly<{ preserveInputRecoveryNotice?: boolean }> = {},
   ): Promise<boolean> => {
     if (tracksBusy) {
       activeTaskCount += 1
       set({ busy: true })
     }
-    if (clearMessage && isCurrent()) set({ message: undefined })
+    if (
+      clearMessage &&
+      isCurrent() &&
+      !(
+        options.preserveInputRecoveryNotice &&
+        get().message === UNCONFIRMED_INPUT_NOTICE
+      )
+    )
+      set({ message: undefined })
     try {
       await task()
       return true
     } catch (error) {
-      if (isCurrent()) set({ message: errorMessage(error, "Request failed.") })
+      if (
+        isCurrent() &&
+        !(
+          options.preserveInputRecoveryNotice &&
+          get().message === UNCONFIRMED_INPUT_NOTICE
+        )
+      )
+        set({ message: errorMessage(error, "Request failed.") })
       return false
     } finally {
       if (tracksBusy) {
@@ -1005,6 +1025,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const invalidateSessionHistory = (
     apiBase: string,
     sessionId: string,
+    preserveRecovery = false,
   ): void => {
     const cacheKey = executionViewKey(apiBase, sessionId)
     historyRevisions.set(cacheKey, historyRevision(apiBase, sessionId) + 1)
@@ -1017,17 +1038,22 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     invalidateSessionListReads()
     usageReadRevision += 1
     authoritativeTurns.delete(sessionId)
-    recoveredDrafts.delete(`${apiBase}\0${sessionId}`)
-    const steers = inputRecoveryMemory.readSteers(apiBase, sessionId)
+    if (!preserveRecovery) {
+      recoveryRollouts.delete(cacheKey)
+      recoveredDrafts.delete(cacheKey)
+    }
+    const steers = preserveRecovery
+      ? []
+      : inputRecoveryMemory.readSteers(apiBase, sessionId)
     const retiredRequests = new Set(steers.map((steer) => steer.requestId))
-    for (const admission of inputRecoveryMemory.listAdmissionsForSession(
-      apiBase,
-      sessionId,
-    )) {
+    for (const admission of preserveRecovery
+      ? []
+      : inputRecoveryMemory.listAdmissionsForSession(apiBase, sessionId)) {
       retiredRequests.add(admission.requestId)
       inputRecoveryMemory.acknowledgeAdmission(admission)
     }
-    inputRecoveryMemory.updateSteers(apiBase, sessionId, () => [])
+    if (!preserveRecovery)
+      inputRecoveryMemory.updateSteers(apiBase, sessionId, () => [])
     for (const requestId of retiredRequests) {
       inFlightAdmissions.delete(requestId)
       rejectedAdmissions.delete(requestId)
@@ -1089,16 +1115,32 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             key !== `resume:${sessionId}`,
         ),
       ),
-      pendingSteers: { ...state.pendingSteers, [sessionId]: [] },
+      ...(!preserveRecovery
+        ? { pendingSteers: { ...state.pendingSteers, [sessionId]: [] } }
+        : {}),
       restoredSteerRequestIds: Object.fromEntries(
         Object.entries(state.restoredSteerRequestIds).filter(
           ([requestId]) => !retiredRequests.has(requestId),
         ),
       ),
-      ...(state.recoveredAdmission?.sessionId === sessionId
+      ...(!preserveRecovery && state.recoveredAdmission?.sessionId === sessionId
         ? { recoveredAdmission: undefined }
         : {}),
     }))
+  }
+
+  const reconcileRecoveryRollout = (session: ApiSessionSummary): boolean => {
+    const key = executionViewKey(get().apiBase, session.id)
+    const previousRollout = recoveryRollouts.get(key)
+    recoveryRollouts.delete(key)
+    if (
+      previousRollout !== undefined &&
+      previousRollout !== session.rolloutId
+    ) {
+      get().resetSessionHistory(session.id)
+      return false
+    }
+    return true
   }
 
   const loadSkills = (
@@ -1200,6 +1242,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            if (!reconcileRecoveryRollout(response.session)) return
             const initializeHistory = initialSnapshot && after === 0
             initialSnapshot = false
             const latestGoal = goalSnapshots.get(selection.sessionId)
@@ -1519,7 +1562,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               execution: reduceExecutionView(get().execution, {
                 type: "stream_unavailable",
               }),
-              message: errorMessage(error, "Could not open event stream."),
+              message:
+                get().message === UNCONFIRMED_INPUT_NOTICE
+                  ? UNCONFIRMED_INPUT_NOTICE
+                  : errorMessage(error, "Could not open event stream."),
             })
           },
           onDisconnected: (error) => {
@@ -1531,10 +1577,13 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               execution: reduceExecutionView(get().execution, {
                 type: "stream_unavailable",
               }),
-              message: errorMessage(
-                error,
-                "The connection to the server was lost.",
-              ),
+              message:
+                get().message === UNCONFIRMED_INPUT_NOTICE
+                  ? UNCONFIRMED_INPUT_NOTICE
+                  : errorMessage(
+                      error,
+                      "The connection to the server was lost.",
+                    ),
             })
           },
         },
@@ -1600,6 +1649,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 isCurrent,
                 false,
                 false,
+                { preserveInputRecoveryNotice: true },
               )
             }
             return
@@ -1653,6 +1703,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               isCurrent,
               false,
               false,
+              { preserveInputRecoveryNotice: true },
             )
             return
           }
@@ -1888,6 +1939,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           applied = true
         },
         () => sessionListRevisions[key] === requestRevision,
+        true,
+        true,
+        { preserveInputRecoveryNotice: true },
       )
       if (!completed && sessionListRevisions[key] === requestRevision) {
         set((state) => ({
@@ -1917,29 +1971,37 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     },
     loadSidebar: async () => {
       const revision = ++sidebarReadRevision
-      await runTask(async () => {
-        const sidebar = await getAppRpcClient(get().apiBase).request(
-          "sidebar/read",
-          {},
-        )
-        if (revision !== sidebarReadRevision) return
-        set((state) => {
-          if (!state.selectedSession) return { sidebar }
-          const {
-            archived: _,
-            sectionId: __,
-            sectionPosition: ___,
-            ...session
-          } = state.selectedSession
-          return {
-            sidebar,
-            selectedSession: {
-              ...session,
-              ...sidebar.entries[session.id],
-            },
-          }
-        })
-      })
+      await runTask(
+        async () => {
+          const sidebar = await getAppRpcClient(get().apiBase).request(
+            "sidebar/read",
+            {},
+          )
+          if (revision !== sidebarReadRevision) return
+          set((state) => {
+            if (!state.selectedSession) return { sidebar }
+            const {
+              archived: _,
+              sectionId: __,
+              sectionPosition: ___,
+              ...session
+            } = state.selectedSession
+            return {
+              sidebar,
+              selectedSession: {
+                ...session,
+                ...sidebar.entries[session.id],
+              },
+            }
+          })
+        },
+        () => revision === sidebarReadRevision,
+        true,
+        true,
+        {
+          preserveInputRecoveryNotice: true,
+        },
+      )
     },
     refreshSidebar: async () => {
       await get().loadSidebar()
@@ -2394,7 +2456,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       return createdId
     },
 
-    resetSessionHistory: (sessionId) => {
+    resetSessionHistory: (sessionId, options) => {
       if (sessionId === undefined) {
         const state = get()
         const prefix = `${state.apiBase}\0`
@@ -2419,10 +2481,30 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             ? []
             : [state.selection.sessionId]),
         ])
-        for (const id of sessions) get().resetSessionHistory(id)
+        // Reconnection is not evidence that a rollout changed. Replay from 0,
+        // retaining submission ownership until its new snapshot identifies it.
+        for (const id of sessions)
+          get().resetSessionHistory(id, { preserveRecovery: true })
         return
       }
-      invalidateSessionHistory(get().apiBase, sessionId)
+      const state = get()
+      if (options?.preserveRecovery) {
+        const key = executionViewKey(state.apiBase, sessionId)
+        if (!recoveryRollouts.has(key))
+          recoveryRollouts.set(
+            key,
+            (state.selectedSession?.id === sessionId
+              ? state.selectedSession
+              : (executionViews.get(key)?.selectedSession ??
+                findCachedSession(state, sessionId))
+            )?.rolloutId,
+          )
+      }
+      invalidateSessionHistory(
+        state.apiBase,
+        sessionId,
+        options?.preserveRecovery,
+      )
       if (get().selection.sessionId !== sessionId) {
         if (findCachedSession(get(), sessionId) === undefined) return
         const apiBase = get().apiBase
@@ -2441,6 +2523,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               { sessionId },
             )
             if (!isCurrent()) return
+            if (!reconcileRecoveryRollout(response)) return
             const goal = goalSnapshots.get(sessionId)
             const summary =
               goal === undefined ? response : withGoal(response, goal.goal)
@@ -2455,6 +2538,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           isCurrent,
           false,
           false,
+          { preserveInputRecoveryNotice: true },
         )
         return
       }
@@ -3625,7 +3709,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         }
         syncInputRecoveryNotice(selection.sessionId)
       } catch (error) {
-        if (isCurrentSelection(selection) && revision === queueReadRevision)
+        if (
+          isCurrentSelection(selection) &&
+          revision === queueReadRevision &&
+          get().message !== UNCONFIRMED_INPUT_NOTICE
+        )
           set({ message: errorMessage(error, "Could not load queued inputs.") })
       }
     },
@@ -3815,40 +3903,41 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       if (sessionId === undefined) {
         if (sameModelSelection(get().draftModelSelection, selection)) return
         set({ draftModelSelection: selection })
-        return
-      }
-      if (sameModelSelection(get().modelSelections[sessionId], selection)) {
-        if (get().restoringModelSelectionFor === sessionId)
-          set({ restoringModelSelectionFor: undefined })
-        return
+      } else {
+        if (sameModelSelection(get().modelSelections[sessionId], selection)) {
+          if (get().restoringModelSelectionFor === sessionId)
+            set({ restoringModelSelectionFor: undefined })
+          return
+        }
+        const modelSelections = { ...get().modelSelections }
+        if (selection === undefined) delete modelSelections[sessionId]
+        else modelSelections[sessionId] = selection
+        set({
+          modelSelections,
+          ...(get().restoringModelSelectionFor === sessionId
+            ? { restoringModelSelectionFor: undefined }
+            : {}),
+        })
+        persistModelSelections(modelSelections)
       }
       const apiBase = get().apiBase
-      const modelSelections = { ...get().modelSelections }
-      if (selection === undefined) delete modelSelections[sessionId]
-      else modelSelections[sessionId] = selection
-      set({
-        modelSelections,
-        ...(get().restoringModelSelectionFor === sessionId
-          ? { restoringModelSelectionFor: undefined }
-          : {}),
-      })
-      persistModelSelections(modelSelections)
       if (selection === undefined) return
-      void runTask(
-        async () => {
-          const response = await getAppRpcClient(apiBase).request(
-            "userPreference/write",
-            selection,
-          )
-          if (apiBase !== get().apiBase) return
-          if (!sameModelSelection(get().modelSelections[sessionId], selection))
-            return
-          set({ userPreference: response.userPreference })
-        },
-        () =>
-          apiBase === get().apiBase &&
-          sameModelSelection(get().modelSelections[sessionId], selection),
-      )
+      const isCurrent = () =>
+        apiBase === get().apiBase &&
+        sameModelSelection(
+          sessionId === undefined
+            ? get().draftModelSelection
+            : get().modelSelections[sessionId],
+          selection,
+        )
+      void runTask(async () => {
+        const response = await getAppRpcClient(apiBase).request(
+          "userPreference/write",
+          selection,
+        )
+        if (!isCurrent()) return
+        set({ userPreference: response.userPreference })
+      }, isCurrent)
     },
 
     openSettings: (section = "general") => {
