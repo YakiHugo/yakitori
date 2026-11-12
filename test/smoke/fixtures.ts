@@ -100,6 +100,55 @@ export async function runFauxTurn(page: Page): Promise<void> {
   ).toHaveCount(0)
 }
 
+export async function runConversationHistoryFlow(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "New session", exact: true }).click()
+  const prompts = [
+    "Earlier history needle for navigation",
+    "Middle history prompt",
+    "Latest history prompt",
+  ] as const
+  const main = page.getByRole("main")
+  const promptMessage = (prompt: string) =>
+    main.locator('[data-context-kind="message"]').filter({ hasText: prompt })
+  for (const [index, prompt] of prompts.entries()) {
+    await page.getByRole("textbox", { name: "Message the Mate" }).fill(prompt)
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      main
+        .getByText("Hello from faux.", { exact: true })
+        .filter({ visible: true }),
+    ).toHaveCount(index + 1)
+    await expect(
+      page.getByRole("button", { name: "Interrupt", exact: true }),
+    ).toHaveCount(0)
+  }
+  const coldOpen = async () => {
+    await page.reload()
+    await page
+      .locator('.sidebar-session [data-sidebar-drag="session"]')
+      .first()
+      .click()
+    await expect(promptMessage(prompts[2])).toBeVisible()
+    await expect(promptMessage(prompts[0])).toHaveCount(0)
+    await expect(promptMessage(prompts[1])).toHaveCount(0)
+  }
+  await coldOpen()
+  await page.locator(".conversation-surface").hover()
+  await page.mouse.wheel(0, -400)
+  await expect(promptMessage(prompts[1])).toHaveCount(1)
+  await expect(promptMessage(prompts[0])).toHaveCount(0)
+  await coldOpen()
+  await page.keyboard.press("ControlOrMeta+f")
+  await page
+    .getByRole("searchbox", { name: "Find in conversation" })
+    .fill("Earlier history needle")
+  await expect(promptMessage(prompts[0])).toBeVisible()
+  await expect(page.locator("[data-find-current]")).toContainText(
+    "Earlier history needle",
+  )
+  await page.getByRole("button", { name: "Close find", exact: true }).click()
+}
+
 export async function runIndependentSessionFlow(
   page: Page,
   testInfo: TestInfo,

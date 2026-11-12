@@ -9,6 +9,7 @@ const compact = new Intl.NumberFormat("en", {
 const exact = new Intl.NumberFormat("en")
 
 export function TelemetryRail() {
+  const historyBefore = useAppStore((state) => state.historyBefore)
   const telemetry = useAppStore((state) => state.execution.telemetry)
   const usage = useAppStore((state) => state.execution.lastTurnUsage)
   const metrics = useAppStore((state) => state.execution.lastTurnMetrics)
@@ -29,9 +30,11 @@ export function TelemetryRail() {
           Avg TTFT{" "}
           <strong>{duration(telemetry.averageTimeToFirstTokenMs)}</strong>
         </span>
-        <span title={`${exact.format(total)} total input and output tokens`}>
-          Tokens <strong>{compact.format(total)}</strong>
-        </span>
+        {historyBefore === undefined ? (
+          <span title={`${exact.format(total)} total input and output tokens`}>
+            Tokens <strong>{compact.format(total)}</strong>
+          </span>
+        ) : null}
         <span title="Provider-reported cached input tokens / all input tokens">
           Cache hit <strong>{cacheHit}</strong>
         </span>

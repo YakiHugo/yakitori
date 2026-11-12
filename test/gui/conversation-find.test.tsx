@@ -15,8 +15,15 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import type { ApiSearchSessionOccurrencesResponse } from "../../src/server/protocol.ts"
 import { clearThreadScopes } from "../../src/gui/store/thread-scope-store.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
+import type { ApiSearchSessionOccurrencesResponse } from "../../src/server/protocol.ts"
+import { inputFixture } from "../fixtures/user-input.ts"
+import { inputParts } from "./input-fixtures.ts"
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }))
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
@@ -82,6 +89,33 @@ function Fixture({ sessionId = "session" }: Readonly<{ sessionId?: string }>) {
             <p>Historical needle</p>
           </div>
         </details>
+      </div>
+    </>
+  )
+}
+
+function PagedFixture() {
+  const contentRef = useRef<HTMLDivElement>(null)
+  const entries = useAppStore((state) => state.execution.entries)
+  return (
+    <>
+      <ConversationFind
+        sessionId="session"
+        contentRef={contentRef}
+        onJump={jump}
+      />
+      <div ref={contentRef}>
+        {entries.map((entry) =>
+          entry.kind === "user_input" ? (
+            <div
+              key={entry.inputId}
+              data-context-kind="message"
+              data-context-message-id={entry.inputId}
+            >
+              {entry.text}
+            </div>
+          ) : null,
+        )}
       </div>
     </>
   )
@@ -192,6 +226,56 @@ it("reveals an older logical message inside a closed disclosure before jumping",
       ?.getAttribute("data-context-message-id"),
   ).toBe("older")
   expect(jump).toHaveBeenCalledOnce()
+})
+
+it("loads an unloaded search target before highlighting and jumping", async () => {
+  useAppStore.setState({
+    selection: { sessionId: "session" },
+    historyBefore: 10,
+  })
+  request.mockImplementation(async (method) => {
+    if (method === "session/searchOccurrences")
+      return {
+        data: [
+          { ...hits[0], itemId: "input_older", snippet: "Historical needle" },
+        ],
+      }
+    if (method === "session/history")
+      return {
+        events: [
+          createEventEnvelope({
+            sessionId: "session",
+            seq: 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: "request_older",
+                inputId: "input_older",
+                role: InputRole.User,
+                content: inputFixture(inputParts("Historical needle")),
+              },
+            },
+          }),
+        ],
+      }
+    throw new Error(`Unexpected request ${method}`)
+  })
+  render(<PagedFixture />)
+  openFind()
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "needle" },
+  })
+  await waitFor(() => expect(jump).toHaveBeenCalled())
+  expect(request).toHaveBeenCalledWith("session/history", {
+    sessionId: "session",
+    before: 10,
+  })
+  expect(
+    document
+      .querySelector("[data-find-current]")
+      ?.getAttribute("data-context-message-id"),
+  ).toBe("input_older")
+  expect(highlights.get("conversation-find-current")?.size).toBe(1)
 })
 
 it("ignores a response for an earlier query and restores find when returning to its session", async () => {

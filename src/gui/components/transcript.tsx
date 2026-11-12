@@ -60,6 +60,17 @@ type TranscriptBlock = {
   entries: readonly ExecutionEntry[]
 }
 
+function containsMessageSource(
+  entries: readonly ExecutionEntry[],
+  messageId: string,
+): boolean {
+  return entries.some((entry) =>
+    entry.kind === "user_input"
+      ? entry.inputId === messageId
+      : entry.kind === "assistant" && entry.itemId === messageId,
+  )
+}
+
 function groupEntries(
   entries: readonly ExecutionEntry[],
   previous: readonly TranscriptBlock[],
@@ -100,6 +111,15 @@ export function Transcript({
 }>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const historyBefore = useAppStore((state) => state.historyBefore)
+  const loadEarlierHistory = useAppStore((state) => state.loadEarlierHistory)
+  const loadHistoryThrough = useAppStore((state) => state.loadHistoryThrough)
+  const historyLoading = useAppStore((state) =>
+    state.inFlightActions.has(`history:${state.selection.sessionId}`),
+  )
+  const hydrating = useAppStore(
+    (state) => state.hydratingSessionId === state.selection.sessionId,
+  )
   const threadId = useAppStore(selectCurrentThreadId)
   const scroll = usePinnedScroll(threadId)
   const surfaceRef = useRef<HTMLDivElement>(null)
@@ -110,6 +130,32 @@ export function Transcript({
   )
   const previousBlocks = useRef<readonly TranscriptBlock[]>([])
   const previousSessionId = useRef(sessionId)
+  const selectionRevision = useAppStore(
+    (state) => state.sessionSelectionIntentRevision,
+  )
+  const loadingEarlier = useRef<
+    Readonly<{ sessionId: string; selectionRevision: number }> | undefined
+  >(undefined)
+  const earlierAnchor = useRef<
+    | Readonly<{
+        request: object
+        sessionId: string
+        selectionRevision: number
+        before: number
+        node: Element
+        top: number
+      }>
+    | undefined
+  >(undefined)
+  const previousScrollTop = useRef(0)
+  const previousTouchY = useRef<number | undefined>(undefined)
+  const [pendingSource, setPendingSource] = useState<
+    | Readonly<{
+        navigation: ContextSourceNavigation
+        selectionRevision: number
+      }>
+    | undefined
+  >(undefined)
   const blocks = useMemo(() => {
     if (previousSessionId.current !== sessionId) {
       previousBlocks.current = []
@@ -205,6 +251,82 @@ export function Transcript({
     .filter((entry) => !entry.steered)
   const inputIds = inputs.map((entry) => entry.inputId).join("\0")
   const queued = new Set(view.queuedInputIds)
+  useEffect(() => {
+    const revealSource = (event: Event) => {
+      const navigation = (event as CustomEvent<ContextSourceNavigation>).detail
+      const source = navigation.source
+      const state = useAppStore.getState()
+      if (
+        source.kind !== "message" ||
+        source.sessionId !== state.selection.sessionId ||
+        containsMessageSource(state.execution.entries, source.messageId)
+      )
+        return
+      setPendingSource({
+        navigation,
+        selectionRevision: state.sessionSelectionIntentRevision,
+      })
+    }
+    window.addEventListener(revealContextSourceEvent, revealSource)
+    return () =>
+      window.removeEventListener(revealContextSourceEvent, revealSource)
+  }, [])
+  useEffect(() => {
+    if (!pendingSource) return
+    const { navigation } = pendingSource
+    const source = navigation.source
+    if (
+      source.kind !== "message" ||
+      source.sessionId !== sessionId ||
+      pendingSource.selectionRevision !== selectionRevision
+    ) {
+      setPendingSource(undefined)
+      return
+    }
+    if (containsMessageSource(view.entries, source.messageId)) {
+      // The new TurnBlock must mount its disclosure listener before retrying.
+      const frame = requestAnimationFrame(() => {
+        const state = useAppStore.getState()
+        if (
+          state.selection.sessionId !== source.sessionId ||
+          state.sessionSelectionIntentRevision !==
+            pendingSource.selectionRevision
+        )
+          return
+        setPendingSource(undefined)
+        const target = findContextSource(source)
+        if (target) target.scrollIntoView(navigation.options)
+        else
+          window.dispatchEvent(
+            new CustomEvent(revealContextSourceEvent, { detail: navigation }),
+          )
+      })
+      return () => cancelAnimationFrame(frame)
+    }
+    if (!historyLoading && historyBefore !== undefined) {
+      void loadHistoryThrough(source.messageId).then((found) => {
+        const state = useAppStore.getState()
+        if (
+          !found &&
+          !state.inFlightActions.has(`history:${source.sessionId}`) &&
+          !containsMessageSource(state.execution.entries, source.messageId)
+        )
+          setPendingSource((current) =>
+            current === pendingSource ? undefined : current,
+          )
+      })
+    } else if (!historyLoading) {
+      setPendingSource(undefined)
+    }
+  }, [
+    pendingSource,
+    sessionId,
+    selectionRevision,
+    view.entries,
+    historyLoading,
+    historyBefore,
+    loadHistoryThrough,
+  ])
   // A message counts as in view while its turn segment — from its own bubble
   // to the next bubble — intersects the viewport, like codex's rail. Only
   // those markers take the active color; there is no default selection.
@@ -230,10 +352,93 @@ export function Transcript({
         : next,
     )
   }, [inputIds, scroll.viewportRef])
+  const requestEarlierHistory = () => {
+    const viewport = scroll.viewportRef.current
+    if (
+      !viewport ||
+      sessionId === undefined ||
+      hydrating ||
+      historyBefore === undefined ||
+      loadingEarlier.current ||
+      viewport.scrollTop > 48
+    ) {
+      return
+    }
+    const request = { sessionId, selectionRevision }
+    loadingEarlier.current = request
+    void loadEarlierHistory({
+      beforePrepend: () => {
+        const state = useAppStore.getState()
+        if (
+          loadingEarlier.current !== request ||
+          state.selection.sessionId !== sessionId ||
+          state.sessionSelectionIntentRevision !== selectionRevision
+        )
+          return
+        const node = scroll.contentRef.current?.firstElementChild
+        if (!node) return
+        scroll.pauseFollowing()
+        // Capture immediately before the store commits the prepend. Streaming
+        // and user scrolling while the request was pending belong to this view.
+        earlierAnchor.current = {
+          request,
+          sessionId,
+          selectionRevision,
+          before: historyBefore,
+          node,
+          top: node.getBoundingClientRect().top,
+        }
+      },
+    }).then((loaded) => {
+      if (!loaded && earlierAnchor.current?.request === request)
+        earlierAnchor.current = undefined
+      if (loadingEarlier.current === request) loadingEarlier.current = undefined
+    })
+  }
   const updateScroll = () => {
     scroll.onScroll()
     updateVisibleInputs()
+    const viewport = scroll.viewportRef.current
+    if (!viewport) return
+    const upward = viewport.scrollTop < previousScrollTop.current
+    previousScrollTop.current = viewport.scrollTop
+    if (upward) requestEarlierHistory()
   }
+  useLayoutEffect(() => {
+    const saved = earlierAnchor.current
+    const viewport = scroll.viewportRef.current
+    if (!saved || !viewport) return
+    if (
+      saved.sessionId !== sessionId ||
+      saved.selectionRevision !== selectionRevision
+    ) {
+      earlierAnchor.current = undefined
+      return
+    }
+    if (historyBefore === saved.before) return
+    earlierAnchor.current = undefined
+    if (!scroll.contentRef.current?.contains(saved.node)) return
+    viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top
+    previousScrollTop.current = viewport.scrollTop
+    scroll.onScroll()
+  }, [
+    historyBefore,
+    sessionId,
+    selectionRevision,
+    scroll.contentRef,
+    scroll.viewportRef,
+    scroll.onScroll,
+  ])
+  useLayoutEffect(() => {
+    if (
+      loadingEarlier.current?.sessionId !== sessionId ||
+      loadingEarlier.current?.selectionRevision !== selectionRevision
+    ) {
+      loadingEarlier.current = undefined
+      earlierAnchor.current = undefined
+      previousScrollTop.current = scroll.viewportRef.current?.scrollTop ?? 0
+    }
+  }, [sessionId, selectionRevision, scroll.viewportRef])
   // Streaming text changes entries but does not move input anchors. Measure
   // those only when the set of visible input anchors changes or on scroll.
   useLayoutEffect(updateVisibleInputs, [updateVisibleInputs])
@@ -287,6 +492,33 @@ export function Transcript({
           viewportClassName="conversation-transcript-viewport"
           viewportRef={scroll.viewportRef}
           onScroll={updateScroll}
+          onWheel={(event) => {
+            if (event.deltaY < 0) requestEarlierHistory()
+          }}
+          onTouchStart={(event) => {
+            previousTouchY.current = event.touches[0]?.clientY
+          }}
+          onTouchMove={(event) => {
+            const y = event.touches[0]?.clientY
+            if (
+              y !== undefined &&
+              previousTouchY.current !== undefined &&
+              y > previousTouchY.current
+            )
+              requestEarlierHistory()
+            previousTouchY.current = y
+          }}
+          onKeyDown={(event) => {
+            if (
+              event.defaultPrevented ||
+              (event.target instanceof HTMLElement &&
+                (event.target.isContentEditable ||
+                  event.target.closest("input, textarea, select")))
+            )
+              return
+            if (["ArrowUp", "PageUp", "Home"].includes(event.key))
+              requestEarlierHistory()
+          }}
         >
           <div
             ref={scroll.contentRef}

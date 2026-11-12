@@ -6,8 +6,8 @@ import {
   useLayoutEffect,
   useRef,
 } from "react"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiSearchSessionOccurrencesResponse } from "../../protocol/application.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useThreadScopeState } from "../store/thread-scope-store.ts"
@@ -37,6 +37,11 @@ export function ConversationFind({
     (state) => state.selectedSession?.counts.inputs,
   )
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
+  const historyBefore = useAppStore((state) => state.historyBefore)
+  const loadingHistory = useAppStore((state) =>
+    state.inFlightActions.has(`history:${sessionId}`),
+  )
+  const loadHistoryThrough = useAppStore((state) => state.loadHistoryThrough)
   const scopeId = `${apiBase}:${sessionId}`
   const [open, setOpen] = useThreadScopeState(scopeId, "find.open", false)
   const [query, setQuery] = useThreadScopeState(scopeId, "find.query", "")
@@ -60,6 +65,7 @@ export function ConversationFind({
   const restoreFocus = useRef<HTMLElement | null>(null)
   const lastJump = useRef<string | undefined>(undefined)
   const completedRequest = useRef<string | undefined>(undefined)
+  const historyRequest = useRef<string | undefined>(undefined)
   const term = query.trim()
   const requestKey = JSON.stringify([
     open,
@@ -193,6 +199,28 @@ export function ConversationFind({
       window.clearTimeout(timer)
     }
   }, [open, term, apiBase, sessionId, inputCount, activeTurnId, revision])
+
+  const selectedItemId = selected?.itemId
+  useEffect(() => {
+    if (!open || selectedItemId === undefined) {
+      historyRequest.current = undefined
+      return
+    }
+    if (historyBefore === undefined || loadingHistory) return
+    const key = JSON.stringify([sessionId, selectedItemId, historyBefore])
+    if (historyRequest.current === key) return
+    historyRequest.current = key
+    const controller = new AbortController()
+    void loadHistoryThrough(selectedItemId, controller.signal)
+    return () => controller.abort()
+  }, [
+    open,
+    sessionId,
+    selectedItemId,
+    historyBefore,
+    loadingHistory,
+    loadHistoryThrough,
+  ])
 
   useLayoutEffect(() => {
     const content = contentRef.current
