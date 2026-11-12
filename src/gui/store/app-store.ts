@@ -35,6 +35,7 @@ import {
   createExecutionViewState,
   type ExecutionView,
   type ExecutionViewState,
+  prependExecutionHistory,
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
@@ -59,8 +60,8 @@ import {
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
-import { useWorkspaceStore } from "./workspace-store.ts"
 import { removeThreadScope } from "./thread-scope-store.ts"
+import { useWorkspaceStore } from "./workspace-store.ts"
 
 type SessionSelection = {
   readonly revision: number
@@ -81,6 +82,7 @@ const executionViews = new Map<
     execution: ExecutionViewState
     selectedSession: ApiSessionDetail | undefined
     queuedItems: readonly QueuedInput[]
+    historyBefore?: number
   }>
 >()
 
@@ -97,6 +99,9 @@ function rememberExecutionView(state: AppStoreData): void {
     execution: state.execution,
     selectedSession: state.selectedSession,
     queuedItems: state.queuedItems,
+    ...(state.historyBefore === undefined
+      ? {}
+      : { historyBefore: state.historyBefore }),
   })
 }
 
@@ -192,6 +197,8 @@ export type AppStoreData = {
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError: string | undefined
   hydratingSessionId: string | undefined
+  // Stored sequence before the loaded transcript. Absent once the start is loaded.
+  historyBefore: number | undefined
   projects: ApiProject[]
   // Last project-list load failure; the sidebar keeps the last good list and
   // shows a retry note while this is set.
@@ -257,9 +264,10 @@ export type AppStoreActions = {
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
-  clearSessionSelection(
-    input?: { projectId: string | undefined; threadId?: string },
-  ): void
+  clearSessionSelection(input?: {
+    projectId: string | undefined
+    threadId?: string
+  }): void
   startNewSession(projectId?: string): void
   setNewSessionProject(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
@@ -282,6 +290,10 @@ export type AppStoreActions = {
     targetId: string,
     after: boolean,
   ): Promise<boolean>
+  loadEarlierHistory(
+    options?: Readonly<{ beforePrepend?: () => void }>,
+  ): Promise<boolean>
+  loadHistoryThrough(itemId: string, signal?: AbortSignal): Promise<boolean>
   selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
     parts: InputDraft,
@@ -327,10 +339,7 @@ export type AppStoreActions = {
 export type AppStore = AppStoreData & AppStoreActions
 
 export function selectCurrentThreadId(
-  state: Pick<
-    AppStoreData,
-    "selection" | "threadId" | "sessionThreadIds"
-  >,
+  state: Pick<AppStoreData, "selection" | "threadId" | "sessionThreadIds">,
 ): string {
   const sessionId = state.selection.sessionId
   return sessionId === undefined
@@ -379,6 +388,7 @@ export function createInitialAppState(): AppStoreData {
     sessionSkills: [],
     sessionSkillsError: undefined,
     hydratingSessionId: undefined,
+    historyBefore: undefined,
     projects: [],
     projectsError: undefined,
     accounts: [],
@@ -1053,8 +1063,19 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     // composer accepts input.
     const blockUntilReplay = options.blockUntilReplay !== false
     if (blockUntilReplay) set({ hydratingSessionId: selection.sessionId })
+    // Recovery interprets an absent admission as an unconfirmed send. Only a
+    // complete replay can establish that absence; ordinary opens use the tail.
+    const recent =
+      after === 0 &&
+      inputRecoveryMemory.listAdmissionsForSession(
+        get().apiBase,
+        selection.sessionId,
+      ).length === 0 &&
+      inputRecoveryMemory.readSteers(get().apiBase, selection.sessionId)
+        .length === 0
 
     let replaySnapshot: ApiSessionDetail | undefined
+    let initialSnapshot = true
     const goalAtSubscribe = goalSnapshots.get(selection.sessionId)
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
@@ -1065,6 +1086,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            const initializeHistory = initialSnapshot && after === 0
+            initialSnapshot = false
             const latestGoal = goalSnapshots.get(selection.sessionId)
             if (latestGoal !== undefined && latestGoal !== goalAtSubscribe)
               response = {
@@ -1087,6 +1110,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
             set({
               selectedSession: response.session,
+              ...(initializeHistory || response.historyBefore !== undefined
+                ? { historyBefore: response.historyBefore }
+                : {}),
               hydratingSessionId: blockUntilReplay
                 ? selection.sessionId
                 : undefined,
@@ -1374,6 +1400,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             })
           },
         },
+        { recent },
       )
       set({ stream: source })
     } catch (error) {
@@ -1979,6 +2006,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         execution: createExecutionViewState(),
         queuedItems: [],
         hydratingSessionId: undefined,
+        historyBefore: undefined,
         sessionSkills: [],
         commandPanel: undefined,
         settingsSection: undefined,
@@ -2122,6 +2150,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           const selection = activateSession(response.session.id)
           set({
             selectedSession: response.session,
+            historyBefore: undefined,
             execution: reduceExecutionView(createExecutionViewState(), {
               type: "durable",
               event: response.event,
@@ -2191,6 +2220,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           closeStream()
           set((state) => ({
             selectedSession: response.session,
+            historyBefore: undefined,
             execution: response.events.reduce(
               (execution, event) =>
                 reduceExecutionView(execution, {
@@ -2260,6 +2290,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               selectedSession: undefined,
               execution: createExecutionViewState(),
               queuedItems: [],
+              historyBefore: undefined,
               promptDraft: state.newSessionPrompt,
               promptExcerpts: state.newSessionExcerpts,
               sessionSkills: [],
@@ -2454,6 +2485,80 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       return completed
     },
 
+    loadEarlierHistory: async (options) => {
+      const sessionId = get().selection.sessionId
+      const selectionRevision = get().sessionSelectionIntentRevision
+      const before = get().historyBefore
+      if (sessionId === undefined || before === undefined) return false
+      const key = `history:${sessionId}`
+      if (get().inFlightActions.has(key)) return false
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      try {
+        const response = await getAppRpcClient(get().apiBase).request(
+          "session/history",
+          { sessionId, before },
+        )
+        if (
+          get().selection.sessionId !== sessionId ||
+          get().sessionSelectionIntentRevision !== selectionRevision ||
+          get().historyBefore !== before
+        ) {
+          return false
+        }
+        if (
+          response.historyBefore !== undefined &&
+          response.historyBefore >= before
+        ) {
+          throw new ApiRequestError("Earlier history did not advance.")
+        }
+        options?.beforePrepend?.()
+        set({
+          historyBefore: response.historyBefore,
+          execution: prependExecutionHistory(get().execution, response.events),
+        })
+        return true
+      } catch (error) {
+        if (
+          get().selection.sessionId === sessionId &&
+          get().sessionSelectionIntentRevision === selectionRevision
+        ) {
+          set({
+            message: errorMessage(error, "Could not load earlier messages."),
+          })
+        }
+        return false
+      } finally {
+        set((state) => {
+          const inFlightActions = new Set(state.inFlightActions)
+          inFlightActions.delete(key)
+          return { inFlightActions }
+        })
+      }
+    },
+
+    loadHistoryThrough: async (itemId, signal) => {
+      const selectionRevision = get().sessionSelectionIntentRevision
+      for (;;) {
+        if (
+          signal?.aborted ||
+          get().sessionSelectionIntentRevision !== selectionRevision
+        )
+          return false
+        if (
+          get().execution.entries.some((entry) =>
+            entry.kind === "user_input"
+              ? entry.inputId === itemId
+              : (entry.kind === "assistant" || entry.kind === "reasoning") &&
+                (entry.itemId === itemId || entry.source?.itemId === itemId),
+          )
+        )
+          return true
+        if (!(await get().loadEarlierHistory())) return false
+      }
+    },
+
     selectSession: async (sessionId, suppliedSummary) => {
       if (
         get().selection.sessionId === sessionId &&
@@ -2517,8 +2622,22 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       const storedView = executionViews.get(
         executionViewKey(get().apiBase, sessionId),
       )
+      const needsAdmissionHistory =
+        storedView?.historyBefore !== undefined &&
+        [
+          ...inputRecoveryMemory.listAdmissionsForSession(
+            get().apiBase,
+            sessionId,
+          ),
+          ...inputRecoveryMemory.readSteers(get().apiBase, sessionId),
+        ].some(
+          ({ requestId }) =>
+            !storedView.execution.admittedRequestIds[requestId],
+        )
       const cached =
-        storedView !== undefined && storedView.execution.lastSeq > 0
+        storedView !== undefined &&
+        storedView.execution.lastSeq > 0 &&
+        !needsAdmissionHistory
           ? storedView
           : undefined
       queueReadRevision += 1
@@ -2536,6 +2655,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             ? sessionId
             : undefined,
         hydratingSessionId: cached ? undefined : sessionId,
+        historyBefore: cached?.historyBefore,
         execution: cached?.execution ?? createExecutionViewState(),
         selectedSession: cached?.selectedSession,
         queuedItems: cached?.queuedItems ?? [],

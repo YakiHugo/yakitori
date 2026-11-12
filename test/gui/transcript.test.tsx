@@ -26,6 +26,10 @@ import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors
 import { inputParts } from "./input-fixtures.ts"
 
 const at = "2026-09-12T00:00:00Z"
+const historyActions = {
+  loadEarlierHistory: useAppStore.getState().loadEarlierHistory,
+  loadHistoryThrough: useAppStore.getState().loadHistoryThrough,
+}
 const entries: ExecutionEntry[] = [
   {
     kind: "user_input",
@@ -136,6 +140,7 @@ beforeEach(() => {
   vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id))
   useAppStore.setState({
     ...createInitialAppState(),
+    ...historyActions,
     selection: { sessionId: "session_1" },
     execution: {
       ...createExecutionViewState(),
@@ -151,6 +156,199 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+it("keeps the visible message stationary when streaming continues during an earlier-history request", async () => {
+  let finish: (() => void) | undefined
+  let prependHeight = 0
+  let height = 1200
+  const earlier: ExecutionEntry = {
+    kind: "user_input",
+    inputId: "input_earlier",
+    text: "Earlier request",
+    content: inputParts("Earlier request"),
+    at,
+  }
+  const loadEarlierHistory = vi.fn(
+    (
+      options?: Readonly<{
+        beforePrepend?: () => void
+      }>,
+    ) =>
+      new Promise<boolean>((resolve) => {
+        finish = () => {
+          options?.beforePrepend?.()
+          prependHeight = 300
+          height += 300
+          useAppStore.setState((state) => ({
+            historyBefore: undefined,
+            execution: {
+              ...state.execution,
+              entries: [earlier, ...state.execution.entries],
+            },
+          }))
+          resolve(true)
+        }
+      }),
+  )
+  useAppStore.setState({ historyBefore: 10, loadEarlierHistory })
+  render(<Transcript />)
+  const viewport = document.querySelector<HTMLElement>(
+    ".conversation-transcript-viewport",
+  )
+  const current = document.querySelector(
+    ".conversation-content",
+  )?.firstElementChild
+  if (!viewport || !current) throw new Error("Expected transcript viewport")
+  scrollGeometry(viewport)
+  Object.defineProperty(viewport, "scrollHeight", {
+    get: () => height,
+    configurable: true,
+  })
+  vi.spyOn(current, "getBoundingClientRect").mockImplementation(
+    () => new DOMRect(0, prependHeight - viewport.scrollTop, 600, 100),
+  )
+  fireEvent.wheel(viewport, { deltaY: -20 })
+  expect(loadEarlierHistory).toHaveBeenCalledTimes(1)
+
+  act(() => {
+    height += 200
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        entries: [
+          ...state.execution.entries,
+          {
+            kind: "assistant",
+            itemId: "live_reply",
+            turnId: "turn_live",
+            text: "Streaming while history loads",
+            status: "streaming",
+            at,
+          },
+        ],
+        activeTurnId: "turn_live",
+      },
+    }))
+  })
+  expect(viewport.scrollTop).toBe(0)
+  viewport.scrollTop = 60
+  fireEvent.scroll(viewport)
+
+  await act(async () => {
+    finish?.()
+  })
+
+  expect(screen.getByText("Earlier request")).toBeDefined()
+  expect(viewport.scrollTop).toBe(360)
+  expect(current.getBoundingClientRect().top).toBe(-60)
+  expect(screen.getByText("Streaming while history loads")).toBeDefined()
+})
+
+it("waits for upward intent before loading history above a short latest reply", async () => {
+  const loadEarlierHistory = vi.fn(async () => false)
+  useAppStore.setState({ historyBefore: 10, loadEarlierHistory })
+  render(<Transcript />)
+  const viewport = document.querySelector<HTMLElement>(
+    ".conversation-transcript-viewport",
+  )
+  if (!viewport) throw new Error("Expected transcript viewport")
+  scrollGeometry(viewport)
+  Object.defineProperty(viewport, "scrollHeight", {
+    value: 300,
+    configurable: true,
+  })
+
+  fireEvent.scroll(viewport)
+  fireEvent.wheel(viewport, { deltaY: 20 })
+  expect(loadEarlierHistory).not.toHaveBeenCalled()
+  await act(async () => {
+    fireEvent.wheel(viewport, { deltaY: -20 })
+  })
+  expect(loadEarlierHistory).toHaveBeenCalledTimes(1)
+  await act(async () => {
+    fireEvent.keyDown(viewport, { key: "ArrowUp" })
+  })
+  expect(loadEarlierHistory).toHaveBeenCalledTimes(2)
+})
+
+it.each([
+  "assistant",
+  "user",
+] as const)("loads an earlier %s message before revealing its saved excerpt source", async (kind) => {
+  const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
+  const earlier: ExecutionEntry =
+    kind === "assistant"
+      ? {
+          kind: "assistant",
+          itemId: "earlier_progress",
+          turnId: "turn_earlier",
+          text: "Earlier commentary",
+          status: "completed",
+          at,
+        }
+      : {
+          kind: "user_input",
+          inputId: "earlier_progress",
+          text: "Earlier commentary",
+          content: inputParts("Earlier commentary"),
+          at,
+        }
+  const loadHistoryThrough = vi.fn(async () => {
+    useAppStore.setState((state) => ({
+      historyBefore: undefined,
+      execution: {
+        ...state.execution,
+        entries: [
+          earlier,
+          {
+            kind: "assistant",
+            itemId: "earlier_answer",
+            turnId: "turn_earlier",
+            text: "Earlier answer",
+            status: "completed",
+            at,
+          },
+          ...state.execution.entries,
+        ],
+        turnTimings: {
+          ...state.execution.turnTimings,
+          turn_earlier: { startedAt: at, completedAt: at },
+        },
+      },
+    }))
+    return true
+  })
+  useAppStore.setState({ historyBefore: 10, loadHistoryThrough })
+  const excerpt: ContextExcerpt = {
+    id: "excerpt_earlier",
+    text: "Earlier commentary",
+    source: {
+      kind: "message",
+      label: "Assistant message",
+      sessionId: "session_1",
+      messageId: "earlier_progress",
+    },
+  }
+  render(
+    <TooltipProvider>
+      <Transcript />
+      <ContextExcerpts excerpts={[excerpt]} />
+    </TooltipProvider>,
+  )
+  fireEvent.click(screen.getByRole("button", { name: "1 annotation" }))
+  await act(async () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Go to source for excerpt 1" }),
+    )
+  })
+  expect(loadHistoryThrough).toHaveBeenCalledWith("earlier_progress")
+  frame(16)
+  const source = document.querySelector(
+    '[data-context-message-id="earlier_progress"]',
+  )
+  expect(source).not.toBeNull()
+  expect(scrollIntoView.mock.contexts).toContain(source)
 })
 
 it("reveals collapsed commentary when following a saved excerpt source", () => {

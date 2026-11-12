@@ -1,29 +1,33 @@
-import {
-  compareSectionSessions,
-  sectionSessionCursor,
-  startAfterSectionCursor,
-} from "../../src/core/session-sidebar.ts"
-import {
-  emptySessionSidebar,
-  changeSessionSidebar,
-  presentSession,
-  sessionInView,
-  type SidebarChange,
-} from "../../src/core/session-sidebar.ts"
-import {
-  advanceSessionHead,
-  sessionEntries,
-  type SessionHeads,
-} from "../../src/core/session-navigation.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
-import { SqliteThreadUsageProjection } from "../../src/core/sqlite-thread-usage-projection.ts"
-import { SqliteThreadSearchProjection } from "../../src/core/sqlite-thread-search-projection.ts"
+import { selectDisplayWindow } from "../../src/core/display-window.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
   StoredThread,
   ThreadSummary,
 } from "../../src/core/rollout.ts"
+import {
+  advanceSessionHead,
+  type SessionHeads,
+  sessionEntries,
+} from "../../src/core/session-navigation.ts"
+import {
+  changeSessionSidebar,
+  compareSectionSessions,
+  emptySessionSidebar,
+  presentSession,
+  type SidebarChange,
+  sectionSessionCursor,
+  sessionInView,
+  startAfterSectionCursor,
+} from "../../src/core/session-sidebar.ts"
+import { SqliteThreadSearchProjection } from "../../src/core/sqlite-thread-search-projection.ts"
+import { SqliteThreadUsageProjection } from "../../src/core/sqlite-thread-usage-projection.ts"
+import {
+  compareThreadSummaries,
+  startAfterThreadCursor,
+  threadCursor,
+} from "../../src/core/thread-search.ts"
 import type {
   CreateForkInput,
   CreateThreadMetadata,
@@ -35,11 +39,6 @@ import type {
   ThreadStoreOccurrenceSearchInput,
   ThreadStoreSearchInput,
 } from "../../src/core/thread-store.ts"
-import {
-  compareThreadSummaries,
-  startAfterThreadCursor,
-  threadCursor,
-} from "../../src/core/thread-search.ts"
 
 type Writer = {
   readonly pending: RolloutItem[]
@@ -298,6 +297,19 @@ export class MemoryThreadStore implements ThreadStore {
   async readThread(threadId: string): Promise<StoredThread | undefined> {
     const thread = this.#threads.get(threadId)
     return thread === undefined ? undefined : structuredClone(thread)
+  }
+
+  async readDisplayWindow(threadId: string, beforeSeqExclusive?: number) {
+    const thread = this.#threads.get(threadId)
+    if (thread === undefined) return undefined
+    const window = selectDisplayWindow(thread.rollout, beforeSeqExclusive)
+    return {
+      metadata: structuredClone(thread.metadata),
+      records: window.records,
+      lookbehind: window.lookbehind,
+      hasEarlier: window.hasEarlier,
+      endSeq: thread.rollout.at(-1)?.seq ?? 0,
+    }
   }
 
   async listThreadIds(): Promise<readonly string[]> {

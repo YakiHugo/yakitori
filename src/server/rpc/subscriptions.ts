@@ -1,4 +1,5 @@
 import { isKernelEvent } from "../../kernel/index.ts"
+import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
 import {
   sessionEventMethod,
   sessionPermissionRequestedMethod,
@@ -37,12 +38,15 @@ export type SessionSubscribeInput = Readonly<{
   connectionId: number
   sessionId: string
   after: number
+  // Cold open paints the latest prompt and its replies. A caught-up cursor
+  // still replays only the tail after `after`.
+  recent?: boolean
 }>
 
 export type SessionSubscribeOutcome =
   | Readonly<{
       ok: true
-      response: ApiReadSessionResponse
+      response: ApiReadSessionResponse & { readonly historyBefore?: number }
       // Runs after the subscribe response is sent: durable replay,
       // replayComplete, permission replay, then the reconciled live buffer.
       replay(): Promise<void>
@@ -318,10 +322,25 @@ export function createSessionSubscriptions(
       input.sessionId,
     )
     let snapshot: Awaited<ReturnType<ServerHandlers["readSession"]>>
+    let windowEvents: readonly AppSessionEventEnvelope[] | undefined
+    let historyBefore: number | undefined
     try {
-      snapshot = await options.handlers.readSession({
-        sessionId: input.sessionId,
-      })
+      if (input.recent === true && input.after === 0) {
+        const window = await options.handlers.readDisplayWindow({
+          sessionId: input.sessionId,
+        })
+        if (!window.ok) {
+          removeOwnedSubscription()
+          return { ok: false, result: window }
+        }
+        snapshot = { ok: true, value: { session: window.value.session } }
+        windowEvents = window.value.events
+        historyBefore = window.value.historyBefore
+      } else {
+        snapshot = await options.handlers.readSession({
+          sessionId: input.sessionId,
+        })
+      }
     } catch (error) {
       // No replay consumer will be returned on a rejected snapshot read. Release
       // this listener without removing a newer subscription for the same key.
@@ -370,21 +389,29 @@ export function createSessionSubscriptions(
 
     const replay = async (): Promise<void> => {
       try {
-        let cursor = input.after
-        for (;;) {
-          if (closed) return
-          const page = await options.handlers.readSessionEvents({
-            sessionId: input.sessionId,
-            after: cursor,
-            through: watermark,
-            limit: replayPageLimit,
-          })
-          if (!page.ok) throw new Error(page.error.message)
-          for (const event of page.value.events) {
+        if (windowEvents !== undefined) {
+          for (const event of windowEvents) {
+            if (closed) return
+            if (event.seq <= input.after || event.seq > watermark) continue
             deliver({ kind: "durable", events: [event] })
           }
-          if (page.value.nextAfter === undefined) break
-          cursor = page.value.nextAfter
+        } else {
+          let cursor = input.after
+          for (;;) {
+            if (closed) return
+            const page = await options.handlers.readSessionEvents({
+              sessionId: input.sessionId,
+              after: cursor,
+              through: watermark,
+              limit: replayPageLimit,
+            })
+            if (!page.ok) throw new Error(page.error.message)
+            for (const event of page.value.events) {
+              deliver({ kind: "durable", events: [event] })
+            }
+            if (page.value.nextAfter === undefined) break
+            cursor = page.value.nextAfter
+          }
         }
         if (closed) return
         options.notify(input.connectionId, sessionReplayCompleteMethod, {
@@ -436,7 +463,14 @@ export function createSessionSubscriptions(
         })
       }
     }
-    return { ok: true, response: snapshot.value, replay }
+    return {
+      ok: true,
+      response: {
+        ...snapshot.value,
+        ...(historyBefore === undefined ? {} : { historyBefore }),
+      },
+      replay,
+    }
   }
 
   return {

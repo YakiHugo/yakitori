@@ -20,6 +20,7 @@ import {
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
+  runConversationHistoryFlow,
   runExternalEngineFlow,
   runFauxTurn,
   runIndependentSessionFlow,
@@ -185,6 +186,13 @@ const test = base.extend<{ desktop: DesktopSmoke }>({
       }
     }
   },
+})
+
+test("conversation history opens at the latest prompt and loads older search targets", async ({
+  desktop,
+}) => {
+  await runConversationHistoryFlow(desktop.page)
+  expect(desktop.rendererErrors).toEqual([])
 })
 
 test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit", async ({

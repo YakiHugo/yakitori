@@ -1,3 +1,4 @@
+import type { DisplayWindowRead } from "./display-window.ts"
 import type {
   HistoryPosition,
   RolloutItem,
@@ -8,6 +9,8 @@ import type {
 } from "./rollout.ts"
 import type { SessionSidebar, SidebarChange } from "./session-sidebar.ts"
 import type { ThreadSearchOccurrence } from "./thread-search.ts"
+
+export type { DisplayWindowRead } from "./display-window.ts"
 
 export const PersistContext = {
   Standard: "standard",
@@ -116,6 +119,11 @@ export type ThreadStore = {
   createFork(input: CreateForkInput): Promise<ThreadStoreForkResult>
   releasePreparedFork(prepared: PreparedFork): Promise<void>
   readThread(threadId: string): Promise<StoredThread | undefined>
+  // Latest user prompt through the file end, without reading earlier history.
+  readDisplayWindow(
+    threadId: string,
+    beforeSeqExclusive?: number,
+  ): Promise<DisplayWindowRead | undefined>
   listThreadIds(): Promise<readonly string[]>
   readSessionSidebar(): Promise<SessionSidebar>
   // Generated titles must test absence inside the same storage mutation lock

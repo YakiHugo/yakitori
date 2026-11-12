@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   createExecutionViewState,
+  prependExecutionHistory,
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
@@ -23,6 +24,85 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("restores a turn's start from earlier history without replacing its terminal outcome", () => {
+    const startedAt = "2026-11-12T00:00:00.000Z"
+    const completedAt = "2026-11-12T00:00:30.000Z"
+    const state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 20,
+        createdAt: completedAt,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_latest",
+            outcome: { status: "interrupted" },
+          },
+        },
+      }),
+    })
+    const next = prependExecutionHistory(state, [
+      createExecutionEnvelope({
+        sessionId,
+        seq: 10,
+        createdAt: startedAt,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_latest", inputId: "input_latest" },
+        },
+      }),
+    ])
+
+    expect(projectExecutionView(next).turnTimings.turn_latest).toEqual({
+      inputId: "input_latest",
+      startedAt,
+      completedAt,
+      outcome: { status: "interrupted" },
+    })
+    expect(projectExecutionView(next).activeTurnId).toBeUndefined()
+    expect(next.lastSeq).toBe(20)
+  })
+
+  it("restores the resident turn's elapsed start from earlier history", () => {
+    const startedAt = "2026-11-12T00:00:00.000Z"
+    const session: ApiSessionDetail = {
+      id: sessionId,
+      conversationId: "conversation_1",
+      seq: 20,
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      activeTurnId: "turn_latest",
+      pendingInputs: [],
+      pendingPermissions: [],
+      counts: {
+        inputs: 1,
+        pendingInputs: 0,
+        turns: 1,
+        items: 0,
+        permissions: 0,
+        tools: 0,
+      },
+    }
+    const next = prependExecutionHistory(createExecutionViewState(session), [
+      createExecutionEnvelope({
+        sessionId,
+        seq: 10,
+        createdAt: startedAt,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_latest", inputId: "input_latest" },
+        },
+      }),
+    ])
+
+    expect(projectExecutionView(next).activeTurnId).toBe("turn_latest")
+    expect(projectExecutionView(next).activeTurnStartedAt).toBe(startedAt)
+    expect(projectExecutionView(next).turnTimings.turn_latest?.inputId).toBe(
+      "input_latest",
+    )
+  })
+
   it("shows the persisted provider rejection reason in the failed turn", () => {
     const message =
       "The model provider rejected the request. (HTTP 400, invalid_request_error) Missing tool_result for call_read."

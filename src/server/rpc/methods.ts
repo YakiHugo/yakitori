@@ -7,6 +7,7 @@ import type {
   ProjectListParams,
   ProjectMoveParams,
   ProjectUpdateParams,
+  SessionHistoryResponse,
   SessionSubscribeParams,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
@@ -253,7 +254,15 @@ function parseSessionSubscribeParams(params: unknown): SessionSubscribeParams {
   ) {
     throw invalidParams("after must be a non-negative integer.")
   }
-  return { sessionId, ...(after === undefined ? {} : { after }) }
+  const recent = record.recent
+  if (recent !== undefined && typeof recent !== "boolean") {
+    throw invalidParams("recent must be a boolean.")
+  }
+  return {
+    sessionId,
+    ...(after === undefined ? {} : { after }),
+    ...(recent === undefined ? {} : { recent }),
+  }
 }
 
 function parseSessionUnsubscribeParams(
@@ -687,6 +696,23 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.readSession(params),
   ),
+  handlerEntry<SessionHistoryResponse>(
+    "session/history",
+    sessionScope,
+    async (handlers, params) => {
+      const result = await handlers.readDisplayWindow(params)
+      if (!result.ok) return result
+      return {
+        ok: true,
+        value: {
+          events: result.value.events,
+          ...(result.value.historyBefore === undefined
+            ? {}
+            : { historyBefore: result.value.historyBefore }),
+        },
+      }
+    },
+  ),
   {
     method: "session/skills",
     scope: sessionScope,
@@ -873,6 +899,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
         connectionId: context.connectionId,
         sessionId: request.sessionId,
         after: request.after ?? 0,
+        ...(request.recent === undefined ? {} : { recent: request.recent }),
       })
       if (!outcome.ok) return { result: adaptHandlerResult(outcome.result) }
       return { result: outcome.response, afterResponse: outcome.replay }

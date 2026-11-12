@@ -21,12 +21,36 @@ import {
 import {
   createSmokeEnvironment,
   runBudgetedGoal,
+  runConversationHistoryFlow,
   runExternalEngineFlow,
   runFauxTurn,
   runIndependentSessionFlow,
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+
+test("conversation history opens at the latest prompt and loads older search targets", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  const errors: string[] = []
+  page.on("pageerror", (error) => errors.push(error.message))
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runConversationHistoryFlow(page)
+    expect(errors).toEqual([])
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
 
 test("browser attachment picker uploads bytes and removes abandoned staging files", async ({
   page,

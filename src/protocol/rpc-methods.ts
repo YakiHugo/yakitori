@@ -100,9 +100,22 @@ export type SessionListParams = Readonly<{
 export type SessionSubscribeParams = Readonly<{
   sessionId: string
   after?: number
+  recent?: boolean
 }>
 
-export type SessionSubscribeResponse = ApiReadSessionResponse
+export type SessionSubscribeResponse = ApiReadSessionResponse & {
+  readonly historyBefore?: number
+}
+
+export type SessionHistoryParams = Readonly<{
+  sessionId: string
+  before: number
+}>
+
+export type SessionHistoryResponse = Readonly<{
+  events: readonly AppSessionEventEnvelope[]
+  historyBefore?: number
+}>
 
 export type SessionUnsubscribeParams = Readonly<{ sessionId: string }>
 
@@ -254,6 +267,7 @@ export type RpcMethodParams = Readonly<
       "session/turn/cancel": ApiCancelTurnRequest
       "session/turn/resume": ApiResumeTurnRequest
       "session/subscribe": SessionSubscribeParams
+      "session/history": SessionHistoryParams
       "session/unsubscribe": SessionUnsubscribeParams
       "project/list": ProjectListParams
       "project/read": ProjectReadParams
@@ -318,6 +332,7 @@ export type RpcMethodResponses = Readonly<
       "session/turn/cancel": ApiCancelTurnResponse
       "session/turn/resume": ApiResumeTurnResponse
       "session/subscribe": SessionSubscribeResponse
+      "session/history": SessionHistoryResponse
       "session/unsubscribe": Readonly<Record<string, never>>
       "project/list": ApiListProjectsResponse
       "project/read": ApiReadProjectResponse

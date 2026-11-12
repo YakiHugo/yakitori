@@ -349,6 +349,61 @@ export function reduceExecutionView(
   return applyDurable(state, action.event)
 }
 
+export function prependExecutionHistory(
+  state: ExecutionViewState,
+  events: readonly AppSessionEventEnvelope[],
+): ExecutionViewState {
+  let prefix = createExecutionViewState()
+  for (const event of events) {
+    prefix = reduceExecutionView(prefix, { type: "durable", event })
+  }
+  const samples = prefix.timeToFirstTokenSamples + state.timeToFirstTokenSamples
+  const weighted =
+    prefix.timeToFirstTokenWeightedMs + state.timeToFirstTokenWeightedMs
+  const entries = [...prefix.entries, ...state.entries]
+  const turnTimings = { ...state.turnTimings }
+  for (const [turnId, timing] of Object.entries(prefix.turnTimings)) {
+    turnTimings[turnId] = { ...timing, ...state.turnTimings[turnId] }
+  }
+  return {
+    ...state,
+    entries,
+    turnTimings,
+    activeTurnStartedAt:
+      state.activeTurnId === undefined
+        ? undefined
+        : (state.activeTurnStartedAt ??
+          turnTimings[state.activeTurnId]?.startedAt),
+    telemetry: {
+      turns: prefix.telemetry.turns + state.telemetry.turns,
+      steps: prefix.telemetry.steps + state.telemetry.steps,
+      modelDurationMs:
+        prefix.telemetry.modelDurationMs + state.telemetry.modelDurationMs,
+      toolDurationMs:
+        prefix.telemetry.toolDurationMs + state.telemetry.toolDurationMs,
+      inputTokens: prefix.telemetry.inputTokens + state.telemetry.inputTokens,
+      outputTokens:
+        prefix.telemetry.outputTokens + state.telemetry.outputTokens,
+      cacheReadInputTokens:
+        prefix.telemetry.cacheReadInputTokens +
+        state.telemetry.cacheReadInputTokens,
+      cacheWriteInputTokens:
+        prefix.telemetry.cacheWriteInputTokens +
+        state.telemetry.cacheWriteInputTokens,
+      ...(samples === 0
+        ? {}
+        : { averageTimeToFirstTokenMs: Math.round(weighted / samples) }),
+    },
+    timeToFirstTokenWeightedMs: weighted,
+    timeToFirstTokenSamples: samples,
+    admittedRequestIds: {
+      ...prefix.admittedRequestIds,
+      ...state.admittedRequestIds,
+    },
+    ...indexEntries(entries),
+  }
+}
+
 export function projectExecutionView(state: ExecutionViewState): ExecutionView {
   const activeActivity = projectActiveActivity(state)
   return {

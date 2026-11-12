@@ -112,6 +112,7 @@ export type AppRpcClient = {
     sessionId: string,
     after: number,
     handlers: SessionStreamHandlers,
+    options?: Readonly<{ recent?: boolean }>,
   ): SessionStream
   // Registers a listener for server-broadcast project/changed notifications;
   // returns the unsubscribe function.
@@ -145,6 +146,7 @@ export type AppRpcClient = {
 type StreamRecord = {
   readonly handlers: SessionStreamHandlers
   readonly sessionId: string
+  readonly recent: boolean
   lastSeq: number
   closed: boolean
 }
@@ -556,6 +558,7 @@ export function createAppRpcClient(options: {
       const response = await request("session/subscribe", {
         sessionId: record.sessionId,
         after: record.lastSeq,
+        ...(record.recent && record.lastSeq === 0 ? { recent: true } : {}),
       })
       if (record.closed || streams.get(record.sessionId) !== record) return
       record.handlers.onSnapshot(response)
@@ -677,10 +680,11 @@ export function createAppRpcClient(options: {
         sideChatListeners.delete(listener)
       }
     },
-    openSessionStream(sessionId, after, handlers) {
+    openSessionStream(sessionId, after, handlers, options) {
       const record: StreamRecord = {
         sessionId,
         handlers,
+        recent: options?.recent === true,
         lastSeq: after,
         closed: false,
       }

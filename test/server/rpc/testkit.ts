@@ -268,6 +268,11 @@ export function createFakeHandlers(
         behavior: "allow" as const,
       }),
     readSessionEvents: async () => okResult({ events: [] }),
+    readDisplayWindow: async () =>
+      okResult({
+        session: makeSessionDetail("session_1"),
+        events: [],
+      }),
   }
   return { ...base, ...overrides }
 }

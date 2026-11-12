@@ -5,8 +5,8 @@ import type {
 } from "../../src/gui/lib/rpc-client.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import type { AppSessionEventEnvelope } from "../../src/protocol/events.ts"
+import type { SessionSubscribeResponse } from "../../src/protocol/rpc-methods.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
-import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
   GoalChangedNotification,
   McpStatusChangedNotification,
@@ -27,13 +27,14 @@ export class FakeSessionStream implements SessionStream {
     readonly sessionId: string,
     readonly after: number,
     private readonly handlers: SessionStreamHandlers,
+    readonly options?: Readonly<{ recent?: boolean }>,
   ) {}
 
   close(): void {
     this.closed = true
   }
 
-  emitSnapshot(response: ApiReadSessionResponse): void {
+  emitSnapshot(response: SessionSubscribeResponse): void {
     this.handlers.onSnapshot(response)
   }
 
@@ -141,8 +142,9 @@ export class FakeRpcClient {
     sessionId: string,
     after: number,
     handlers: SessionStreamHandlers,
+    options?: Readonly<{ recent?: boolean }>,
   ): FakeSessionStream {
-    const stream = new FakeSessionStream(sessionId, after, handlers)
+    const stream = new FakeSessionStream(sessionId, after, handlers, options)
     this.streams.push(stream)
     return stream
   }

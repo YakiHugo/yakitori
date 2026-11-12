@@ -112,6 +112,150 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe("partial conversation history", () => {
+  it("opens ordinary sessions with recent history", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams[0]?.options?.recent).toBe(true)
+  })
+
+  it("preserves unloaded history across an incremental reconnect snapshot", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 20 },
+      historyBefore: 10,
+    })
+    stream?.emitReplayComplete()
+    stream?.disconnect(new Error("Disconnected"))
+    emitSnapshot(stream, { ...sessionDetail, seq: 21 })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().historyBefore).toBe(10)
+  })
+
+  it("checks complete history before restoring an unconfirmed input", async () => {
+    const content = inputFixture(inputParts("already accepted"))
+    const pending = inputRecoveryMemory.reserveAdmission({
+      apiBase: useAppStore.getState().apiBase,
+      sessionId: "session_1",
+      content,
+    })
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    expect(stream?.options?.recent).toBe(false)
+    emitSnapshot(stream, { ...sessionDetail, seq: 100 })
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: pending.requestId,
+            inputId: "input_old",
+            role: InputRole.User,
+            content,
+          },
+        },
+      }),
+    )
+    stream?.emitReplayComplete()
+    await vi.waitFor(() =>
+      expect(
+        inputRecoveryMemory.listAdmissionsForSession(
+          useAppStore.getState().apiBase,
+          "session_1",
+        ),
+      ).toEqual([]),
+    )
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("loads earlier pages until a requested message is available", async () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      historyBefore: 10,
+      execution: { ...createExecutionViewState(), lastSeq: 100 },
+    })
+    fakeRef.current.respond = (method, params) => {
+      if (method !== "session/history") return notFound()
+      const before = (params as { before: number }).before
+      return {
+        events: [
+          createEventEnvelope({
+            sessionId: "session_1",
+            seq: before === 10 ? 8 : 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: before === 10 ? "request_middle" : "request_old",
+                inputId: before === 10 ? "input_middle" : "input_old",
+                role: InputRole.User,
+                content: inputFixture(
+                  inputParts(before === 10 ? "middle" : "old"),
+                ),
+              },
+            },
+          }),
+        ],
+        ...(before === 10 ? { historyBefore: 5 } : {}),
+      }
+    }
+    expect(await useAppStore.getState().loadHistoryThrough("input_old")).toBe(
+      true,
+    )
+    expect(fakeRef.current.requestsFor("session/history")).toEqual([
+      {
+        method: "session/history",
+        params: { sessionId: "session_1", before: 10 },
+      },
+      {
+        method: "session/history",
+        params: { sessionId: "session_1", before: 5 },
+      },
+    ])
+    expect(useAppStore.getState().execution.lastSeq).toBe(100)
+    expect(
+      useAppStore
+        .getState()
+        .execution.entries.map((entry) =>
+          entry.kind === "user_input" ? entry.text : entry.kind,
+        ),
+    ).toEqual(["old", "middle"])
+  })
+
+  it("discards an earlier page after leaving and returning to the session", async () => {
+    const page = deferredResponse()
+    fakeRef.current.respond = () => page.promise
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSelectionIntentRevision: 1,
+      historyBefore: 10,
+    })
+    const beforePrepend = vi.fn()
+    const loading = useAppStore.getState().loadEarlierHistory({ beforePrepend })
+    useAppStore.setState({ sessionSelectionIntentRevision: 3 })
+    page.resolve({ events: [], historyBefore: 5 })
+    expect(await loading).toBe(false)
+    expect(beforePrepend).not.toHaveBeenCalled()
+    expect(useAppStore.getState().historyBefore).toBe(10)
+  })
+
+  it("stops targeted history loading when the server repeats its cursor", async () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      historyBefore: 10,
+    })
+    fakeRef.current.respond = () => ({ events: [], historyBefore: 10 })
+    expect(
+      await useAppStore.getState().loadHistoryThrough("input_missing"),
+    ).toBe(false)
+    expect(fakeRef.current.requestsFor("session/history")).toHaveLength(1)
+    expect(useAppStore.getState().message).toBe(
+      "Earlier history did not advance.",
+    )
+  })
+})
+
 describe("app store initialization", () => {
   it.each([
     "{broken",

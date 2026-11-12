@@ -26,9 +26,16 @@ import {
   isTurnCompletion,
   isTurnMetrics,
 } from "../kernel/events.ts"
-import { isThreadMessageProvenance } from "../protocol/input-queue.ts"
 import { isStorageKey } from "../kernel/ids.ts"
+import { isThreadMessageProvenance } from "../protocol/input-queue.ts"
 import { ContextManager } from "./context-manager.ts"
+import {
+  type DisplayWindowRead,
+  displayTailReady,
+  readJsonlFirst,
+  readJsonlTail,
+  selectDisplayWindow,
+} from "./display-window.ts"
 import type {
   HistoryPosition,
   ResponseItemEnvelope,
@@ -119,6 +126,14 @@ type PhysicalRolloutRecord = {
   readonly entry: StoredRolloutItem
   readonly endByteOffset: number
 }
+
+type RolloutSegment = Readonly<{
+  rolloutId: string
+  sessionMeta: StoredRolloutItem & {
+    item: Extract<RolloutItem, { type: "session_meta" }>
+  }
+  position?: HistoryPosition
+}>
 
 type ForkReservation = {
   readonly prepared: PreparedFork
@@ -710,6 +725,58 @@ export class JsonlThreadStore implements ThreadStore {
     }
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
     return this.#readRequiredThread(threadId)
+  }
+
+  async readDisplayWindow(
+    threadId: string,
+    beforeSeqExclusive?: number,
+  ): Promise<DisplayWindowRead | undefined> {
+    await this.#ready
+    requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined && staged.materializing === undefined) {
+      const pending = staged.pendingDurableAppend
+      const visibleThrough =
+        pending === undefined
+          ? staged.rollout.length
+          : pending.throughSeq - pending.items.length
+      return windowFromRecords(
+        staged.metadata,
+        staged.rollout.filter(({ seq }) => seq < visibleThrough),
+        beforeSeqExclusive,
+        true,
+      )
+    }
+    if (staged?.materializing !== undefined) await staged.materializing
+    if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
+    const metadata = await this.#readMetadata(threadId)
+    const lineage = await this.#rolloutLineage(metadata.rolloutId)
+    let records: readonly StoredRolloutItem[] = []
+    let endSeq = 0
+    let reachedRoot = false
+    for (let index = lineage.length - 1; index >= 0; index -= 1) {
+      const segment = lineage[index]
+      if (segment === undefined) continue
+      const tail = await readJsonlTail(this.#rolloutPath(segment.rolloutId), {
+        ...segment.position,
+        ...(beforeSeqExclusive === undefined ? {} : { beforeSeqExclusive }),
+        parse: parseRolloutLine,
+        enough: (rows, reachedStart) =>
+          displayTailReady([...rows, ...records], reachedStart && index === 0),
+      })
+      validateRolloutSegment(tail.records, segment)
+      endSeq = Math.max(endSeq, tail.endSeq)
+      records = [
+        ...tail.records.filter((record) => record.item.type !== "session_meta"),
+        ...records,
+      ]
+      reachedRoot = tail.reachedStart && index === 0
+      if (displayTailReady(records, reachedRoot)) break
+    }
+    return {
+      ...windowFromRecords(metadata, records, undefined, reachedRoot),
+      endSeq,
+    }
   }
 
   async listThreadIds(): Promise<readonly string[]> {
@@ -1460,51 +1527,62 @@ export class JsonlThreadStore implements ThreadStore {
 
   async #readRequiredThread(threadId: string): Promise<StoredThread> {
     const metadata = await this.#readMetadata(threadId)
-    const rollout = await this.#materialize(metadata.rolloutId, new Set())
+    const rollout = await this.#materialize(metadata.rolloutId)
     return { metadata, rollout }
   }
 
-  async #materialize(
-    rolloutId: string,
-    seen: Set<string>,
-    position?: HistoryPosition,
-  ): Promise<readonly StoredRolloutItem[]> {
-    if (seen.has(rolloutId)) throw new Error("Thread history contains a cycle.")
-    seen.add(rolloutId)
-    try {
-      const local = await readPhysicalRollout(
-        this.#rolloutPath(rolloutId),
-        { rolloutId },
-        position,
-      )
-      const sessionMeta = local[0]
-      if (sessionMeta?.item.type !== "session_meta") {
-        throw new Error(`Rollout ${rolloutId} has no Session metadata item.`)
+  // Full replay and display paging share the same immutable ancestor ranges.
+  // Resolving headers and cutoffs never materializes their history bodies.
+  async #rolloutLineage(rolloutId: string): Promise<readonly RolloutSegment[]> {
+    const segments: RolloutSegment[] = []
+    const seen = new Set<string>()
+    let position: HistoryPosition | undefined
+    while (true) {
+      if (seen.has(rolloutId))
+        throw new Error("Thread history contains a cycle.")
+      seen.add(rolloutId)
+      const sessionMeta = await readJsonlFirst(this.#rolloutPath(rolloutId), {
+        ...position,
+        parse: parseRolloutLine,
+      })
+      if (sessionMeta?.item.type !== "session_meta" || sessionMeta.seq !== 0) {
+        throw new Error(`Rollout ${rolloutId} has invalid Session metadata.`)
       }
-      const historyBase = sessionMeta.item.metadata.historyBase
-      const inherited =
-        historyBase === undefined
-          ? []
-          : await this.#materializePrefix(historyBase, seen)
-      return [sessionMeta, ...inherited, ...local.slice(1)]
-    } finally {
-      seen.delete(rolloutId)
+      if (
+        sessionMeta.rolloutId !== rolloutId ||
+        sessionMeta.item.metadata.rolloutId !== rolloutId ||
+        sessionMeta.threadId !== sessionMeta.item.metadata.id
+      ) {
+        throw new Error(`Rollout ${rolloutId} has mismatched identity.`)
+      }
+      segments.push({
+        rolloutId,
+        sessionMeta: { ...sessionMeta, item: sessionMeta.item },
+        ...(position === undefined ? {} : { position }),
+      })
+      position = sessionMeta.item.metadata.historyBase
+      if (position === undefined) break
+      rolloutId = position.rolloutId
     }
+    return segments.reverse()
   }
 
-  async #materializePrefix(
-    position: HistoryPosition,
-    seen: Set<string>,
-  ): Promise<readonly StoredRolloutItem[]> {
-    // A fork owns only this immutable byte range. Later ancestor records must
-    // not affect its replay or its cutoff validation.
-    const history = await this.#materialize(position.rolloutId, seen, position)
-    const prefix = history.filter(
-      (entry) =>
-        entry.item.type !== "session_meta" &&
-        entry.seq < position.endSeqExclusive,
-    )
-    return prefix
+  async #materialize(rolloutId: string): Promise<readonly StoredRolloutItem[]> {
+    const lineage = await this.#rolloutLineage(rolloutId)
+    const content: StoredRolloutItem[][] = []
+    for (const segment of lineage) {
+      const local = await readPhysicalRollout(
+        this.#rolloutPath(segment.rolloutId),
+        { rolloutId: segment.rolloutId },
+        segment.position,
+      )
+      content.push(local.slice(1))
+    }
+    const sessionMeta = lineage.at(-1)?.sessionMeta
+    if (sessionMeta === undefined) {
+      throw new Error(`Rollout ${rolloutId} has no Session metadata item.`)
+    }
+    return [sessionMeta, ...content.flat()]
   }
 
   async #snapshotForFork(
@@ -2201,6 +2279,63 @@ function isGitInfo(value: unknown): boolean {
       value.branch !== undefined ||
       value.originUrl !== undefined)
   )
+}
+
+function parseRolloutLine(line: string): StoredRolloutItem {
+  const value = normalizeStoredModelContent(JSON.parse(line))
+  if (!isStoredRolloutItem(value)) {
+    throw new Error("Rollout contains an invalid item.")
+  }
+  return value
+}
+
+function validateRolloutSegment(
+  records: readonly StoredRolloutItem[],
+  segment: RolloutSegment,
+): void {
+  const metadata = segment.sessionMeta.item.metadata
+  const startSeq = metadata.historyBase?.endSeqExclusive ?? 1
+  let expectedSeq: number | undefined
+  for (const record of records) {
+    if (record.item.type === "session_meta") {
+      if (expectedSeq !== undefined || record.seq !== 0) {
+        throw new Error(
+          `Rollout ${segment.rolloutId} has invalid local ordering.`,
+        )
+      }
+      expectedSeq = startSeq
+      continue
+    }
+    if (
+      record.rolloutId !== segment.rolloutId ||
+      record.threadId !== metadata.id ||
+      record.seq < startSeq ||
+      (expectedSeq !== undefined && record.seq !== expectedSeq) ||
+      (segment.position !== undefined &&
+        record.seq >= segment.position.endSeqExclusive)
+    ) {
+      throw new Error(
+        `Rollout ${segment.rolloutId} has invalid local ordering.`,
+      )
+    }
+    expectedSeq = record.seq + 1
+  }
+}
+
+function windowFromRecords(
+  metadata: ThreadMetadata,
+  records: readonly StoredRolloutItem[],
+  beforeSeqExclusive: number | undefined,
+  reachedRoot: boolean,
+): DisplayWindowRead {
+  const window = selectDisplayWindow(records, beforeSeqExclusive)
+  return {
+    metadata,
+    records: window.records,
+    lookbehind: window.lookbehind,
+    hasEarlier: window.hasEarlier || !reachedRoot,
+    endSeq: records.at(-1)?.seq ?? 0,
+  }
 }
 
 // Existing rollouts stored user/tool text and media in separate arrays. Normalize
