@@ -15,13 +15,18 @@ import {
   type SessionSidebar,
 } from "../core/session-sidebar.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
-import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
+import {
+  type DisplayWindowRead,
+  PersistContext,
+  type ThreadStore,
+} from "../core/thread-store.ts"
 import {
   inputContentAttachments,
   inputContentText,
   isInputContent,
   replaceInputAttachments,
 } from "../core/user-input.ts"
+import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import {
   AttachmentConflictError,
   createRequestId,
@@ -41,7 +46,6 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
-import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
@@ -65,8 +69,8 @@ import {
 } from "./operational-errors.ts"
 import type {
   ApiClearGoalResponse,
-  ApiResumeTurnResponse,
   ApiReadGoalResponse,
+  ApiResumeTurnResponse,
   ApiSetGoalResponse,
 } from "./protocol.ts"
 import {
@@ -76,6 +80,7 @@ import {
   type ApiCompactSessionResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
+  type ApiDisplayWindowResponse,
   ApiErrorCode,
   type ApiForkSessionResponse,
   type ApiListAgentsResponse,
@@ -234,6 +239,9 @@ export type ServerHandlers = {
   readSessionEvents(
     input: unknown,
   ): Promise<ApplicationResult<ApiReadSessionEventsResponse>>
+  readDisplayWindow(
+    input: unknown,
+  ): Promise<ApplicationResult<ApiDisplayWindowResponse>>
 }
 
 export type ThreadServerHandlers = ServerHandlers & {
@@ -2267,6 +2275,62 @@ export function createThreadServerHandlers(
         return fail(error, reporter, "read-session-events")
       }
     },
+
+    async readDisplayWindow(input) {
+      try {
+        const request = requireDisplayWindowRequest(input)
+        const live = options.manager.getThread(request.sessionId)
+        if (live !== undefined) await ensureEventPump(live)
+        const window = await options.store.readDisplayWindow(
+          request.sessionId,
+          request.before,
+        )
+        if (window === undefined) {
+          throw notFound(`Session ${request.sessionId} was not found.`, {
+            sessionId: request.sessionId,
+          })
+        }
+        const modelContext = window.records.some(
+          (record) => record.item.type === "turn_context",
+        )
+          ? []
+          : window.lookbehind
+              .filter((record) => record.item.type === "turn_context")
+              .slice(-1)
+        const session = {
+          ...(await mapStoredThread(
+            {
+              metadata: window.metadata,
+              rollout: [...modelContext, ...window.records],
+            },
+            live,
+            queueOptions,
+          )),
+          seq: window.endSeq + 1,
+        }
+        const expiry = sessionCacheExpiry([
+          ...window.lookbehind,
+          ...window.records,
+        ])
+        const replayRecords = replayRecordsForWindow(window)
+        return ok({
+          session:
+            expiry === undefined
+              ? session
+              : { ...session, cacheExpiry: expiry },
+          events: replayRecords.map((record) =>
+            mapRolloutEvent(record, request.sessionId),
+          ),
+          // Supplemental state can precede unseen transcript records. Only
+          // the contiguous window defines how far history has been covered.
+          ...(window.hasEarlier && window.records[0] !== undefined
+            ? { historyBefore: window.records[0].seq }
+            : {}),
+        })
+      } catch (error) {
+        return fail(error, reporter, "read-display-window")
+      }
+    },
   }
 }
 
@@ -2917,6 +2981,33 @@ function requireRequestId(value: unknown): string {
     "requestId must be 1 to 128 letters, numbers, dots, underscores, colons, or hyphens.",
     { field: "requestId" },
   )
+}
+
+function replayRecordsForWindow(
+  window: DisplayWindowRead,
+): readonly StoredRolloutItem[] {
+  const tokens = window.records.some(
+    (record) => record.item.type === "token_count",
+  )
+    ? []
+    : window.lookbehind
+        .filter((record) => record.item.type === "token_count")
+        .slice(-1)
+  return [
+    ...tokens,
+    ...window.records.filter((record) => record.item.type !== "session_meta"),
+  ]
+}
+
+function requireDisplayWindowRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session display request must be an object.",
+  )
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    before: requireOptionalSequence(record.before, "before"),
+  }
 }
 
 function requireReadSessionEventsRequest(input: unknown) {

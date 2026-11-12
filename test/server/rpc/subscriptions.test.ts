@@ -1,6 +1,6 @@
-import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import { describe, expect, it, vi } from "vitest"
 import { createEventEnvelope, EventType } from "../../../src/kernel/index.ts"
+import type { AppSessionEventEnvelope } from "../../../src/protocol/events.ts"
 import type { LiveRuntimeWarning } from "../../../src/runtime/live-events.ts"
 import {
   createSessionEventHub,
@@ -178,6 +178,36 @@ describe("buffered turn lifecycle", () => {
 })
 
 describe("session/subscribe", () => {
+  it("replays the display window instead of paging from the start", async () => {
+    const calls = { events: 0 }
+    const windowEvent = makeTurnStarted(sessionId, 9, "turn_latest")
+    const handlers = createFakeHandlers({
+      readSessionEvents: async () => {
+        calls.events += 1
+        return okResult({ events: [] })
+      },
+      readDisplayWindow: async () =>
+        okResult({
+          session: makeSessionDetail(sessionId, { seq: 9 }),
+          events: [windowEvent],
+          historyBefore: 8,
+        }),
+    })
+    const { processor } = createTestProcessor({ handlers })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    const response = await connection.sendRequest("session/subscribe", {
+      sessionId,
+      recent: true,
+    })
+    await flush()
+    expect(response).toMatchObject({ result: { historyBefore: 8 } })
+    expect(
+      connection.notifications("session/event").map((frame) => frame.params),
+    ).toEqual([{ sessionId, seq: 9, event: windowEvent }])
+    expect(calls.events).toBe(0)
+  })
+
   it.each([
     false,
     true,

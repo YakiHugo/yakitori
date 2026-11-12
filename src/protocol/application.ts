@@ -391,6 +391,12 @@ export type ApiReadSessionEventsResponse = {
   readonly nextAfter?: number
 }
 
+export type ApiDisplayWindowResponse = {
+  readonly session: ApiSessionDetail
+  readonly events: readonly AppSessionEventEnvelope[]
+  readonly historyBefore?: number
+}
+
 export type ApiSessionSummary = Readonly<{
   archived?: boolean
   sectionId?: string
