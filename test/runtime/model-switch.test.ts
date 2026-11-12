@@ -87,7 +87,7 @@ describe("pre-sampling model switches", () => {
   it.each([
     "model",
     "provider",
-  ])("requires restoring a native checkpoint's removed source %s", async (removed) => {
+  ])("falls back to the selected model when a native checkpoint's source %s is removed", async (removed) => {
     const requests: ModelRequest[] = []
     let samples = 0
     const stream: StreamFn = async function* (request) {
@@ -107,6 +107,22 @@ describe("pre-sampling model switches", () => {
                 encryptedContent: "opaque checkpoint",
               },
             ],
+          },
+        }
+        return
+      }
+      if (request.compaction === "local") {
+        expect(JSON.stringify(request.messages)).not.toContain(
+          "opaque checkpoint",
+        )
+        expect(JSON.stringify(request.messages)).toContain(
+          "filtered out because it was stored in an encrypted checkpoint",
+        )
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "Portable progress" }],
           },
         }
         return
@@ -150,24 +166,132 @@ describe("pre-sampling model switches", () => {
         { id: "model-b", contextWindowTokens: 200_000 },
       ]),
     })
-    const callsBeforeSwitch = requests.length
     await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "continue" }]),
       modelSelection: { provider, model: "model-b" },
     })
     await expect
       .poll(() => thread.agentStatus)
-      .toEqual({
-        errored:
-          "Native checkpoint continuation requires work/model-a. Restore its provider connection and model configuration before continuing.",
+      .toEqual({ completed: "sample 3" })
+    expect(
+      requests
+        .filter((request) => request.compaction === "local")
+        .map((request) => [request.target.provider, request.target.model]),
+    ).toEqual([[provider, "model-b"]])
+    expect(thread.snapshot().context.previousModel).toMatchObject({
+      provider,
+      model: "model-b",
+    })
+    expect(JSON.stringify(thread.snapshot().context.history)).not.toContain(
+      "opaque checkpoint",
+    )
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "filtered out because it was stored in an encrypted checkpoint",
+    )
+  })
+
+  it("falls back to the selected model when the checkpoint owner cannot pay", async () => {
+    const requests: ModelRequest[] = []
+    let samples = 0
+    const stream: StreamFn = async function* (request) {
+      requests.push(request)
+      if (request.compaction === "codex_remote") {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            providerResponseId: "native_response",
+            content: [
+              {
+                type: "compaction",
+                provider: "work",
+                model: "model-a",
+                scope: "work:account",
+                encryptedContent: "opaque checkpoint",
+              },
+            ],
+          },
+        }
+        return
+      }
+      if (request.compaction === "local") {
+        if (request.target.model === "model-a") {
+          yield {
+            type: "failure",
+            failure: {
+              kind: "provider_error",
+              stage: "response_body",
+              provider: request.target.provider,
+              wireApi: "openai_responses",
+              providerCode: "credit_balance_exhausted",
+              message: "You have no credits remaining.",
+            },
+          }
+          return
+        }
+        expect(JSON.stringify(request.messages)).not.toContain(
+          "opaque checkpoint",
+        )
+        expect(JSON.stringify(request.messages)).toContain(
+          "filtered out because it was stored in an encrypted checkpoint",
+        )
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "Portable progress" }],
+          },
+        }
+        return
+      }
+      samples += 1
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: `done ${request.target.model}` }],
+          usage: { activeContextTokens: samples === 1 ? 100_000 : 100 },
+        },
+      }
+    }
+    const harness = await setupConfigured(stream, true)
+    const thread = await harness.manager.createThread({
+      workingDirectory: harness.root,
+      mateId: "mate",
+      mateRevisionId: "revision",
+    })
+    for (const text of ["start", "create checkpoint"]) {
+      await thread.startIfIdle({
+        content: inputFixture([{ type: "text" as const, text }]),
       })
-    expect(requests).toHaveLength(callsBeforeSwitch)
+      await expect
+        .poll(() => thread.agentStatus)
+        .toEqual({ completed: "done model-a" })
+    }
+    await harness.registration.replace({
+      work: harness.provider("work", [
+        { id: "model-a", contextWindowTokens: 100_000 },
+        { id: "model-b", contextWindowTokens: 200_000 },
+      ]),
+    })
+    await thread.startIfIdle({
+      content: inputFixture([{ type: "text" as const, text: "continue" }]),
+      modelSelection: { provider: "work", model: "model-b" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done model-b" })
+    expect(
+      requests
+        .filter((request) => request.compaction === "local")
+        .map((request) => request.target.model),
+    ).toEqual(["model-a", "model-b"])
     expect(thread.snapshot().context.previousModel).toMatchObject({
       provider: "work",
-      model: "model-a",
+      model: "model-b",
     })
     expect(JSON.stringify(thread.snapshot().context.history)).toContain(
-      "opaque checkpoint",
+      "filtered out because it was stored in an encrypted checkpoint",
     )
   })
 
@@ -319,6 +443,77 @@ describe("pre-sampling model switches", () => {
       "encryptedContent",
     )
   })
+
+  it.each([
+    { name: "still fits above the compact limit", usage: 95_000 },
+    { name: "no longer fits", usage: 100_000 },
+  ])("falls back to the selected provider when the previous model cannot pay and the history $name", async ({
+    usage,
+  }) => {
+    const requests: ModelRequest[] = []
+    const good = recordingStream(requests, usage)
+    const stream: StreamFn = async function* (request) {
+      if (
+        request.compaction !== undefined &&
+        request.target.provider === "codex"
+      ) {
+        requests.push(request)
+        yield {
+          type: "failure",
+          failure: {
+            kind: "provider_error",
+            stage: "response_body",
+            provider: request.target.provider,
+            wireApi: "openai_responses",
+            providerCode: "credit_balance_exhausted",
+            message: "You have no credits remaining.",
+          },
+        }
+        return
+      }
+      yield* good(request)
+    }
+    const harness = await setup(
+      { old: { window: 200_000 }, new: { window: 100_000 } },
+      stream,
+    )
+    const thread = await harness.manager().createThread({
+      workingDirectory: harness.root,
+      mateId: "mate",
+      mateRevisionId: "revision",
+    })
+    await thread.startIfIdle({
+      content: inputFixture([{ type: "text" as const, text: "start" }]),
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done old" })
+    await thread.startIfIdle({
+      content: inputFixture([
+        { type: "text" as const, text: "switch provider" },
+      ]),
+      modelSelection: { provider: "kimi-code", model: "new" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done new" })
+    expect(
+      requests
+        .filter((request) => request.compaction !== undefined)
+        .map((request) => [
+          request.target.provider,
+          request.target.model,
+          request.compaction,
+        ]),
+    ).toEqual([
+      ["codex", "old", "local"],
+      ["kimi-code", "new", "local"],
+    ])
+    expect(requests.at(-1)?.target).toMatchObject({
+      provider: "kimi-code",
+      model: "new",
+    })
+  })
   it.each([
     {
       name: "different compatibility hashes",
@@ -340,6 +535,13 @@ describe("pre-sampling model switches", () => {
       second: { window: 100_000 },
       usage: 90_000,
       compact: "new",
+    },
+    {
+      name: "a smaller window that fits above the compact limit",
+      first: { window: 200_000 },
+      second: { window: 100_000 },
+      usage: 95_000,
+      compact: "old",
     },
     {
       name: "matching compatibility hashes",
