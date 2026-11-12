@@ -19,6 +19,48 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  it("drops the obsolete response byte cap when restoring an existing session", () => {
+    const created = SessionConfiguration.create({
+      selection: { provider: "faux", model: "scripted" },
+      workspaceRoot: "/workspace",
+      promptCacheKey: "existing-session",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+    })
+    expect(created.snapshot.executionPolicyDefaults).not.toHaveProperty(
+      "assistantResponseBytes",
+    )
+    const persisted = {
+      ...created.snapshot,
+      executionPolicyDefaults: {
+        ...created.snapshot.executionPolicyDefaults,
+        assistantResponseBytes: 262_144,
+      },
+    }
+    const restored = SessionConfiguration.restore(persisted)
+    expect(restored.snapshot).toEqual(created.snapshot)
+    expect(
+      SessionConfiguration.create({
+        selection: persisted.defaultTarget,
+        workspaceRoot: persisted.workspaceRoot,
+        promptCacheKey: persisted.promptCacheKey,
+        enabledTools: persisted.enabledTools,
+        approvalPolicy: persisted.approvalPolicy,
+        executionPolicy: persisted.executionPolicyDefaults,
+      }).snapshot.executionPolicyDefaults,
+    ).toEqual(created.snapshot.executionPolicyDefaults)
+    expect(
+      createTurnContext({
+        requestSettings: restored.resolveStep(persisted.defaultTarget),
+        mateId: "mate",
+        mateRevisionId: "revision",
+      }).execution.executionPolicy,
+    ).toEqual(created.snapshot.executionPolicyDefaults)
+    expect(persisted.executionPolicyDefaults.assistantResponseBytes).toBe(
+      262_144,
+    )
+  })
+
   const previousDefaultTools = [
     "read_file",
     "view_image",

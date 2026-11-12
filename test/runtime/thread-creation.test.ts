@@ -169,7 +169,6 @@ describe("independent session creation", () => {
           executionPolicy: {
             modelVisibleToolResultBytes: 4096,
             modelVisibleToolResultLines: 100,
-            assistantResponseBytes: 128_000,
           },
           modelContextWindowTokens: 600_000,
           modelAutoCompactTokenLimit: 10,
@@ -247,7 +246,6 @@ describe("independent session creation", () => {
         executionPolicyDefaults: {
           modelVisibleToolResultBytes: 4096,
           modelVisibleToolResultLines: 100,
-          assistantResponseBytes: 128_000,
         },
       })
       expect(childConfiguration).not.toHaveProperty("modelContextWindowTokens")

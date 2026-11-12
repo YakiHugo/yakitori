@@ -1690,7 +1690,6 @@ async function executeTurnModelLoop(
       const committedContent: ModelContentBlock[] = []
       const committedNative: ModelNativeItem[] = []
       const committedCallIds = new Set<string>()
-      let committedBytes = 0
       if (!continuingAnswer) answerItemIds.length = 0
       let answerStartIndex = answerItemIds.length
       let explicitAnswer = false
@@ -1774,17 +1773,6 @@ async function executeTurnModelLoop(
         attempt,
         async onOutputItem(content, itemId, native) {
           throwIfAborted(samplingSignal)
-          committedBytes +=
-            utf8Bytes(JSON.stringify(content)) +
-            (native === undefined ? 0 : utf8Bytes(JSON.stringify(native)))
-          if (
-            committedBytes >
-            executionStep.executionPolicy.assistantResponseBytes
-          ) {
-            throw new Error(
-              "Assistant response exceeded the configured byte limit.",
-            )
-          }
           for (const block of content) {
             if (block.type !== "tool_call") continue
             if (committedCallIds.has(block.id))
@@ -1811,7 +1799,6 @@ async function executeTurnModelLoop(
         },
         emitWarning: (message, diagnostic) =>
           input.session.emitWarning(input.execution, message, diagnostic),
-        assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
         onRetry(committed) {
           input.session.invalidateRequestStartedAt(input.execution)
@@ -1824,7 +1811,6 @@ async function executeTurnModelLoop(
             )
             committedContent.length = 0
             committedNative.length = 0
-            committedBytes = 0
             sampledContext = undefined
             explicitAnswer = false
             responseItemId = `message_${globalThis.crypto.randomUUID()}`
@@ -2044,8 +2030,6 @@ async function executeTurnModelLoop(
               recordModelAttempt: (attempt) =>
                 input.session.recordModelAttempt(input.execution, attempt),
               ...(wireApi === undefined ? {} : { wireApi }),
-              assistantResponseBytes:
-                step.executionPolicy.assistantResponseBytes,
               emitWarning: (message, diagnostic) =>
                 input.session.emitWarning(input.execution, message, diagnostic),
               onOperationalFailure: input.options.onOperationalFailure,
@@ -2366,7 +2350,6 @@ async function consumeModelStream(input: {
   readonly itemId?: string
   readonly emitModelStream?: WithoutExecution<Session["emitModelStream"]>
   readonly emitWarning?: WithoutExecution<Session["emitWarning"]>
-  readonly assistantResponseBytes: number
   readonly onOperationalFailure: TurnLoopOperationalFailureReporter | undefined
   readonly onOutputItem?: (
     content: readonly ModelContentBlock[],
@@ -2414,8 +2397,6 @@ async function consumeModelStream(input: {
     input.itemId === undefined || providerItemId === undefined
       ? input.itemId
       : `${input.itemId}_${providerItemId}`
-  const streamedBytes = { assistant: 0, reasoning: 0 }
-  const trailingHighSurrogate = { assistant: "", reasoning: "" }
   try {
     for (;;) {
       const next = await iterator.next()
@@ -2456,10 +2437,6 @@ async function consumeModelStream(input: {
         await attempt?.end(event)
         attempt?.retry(event.nextAttempt)
         input.onRetry?.(event.committedOutput === true, event.nextAttempt)
-        streamedBytes.assistant = 0
-        streamedBytes.reasoning = 0
-        trailingHighSurrogate.assistant = ""
-        trailingHighSurrogate.reasoning = ""
         if (event.usage !== undefined) await input.onUsage(event.usage)
         input.emitWarning?.(
           event.maxAttempts === undefined
@@ -2530,19 +2507,6 @@ async function consumeModelStream(input: {
         input.onFirstToken?.()
         const kind =
           event.type === "reasoning_delta" ? "reasoning" : "assistant"
-        let text = trailingHighSurrogate[kind] + event.text
-        trailingHighSurrogate[kind] = ""
-        const last = text.charCodeAt(text.length - 1)
-        if (last >= 0xd800 && last <= 0xdbff) {
-          trailingHighSurrogate[kind] = text.slice(-1)
-          text = text.slice(0, -1)
-        }
-        streamedBytes[kind] += utf8Bytes(text)
-        if (streamedBytes[kind] > input.assistantResponseBytes) {
-          throw new Error(
-            "Model stream update exceeded the configured byte limit.",
-          )
-        }
         const parentItemId = displayItemId(event.itemId)
         if (parentItemId !== undefined) {
           const itemId = modelOutputItemId(parentItemId, kind, event.partIndex)
@@ -2574,39 +2538,12 @@ async function consumeModelStream(input: {
         throw new Error("Model stream emitted more than one terminal response.")
       }
       terminal = event.response
-      for (const kind of ["assistant", "reasoning"] as const) {
-        streamedBytes[kind] += utf8Bytes(trailingHighSurrogate[kind])
-        if (streamedBytes[kind] > input.assistantResponseBytes) {
-          throw new Error(
-            "Model stream update exceeded the configured byte limit.",
-          )
-        }
-      }
       input.onFirstToken?.()
       if (event.response.usage !== undefined)
         await input.onUsage(event.response.usage)
     }
     if (terminal === undefined)
       throw new Error("Model stream ended without a terminal response.")
-    const metadataBytes =
-      terminal.nativeMetadata === undefined
-        ? 0
-        : utf8Bytes(JSON.stringify(terminal.nativeMetadata))
-    // Compaction has its own summary/window admission. In particular, an
-    // encrypted checkpoint can represent existing context larger than a new
-    // assistant answer. Its envelope still obeys the diagnostic safety bound.
-    if (
-      metadataBytes > input.assistantResponseBytes ||
-      (input.request.compaction === undefined &&
-        utf8Bytes(JSON.stringify(terminal.content)) +
-          (terminal.native === undefined
-            ? 0
-            : utf8Bytes(JSON.stringify(terminal.native))) +
-          metadataBytes >
-          input.assistantResponseBytes)
-    ) {
-      throw new Error("Assistant response exceeded the configured byte limit.")
-    }
     await attempt?.end({ type: "response", response: terminal })
   } catch (error) {
     await attempt?.fail(error, input.request.signal?.aborted === true)
@@ -2779,8 +2716,6 @@ async function compactLiveHistory(
         recordModelAttempt: (attempt) =>
           input.session.recordModelAttempt(input.execution, attempt),
         wireApi: input.wireApi,
-        assistantResponseBytes:
-          compactionStep.executionPolicy.assistantResponseBytes,
         emitWarning: (message, diagnostic) =>
           input.session.emitWarning(input.execution, message, diagnostic),
         onOperationalFailure: input.onOperationalFailure,
@@ -2946,15 +2881,6 @@ async function compactLiveHistory(
         source = source.slice(1)
       }
     }
-    if (
-      utf8Bytes(result.summary) >
-      compactionStep.executionPolicy.assistantResponseBytes
-    ) {
-      throw new Error(
-        "Compaction checkpoint exceeded its configured byte limit.",
-      )
-    }
-
     const fullWorldState = diffWorldState(undefined, input.worldState)
     if (fullWorldState === undefined) {
       throw new Error(
@@ -3435,8 +3361,4 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function abortError(): Error {
   return new DOMException("Turn aborted.", "AbortError")
-}
-
-function utf8Bytes(value: string): number {
-  return Buffer.byteLength(value, "utf8")
 }

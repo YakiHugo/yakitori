@@ -12,7 +12,6 @@ import { isSessionConfigurationSnapshot } from "../kernel/index.ts"
 import {
   createSessionExecutionPolicy,
   type SessionExecutionPolicy,
-  SessionExecutionPolicyDefaults,
 } from "./limits.ts"
 import type { ModelSystemSection, ModelTarget } from "./model.ts"
 import {
@@ -116,9 +115,9 @@ export class SessionConfiguration {
       baseInstructions,
       enabledTools: [...input.enabledTools],
       approvalPolicy: input.approvalPolicy,
-      executionPolicyDefaults: {
-        ...(input.executionPolicy ?? createSessionExecutionPolicy()),
-      },
+      executionPolicyDefaults: createSessionExecutionPolicy(
+        input.executionPolicy,
+      ),
       ...(input.modelContextWindowTokens === undefined
         ? {}
         : { modelContextWindowTokens: input.modelContextWindowTokens }),
@@ -140,7 +139,7 @@ export class SessionConfiguration {
     if (!isSessionConfigurationSnapshot(snapshot)) {
       throw new Error("Invalid Session configuration snapshot.")
     }
-    const executionPolicyDefaults = requireSessionExecutionPolicy(
+    const executionPolicyDefaults = createSessionExecutionPolicy(
       snapshot.executionPolicyDefaults,
     )
     const model = resolveSelection(snapshot.defaultTarget, models)
@@ -228,7 +227,7 @@ export class SessionConfiguration {
       workspaceRoot: this.snapshot.workspaceRoot,
       enabledTools: [...this.snapshot.enabledTools],
       approvalPolicy: this.snapshot.approvalPolicy,
-      executionPolicy: requireSessionExecutionPolicy(
+      executionPolicy: createSessionExecutionPolicy(
         this.snapshot.executionPolicyDefaults,
       ),
       autoCompact: resolveAutoCompact(
@@ -499,22 +498,6 @@ function validateSelection(
   else models.validate(selection)
 }
 
-function requireSessionExecutionPolicy(
-  value: SessionConfigurationSnapshot["executionPolicyDefaults"],
-): SessionExecutionPolicy {
-  const expectedKeys = Object.keys(SessionExecutionPolicyDefaults)
-  const actualKeys = Object.keys(value)
-  if (
-    actualKeys.length !== expectedKeys.length ||
-    expectedKeys.some((key) => !Object.hasOwn(value, key))
-  ) {
-    throw new Error(
-      "Session configuration contains an invalid execution policy.",
-    )
-  }
-  return createSessionExecutionPolicy(value)
-}
-
 export function stepExecutionLimits(
   configuration: ResolvedStepConfiguration,
 ): TurnExecutionLimits {
@@ -522,7 +505,6 @@ export function stepExecutionLimits(
   return {
     modelVisibleToolResultBytes: executionPolicy.modelVisibleToolResultBytes,
     modelVisibleToolResultLines: executionPolicy.modelVisibleToolResultLines,
-    assistantResponseBytes: executionPolicy.assistantResponseBytes,
   }
 }
 

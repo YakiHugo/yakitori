@@ -10,7 +10,6 @@ import {
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
 import { createRequestId } from "../../src/kernel/ids.ts"
-import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
@@ -763,7 +762,7 @@ describe("Turn recovery", () => {
     expect(terminalIndex).toBeGreaterThan(resultIndex)
   })
 
-  it("retries partial output without committing it, accumulating its byte budget, or repeating completed tools", async () => {
+  it("retries partial output without committing it or repeating completed tools", async () => {
     let executions = 0
     const partial = "x".repeat(100)
     const provider = createFauxProvider([
@@ -796,23 +795,19 @@ describe("Turn recovery", () => {
         usage: { inputTokens: 6, outputTokens: 3 },
       },
     ])
-    const runtime = await fixture(
-      provider.stream,
-      [
-        {
-          toolName: plainToolName("once"),
-          description: "Execute once",
-          inputSchema: { type: "object" },
-          effect: "observe",
-          approvalRequirement: { kind: "none" },
-          async execute() {
-            executions += 1
-            return { ok: true, content: "executed", output: "executed" }
-          },
+    const runtime = await fixture(provider.stream, [
+      {
+        toolName: plainToolName("once"),
+        description: "Execute once",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          executions += 1
+          return { ok: true, content: "executed", output: "executed" }
         },
-      ],
-      111,
-    )
+      },
+    ])
     const thread = await runtime.createThread()
     await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "recover" }]),
@@ -857,11 +852,7 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function fixture(
-  stream: StreamFn,
-  tools: RuntimeTool[],
-  assistantResponseBytes?: number,
-) {
+async function fixture(stream: StreamFn, tools: RuntimeTool[]) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-turn-recovery-"))
   const store = new JsonlThreadStore({ root: join(root, "store") })
   const models = createStaticModelsManager("faux")
@@ -897,11 +888,6 @@ async function fixture(
         model: "faux",
         toolRegistry: createToolRegistry(tools),
         loadProjectInstructions: async () => undefined,
-        executionPolicy: createSessionExecutionPolicy({
-          ...(assistantResponseBytes === undefined
-            ? {}
-            : { assistantResponseBytes }),
-        }),
       }),
   })
   cleanups.push(async () => {

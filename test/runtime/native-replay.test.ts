@@ -30,6 +30,14 @@ import {
   toOpenAIInput,
 } from "../../src/runtime/openai-provider.ts"
 
+const encryptedReasoning = "opaque".repeat(50_000)
+const openAIUsage = {
+  input_tokens: 7,
+  output_tokens: 3,
+  total_tokens: 10,
+  attribution: { trace: "source".repeat(50_000) },
+}
+
 const cases: ReadonlyArray<{
   api: ModelNativeItem["wireApi"]
   values: JsonObject[]
@@ -46,7 +54,7 @@ const cases: ReadonlyArray<{
           { type: "summary_text", text: "Second" },
         ],
         content: [{ type: "reasoning_text", text: "Native thought" }],
-        encrypted_content: "opaque",
+        encrypted_content: encryptedReasoning,
       },
       {
         type: "function_call",
@@ -56,6 +64,13 @@ const cases: ReadonlyArray<{
         namespace: "yakitori",
         arguments: '{ "value" : 1.0 }',
         status: "completed",
+      },
+      {
+        type: "message",
+        id: "text_a",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "OK", annotations: [] }],
       },
     ],
   },
@@ -169,7 +184,7 @@ it.each(
           vendor_metadata: { trace: "envelope" },
           status: "completed",
           output: values,
-          usage: null,
+          usage: openAIUsage,
           error: null,
           incomplete_details: null,
         },
@@ -305,6 +320,16 @@ it.each(
     expect(terminal.nativeMetadata?.value).toMatchObject({
       vendor_metadata: { trace: "envelope" },
     })
+    if (api === "openai_responses") {
+      expect(Buffer.byteLength(encryptedReasoning)).toBeGreaterThan(262_144)
+      expect(
+        Buffer.byteLength(JSON.stringify(openAIUsage.attribution)),
+      ).toBeGreaterThan(262_144)
+      expect(terminal.nativeMetadata?.value.usage).toEqual(openAIUsage)
+      expect(terminal.content.filter((block) => block.type === "text")).toEqual(
+        [{ type: "text", text: "OK" }],
+      )
+    }
     if (api === "gemini_generate_content")
       expect(terminal.nativeMetadata?.value.usageMetadata).toMatchObject({
         thoughtsTokenCount: 2,
@@ -369,14 +394,20 @@ it.each(
     writer = undefined
     const reopened = new JsonlThreadStore({ root })
     const saved = await reopened.resumeThread(id)
-    expect(
-      saved?.rollout.find(({ item }) => item.type === "model_attempt")?.item,
-    ).toMatchObject({
+    const attempt = saved?.rollout.find(
+      ({ item }) => item.type === "model_attempt",
+    )?.item
+    expect(attempt).toMatchObject({
       type: "model_attempt",
       attempt: {
         responseMetadata: { value: { vendor_metadata: { trace: "envelope" } } },
       },
     })
+    if (api === "openai_responses") {
+      if (attempt?.type !== "model_attempt")
+        throw new Error("Missing saved model attempt")
+      expect(attempt.attempt.responseMetadata?.value.usage).toEqual(openAIUsage)
+    }
     writer = reopened
     const message = saved?.rollout.find(
       ({ item }) => item.type === "response_item",
@@ -387,6 +418,10 @@ it.each(
     )
       throw new Error("Missing saved assistant")
     const assistant: ModelAssistantMessage = message.item.item
+    if (api === "openai_responses")
+      expect(
+        assistant.content.filter((block) => block.type === "text"),
+      ).toEqual([{ type: "text", text: "OK" }])
     const project = (provider: string, scope: string, model = "test") => {
       if (api === "openai_responses")
         return toOpenAIInput(

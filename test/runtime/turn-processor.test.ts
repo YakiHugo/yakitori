@@ -19,7 +19,9 @@ import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type {
   ModelDocumentBlock,
+  ModelNativeItem,
   ModelRequest,
+  ModelResponse,
   ModelStreamEvent,
   StreamFn,
 } from "../../src/runtime/model.ts"
@@ -980,55 +982,104 @@ describe("Turn processor", () => {
     expect(sampled[0]).not.toContain("blocked")
   })
 
-  it("enforces the output byte limit across deltas", async () => {
-    const runtime = await createRuntime(
-      async function* () {
-        yield { type: "delta", text: "ab" }
-        yield { type: "delta", text: "cd" }
-        yield { type: "delta", text: "ef" }
-        yield responseEvent("abcdef")
-      },
-      createToolRegistry([]),
+  it.each([
+    false,
+    true,
+  ])("completes a short answer with large native replay and diagnostic data (streamed items: %s)", async (streamItems) => {
+    const native: ModelNativeItem[] = [
       {
-        executionPolicy: createSessionExecutionPolicy({
-          assistantResponseBytes: 5,
-        }),
+        provider: "faux",
+        model: "scripted",
+        wireApi: "openai_responses",
+        value: { type: "reasoning", encrypted_content: "r".repeat(300_000) },
       },
-    )
+    ]
+    const nativeMetadata: ModelNativeItem = {
+      provider: "faux",
+      model: "scripted",
+      wireApi: "openai_responses",
+      value: { usage: { attribution: { trace: "a".repeat(300_000) } } },
+    }
+    const response: ModelResponse = {
+      stopReason: ModelStopReason.EndTurn,
+      content: [{ type: "text", text: "OK" }],
+      native,
+      nativeMetadata,
+    }
+    const runtime = await createRuntime(async function* () {
+      yield { type: "delta", text: "OK", itemId: "answer" }
+      if (streamItems)
+        yield {
+          type: "output_item",
+          itemId: "answer",
+          content: response.content,
+          native,
+        }
+      yield { type: "response", response }
+    })
     const thread = await runtime.createThread()
     await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "go" }]),
     })
-    await expect
-      .poll(() => thread.agentStatus)
-      .toEqual({
-        errored: "Model stream update exceeded the configured byte limit.",
-      })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "OK" })
+    const stored = await runtime.store.readThread(thread.id)
+    const answers = stored?.rollout.flatMap(({ item }) =>
+      item.type === "response_item" && item.item.item.role === "assistant"
+        ? [item.item.item]
+        : [],
+    )
+    expect(answers).toEqual([
+      expect.objectContaining({
+        content: response.content,
+        native,
+      }),
+    ])
+    expect(
+      stored?.rollout.find(({ item }) => item.type === "model_attempt")?.item,
+    ).toMatchObject({
+      attempt: { outcome: "completed", responseMetadata: nativeMetadata },
+    })
   })
 
-  it("counts a Unicode character split across deltas once", async () => {
-    const emoji = "🙂"
-    const runtime = await createRuntime(
-      async function* () {
-        yield { type: "delta", text: emoji[0] ?? "" }
-        yield { type: "delta", text: emoji[1] ?? "" }
+  it("completes large text and reasoning streamed across deltas", async () => {
+    const text = "文".repeat(100_000)
+    const reasoning = "r".repeat(300_000)
+    const runtime = await createRuntime(async function* () {
+      for (let index = 0; index < 10; index += 1) {
         yield {
-          type: "response",
-          response: { stopReason: ModelStopReason.EndTurn, content: [] },
+          type: "delta",
+          text: text.slice(index * 10_000, (index + 1) * 10_000),
+          itemId: "answer",
         }
-      },
-      createToolRegistry([]),
-      {
-        executionPolicy: createSessionExecutionPolicy({
-          assistantResponseBytes: 4,
-        }),
-      },
-    )
+        yield {
+          type: "reasoning_delta",
+          text: reasoning.slice(index * 30_000, (index + 1) * 30_000),
+          itemId: "answer",
+        }
+      }
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [
+            { type: "reasoning", text: reasoning },
+            { type: "text", text },
+          ],
+        },
+      }
+    })
     const thread = await runtime.createThread()
     await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "go" }]),
     })
-    await expect.poll(() => thread.agentStatus).toEqual({ completed: null })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: text })
+    expect(thread.snapshot().context.history.at(-1)?.item).toMatchObject({
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: reasoning },
+        { type: "text", text },
+      ],
+    })
   })
 
   it("snapshots model transport configuration once per Turn", async () => {
@@ -1299,15 +1350,16 @@ describe("Turn processor", () => {
     })
   })
 
-  it("compacts a running tool chain while retaining user corrections outside the summary", async () => {
+  it("compacts a running tool chain with a large checkpoint while retaining user corrections", async () => {
     let effects = 0
+    const summary = "The work was performed. Report its result.\n".repeat(8_000)
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
         content: [
           { type: "tool_call", id: "work_once", name: "work", input: {} },
         ],
-        usage: { activeContextTokens: 59_000 },
+        usage: { activeContextTokens: 590_000 },
       },
       {
         assertRequest(request) {
@@ -1320,9 +1372,7 @@ describe("Turn processor", () => {
             ),
           ).toBe(true)
         },
-        content: [
-          { type: "text", text: "The work was performed. Report its result." },
-        ],
+        content: [{ type: "text", text: summary }],
       },
       {
         assertRequest(request) {
@@ -1341,6 +1391,14 @@ describe("Turn processor", () => {
           expect(
             request.messages.some((message) => message.role === "tool"),
           ).toBe(false)
+          expect(
+            request.messages.some((message) =>
+              message.content.some(
+                (block) =>
+                  block.type === "text" && block.text.includes(summary.trim()),
+              ),
+            ),
+          ).toBe(true)
         },
         content: [{ type: "text", text: "Finished without API changes." }],
       },
@@ -1360,7 +1418,7 @@ describe("Turn processor", () => {
           },
         },
       ]),
-      { modelContextWindowTokens: 60_000 },
+      { modelContextWindowTokens: 600_000 },
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({
