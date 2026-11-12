@@ -14,12 +14,12 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import Anthropic from "@anthropic-ai/sdk"
 import { afterEach, describe, expect, it } from "vitest"
-import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type {
   ResponseItemEnvelope,
   RolloutItem,
+  StoredRolloutItem,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
@@ -35,6 +35,7 @@ import { createAnthropicTurnTransport } from "../../src/runtime/anthropic-provid
 import { ModelFailureError } from "../../src/runtime/errors.ts"
 import type { ModelStreamEvent } from "../../src/runtime/model.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 const roots: string[] = []
@@ -46,6 +47,214 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("reads the latest user prompt without the earlier prompt", async () => {
+    const { store } = await createStore()
+    const id = "thread_display_window"
+    await createPersistentThread(store, metadata(id))
+    const input = (
+      inputId: string,
+      text: string,
+    ): Extract<RolloutItem, { type: "response_item" }> => ({
+      type: "response_item",
+      item: {
+        id: inputId,
+        turnId: inputId,
+        createdAt: new Date().toISOString(),
+        item: { role: "user", content: [{ type: "text", text }] },
+      },
+    })
+    await store.appendItems(id, [
+      input("input_early", "earlier"),
+      { type: "turn_completed", turnId: "input_early", outcome: "completed" },
+      input("input_latest", "current"),
+    ])
+    await store.shutdownThread(id)
+    const window = await store.readDisplayWindow(id)
+    expect(
+      window?.records.map((entry) =>
+        entry.item.type === "response_item"
+          ? entry.item.item.id
+          : entry.item.type,
+      ),
+    ).toEqual(["input_latest"])
+    expect(window?.hasEarlier).toBe(true)
+  })
+
+  it("pages contiguous history through nested forks without exposing parent growth", async () => {
+    const { store } = await createStore()
+    const rootId = "thread_display_root"
+    const childId = "thread_display_child"
+    const leafId = "thread_display_leaf"
+    const turn = (name: string): readonly RolloutItem[] => {
+      const selection = { provider: "faux", model: "scripted" }
+      const turnId = `turn_${name}`
+      return [
+        { type: "turn_started", turnId, inputItemId: `input_${name}` },
+        {
+          type: "turn_context",
+          context: {
+            turnId,
+            selection,
+            configuration: SessionConfiguration.create({
+              selection,
+              workspaceRoot: "/workspace",
+              enabledTools: [],
+              approvalPolicy: "always_approve",
+              promptCacheKey: name,
+            }).snapshot,
+          },
+        },
+        {
+          type: "response_item",
+          item: {
+            ...response(turnId, name).item,
+            id: `input_${name}`,
+          },
+        },
+        { type: "token_count", turnId, activeContextTokens: 12 },
+        terminal(turnId),
+      ]
+    }
+    await createPersistentThread(store, metadata(rootId))
+    await store.appendItems(rootId, [...turn("first"), ...turn("second")])
+    const childPrepared = await store.prepareFork({
+      sourceThreadId: rootId,
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared: childPrepared,
+      target: metadata(childId, { parentThreadId: rootId }),
+    })
+    await store.appendItems(childId, turn("child"))
+    const leafPrepared = await store.prepareFork({
+      sourceThreadId: childId,
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared: leafPrepared,
+      target: metadata(leafId, { parentThreadId: childId }),
+    })
+    // A leaf without local prompts still pages all its inherited generations.
+    const inherited = await store.readDisplayWindow(leafId)
+    expect(inherited?.records.map((record) => record.seq)).toEqual([
+      11, 12, 13, 14, 15,
+    ])
+    await store.appendItems(leafId, turn("leaf"))
+    await store.appendItems(rootId, turn("outside_root_cutoff"))
+    await store.appendItems(childId, turn("outside_child_cutoff"))
+    await Promise.all(
+      [rootId, childId, leafId].map((id) => store.shutdownThread(id)),
+    )
+
+    const pages = []
+    let page = await store.readDisplayWindow(leafId)
+    while (page !== undefined) {
+      pages.unshift(page)
+      if (!page.hasEarlier) break
+      const before = page.records[0]?.seq
+      expect(before).toBeDefined()
+      page = await store.readDisplayWindow(leafId, before)
+    }
+    expect(
+      pages.map((window) => window.records.map((record) => record.seq)),
+    ).toEqual([
+      [1, 2, 3, 4, 5],
+      [6, 7, 8, 9, 10],
+      [11, 12, 13, 14, 15],
+      [16, 17, 18, 19, 20],
+    ])
+    expect(pages.map((window) => window.endSeq)).toEqual([20, 20, 20, 20])
+    const full = await store.readThread(leafId)
+    expect(pages.flatMap((window) => window.records)).toEqual(
+      full?.rollout.filter((record) => record.item.type !== "session_meta"),
+    )
+  })
+
+  it("rejects local sequences overlapping inherited history when reading a tail", async () => {
+    const { root, store } = await createStore()
+    const sourceId = "thread_display_overlap_source"
+    const childId = "thread_display_overlap_child"
+    const turnId = "turn_overlap"
+    const selection = { provider: "faux", model: "scripted" }
+    await createPersistentThread(store, metadata(sourceId))
+    await store.appendItems(
+      sourceId,
+      Array.from({ length: 100 }, (_, index) => terminal(`turn_${index}`)),
+    )
+    const prepared = await store.prepareFork({
+      sourceThreadId: sourceId,
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared,
+      target: metadata(childId, { parentThreadId: sourceId }),
+    })
+    await store.appendItems(childId, [
+      // Keep the file header outside the latest complete tail chunk.
+      response("turn_padding", "x".repeat(128 * 1024)),
+      { type: "turn_started", turnId, inputItemId: "input_overlap" },
+      {
+        type: "turn_context",
+        context: {
+          turnId,
+          selection,
+          configuration: SessionConfiguration.create({
+            selection,
+            workspaceRoot: "/workspace",
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: turnId,
+          }).snapshot,
+        },
+      },
+      {
+        type: "response_item",
+        item: { ...response(turnId, "current").item, id: "input_overlap" },
+      },
+      { type: "token_count", turnId, activeContextTokens: 12 },
+      terminal(turnId),
+    ])
+    await Promise.all([sourceId, childId].map((id) => store.shutdownThread(id)))
+    const path = join(root, "rollouts", childId, "rollout.jsonl")
+    const records = (await readFile(path, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as StoredRolloutItem)
+    const malformed = records.map((record, index) =>
+      index < 2 ? record : { ...record, seq: index - 1 },
+    )
+    await writeFile(
+      path,
+      `${malformed.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    )
+    await expect(store.readThread(childId)).rejects.toThrow(
+      "invalid local ordering",
+    )
+    await expect(store.readDisplayWindow(childId)).rejects.toThrow(
+      "invalid local ordering",
+    )
+  })
+
+  it("rejects cycles on both full replay and display reads", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_display_cycle"
+    await createPersistentThread(store, metadata(id))
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const text = await readFile(path, "utf8")
+    const entry = JSON.parse(text) as {
+      item: { metadata: { historyBase?: unknown } }
+    }
+    entry.item.metadata.historyBase = {
+      rolloutId: id,
+      endSeqExclusive: 1,
+      endByteOffset: Buffer.byteLength(text),
+    }
+    await writeFile(path, `${JSON.stringify(entry)}\n`)
+    await expect(store.readThread(id)).rejects.toThrow("cycle")
+    await expect(store.readDisplayWindow(id)).rejects.toThrow("cycle")
+  })
+
   it("refuses to resume the previous provider IR while preserving readable history", async () => {
     const { root, store } = await createStore()
     const id = "thread_previous_ir"
@@ -2759,6 +2968,7 @@ describe("JsonlThreadStore", () => {
     await writeFile(childPath, `${JSON.stringify(childMeta)}\n`)
     await expect(store.readThread("thread_child")).rejects.toThrow()
     await expect(store.resumeThread("thread_child")).rejects.toThrow()
+    await expect(store.readDisplayWindow("thread_child")).rejects.toThrow()
   })
 
   it("rejects a forged byte cutoff instead of silently widening history", async () => {
@@ -2784,6 +2994,9 @@ describe("JsonlThreadStore", () => {
     await writeFile(childPath, `${JSON.stringify(childMeta)}\n`)
 
     await expect(store.readThread("thread_child")).rejects.toThrow(
+      "invalid cutoff position",
+    )
+    await expect(store.readDisplayWindow("thread_child")).rejects.toThrow(
       "invalid cutoff position",
     )
     await store.shutdownThread("thread_source")
