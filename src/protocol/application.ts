@@ -411,6 +411,9 @@ export type ApiSessionSummary = Readonly<{
   goal?: ThreadGoal
   // True while a Turn is running in this Session.
   active?: boolean
+  status?: "working" | "waiting" | "failed" | "idle"
+  // Latest successful Turn completion in the public event sequence.
+  latestCompletionSeq?: number
   workingDirectory?: string
   gitInfo?: GitInfo
   // Set when the Session belongs to a live Project; omitted for orphaned

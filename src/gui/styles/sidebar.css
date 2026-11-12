@@ -125,7 +125,33 @@
 }
 .sidebar-session .sidebar-row,
 .sidebar-list-more {
-  padding-left: 30px;
+  padding-left: 32px;
+}
+.sidebar-session-status {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.sidebar-session-status[data-status="waiting"] {
+  color: light-dark(oklch(0.61 0.15 70), oklch(0.8 0.15 80));
+}
+.sidebar-session-status[data-status="failed"] {
+  color: var(--destructive);
+}
+.sidebar-session-status[data-status="unread"] {
+  color: light-dark(oklch(0.57 0.2 255), oklch(0.74 0.15 255));
+}
+.sidebar-unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .sidebar-project .sidebar-row:hover,
 .sidebar-session .sidebar-row:hover {

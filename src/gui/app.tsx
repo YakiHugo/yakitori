@@ -18,10 +18,12 @@ import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { UNCONFIRMED_INPUT_NOTICE } from "./input-recovery-memory.ts"
 import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
+import { useSessionRead } from "./hooks/use-session-read.ts"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 import { useEngineStore } from "./store/engine-store.ts"
 
 export function App() {
+  useSessionRead()
   const externalSession = useEngineStore((state) => state.engineId)
   const externalSessionId = useEngineStore((state) => state.sessionId)
   const message = useAppStore((state) => state.message || state.providersError)

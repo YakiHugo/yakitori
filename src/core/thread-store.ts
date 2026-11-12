@@ -119,6 +119,7 @@ export type ThreadStore = {
   createFork(input: CreateForkInput): Promise<ThreadStoreForkResult>
   releasePreparedFork(prepared: PreparedFork): Promise<void>
   readThread(threadId: string): Promise<StoredThread | undefined>
+  readThreadSummary(threadId: string): Promise<ThreadSummary | undefined>
   // Latest user prompt through the file end, without reading earlier history.
   readDisplayWindow(
     threadId: string,

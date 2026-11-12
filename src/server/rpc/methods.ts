@@ -85,6 +85,7 @@ import {
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
+  type ApiSessionSummary,
   type ApiSetGoalResponse,
   type ApiSteerInputResponse,
   type ApiSubscriptionProvider,
@@ -695,6 +696,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "session/read",
     sessionScope,
     (handlers, params) => handlers.readSession(params),
+  ),
+  handlerEntry<ApiSessionSummary>(
+    "session/summary",
+    sessionScope,
+    (handlers, params) => handlers.readSessionSummary(params),
   ),
   handlerEntry<SessionHistoryResponse>(
     "session/history",

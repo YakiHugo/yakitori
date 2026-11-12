@@ -39,6 +39,7 @@ import type {
   ThreadStoreOccurrenceSearchInput,
   ThreadStoreSearchInput,
 } from "../../src/core/thread-store.ts"
+import { advanceThreadStatus } from "../../src/core/thread-status.ts"
 
 type Writer = {
   readonly pending: RolloutItem[]
@@ -299,6 +300,17 @@ export class MemoryThreadStore implements ThreadStore {
     return thread === undefined ? undefined : structuredClone(thread)
   }
 
+  async readThreadSummary(threadId: string): Promise<ThreadSummary | undefined> {
+    const thread = this.#threads.get(threadId)
+    return thread === undefined
+      ? undefined
+      : {
+          ...thread.metadata,
+          ...advanceThreadStatus({}, thread.rollout),
+          seq: Math.max(0, thread.rollout.length - 1),
+        }
+  }
+
   async readDisplayWindow(threadId: string, beforeSeqExclusive?: number) {
     const thread = this.#threads.get(threadId)
     if (thread === undefined) return undefined
@@ -328,6 +340,7 @@ export class MemoryThreadStore implements ThreadStore {
       )
       .map((thread) => ({
         ...thread.metadata,
+        ...advanceThreadStatus({}, thread.rollout),
         seq: thread.rollout.length,
       }))
       .sort(compareThreadSummaries)

@@ -34,6 +34,7 @@ import type {
   ApiSearchSessionsRequest,
   ApiSearchSessionsResponse,
   ApiServerDiagnostics,
+  ApiSessionSummary,
   ApiSetGoalRequest,
   ApiSetGoalResponse,
   ApiSteerInputRequest,
@@ -240,6 +241,7 @@ export type RpcMethodParams = Readonly<
       "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
       "session/create": ApiCreateSessionRequest
       "session/read": ApiReadSessionRequest
+      "session/summary": ApiReadSessionRequest
       "session/skills": Readonly<{ sessionId?: string; projectId?: string }>
       "session/skill/read": Readonly<{
         sessionId?: string
@@ -315,6 +317,7 @@ export type RpcMethodResponses = Readonly<
       "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
       "session/create": ApiCreateSessionResponse
       "session/read": ApiReadSessionResponse
+      "session/summary": ApiSessionSummary
       "session/skills": ApiListSkillsResponse
       "session/skill/read": WorkspaceReadResponse
       "session/delete": ApiDeleteSessionResponse

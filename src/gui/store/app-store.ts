@@ -424,6 +424,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const sessionListRevisions: Record<string, number> = {}
   // Snapshot identity distinguishes a later clear from an earlier null goal.
   const goalSnapshots = new Map<string, Readonly<{ goal: ThreadGoal | null }>>()
+  const summarySnapshots = new Map<string, ApiSessionSummary>()
+  const summaryReadRevisions = new Map<string, number>()
   let sidebarReadRevision = 0
   let projectReadRevision = 0
   // Sidebar mutations are serialized through this chain so rapid pin/move
@@ -1426,6 +1428,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           void get().loadProviders()
         })
         goalSnapshots.clear()
+        summarySnapshots.clear()
+        summaryReadRevisions.clear()
         client.subscribeToGoalChanges((notification) => {
           if (getAppRpcClient(get().apiBase) !== client) return
           if (notification === undefined) {
@@ -1457,8 +1461,49 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           )
         })
         client.subscribeToSidebarChanges((notification) => {
+          if (getAppRpcClient(get().apiBase) !== client) return
           const sidebar = notification.sidebar
           const sessionId = notification.sessionId
+          if (sidebar === undefined && sessionId !== undefined) {
+            const revision = (summaryReadRevisions.get(sessionId) ?? 0) + 1
+            summaryReadRevisions.set(sessionId, revision)
+            // Discovery must not restore membership captured before a sidebar
+            // change or while its optimistic presentation is still pending.
+            const presentationRevision = sidebarReadRevision
+            const startedDuringMutation =
+              pendingSidebarSessionIds.has(sessionId)
+            const isCurrent = () =>
+              getAppRpcClient(get().apiBase) === client &&
+              summaryReadRevisions.get(sessionId) === revision &&
+              sidebarReadRevision === presentationRevision &&
+              !startedDuringMutation &&
+              !pendingSidebarSessionIds.has(sessionId)
+            // Runtime status notifications must not reload the first page of
+            // every list: those lists may already contain paginated rows.
+            void runTask(
+              async () => {
+                const summary = await client.request("session/summary", {
+                  sessionId,
+                })
+                if (!isCurrent()) return
+                summarySnapshots.set(sessionId, summary)
+                set((state) => ({
+                  sessionsByProject: Object.fromEntries(
+                    Object.entries(state.sessionsByProject).map(
+                      ([key, list]) => [
+                        key,
+                        projectSessionSummary(list, key, summary),
+                      ],
+                    ),
+                  ),
+                }))
+              },
+              isCurrent,
+              false,
+              false,
+            )
+            return
+          }
           if (sidebar !== undefined && sessionId !== undefined) {
             const pendingPin = pendingSidebarPins.get(sessionId)
             if (
@@ -1503,7 +1548,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   const nextActive = active.has(session.id)
                   if ((session.active ?? false) === nextActive) return session
                   listChanged = true
-                  return { ...session, active: nextActive }
+                  return {
+                    ...session,
+                    active: nextActive,
+                    ...(nextActive && session.status !== "waiting"
+                      ? { status: "working" as const }
+                      : session.status === "working"
+                        ? { status: "idle" as const }
+                        : {}),
+                  }
                 })
                 if (!listChanged) return [key, list]
                 changed = true
@@ -1600,6 +1653,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
     loadSessions: async (projectId, input = {}) => {
       const goalsAtRequest = new Map(goalSnapshots)
+      const summariesAtRequest = new Map(summarySnapshots)
       const key = sessionListKey(projectId, input)
       const requestRevision = (sessionListRevisions[key] ?? 0) + 1
       sessionListRevisions[key] = requestRevision
@@ -1651,26 +1705,31 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 unsentIds.has(session.id) &&
                 !sessions.some((entry) => entry.id === session.id),
             )
+            let list: ProjectSessionList = {
+              sessions: input.append
+                ? [
+                    ...new Map(
+                      [...(current?.sessions ?? []), ...sessions].map(
+                        (session) => [
+                          session.navigationId ?? session.id,
+                          session,
+                        ],
+                      ),
+                    ).values(),
+                  ]
+                : [...preserved, ...sessions],
+              ...(response.nextCursor === undefined
+                ? {}
+                : { nextCursor: response.nextCursor }),
+            }
+            for (const [sessionId, summary] of summarySnapshots) {
+              if (summary !== summariesAtRequest.get(sessionId))
+                list = projectSessionSummary(list, key, summary)
+            }
             return {
               sessionsByProject: {
                 ...state.sessionsByProject,
-                [key]: {
-                  sessions: input.append
-                    ? [
-                        ...new Map(
-                          [...(current?.sessions ?? []), ...sessions].map(
-                            (session) => [
-                              session.navigationId ?? session.id,
-                              session,
-                            ],
-                          ),
-                        ).values(),
-                      ]
-                    : [...preserved, ...sessions],
-                  ...(response.nextCursor === undefined
-                    ? {}
-                    : { nextCursor: response.nextCursor }),
-                },
+                [key]: list,
               },
             }
           })
@@ -3839,6 +3898,57 @@ function withGoal<T extends ApiSessionSummary>(
   return { ...base, ...(goal === null ? {} : { goal }) } as T
 }
 
+function withSidebarStatus(
+  session: ApiSessionSummary,
+  status: Pick<ApiSessionSummary, "active" | "status" | "latestCompletionSeq">,
+): ApiSessionSummary {
+  const latestCompletionSeq = Math.max(
+    session.latestCompletionSeq ?? 0,
+    status.latestCompletionSeq ?? 0,
+  )
+  return {
+    ...session,
+    active: status.active === true,
+    ...(status.status === undefined ? {} : { status: status.status }),
+    ...(latestCompletionSeq > 0 ? { latestCompletionSeq } : {}),
+  }
+}
+
+function projectSessionSummary(
+  list: ProjectSessionList,
+  key: string,
+  summary: ApiSessionSummary,
+): ProjectSessionList {
+  if (list.sessions.some((session) => session.id === summary.id))
+    return {
+      ...list,
+      sessions: list.sessions.map((session) =>
+        session.id === summary.id
+          ? withSidebarStatus(session, summary)
+          : session,
+      ),
+    }
+  // Only current navigation heads have a navigationId. Subagents and old
+  // edit heads remain addressable but must not become standalone sidebar rows.
+  if (summary.navigationId === undefined) return list
+  const sessions = list.sessions.filter(
+    (session) => (session.navigationId ?? session.id) !== summary.navigationId,
+  )
+  const anchor = list.sessions.at(-1)
+  if (
+    sessionMatchesList(summary, key) &&
+    (list.nextCursor === undefined ||
+      anchor === undefined ||
+      compareSidebarSessions(key, summary, anchor) <= 0)
+  ) {
+    sessions.push(summary)
+  }
+  if (sessions.length === list.sessions.length && !sessions.includes(summary))
+    return list
+  sessions.sort((left, right) => compareSidebarSessions(key, left, right))
+  return { ...list, sessions }
+}
+
 function sessionMatchesList(session: ApiSessionSummary, key: string): boolean {
   if (key === "sidebar:archived") return session.archived === true
   if (session.archived === true) return false
@@ -3922,11 +4032,20 @@ function applyDurableSessionDetail(
     case "turn.started":
       return {
         ...next,
+        active: true,
+        status: "working",
         activeTurnId: event.data.turnId,
       }
     case "turn.completed": {
       const { activeTurnId: _, ...withoutActiveTurn } = next
-      return withoutActiveTurn
+      return {
+        ...withoutActiveTurn,
+        active: false,
+        status: event.data.outcome.status === "failed" ? "failed" : "idle",
+        ...(event.data.outcome.status === "completed"
+          ? { latestCompletionSeq: event.seq }
+          : {}),
+      }
     }
     default:
       return next
@@ -3958,6 +4077,7 @@ function updateSessionSummary(
   const session = index < 0 ? undefined : sessions[index]
   if (
     session === undefined ||
+    selectedSession.seq < session.seq ||
     (session.seq === selectedSession.seq &&
       session.updatedAt === selectedSession.updatedAt)
   ) {
@@ -3969,6 +4089,14 @@ function updateSessionSummary(
           ...entry,
           seq: selectedSession.seq,
           updatedAt: selectedSession.updatedAt,
+          ...(selectedSession.latestCompletionSeq === undefined
+            ? {}
+            : {
+                latestCompletionSeq: Math.max(
+                  entry.latestCompletionSeq ?? 0,
+                  selectedSession.latestCompletionSeq,
+                ),
+              }),
         }
       : entry,
   )
