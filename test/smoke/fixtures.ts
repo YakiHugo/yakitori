@@ -1190,7 +1190,6 @@ async function runApprovalAndInterruption(
   const replies = page
     .getByRole("region", { name: "Response", exact: true })
     .getByText("Mock provider reply", { exact: true })
-  const previousReplyCount = await replies.count()
   const composer = page.getByRole("textbox", {
     name: "Message the Mate",
     exact: true,
@@ -1231,6 +1230,8 @@ async function runApprovalAndInterruption(
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath("resume-ready.png") })
+  // Reload restores the latest prompt; older replies remain outside the window.
+  const previousReplyCount = await replies.count()
   await page.getByRole("button", { name: "Resume", exact: true }).click()
   await expect(replies).toHaveCount(previousReplyCount + 1)
   await expect(

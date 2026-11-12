@@ -911,6 +911,19 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
     responses
       .first()
       .getByRole("img", { name: "Mermaid diagram", exact: true }),
+    ["Recovered", "Ready"],
+  )
+  await expect(responses).toHaveCount(1)
+  await page.keyboard.press("ControlOrMeta+f")
+  await page
+    .getByRole("searchbox", { name: "Find in conversation" })
+    .fill(prompt)
+  await expect(page.locator("[data-find-current]")).toContainText(prompt)
+  await page.getByRole("button", { name: "Close find", exact: true }).click()
+  await expectMermaidDiagram(
+    responses
+      .first()
+      .getByRole("img", { name: "Mermaid diagram", exact: true }),
     ["Start", "Finish"],
   )
   await expect(responses.nth(1).locator("pre")).toContainText("A[Unclosed")
