@@ -424,11 +424,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const sessionListRevisions: Record<string, number> = {}
   // Snapshot identity distinguishes a later clear from an earlier null goal.
   const goalSnapshots = new Map<string, Readonly<{ goal: ThreadGoal | null }>>()
-  const statusSnapshots = new Map<
-    string,
-    Pick<ApiSessionSummary, "active" | "status" | "latestCompletionSeq">
-  >()
-  const statusReadRevisions = new Map<string, number>()
+  const summarySnapshots = new Map<string, ApiSessionSummary>()
+  const summaryReadRevisions = new Map<string, number>()
   let sidebarReadRevision = 0
   let projectReadRevision = 0
   // Sidebar mutations are serialized through this chain so rapid pin/move
@@ -1431,8 +1428,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           void get().loadProviders()
         })
         goalSnapshots.clear()
-        statusSnapshots.clear()
-        statusReadRevisions.clear()
+        summarySnapshots.clear()
+        summaryReadRevisions.clear()
         client.subscribeToGoalChanges((notification) => {
           if (getAppRpcClient(get().apiBase) !== client) return
           if (notification === undefined) {
@@ -1468,33 +1465,26 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           const sidebar = notification.sidebar
           const sessionId = notification.sessionId
           if (sidebar === undefined && sessionId !== undefined) {
-            const revision = (statusReadRevisions.get(sessionId) ?? 0) + 1
-            statusReadRevisions.set(sessionId, revision)
+            const revision = (summaryReadRevisions.get(sessionId) ?? 0) + 1
+            summaryReadRevisions.set(sessionId, revision)
             const isCurrent = () =>
               getAppRpcClient(get().apiBase) === client &&
-              statusReadRevisions.get(sessionId) === revision
+              summaryReadRevisions.get(sessionId) === revision
             // Runtime status notifications must not reload the first page of
             // every list: those lists may already contain paginated rows.
             void runTask(
               async () => {
-                const status = await client.request("session/status", {
+                const summary = await client.request("session/summary", {
                   sessionId,
                 })
                 if (!isCurrent()) return
-                statusSnapshots.set(sessionId, status)
+                summarySnapshots.set(sessionId, summary)
                 set((state) => ({
                   sessionsByProject: Object.fromEntries(
                     Object.entries(state.sessionsByProject).map(
                       ([key, list]) => [
                         key,
-                        {
-                          ...list,
-                          sessions: list.sessions.map((entry) =>
-                            entry.id === sessionId
-                              ? withSidebarStatus(entry, status)
-                              : entry,
-                          ),
-                        },
+                        projectSessionSummary(list, key, summary),
                       ],
                     ),
                   ),
@@ -1655,7 +1645,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
     loadSessions: async (projectId, input = {}) => {
       const goalsAtRequest = new Map(goalSnapshots)
-      const statusesAtRequest = new Map(statusSnapshots)
+      const summariesAtRequest = new Map(summarySnapshots)
       const key = sessionListKey(projectId, input)
       const requestRevision = (sessionListRevisions[key] ?? 0) + 1
       sessionListRevisions[key] = requestRevision
@@ -1692,16 +1682,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           if (sessionListRevisions[key] !== requestRevision) return
           const sessions = response.sessions.map((session) => {
             const latestGoal = goalSnapshots.get(session.id)
-            const withLatestGoal =
-              latestGoal !== undefined &&
+            return latestGoal !== undefined &&
               latestGoal !== goalsAtRequest.get(session.id)
-                ? withGoal(session, latestGoal.goal)
-                : session
-            const latestStatus = statusSnapshots.get(session.id)
-            return latestStatus !== undefined &&
-              latestStatus !== statusesAtRequest.get(session.id)
-              ? withSidebarStatus(withLatestGoal, latestStatus)
-              : withLatestGoal
+              ? withGoal(session, latestGoal.goal)
+              : session
           })
           set((state) => {
             const current = state.sessionsByProject[key]
@@ -1713,26 +1697,31 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 unsentIds.has(session.id) &&
                 !sessions.some((entry) => entry.id === session.id),
             )
+            let list: ProjectSessionList = {
+              sessions: input.append
+                ? [
+                    ...new Map(
+                      [...(current?.sessions ?? []), ...sessions].map(
+                        (session) => [
+                          session.navigationId ?? session.id,
+                          session,
+                        ],
+                      ),
+                    ).values(),
+                  ]
+                : [...preserved, ...sessions],
+              ...(response.nextCursor === undefined
+                ? {}
+                : { nextCursor: response.nextCursor }),
+            }
+            for (const [sessionId, summary] of summarySnapshots) {
+              if (summary !== summariesAtRequest.get(sessionId))
+                list = projectSessionSummary(list, key, summary)
+            }
             return {
               sessionsByProject: {
                 ...state.sessionsByProject,
-                [key]: {
-                  sessions: input.append
-                    ? [
-                        ...new Map(
-                          [...(current?.sessions ?? []), ...sessions].map(
-                            (session) => [
-                              session.navigationId ?? session.id,
-                              session,
-                            ],
-                          ),
-                        ).values(),
-                      ]
-                    : [...preserved, ...sessions],
-                  ...(response.nextCursor === undefined
-                    ? {}
-                    : { nextCursor: response.nextCursor }),
-                },
+                [key]: list,
               },
             }
           })
@@ -3915,6 +3904,41 @@ function withSidebarStatus(
     ...(status.status === undefined ? {} : { status: status.status }),
     ...(latestCompletionSeq > 0 ? { latestCompletionSeq } : {}),
   }
+}
+
+function projectSessionSummary(
+  list: ProjectSessionList,
+  key: string,
+  summary: ApiSessionSummary,
+): ProjectSessionList {
+  if (list.sessions.some((session) => session.id === summary.id))
+    return {
+      ...list,
+      sessions: list.sessions.map((session) =>
+        session.id === summary.id
+          ? withSidebarStatus(session, summary)
+          : session,
+      ),
+    }
+  // Only current navigation heads have a navigationId. Subagents and old
+  // edit heads remain addressable but must not become standalone sidebar rows.
+  if (summary.navigationId === undefined) return list
+  const sessions = list.sessions.filter(
+    (session) => (session.navigationId ?? session.id) !== summary.navigationId,
+  )
+  const anchor = list.sessions.at(-1)
+  if (
+    sessionMatchesList(summary, key) &&
+    (list.nextCursor === undefined ||
+      anchor === undefined ||
+      compareSidebarSessions(key, summary, anchor) <= 0)
+  ) {
+    sessions.push(summary)
+  }
+  if (sessions.length === list.sessions.length && !sessions.includes(summary))
+    return list
+  sessions.sort((left, right) => compareSidebarSessions(key, left, right))
+  return { ...list, sessions }
 }
 
 function sessionMatchesList(session: ApiSessionSummary, key: string): boolean {

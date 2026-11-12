@@ -120,11 +120,6 @@ export type SessionHistoryResponse = Readonly<{
 
 export type SessionUnsubscribeParams = Readonly<{ sessionId: string }>
 
-export type SessionStatusResponse = Pick<
-  ApiSessionSummary,
-  "active" | "status" | "latestCompletionSeq"
->
-
 export type ProjectListParams = Readonly<{
   cursor?: string
   limit?: number
@@ -246,7 +241,7 @@ export type RpcMethodParams = Readonly<
       "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
       "session/create": ApiCreateSessionRequest
       "session/read": ApiReadSessionRequest
-      "session/status": ApiReadSessionRequest
+      "session/summary": ApiReadSessionRequest
       "session/skills": Readonly<{ sessionId?: string; projectId?: string }>
       "session/skill/read": Readonly<{
         sessionId?: string
@@ -322,7 +317,7 @@ export type RpcMethodResponses = Readonly<
       "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
       "session/create": ApiCreateSessionResponse
       "session/read": ApiReadSessionResponse
-      "session/status": SessionStatusResponse
+      "session/summary": ApiSessionSummary
       "session/skills": ApiListSkillsResponse
       "session/skill/read": WorkspaceReadResponse
       "session/delete": ApiDeleteSessionResponse

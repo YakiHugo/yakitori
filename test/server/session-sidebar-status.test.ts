@@ -15,6 +15,10 @@ import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { InputQueue } from "../../src/server/input-queue.ts"
 import {
+  createSqliteProjectStore,
+  type ProjectStore,
+} from "../../src/server/sqlite-project-store.ts"
+import {
   createElicitationBroker,
   createSessionInteractions,
 } from "../../src/server/user-interactions.ts"
@@ -81,7 +85,10 @@ async function rootDirectory() {
   return root
 }
 
-async function persistedHandlers(items: readonly RolloutItem[]) {
+async function persistedHandlers(
+  items: readonly RolloutItem[],
+  options: { projectId?: string; projectStore?: ProjectStore } = {},
+) {
   const root = await rootDirectory()
   const writer = new JsonlThreadStore({ root })
   await writer.createThread({
@@ -89,6 +96,9 @@ async function persistedHandlers(items: readonly RolloutItem[]) {
     conversationId: sessionId,
     createdAt,
     updatedAt: createdAt,
+    ...(options.projectId === undefined
+      ? {}
+      : { projectId: options.projectId }),
   })
   await writer.persistThread(sessionId, "turn_start")
   await writer.appendItems(sessionId, items)
@@ -102,7 +112,14 @@ async function persistedHandlers(items: readonly RolloutItem[]) {
     },
   })
   const inputQueue = new InputQueue(":memory:")
-  const handlers = createThreadServerHandlers({ manager, store, inputQueue })
+  const handlers = createThreadServerHandlers({
+    manager,
+    store,
+    inputQueue,
+    ...(options.projectStore === undefined
+      ? {}
+      : { projectStore: options.projectStore }),
+  })
   cleanups.push(async () => {
     await handlers.close()
     await manager.shutdown()
@@ -112,7 +129,110 @@ async function persistedHandlers(items: readonly RolloutItem[]) {
 }
 
 describe("authoritative session sidebar status", () => {
-  it("reads narrow status over RPC from the cached projection without loading history", async () => {
+  it("marks newly created roots and independent forks eligible while excluding subagents and replaced edit heads", async () => {
+    const { handlers, store } = await persistedHandlers([])
+    const independentId = "session_00000000-0000-4000-8000-000000000092"
+    const subagentId = "session_00000000-0000-4000-8000-000000000093"
+    const editedId = "session_00000000-0000-4000-8000-000000000094"
+    for (const id of [independentId, subagentId]) {
+      await store.createThread({
+        id,
+        conversationId: id,
+        createdAt,
+        updatedAt: createdAt,
+        title: id === independentId ? "Independent worker" : "Child worker",
+        parentThreadId: sessionId,
+        ...(id === subagentId
+          ? { metadata: { agent: { kind: "subagent" } } }
+          : {}),
+      })
+    }
+    cleanups.push(async () => {
+      for (const id of [independentId, subagentId, editedId])
+        await store.shutdownThread(id)
+    })
+    expect(
+      await handlers.readSessionSummary({ sessionId: independentId }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        id: independentId,
+        title: "Independent worker",
+        navigationId: independentId,
+        parentSessionId: sessionId,
+        status: "idle",
+      },
+    })
+    const child = await handlers.readSessionSummary({ sessionId: subagentId })
+    if (!child.ok) throw new Error(child.error.message)
+    expect(child.value.metadata).toEqual({ agent: { kind: "subagent" } })
+    expect(child.value).not.toHaveProperty("navigationId")
+    const prepared = await store.prepareFork({
+      sourceThreadId: sessionId,
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared,
+      target: {
+        id: editedId,
+        conversationId: sessionId,
+        createdAt,
+        updatedAt: createdAt,
+        parentThreadId: sessionId,
+        forkReason: "edit",
+      },
+    })
+    expect(
+      await handlers.readSessionSummary({ sessionId: editedId }),
+    ).toMatchObject({
+      ok: true,
+      value: { id: editedId, navigationId: sessionId, forkReason: "edit" },
+    })
+    const historical = await handlers.readSessionSummary({ sessionId })
+    if (!historical.ok) throw new Error(historical.error.message)
+    expect(historical.value).not.toHaveProperty("navigationId")
+  })
+
+  it("returns current sidebar presentation and suppresses deleted project ownership", async () => {
+    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    cleanups.push(async () => projectStore.close())
+    const { project } = await projectStore.createProject({
+      name: "Workspace",
+      roots: ["/workspace"],
+    })
+    const { handlers, store } = await persistedHandlers([], {
+      projectId: project.id,
+      projectStore,
+    })
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId,
+      title: "Renamed worker",
+      archived: true,
+      sectionId: "pinned",
+    })
+    expect(await handlers.readSessionSummary({ sessionId })).toMatchObject({
+      ok: true,
+      value: {
+        navigationId: sessionId,
+        title: "Renamed worker",
+        archived: true,
+        sectionId: "pinned",
+        projectId: project.id,
+      },
+    })
+    await projectStore.deleteProject(project.id)
+    const result = await handlers.readSessionSummary({ sessionId })
+    if (!result.ok) throw new Error(result.error.message)
+    expect(result.value).not.toHaveProperty("projectId")
+    expect(result.value).toMatchObject({
+      title: "Renamed worker",
+      archived: true,
+      sectionId: "pinned",
+    })
+  })
+
+  it("reads a complete sidebar summary over RPC from the cached projection without loading history", async () => {
     const { handlers, store } = await persistedHandlers([
       start("turn_success"),
       { type: "turn_completed", turnId: "turn_success", outcome: "completed" },
@@ -131,14 +251,24 @@ describe("authoritative session sidebar status", () => {
     try {
       await initializeConnection(connection)
       expect(
-        await connection.sendRequest("session/status", { sessionId }),
+        await connection.sendRequest("session/summary", { sessionId }),
       ).toMatchObject({
-        result: { status: "failed", latestCompletionSeq: 3 },
+        result: {
+          id: sessionId,
+          navigationId: sessionId,
+          status: "failed",
+          latestCompletionSeq: 3,
+        },
       })
-      const result = await handlers.readSessionStatus({ sessionId })
-      expect(result).toEqual({
+      const result = await handlers.readSessionSummary({ sessionId })
+      expect(result).toMatchObject({
         ok: true,
-        value: { status: "failed", latestCompletionSeq: 3 },
+        value: {
+          id: sessionId,
+          navigationId: sessionId,
+          status: "failed",
+          latestCompletionSeq: 3,
+        },
       })
       expect(rebuild).not.toHaveBeenCalled()
     } finally {
@@ -295,7 +425,7 @@ describe("authoritative session sidebar status", () => {
     if (!created.ok) throw new Error(created.error.message)
     const liveId = created.value.session.id
     const status = async () => {
-      const result = await handlers.readSessionStatus({ sessionId: liveId })
+      const result = await handlers.readSessionSummary({ sessionId: liveId })
       if (!result.ok) throw new Error(result.error.message)
       return result.value.status
     }

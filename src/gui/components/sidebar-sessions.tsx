@@ -176,6 +176,7 @@ export function SessionItems({
               data-drag-label={session.title ?? "Untitled session"}
               data-drag-project={session.projectId}
               aria-current={session.id === selectedId}
+              aria-label={session.title ?? "Untitled session"}
               title={session.title ?? "Untitled session"}
               onClick={() => {
                 onSelect?.()

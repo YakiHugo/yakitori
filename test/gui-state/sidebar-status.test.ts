@@ -52,6 +52,20 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+function sessionSummary(
+  patch: Partial<ApiSessionSummary> = {},
+): ApiSessionSummary {
+  return {
+    id: session.id,
+    navigationId: session.id,
+    conversationId: session.conversationId,
+    seq: session.seq,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    ...patch,
+  }
+}
+
 function firstRow() {
   return useAppStore.getState().sessionsByProject[""]?.sessions[0]
 }
@@ -105,8 +119,8 @@ describe("sidebar status authority", () => {
       session: { ...session, status: snapshotStatus },
     })
     fakeRef.current.respond = (method) => {
-      if (method === "session/status")
-        return { active: true, status: authoritativeStatus }
+      if (method === "session/summary")
+        return sessionSummary({ active: true, status: authoritativeStatus })
       throw new ApiRequestError("not found", "not_found")
     }
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
@@ -125,7 +139,7 @@ describe("sidebar status authority", () => {
   it("keeps authoritative inactivity when output advances a stale active snapshot", async () => {
     await boot()
     fakeRef.current.streams[0]?.emitSnapshot({ session })
-    fakeRef.current.respond = () => ({ status: "failed" })
+    fakeRef.current.respond = () => sessionSummary({ status: "failed" })
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
     await vi.waitFor(() => expect(firstRow()?.status).toBe("failed"))
 
@@ -140,18 +154,18 @@ describe("sidebar status authority", () => {
 
   it("ignores an older status read that finishes after a newer notification", async () => {
     await boot()
-    const older = deferred<{ active: boolean; status: "waiting" }>()
-    const newer = deferred<{ active: boolean; status: "working" }>()
+    const older = deferred<ApiSessionSummary>()
+    const newer = deferred<ApiSessionSummary>()
     let reads = 0
     fakeRef.current.respond = () =>
       ++reads === 1 ? older.promise : newer.promise
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
-    newer.resolve({ active: true, status: "working" })
+    newer.resolve(sessionSummary({ active: true, status: "working" }))
     await vi.waitFor(() =>
-      expect(fakeRef.current.requestsFor("session/status")).toHaveLength(2),
+      expect(fakeRef.current.requestsFor("session/summary")).toHaveLength(2),
     )
-    older.resolve({ active: true, status: "waiting" })
+    older.resolve(sessionSummary({ active: true, status: "waiting" }))
     await new Promise<void>((resolve) => setImmediate(resolve))
 
     expect(firstRow()?.status).toBe("working")
@@ -163,7 +177,7 @@ describe("sidebar status authority", () => {
     fakeRef.current.respond = (method) =>
       method === "session/list"
         ? staleList.promise
-        : { active: true, status: "waiting" }
+        : sessionSummary({ active: true, status: "waiting" })
     const loading = useAppStore.getState().loadSessions(undefined)
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
     await vi.waitFor(() => expect(firstRow()?.status).toBe("waiting"))
@@ -197,7 +211,7 @@ describe("sidebar status authority", () => {
       active: true,
       status: "working",
     })
-    fakeRef.current.respond = () => ({ status: "idle" })
+    fakeRef.current.respond = () => sessionSummary({ status: "idle" })
     fakeRef.current.emitSidebarChanged({ sessionId: session.id })
     await vi.waitFor(() => expect(firstRow()?.status).toBe("idle"))
     expect(firstRow()?.latestCompletionSeq).toBe(2)
@@ -212,7 +226,13 @@ it("updates unopened rows without dropping loaded pages or the next cursor", asy
   }))
   await boot(rows.slice(0, 30))
   fakeRef.current.respond = (method, params) => {
-    if (method === "session/status") return { active: true, status: "waiting" }
+    if (method === "session/summary")
+      return sessionSummary({
+        id: "session_45",
+        navigationId: "session_45",
+        active: true,
+        status: "waiting",
+      })
     const { cursor } = params as { cursor?: string }
     return cursor === "page_2"
       ? { sessions: rows.slice(30, 60), nextCursor: "page_3" }
@@ -258,5 +278,154 @@ it("updates unopened rows without dropping loaded pages or the next cursor", asy
     fakeRef.current.requestsFor("session/list").at(-1)?.params,
   ).toMatchObject({
     cursor: "page_3",
+  })
+})
+
+describe("sidebar session discovery", () => {
+  const independent = sessionSummary({
+    id: "independent_worker",
+    navigationId: "independent_worker",
+    conversationId: "independent_worker",
+    parentSessionId: session.id,
+    projectId: "project_1",
+    title: "Independent worker",
+    updatedAt: "2026-11-12T00:00:00.000Z",
+    status: "idle",
+  })
+
+  it("reveals an independent session in loaded lists while retaining all loaded pages", async () => {
+    const rows = Array.from({ length: 60 }, (_, index) =>
+      sessionSummary({
+        id: `loaded_${String(60 - index).padStart(2, "0")}`,
+        navigationId: `loaded_${String(60 - index).padStart(2, "0")}`,
+        projectId: "project_1",
+      }),
+    )
+    await boot([])
+    useAppStore.setState({
+      sessionsByProject: {
+        "": { sessions: rows, nextCursor: "all_page_3" },
+        project_1: { sessions: rows, nextCursor: "project_page_3" },
+        project_2: { sessions: [] },
+        "sidebar:archived": { sessions: [] },
+        "sidebar:section:pinned": { sessions: [] },
+      },
+    })
+    const listReads = fakeRef.current.requestsFor("session/list").length
+    fakeRef.current.respond = () => independent
+    fakeRef.current.emitSidebarChanged({ sessionId: independent.id })
+    await vi.waitFor(() => expect(firstRow()?.title).toBe("Independent worker"))
+
+    const lists = useAppStore.getState().sessionsByProject
+    for (const key of ["", "project_1"]) {
+      expect(lists[key]?.sessions).toHaveLength(61)
+      expect(lists[key]?.sessions[0]).toEqual(independent)
+      expect(lists[key]?.sessions.slice(1).map((row) => row.id)).toEqual(
+        rows.map((row) => row.id),
+      )
+    }
+    expect(lists[""]?.nextCursor).toBe("all_page_3")
+    expect(lists.project_1?.nextCursor).toBe("project_page_3")
+    expect(lists.project_2?.sessions).toEqual([])
+    expect(lists["sidebar:archived"]?.sessions).toEqual([])
+    expect(lists["sidebar:section:pinned"]?.sessions).toEqual([])
+    expect(fakeRef.current.requestsFor("session/list")).toHaveLength(listReads)
+    expect(fakeRef.current.requestsFor("session/read")).toEqual([])
+  })
+
+  it("retains discovery when a previously started list response omits the new session", async () => {
+    await boot()
+    const staleList = deferred<{
+      sessions: ApiSessionSummary[]
+      nextCursor: string
+    }>()
+    fakeRef.current.respond = (method) =>
+      method === "session/list" ? staleList.promise : independent
+    const loading = useAppStore.getState().loadSessions(undefined)
+    fakeRef.current.emitSidebarChanged({ sessionId: independent.id })
+    await vi.waitFor(() => expect(firstRow()?.id).toBe(independent.id))
+    staleList.resolve({ sessions: [session], nextCursor: "page_2" })
+    await loading
+
+    expect(
+      useAppStore
+        .getState()
+        .sessionsByProject[""]?.sessions.map((row) => row.id),
+    ).toEqual(["independent_worker", "session_1"])
+    expect(useAppStore.getState().sessionsByProject[""]?.nextCursor).toBe(
+      "page_2",
+    )
+  })
+
+  it.each([
+    { metadata: { agent: { kind: "subagent" } } },
+    { parentSessionId: session.id, forkReason: "edit" as const },
+  ])("excludes addressable sessions without a current navigation entry: %j", async (patch) => {
+    await boot()
+    const { navigationId: _, ...hidden } = sessionSummary({
+      ...patch,
+      id: "hidden_worker",
+      updatedAt: independent.updatedAt,
+    })
+    fakeRef.current.respond = () => hidden
+    fakeRef.current.emitSidebarChanged({ sessionId: hidden.id })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(
+      useAppStore
+        .getState()
+        .sessionsByProject[""]?.sessions.map((row) => row.id),
+    ).toEqual(["session_1"])
+  })
+
+  it.each([
+    { patch: { archived: true }, expectedKeys: ["sidebar:archived"] },
+    {
+      patch: { sectionId: "pinned", sectionPosition: 1 },
+      expectedKeys: ["", "sidebar:section:pinned"],
+    },
+  ])("respects archived and section membership for discovered sessions: $patch", async ({
+    patch,
+    expectedKeys,
+  }) => {
+    await boot([])
+    useAppStore.setState({
+      sessionsByProject: {
+        "": { sessions: [] },
+        project_1: { sessions: [] },
+        "sidebar:archived": { sessions: [] },
+        "sidebar:section:pinned": { sessions: [] },
+      },
+    })
+    fakeRef.current.respond = () => ({ ...independent, ...patch })
+    fakeRef.current.emitSidebarChanged({ sessionId: independent.id })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    const populated = Object.entries(useAppStore.getState().sessionsByProject)
+      .filter(([, list]) =>
+        list.sessions.some((row) => row.id === independent.id),
+      )
+      .map(([key]) => key)
+    expect(populated).toEqual(expectedKeys)
+  })
+
+  it("replaces the displayed edit head without creating a duplicate navigation row", async () => {
+    await boot([sessionSummary()])
+    const newHead = {
+      ...independent,
+      id: "edited_head",
+      navigationId: session.id,
+      forkReason: "edit" as const,
+    }
+    fakeRef.current.respond = () => newHead
+    fakeRef.current.emitSidebarChanged({ sessionId: newHead.id })
+    await vi.waitFor(() => expect(firstRow()?.id).toBe("edited_head"))
+
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([
+      newHead,
+    ])
+    expect(useAppStore.getState().sessionsByProject[""]?.nextCursor).toBe(
+      "page_2",
+    )
   })
 })

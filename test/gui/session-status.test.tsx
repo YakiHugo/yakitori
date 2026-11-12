@@ -88,6 +88,12 @@ describe("sidebar session status", () => {
     useAppStore.setState({ sessionsByProject: { "": { sessions } } })
     render(<SessionItems />)
 
+    for (const session of sessions)
+      expect(
+        screen.getByRole("button", {
+          name: session.title ?? "Untitled session",
+        }),
+      ).toBeDefined()
     expect(screen.getByRole("status", { name: "Working" })).toBeDefined()
     expect(
       screen.getByRole("status", { name: "Waiting for you" }),

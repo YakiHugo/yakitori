@@ -9,7 +9,6 @@ import type {
   ProjectUpdateParams,
   SessionHistoryResponse,
   SessionSubscribeParams,
-  SessionStatusResponse,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
@@ -86,6 +85,7 @@ import {
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
+  type ApiSessionSummary,
   type ApiSetGoalResponse,
   type ApiSteerInputResponse,
   type ApiSubscriptionProvider,
@@ -697,10 +697,10 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.readSession(params),
   ),
-  handlerEntry<SessionStatusResponse>(
-    "session/status",
+  handlerEntry<ApiSessionSummary>(
+    "session/summary",
     sessionScope,
-    (handlers, params) => handlers.readSessionStatus(params),
+    (handlers, params) => handlers.readSessionSummary(params),
   ),
   handlerEntry<SessionHistoryResponse>(
     "session/history",

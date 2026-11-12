@@ -104,7 +104,6 @@ import {
   QueuedSessionArchivedError,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
-import type { SessionStatusResponse } from "../protocol/rpc-methods.ts"
 import {
   mapRolloutEvent,
   modelUserInputContent,
@@ -200,9 +199,9 @@ export type ServerHandlers = {
   readSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiReadSessionResponse>>
-  readSessionStatus(
+  readSessionSummary(
     input: unknown,
-  ): Promise<ApplicationResult<SessionStatusResponse>>
+  ): Promise<ApplicationResult<ApiSessionSummary>>
   listSkills(input: unknown): Promise<ApplicationResult<ApiListSkillsResponse>>
   deleteSession(
     input: unknown,
@@ -1354,15 +1353,26 @@ export function createThreadServerHandlers(
       }
     },
 
-    async readSessionStatus(input) {
+    async readSessionSummary(input) {
       try {
         const { sessionId } = requireReadSessionRequest(input)
         const summary = await options.store.readThreadSummary(sessionId)
         if (summary === undefined)
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
-        return ok(mapSessionStatus(summary, options))
+        const presented = {
+          ...summary,
+          ...(await options.store.sessionPresentation(sessionId)),
+        }
+        return ok(
+          mapThreadSummary(
+            presented,
+            await liveProjectIds(options, [summary]),
+            options.goals?.read(sessionId),
+            options,
+          ),
+        )
       } catch (error) {
-        return fail(error, reporter, "read-session-status")
+        return fail(error, reporter, "read-session-summary")
       }
     },
 
@@ -2356,7 +2366,7 @@ export function createThreadServerHandlers(
 function mapSessionStatus(
   thread: ThreadSummary,
   options?: ThreadServerHandlerOptions,
-): SessionStatusResponse {
+): Pick<ApiSessionSummary, "active" | "status" | "latestCompletionSeq"> {
   const active =
     options?.manager.getThread(thread.id)?.snapshot().activeTurnId !== undefined
   const waitingForPermission =
@@ -2463,7 +2473,9 @@ async function mapStoredThread(
   const pendingPermissions =
     options.listPendingPermissions?.(stored.metadata.id) ?? []
   const currentContext = contexts.at(-1)
-  const cachedSummary = await options.store.readThreadSummary(stored.metadata.id)
+  const cachedSummary = await options.store.readThreadSummary(
+    stored.metadata.id,
+  )
   if (cachedSummary === undefined)
     throw notFound(`Session ${stored.metadata.id} was not found.`)
   const summary: ThreadSummary = {
