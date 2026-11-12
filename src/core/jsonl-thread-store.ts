@@ -89,6 +89,7 @@ import {
   type ThreadStoreSearchInput,
 } from "./thread-store.ts"
 import { readUsageHistory } from "./usage-history.ts"
+import { advanceThreadStatus } from "./thread-status.ts"
 import { isInputContent } from "./user-input.ts"
 
 type PendingWrite = {
@@ -832,34 +833,49 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
+  async readThreadSummary(threadId: string): Promise<ThreadSummary | undefined> {
+    await this.#ready
+    requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined && staged.materializing === undefined) {
+      return {
+        ...staged.metadata,
+        ...advanceThreadStatus({}, staged.rollout),
+        seq: Math.max(0, staged.rollout.length - 1),
+      }
+    }
+    if (staged?.materializing !== undefined) await staged.materializing
+    if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
+    return this.#withSearchProjection(async () => {
+      const metadata = await this.#readMetadata(threadId)
+      const stamp = await this.#searchProjectionStamp(metadata)
+      if (!this.#searchProjection.isCurrent(threadId, stamp)) {
+        this.#searchProjection.rebuild(
+          await this.#readRequiredThread(threadId),
+          stamp,
+        )
+      }
+      return this.#searchProjection.readSummary(threadId)
+    })
+  }
+
   async #threadSummaries(): Promise<ThreadSummary[]> {
     const files = await readdir(this.#threadsDirectory)
-    return this.#withSearchProjection(async () => {
-      const summaries = await Promise.all(
-        files
-          .filter((file) => file.endsWith(".json"))
-          .map(async (file): Promise<ThreadSummary | undefined> => {
-            const threadId = basename(file, ".json")
-            try {
-              const metadata = await this.#readMetadata(threadId)
-              const stamp = await this.#searchProjectionStamp(metadata)
-              if (!this.#searchProjection.isCurrent(threadId, stamp)) {
-                this.#searchProjection.rebuild(
-                  await this.#readRequiredThread(threadId),
-                  stamp,
-                )
-              }
-              return this.#searchProjection.readSummary(threadId)
-            } catch {
-              // One damaged index entry cannot make every healthy Thread unlistable.
-              return undefined
-            }
-          }),
-      )
-      return summaries.filter(
-        (summary): summary is ThreadSummary => summary !== undefined,
-      )
-    })
+    const summaries = await Promise.all(
+      files
+        .filter((file) => file.endsWith(".json"))
+        .map(async (file): Promise<ThreadSummary | undefined> => {
+          try {
+            return await this.readThreadSummary(basename(file, ".json"))
+          } catch {
+            // One damaged index entry cannot make every healthy Thread unlistable.
+            return undefined
+          }
+        }),
+    )
+    return summaries.filter(
+      (summary): summary is ThreadSummary => summary !== undefined,
+    )
   }
 
   async #navigationMetadata(): Promise<ThreadMetadata[]> {

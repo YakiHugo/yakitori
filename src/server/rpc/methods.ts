@@ -9,6 +9,7 @@ import type {
   ProjectUpdateParams,
   SessionHistoryResponse,
   SessionSubscribeParams,
+  SessionStatusResponse,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
 } from "../../protocol/rpc-methods.ts"
@@ -695,6 +696,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "session/read",
     sessionScope,
     (handlers, params) => handlers.readSession(params),
+  ),
+  handlerEntry<SessionStatusResponse>(
+    "session/status",
+    sessionScope,
+    (handlers, params) => handlers.readSessionStatus(params),
   ),
   handlerEntry<SessionHistoryResponse>(
     "session/history",

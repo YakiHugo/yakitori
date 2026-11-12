@@ -6,6 +6,7 @@ import type {
   StoredRolloutItem,
   StoredThread,
   ThreadMetadata,
+  ThreadStatusProjection,
   ThreadSummary,
 } from "./rollout.ts"
 import {
@@ -22,6 +23,7 @@ import type {
   ThreadStoreSearchInput,
   ThreadStoreSearchResult,
 } from "./thread-store.ts"
+import { advanceThreadStatus } from "./thread-status.ts"
 
 export type ThreadSearchProjectionStamp = Readonly<{
   metadataSize: number
@@ -42,6 +44,7 @@ type ThreadRow = Readonly<{
   metadata_json: string
   seq: number
   title: string
+  status_json: string
 }>
 
 type MessageRow = Readonly<{
@@ -66,8 +69,8 @@ type OccurrenceCursor = Readonly<{
   occurrenceIndex: number
 }>
 
-// Rebuild disposable text projections after preserving user message source text.
-const schemaVersion = 5
+// Status summaries are disposable alongside the text projection.
+const schemaVersion = 6
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -121,7 +124,7 @@ export class SqliteThreadSearchProjection {
   readSummary(threadId: string): ThreadSummary | undefined {
     const row = this.#database
       .prepare(
-        "SELECT thread_id, metadata_json, seq, title FROM search_threads WHERE thread_id = ?",
+        "SELECT thread_id, metadata_json, seq, title, status_json FROM search_threads WHERE thread_id = ?",
       )
       .get(threadId) as ThreadRow | undefined
     return row === undefined ? undefined : summaryFromRow(row)
@@ -388,11 +391,11 @@ export class SqliteThreadSearchProjection {
 function matchingThreadsSql(): string {
   return `
     WITH presented AS (
-      SELECT thread_id, metadata_json, seq, updated_at,
+      SELECT thread_id, metadata_json, status_json, seq, updated_at,
         COALESCE((SELECT value FROM json_each(?) WHERE key = search_threads.thread_id), title) AS title
       FROM search_threads
     )
-    SELECT thread_id, metadata_json, seq, title
+    SELECT thread_id, metadata_json, status_json, seq, title
     FROM presented AS thread
     WHERE (literal_match(title, ?) = 1 OR EXISTS (
       SELECT 1
@@ -434,6 +437,16 @@ function applyEntries(
   threadId: string,
   entries: readonly StoredRolloutItem[],
 ): void {
+  const row = database
+    .prepare("SELECT status_json FROM search_threads WHERE thread_id = ?")
+    .get(threadId) as Readonly<{ status_json: string }>
+  const status = JSON.parse(row.status_json) as ThreadStatusProjection
+  database
+    .prepare("UPDATE search_threads SET status_json = ? WHERE thread_id = ?")
+    .run(
+      JSON.stringify(advanceThreadStatus(status, entries)),
+      threadId,
+    )
   for (const record of entries) {
     if (record.item.type === "response_item") {
       const envelope = record.item.item
@@ -594,7 +607,11 @@ function summaryFromRow(row: ThreadRow): ThreadSummary {
   ) {
     throw new Error(`Thread ${row.thread_id} has invalid search metadata.`)
   }
-  return { ...(value as ThreadMetadata), seq: row.seq }
+  return {
+    ...(value as ThreadMetadata),
+    ...(JSON.parse(row.status_json) as ThreadStatusProjection),
+    seq: row.seq,
+  }
 }
 
 function parseOccurrenceCursor(
@@ -656,6 +673,7 @@ function initializeDatabase(database: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS search_threads (
       thread_id TEXT PRIMARY KEY,
       metadata_json TEXT NOT NULL,
+      status_json TEXT NOT NULL DEFAULT '{}',
       title TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       seq INTEGER NOT NULL,

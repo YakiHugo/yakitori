@@ -15,6 +15,7 @@ import {
   type SessionSidebar,
 } from "../core/session-sidebar.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
+import { isSidebarStatusItem } from "../core/thread-status.ts"
 import {
   type DisplayWindowRead,
   PersistContext,
@@ -103,6 +104,7 @@ import {
   QueuedSessionArchivedError,
 } from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
+import type { SessionStatusResponse } from "../protocol/rpc-methods.ts"
 import {
   mapRolloutEvent,
   modelUserInputContent,
@@ -172,6 +174,7 @@ export type ThreadServerHandlerOptions = {
   readonly notifyQueueChanged?: (sessionId: string) => void
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly onRootTurnCompleted?: (event: SessionCompletedNotification) => void
+  readonly notifySidebarChanged?: (sessionId: string) => void
 }
 
 export type ServerHandlers = {
@@ -197,6 +200,9 @@ export type ServerHandlers = {
   readSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiReadSessionResponse>>
+  readSessionStatus(
+    input: unknown,
+  ): Promise<ApplicationResult<SessionStatusResponse>>
   listSkills(input: unknown): Promise<ApplicationResult<ApiListSkillsResponse>>
   deleteSession(
     input: unknown,
@@ -351,6 +357,8 @@ export function createThreadServerHandlers(
         Math.max(publishedThrough.get(threadId) ?? 0, hostSeq(last)),
       )
     }
+    if (records.some(({ item }) => isSidebarStatusItem(item)))
+      options.notifySidebarChanged?.(threadId)
     for (const record of records) {
       recordTurnInput(publication, record.item)
       if (isInitialUserInput(record)) {
@@ -589,6 +597,7 @@ export function createThreadServerHandlers(
           }
           if (event.type === "permission") {
             options.eventHub?.publishTransient(event.event)
+            options.notifySidebarChanged?.(event.threadId)
             continue
           }
           if (
@@ -1111,17 +1120,14 @@ export function createThreadServerHandlers(
         })
         const liveProjects = await liveProjectIds(options, result.threads)
         return ok({
-          sessions: result.threads.map((thread) => {
-            const summary = mapThreadSummary(
+          sessions: result.threads.map((thread) =>
+            mapThreadSummary(
               thread,
               liveProjects,
               options.goals?.read(thread.id),
-            )
-            return options.manager.getThread(thread.id)?.snapshot()
-              .activeTurnId === undefined
-              ? summary
-              : { ...summary, active: true }
-          }),
+              options,
+            ),
+          ),
           ...(result.nextCursor === undefined
             ? {}
             : {
@@ -1169,6 +1175,7 @@ export function createThreadServerHandlers(
               summary,
               liveProjects,
               options.goals?.read(summary.id),
+              options,
             ),
             snippet,
           })),
@@ -1344,6 +1351,18 @@ export function createThreadServerHandlers(
         return ok({ goal: null })
       } catch (error) {
         return fail(error, reporter, "clear-goal")
+      }
+    },
+
+    async readSessionStatus(input) {
+      try {
+        const { sessionId } = requireReadSessionRequest(input)
+        const summary = await options.store.readThreadSummary(sessionId)
+        if (summary === undefined)
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        return ok(mapSessionStatus(summary, options))
+      } catch (error) {
+        return fail(error, reporter, "read-session-status")
       }
     },
 
@@ -2334,12 +2353,39 @@ export function createThreadServerHandlers(
   }
 }
 
+function mapSessionStatus(
+  thread: ThreadSummary,
+  options?: ThreadServerHandlerOptions,
+): SessionStatusResponse {
+  const active =
+    options?.manager.getThread(thread.id)?.snapshot().activeTurnId !== undefined
+  const waitingForPermission =
+    (options?.listPendingPermissions?.(thread.id).length ?? 0) > 0
+  return {
+    status: waitingForPermission
+      ? "waiting"
+      : active
+        ? "working"
+        : (thread.unansweredQuestionIds?.length ?? 0) > 0
+          ? "waiting"
+          : thread.latestTurnOutcome === "failed"
+            ? "failed"
+            : "idle",
+    ...(active ? { active: true } : {}),
+    ...(thread.latestCompletionSeq === undefined
+      ? {}
+      : { latestCompletionSeq: thread.latestCompletionSeq }),
+  }
+}
+
 function mapThreadSummary(
   thread: ThreadSummary,
   liveProjects: ReadonlySet<string> | undefined,
   goal?: ThreadGoal,
+  options?: ThreadServerHandlerOptions,
 ): ApiSessionSummary {
   return {
+    ...mapSessionStatus(thread, options),
     ...(goal === undefined ? {} : { goal }),
     ...(thread.archived === undefined ? {} : { archived: thread.archived }),
     ...(thread.sectionPosition === undefined
@@ -2417,15 +2463,23 @@ async function mapStoredThread(
   const pendingPermissions =
     options.listPendingPermissions?.(stored.metadata.id) ?? []
   const currentContext = contexts.at(-1)
+  const cachedSummary = await options.store.readThreadSummary(stored.metadata.id)
+  if (cachedSummary === undefined)
+    throw notFound(`Session ${stored.metadata.id} was not found.`)
   const summary: ThreadSummary = {
-    ...stored.metadata,
+    ...cachedSummary,
     ...(await options.store.sessionPresentation(stored.metadata.id)),
     seq: Math.max(0, threadSeq(stored) - 1),
   }
   const liveProjects = await liveProjectIds(options, [stored.metadata])
   const pendingQueue = options.inputQueue?.list(stored.metadata.id) ?? []
   return {
-    ...mapThreadSummary(summary, liveProjects, options.goals?.read(summary.id)),
+    ...mapThreadSummary(
+      summary,
+      liveProjects,
+      options.goals?.read(summary.id),
+      options,
+    ),
     ...(live?.snapshot().activeTurnId === undefined
       ? {}
       : { active: true, activeTurnId: live.snapshot().activeTurnId }),

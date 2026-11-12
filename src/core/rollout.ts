@@ -239,6 +239,7 @@ export type StoredThread = {
 }
 
 export type ThreadSummary = ThreadMetadata &
+  ThreadStatusProjection &
   Readonly<{
     archived?: boolean
     sectionId?: string
@@ -246,3 +247,10 @@ export type ThreadSummary = ThreadMetadata &
     navigationId?: string
     seq: number
   }>
+
+export type ThreadStatusProjection = Readonly<{
+  latestTurnOutcome?: "completed" | "failed" | "interrupted"
+  // Uses the public event sequence (rollout seq + 1), for a local read watermark.
+  latestCompletionSeq?: number
+  unansweredQuestionIds?: readonly string[]
+}>

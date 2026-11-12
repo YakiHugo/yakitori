@@ -191,6 +191,7 @@ export function createFakeHandlers(
     searchSessionOccurrences: async () => okResult({ data: [] }),
     readSession: async () =>
       okResult({ session: makeSessionDetail("session_1") }),
+    readSessionStatus: async () => okResult({ status: "idle" }),
     listSkills: async () => okResult({ skills: [] }),
     deleteSession: async () => okResult({ sessionId: "session_1" }),
     closeSession: async () => okResult({ sessionId: "session_1" }),
