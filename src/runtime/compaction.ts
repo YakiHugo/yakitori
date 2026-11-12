@@ -11,31 +11,55 @@ import { estimateHistoryTokens } from "./model-request-budget.ts"
 // following Codex. User-message retention is enforced separately by code.
 const LOCAL_COMPACTION_PROMPT = `Write a concise checkpoint for the model that will continue this task. Include completed work and decisions, important constraints and user preferences, remaining actions, and the concrete paths, data, or references needed to proceed. Incorporate any earlier checkpoint into this summary. Return the checkpoint without continuing the task.`
 
-// Matches provider messages for an over-long request (Anthropic "prompt is
-// too long", OpenAI "context_length_exceeded" style text, HTTP 413). Used to
-// retry compaction with a smaller source instead of giving up.
+// Structured overflow signals take precedence. Prose is only a fallback for
+// request rejections, so unrelated failures cannot trigger history trimming.
 export function isContextOverflowError(error: unknown): boolean {
-  if (
-    error instanceof ModelFailureError &&
-    ([
-      "context_length_exceeded",
-      "context_window_exceeded",
-      "prompt_too_long",
-    ].includes(error.failure.providerCode ?? "") ||
-      error.failure.status === 413)
-  )
-    return true
+  if (error instanceof ModelFailureError) {
+    const { kind, stage, status, providerCode, details } = error.failure
+    if (
+      [
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "prompt_too_long",
+      ].includes(providerCode ?? "") ||
+      status === 413
+    )
+      return true
+    if (
+      (kind !== "invalid_request" && kind !== "provider_error") ||
+      stage === "request_build" ||
+      (status !== undefined && status !== 400 && status !== 422) ||
+      compactionBillingCodes.has(providerCode ?? "") ||
+      [
+        "authentication_error",
+        "permission_error",
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "server_error",
+        "server_overloaded",
+        "overloaded_error",
+      ].includes(providerCode ?? "") ||
+      // A transport cause without a provider response is not overflow evidence.
+      (status === undefined &&
+        providerCode === undefined &&
+        details?.causeCode !== undefined)
+    )
+      return false
+  }
   const message = (
     error instanceof Error ? error.message : String(error)
   ).toLowerCase()
   return (
     message.includes("prompt is too long") ||
-    message.includes("context length") ||
-    message.includes("context_length") ||
-    message.includes("maximum context") ||
+    /\bcontext[ _-](?:length|window)[ _-](?:is[ _-])?(?:exceeded|exceeds)\b/.test(
+      message,
+    ) ||
+    /\b(?:exceeds?|exceeded)\b[^.\n]*\bcontext (?:length|window)\b/.test(
+      message,
+    ) ||
+    /\bmaximum context (?:length|window)\b/.test(message) ||
     message.includes("too many tokens") ||
-    message.includes("request too large") ||
-    message.includes("413")
+    message.includes("request too large")
   )
 }
 

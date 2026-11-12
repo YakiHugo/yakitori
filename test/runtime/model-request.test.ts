@@ -544,8 +544,12 @@ describe("model request runtime", () => {
     expect(events[1]).toEqual(success)
   })
 
-  it("normalizes a thrown undici termination without exposing its text", async () => {
-    const provider = scriptedThrow(new Error("terminated"))
+  it("normalizes a thrown socket error by its code without exposing its text", async () => {
+    const provider = scriptedThrow(
+      Object.assign(new Error("private transport diagnostic"), {
+        code: "UND_ERR_SOCKET",
+      }),
+    )
     const stream = createModelRequestStream(provider, {
       wireApi: "openai_responses",
       maxAttempts: 1,
@@ -565,7 +569,9 @@ describe("model request runtime", () => {
   it("normalizes a synchronous transport construction failure", async () => {
     const stream = createModelRequestStream(
       () => {
-        throw new Error("terminated")
+        throw Object.assign(new Error("private connection diagnostic"), {
+          code: "ECONNRESET",
+        })
       },
       { wireApi: "openai_responses", maxAttempts: 1 },
     )
@@ -578,6 +584,36 @@ describe("model request runtime", () => {
           message: "Could not connect to the model provider.",
         }),
       }),
+    ])
+  })
+
+  it("ends an unclassified thrown error instead of treating its text as a connectivity wait", async () => {
+    let calls = 0
+    const sleeps: number[] = []
+    const provider = scriptedThrow(new Error("socket hang up"))
+    const stream = createModelRequestStream(
+      (request) => {
+        calls += 1
+        return provider(request)
+      },
+      {
+        wireApi: "openai_responses",
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs)
+        },
+      },
+    )
+    const events = await collect(stream, undefined, {
+      ...requestFixture(),
+      waitForConnection: true,
+    })
+    expect(calls).toBe(1)
+    expect(sleeps).toEqual([])
+    expect(events).toMatchObject([
+      {
+        type: "failure",
+        failure: { kind: "provider_error", retryDecision: "fail" },
+      },
     ])
   })
 

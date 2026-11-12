@@ -105,6 +105,7 @@ export type OpenAIProviderOptions = Readonly<{
   // codex ChatGPT backend).
   defaultHeaders?: Record<string, string | null>
   onResponseHeaders?: (headers: Headers) => void
+  fetch?: ClientOptions["fetch"]
   fetchOptions?: ClientOptions["fetchOptions"]
 }>
 
@@ -208,6 +209,7 @@ function openAIClient(options: OpenAIProviderOptions): OpenAI {
       apiKey: options.apiKey,
       baseURL: options.baseURL,
       defaultHeaders: options.defaultHeaders,
+      fetch: options.fetch,
       fetchOptions: options.fetchOptions,
       maxRetries: 0,
     })
