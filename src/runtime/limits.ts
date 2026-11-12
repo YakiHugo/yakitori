@@ -5,7 +5,6 @@ export const SessionExecutionPolicyDefaults = {
   // per-session overrides, rather than a second global tool-output cap.
   modelVisibleToolResultBytes: Number.MAX_SAFE_INTEGER,
   modelVisibleToolResultLines: Number.MAX_SAFE_INTEGER,
-  assistantResponseBytes: 256 * 1024,
 } as const satisfies SessionExecutionPolicyDefaultsSnapshot
 
 // Tool-installation defaults are intentionally absent from Session history.
@@ -44,7 +43,10 @@ export function createRunnerTimingPolicy(
   return { ...RunnerTimingDefaults, ...overrides }
 }
 
-export type SessionExecutionPolicy = SessionExecutionPolicyDefaultsSnapshot
+export type SessionExecutionPolicy = Omit<
+  SessionExecutionPolicyDefaultsSnapshot,
+  "assistantResponseBytes"
+>
 
 export function createSessionExecutionPolicy(
   overrides: Partial<SessionExecutionPolicy> = {},
@@ -56,8 +58,5 @@ export function createSessionExecutionPolicy(
     modelVisibleToolResultLines:
       overrides.modelVisibleToolResultLines ??
       SessionExecutionPolicyDefaults.modelVisibleToolResultLines,
-    assistantResponseBytes:
-      overrides.assistantResponseBytes ??
-      SessionExecutionPolicyDefaults.assistantResponseBytes,
   }
 }

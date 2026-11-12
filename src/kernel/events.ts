@@ -149,11 +149,10 @@ export type {
   ModelUserMessage,
 } from "../core/conversation.ts"
 
-export type TurnExecutionLimits = {
-  readonly modelVisibleToolResultBytes: number
-  readonly modelVisibleToolResultLines: number
-  readonly assistantResponseBytes: number
-}
+export type TurnExecutionLimits = Readonly<{
+  modelVisibleToolResultBytes: number
+  modelVisibleToolResultLines: number
+}>
 
 export type BaseInstructionsSnapshot = {
   readonly text: string
@@ -168,11 +167,12 @@ export type BaseInstructionsSnapshot = {
     | { readonly type: "custom" }
 }
 
-export type SessionExecutionPolicyDefaultsSnapshot = {
-  readonly modelVisibleToolResultBytes: number
-  readonly modelVisibleToolResultLines: number
-  readonly assistantResponseBytes: number
-}
+export type SessionExecutionPolicyDefaultsSnapshot = Readonly<{
+  modelVisibleToolResultBytes: number
+  modelVisibleToolResultLines: number
+  // Accepted only to reopen existing sessions; restore drops this obsolete cap.
+  assistantResponseBytes?: number
+}>
 
 export type ApprovalPolicy = "always_approve" | "auto_file_tools"
 export type AutoCompactTokenLimitScope = "body_after_prefix" | "total"
@@ -1205,8 +1205,11 @@ function isSessionExecutionPolicyDefaults(
 ): value is SessionExecutionPolicyDefaultsSnapshot {
   return (
     isRecord(value) &&
-    onlyKeys(value, sessionExecutionPolicyKeys) &&
-    Object.keys(value).length === sessionExecutionPolicyKeys.length &&
+    onlyKeys(value, [
+      ...sessionExecutionPolicyKeys,
+      "assistantResponseBytes",
+    ]) &&
+    sessionExecutionPolicyKeys.every((key) => Object.hasOwn(value, key)) &&
     Object.values(value).every(
       (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
     )
@@ -1216,7 +1219,6 @@ function isSessionExecutionPolicyDefaults(
 const sessionExecutionPolicyKeys = [
   "modelVisibleToolResultBytes",
   "modelVisibleToolResultLines",
-  "assistantResponseBytes",
 ] as const
 
 function optionalFieldsAreValid(data: Record<string, unknown>): boolean {

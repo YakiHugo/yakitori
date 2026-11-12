@@ -17,7 +17,6 @@ export function testTurnExecutionContext(
     executionPolicy: {
       modelVisibleToolResultBytes: 50_000,
       modelVisibleToolResultLines: 2_000,
-      assistantResponseBytes: 256_000,
     },
     ...overrides,
   }
