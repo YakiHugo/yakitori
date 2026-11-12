@@ -42,7 +42,11 @@ export function spawnServerProcess(
 
   const child = spawn(input.command, [...input.args], {
     ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-    env: input.env ?? process.env,
+    env: {
+      ...(input.env ?? process.env),
+      // This flag describes this parent's bridge, never an ancestor's host.
+      YAKITORI_DESKTOP_BROWSER: input.desktopBrowser ? "1" : "0",
+    },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     // Attachment byte commands must preserve Uint8Array across the sidecar IPC.
     serialization: "advanced",

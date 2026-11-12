@@ -3,9 +3,54 @@ import { get } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
+import type { YakitoriApplication } from "../../src/server/application.ts"
 import { runYakitoriServerProcess } from "../../src/server/server-process.ts"
 
 describe("runYakitoriServerProcess", () => {
+  it("does not acquire browser IPC from an embedding host's environment", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-web-host-"))
+    const listening = Promise.withResolvers<YakitoriApplication>()
+    const originalSend = process.send
+    const send = vi.fn(() => true)
+    process.send = send
+    vi.stubEnv("YAKITORI_DESKTOP_BROWSER", "1")
+    const exit = vi
+      .spyOn(process, "exit")
+      .mockImplementation(() => undefined as never)
+    let signalled = false
+    let run: Promise<void> | undefined
+    try {
+      run = runYakitoriServerProcess({
+        host: "127.0.0.1",
+        port: 0,
+        application: {
+          rootDir,
+          workspace: rootDir,
+          userConfigPath: join(rootDir, "config.toml"),
+          provider: "faux",
+        },
+        onListening: (_url, app) => listening.resolve(app),
+      })
+      void run.catch(listening.reject)
+      const app = await listening.promise
+      const created = await app.handlers.createSession({})
+      expect(created.ok).toBe(true)
+      process.emit("SIGINT")
+      signalled = true
+      await run
+      expect(exit).toHaveBeenCalledWith(0)
+      expect(send).not.toHaveBeenCalled()
+    } finally {
+      if (!signalled && run !== undefined) process.emit("SIGINT")
+      await run
+      exit.mockRestore()
+      if (originalSend === undefined) delete process.send
+      else process.send = originalSend
+      vi.unstubAllEnvs()
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
   it("refuses to bind a non-loopback host because the server has no auth", async () => {
     await expect(
       runYakitoriServerProcess({
