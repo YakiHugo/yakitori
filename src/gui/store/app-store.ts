@@ -2865,7 +2865,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           return false
         if (
           get().execution.entries.some((entry) =>
-            entry.kind === "user_input"
+            entry.kind === "user_input" || entry.kind === "agent_input"
               ? entry.inputId === itemId
               : (entry.kind === "assistant" || entry.kind === "reasoning") &&
                 (entry.itemId === itemId || entry.source?.itemId === itemId),

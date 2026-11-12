@@ -177,7 +177,10 @@ describe("partial conversation history", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
-  it("loads earlier pages until a requested message is available", async () => {
+  it.each([
+    "human",
+    "agent",
+  ] as const)("loads earlier pages until a requested %s message is available", async (source) => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       historyBefore: 10,
@@ -196,7 +199,8 @@ describe("partial conversation history", () => {
               data: {
                 requestId: before === 10 ? "request_middle" : "request_old",
                 inputId: before === 10 ? "input_middle" : "input_old",
-                role: InputRole.User,
+                role: source === "human" ? InputRole.User : InputRole.Runtime,
+                source,
                 content: inputFixture(
                   inputParts(before === 10 ? "middle" : "old"),
                 ),
@@ -225,7 +229,9 @@ describe("partial conversation history", () => {
       useAppStore
         .getState()
         .execution.entries.map((entry) =>
-          entry.kind === "user_input" ? entry.text : entry.kind,
+          entry.kind === "user_input" || entry.kind === "agent_input"
+            ? entry.text
+            : entry.kind,
         ),
     ).toEqual(["old", "middle"])
   })
