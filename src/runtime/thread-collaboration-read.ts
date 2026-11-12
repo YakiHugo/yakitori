@@ -131,8 +131,53 @@ export function createThreadReader(input: {
             : { nextCursor: cursorFor(scope, result.nextCursor) }),
         }
       }
-      const stored = await input.store.readThread(request.threadId)
+      let stored = await input.store.readThread(request.threadId)
       if (stored === undefined) throw missingThread(request.threadId)
+      if (request.turnId !== undefined || request.itemId !== undefined) {
+        const position = readCursor(
+          request.cursor,
+          transcriptScope(request),
+        )?.position
+        if (
+          position !== undefined &&
+          (!isRecord(position) || typeof position.rolloutId !== "string")
+        )
+          throw invalidCursor()
+        const selectedRolloutId =
+          position === undefined ? undefined : String(position.rolloutId)
+        const matches = (version: StoredThread) => {
+          if (selectedRolloutId !== undefined)
+            return version.metadata.rolloutId === selectedRolloutId
+          const targetTurns = new Map(
+            version.rollout.flatMap(({ item }) =>
+              item.type === "thread_message_admitted"
+                ? [[item.inputItemId, item.targetTurnId] as const]
+                : [],
+            ),
+          )
+          return version.rollout.some(({ item }) => {
+            if (item.type !== "response_item" && item.type !== "agent_message")
+              return false
+            const envelope = item.item
+            return (
+              (request.itemId === undefined ||
+                envelope.id === request.itemId) &&
+              (request.turnId === undefined ||
+                (targetTurns.get(envelope.id) ?? envelope.turnId) ===
+                  request.turnId)
+            )
+          })
+        }
+        if (!matches(stored)) {
+          const versions = await input.store.readThreadVersions(
+            request.threadId,
+          )
+          const selected = versions.find(matches)
+          if (selectedRolloutId !== undefined && selected === undefined)
+            throw invalidCursor()
+          if (selected !== undefined) stored = selected
+        }
+      }
       return readTranscriptPage(stored, request, limit)
     },
   }
@@ -152,12 +197,7 @@ function readTranscriptPage(
       "invalid_input",
       `max_characters must be between 1 and ${MAX_PAGE_CHARACTERS}.`,
     )
-  const scope = JSON.stringify([
-    "read",
-    request.threadId,
-    request.turnId ?? null,
-    request.itemId ?? null,
-  ])
+  const scope = transcriptScope(request)
   const position = readCursor(request.cursor, scope)?.position
   if (
     position !== undefined &&
@@ -267,9 +307,27 @@ function readTranscriptPage(
     items,
     truncated,
     ...(truncated
-      ? { nextCursor: cursorFor(scope, { index, offset, through, anchor }) }
+      ? {
+          nextCursor: cursorFor(scope, {
+            index,
+            offset,
+            through,
+            anchor,
+            ...(request.turnId === undefined && request.itemId === undefined
+              ? {}
+              : { rolloutId: stored.metadata.rolloutId }),
+          }),
+        }
       : {}),
   }
+}
+function transcriptScope(request: ReadThreadInput): string {
+  return JSON.stringify([
+    "read",
+    request.threadId,
+    request.turnId ?? null,
+    request.itemId ?? null,
+  ])
 }
 function transcriptText(envelope: ResponseItemEnvelope): string {
   const item = envelope.item

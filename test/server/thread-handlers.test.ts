@@ -53,6 +53,216 @@ afterEach(async () => {
 
 describe("thread server handlers", () => {
   it.each([
+    "undo",
+    "edit",
+  ] as const)("%s replaces history under the same session id, retires the actor and clears durable queued input", async (reason) => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-revert-live-"))
+    const store = new JsonlThreadStore({ root: join(workspace, "store") })
+    const queuePath = join(workspace, "queue.sqlite")
+    const inputQueue = new InputQueue(queuePath)
+    const sampling = deferred<void>()
+    let calls = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          stream: async function* (request) {
+            calls += 1
+            if (calls === 2) {
+              sampling.resolve()
+              await new Promise<void>((resolve) => {
+                if (request.signal?.aborted) resolve()
+                else
+                  request.signal?.addEventListener("abort", () => resolve(), {
+                    once: true,
+                  })
+              })
+              yield { type: "cancelled" }
+              return
+            }
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      calls === 1 ? "retained answer" : "replacement answer",
+                  },
+                ],
+              },
+            }
+          },
+        }),
+    })
+    const eventHub = {
+      publishDurable: vi.fn(),
+      publishTransient: vi.fn(),
+      resetSession: vi.fn(),
+    }
+    const notifySessionHistoryReset = vi.fn()
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      inputQueue,
+      eventHub,
+      notifySessionHistoryReset,
+    })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      inputQueue.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.error.message)
+    const sessionId = created.value.session.id
+    const first = await handlers.admitInput({
+      sessionId,
+      requestId: "retained",
+      content: createUserInput("keep this"),
+    })
+    if (!first.ok) throw new Error(first.error.message)
+    await expect
+      .poll(async () =>
+        (await store.readThread(sessionId))?.rollout.some(
+          ({ item }) =>
+            item.type === "turn_completed" && item.turnId === "retained",
+        ),
+      )
+      .toBe(true)
+    const original = manager.getThread(sessionId)
+    if (original === undefined) throw new Error("Missing original actor.")
+    await expect.poll(() => original.status).toBe("idle")
+    const originalRolloutId = original.snapshot().metadata.rolloutId
+    const second = await handlers.admitInput({
+      sessionId,
+      requestId: "replaced",
+      content: createUserInput("remove this"),
+    })
+    if (!second.ok) throw new Error(second.error.message)
+    await sampling.promise
+    const queued = await handlers.queueInput({
+      sessionId,
+      requestId: "abandoned_queue",
+      content: createUserInput("must never run"),
+    })
+    if (!queued.ok) throw new Error(queued.error.message)
+    expect(inputQueue.list(sessionId)).toHaveLength(1)
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId,
+      title: "Pinned title",
+      sectionId: "pinned",
+    })
+    const sidebarBefore = await store.readSessionSidebar()
+    const reverted = await handlers.revertSession({
+      sessionId,
+      atInputId: second.value.inputId,
+      reason,
+      ...(reason === "edit"
+        ? { content: createUserInput("edited input") }
+        : {}),
+    })
+    if (!reverted.ok) throw new Error(reverted.error.message)
+    expect(reverted.value.session).toMatchObject({
+      id: sessionId,
+      title: "Pinned title",
+      sectionId: "pinned",
+    })
+    expect(await store.readSessionSidebar()).toEqual(sidebarBefore)
+    expect(original.status).toBe("shutdown")
+    expect(manager.getThread(sessionId)).not.toBe(original)
+    expect(
+      manager.getThread(sessionId)?.snapshot().metadata.rolloutId,
+    ).not.toBe(originalRolloutId)
+    expect(eventHub.resetSession).toHaveBeenCalledExactlyOnceWith(sessionId)
+    expect(notifySessionHistoryReset).toHaveBeenCalledExactlyOnceWith(sessionId)
+    const versions = await store.readThreadVersions(sessionId)
+    expect(
+      versions[1]?.rollout.find(
+        ({ item }) =>
+          item.type === "turn_completed" && item.turnId === "replaced",
+      )?.item,
+    ).toMatchObject({ outcome: "interrupted" })
+    expect(inputQueue.list(sessionId)).toEqual([])
+    const secondConnection = new InputQueue(queuePath)
+    try {
+      expect(secondConnection.list(sessionId)).toEqual([])
+    } finally {
+      secondConnection.close()
+    }
+    expect(
+      reverted.value.events.some(
+        (event) =>
+          isKernelEvent(event) &&
+          event.type === "input.admitted" &&
+          event.data.inputId === first.value.inputId,
+      ),
+    ).toBe(true)
+    const replay = await handlers.readSessionEvents({ sessionId })
+    if (!replay.ok) throw new Error(replay.error.message)
+    expect(reverted.value.events).toEqual(
+      replay.value.events.filter(
+        ({ seq }) => seq <= reverted.value.session.seq,
+      ),
+    )
+    expect(reverted.value.events).toContainEqual(
+      expect.objectContaining({
+        type: "item.completed",
+        data: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agent_message",
+            content: [{ type: "text", text: "retained answer" }],
+          }),
+        }),
+      }),
+    )
+    if (reason === "undo") {
+      expect(calls).toBe(2)
+      const admitted = await handlers.admitInput({
+        sessionId,
+        requestId: "after_undo",
+        content: createUserInput("fresh input"),
+      })
+      if (!admitted.ok) throw new Error(admitted.error.message)
+    }
+    await expect
+      .poll(
+        async () =>
+          (await store.readThread(sessionId))?.rollout.filter(
+            ({ item }) => item.type === "turn_completed",
+          ).length,
+      )
+      .toBe(2)
+    expect(calls).toBe(3)
+    const current = await store.readThread(sessionId)
+    const userInputs = current?.rollout.flatMap(({ item }) =>
+      item.type === "response_item" &&
+      item.item.item.role === "user" &&
+      item.item.item.context === undefined
+        ? item.item.item.content.flatMap((block) =>
+            block.type === "text" ? [block.text] : [],
+          )
+        : [],
+    )
+    expect(userInputs).toEqual([
+      "keep this",
+      reason === "edit" ? "edited input" : "fresh input",
+    ])
+    const listed = await handlers.listSessions()
+    if (!listed.ok) throw new Error(listed.error.message)
+    expect(listed.value.sessions.map(({ id }) => id)).toEqual([sessionId])
+  })
+
+  it.each([
     "allow",
     "deny",
   ] as const)("resolves %s permission only for the matching Session, Turn and request", async (behavior) => {
@@ -1815,8 +2025,10 @@ describe("thread server handlers", () => {
         deliveries.push(delivery.event.type)
         return
       }
-      deliveries.push(...delivery.events.map((event) => event.type))
-      durable.push(...delivery.events.map(({ seq, type }) => ({ seq, type })))
+      if (delivery.kind === "durable") {
+        deliveries.push(...delivery.events.map((event) => event.type))
+        durable.push(...delivery.events.map(({ seq, type }) => ({ seq, type })))
+      }
     })
     cleanups.push(async () => subscription.close())
 

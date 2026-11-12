@@ -2332,7 +2332,7 @@ describe("application composition", () => {
           ),
         ).toEqual(imageBytes)
 
-        const rejectedFork = await application.handlers.forkSession({
+        const rejectedFork = await application.handlers.revertSession({
           sessionId,
           atInputId: admitted.value.inputId,
           reason: "edit",
@@ -2351,7 +2351,7 @@ describe("application composition", () => {
           error: { code: ApiErrorCode.InvalidInput },
         })
 
-        const forked = await application.handlers.forkSession({
+        const forked = await application.handlers.revertSession({
           sessionId,
           atInputId: admitted.value.inputId,
           reason: "edit",
@@ -2371,6 +2371,7 @@ describe("application composition", () => {
           ]),
         })
         expectOk(forked)
+        expect(forked.value.session.id).toBe(sessionId)
         expect(forked.value.historyEndSeqExclusive).toBe(2)
         await waitForThreadIdle(application, forked.value.session.id)
 
@@ -2378,10 +2379,12 @@ describe("application composition", () => {
           forked.value.session.id,
         )
         expect(child?.metadata).toMatchObject({
-          parentThreadId: sessionId,
-          forkedFromInputId: admitted.value.inputId,
-          forkReason: "edit",
+          id: sessionId,
+          previousRolloutId: sessionId,
         })
+        const replacementRolloutId = child?.metadata.rolloutId
+        expect(replacementRolloutId).toBeDefined()
+        expect(replacementRolloutId).not.toBe(sessionId)
         const childInput = child?.rollout.find(
           ({ item }) =>
             item.type === "response_item" && item.item.id.startsWith("input_"),
@@ -2392,7 +2395,7 @@ describe("application composition", () => {
               content: [
                 {
                   file: {
-                    rolloutId: forked.value.session.id,
+                    rolloutId: replacementRolloutId,
                     path: expect.stringMatching(
                       /^attachments\/requests\/request_.+\/1\.png$/,
                     ),
@@ -2420,7 +2423,7 @@ describe("application composition", () => {
             join(
               application.sessionStoreRoot,
               "rollouts",
-              forked.value.session.id,
+              replacementRolloutId ?? "missing-rollout",
               "files",
               childImagePath,
             ),
@@ -4736,7 +4739,7 @@ describe("application composition", () => {
     })
   })
 
-  it("forks, edits, and drives a Turn without touching the source Session", async () => {
+  it("edits the original Session and retains the replaced history as an older version", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "first reply" }] },
@@ -4774,7 +4777,7 @@ describe("application composition", () => {
         expectOk(second)
         await waitForThreadIdle(application, created.value.session.id)
 
-        const forked = await application.handlers.forkSession({
+        const forked = await application.handlers.revertSession({
           sessionId: created.value.session.id,
           atInputId: second.value.inputId,
           reason: "edit",
@@ -4784,23 +4787,24 @@ describe("application composition", () => {
           modelSelection: forkModelSelection,
         })
         expectOk(forked)
+        expect(forked.value.session.id).toBe(created.value.session.id)
         await waitForThreadIdle(application, forked.value.session.id)
 
-        const source = await application.threadStore.readThread(
-          created.value.session.id,
-        )
         const target = await application.threadStore.readThread(
           forked.value.session.id,
         )
-        expect(completedTurnCount(source)).toBe(2)
-        expect(userTexts(source)).toEqual(["first", "replace this"])
         expect(completedTurnCount(target)).toBe(2)
         expect(userTexts(target)).toEqual(["first", "replacement"])
         expect(target?.metadata).toMatchObject({
-          parentThreadId: created.value.session.id,
-          forkedFromTurnId: "request_fork_second",
+          id: created.value.session.id,
+          previousRolloutId: created.value.session.id,
           workingDirectory: application.workspace,
         })
+        const versions = await application.threadStore.readThreadVersions(
+          created.value.session.id,
+        )
+        expect(versions).toHaveLength(2)
+        expect(userTexts(versions[1])).toEqual(["first", "replace this"])
         expect(
           target?.rollout.find(
             (entry) =>

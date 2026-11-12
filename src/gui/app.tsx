@@ -221,8 +221,7 @@ function SessionHeader() {
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
         </h2>
-        {session.parentSessionId !== undefined &&
-        session.forkReason === undefined ? (
+        {session.parentSessionId !== undefined ? (
           <button
             type="button"
             onClick={() =>

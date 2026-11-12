@@ -13,6 +13,11 @@ import {
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import {
+  clearThreadScopes,
+  readThreadScopeValue,
+  writeThreadScopeValue,
+} from "../../src/gui/store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import {
   createEventEnvelope,
@@ -46,6 +51,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
 
 const sessionDetail: ApiSessionDetail = {
   id: "session_1",
+  rolloutId: "rollout_original",
   conversationId: "conversation_1",
   seq: 1,
   createdAt: "2026-07-24T00:00:00.000Z",
@@ -99,6 +105,7 @@ function makeProject(id: string, root: string, name = ""): ApiProject {
 beforeEach(() => {
   globalThis.localStorage.clear()
   inputRecoveryMemory.clear()
+  clearThreadScopes()
   fakeRef.current = new FakeRpcClient()
   useAppStore.setState(
     { ...useAppStore.getInitialState(), ...createInitialAppState() },
@@ -611,6 +618,108 @@ describe("app store event stream", () => {
     ])
   })
 
+  it("publishes cached catch-up only after the replay is complete", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const initial = fakeRef.current.streams.at(-1)
+    emitSnapshot(initial)
+    initial?.emitReplayComplete()
+    await useAppStore.getState().selectSession("session_other")
+    await useAppStore.getState().selectSession("session_1")
+    const resumed = fakeRef.current.streams.at(-1)
+    const cached = useAppStore.getState().execution
+    emitSnapshot(resumed, { ...sessionDetail, seq: 3 })
+    resumed?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request_catchup",
+            inputId: "input_catchup",
+            role: InputRole.User,
+            content: inputFixture(inputParts("received while away")),
+          },
+        },
+      }),
+    )
+    expect(useAppStore.getState().execution).toBe(cached)
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    resumed?.emitReplayComplete()
+    expect(useAppStore.getState().execution.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "user_input",
+        text: "received while away",
+      }),
+    )
+  })
+
+  it.each([
+    "snapshot",
+    "events",
+  ])("resumes unapplied history after navigation interrupts replay at %s", async (stage) => {
+    await useAppStore.getState().selectSession("session_1")
+    const initial = fakeRef.current.streams.at(-1)
+    emitSnapshot(initial)
+    initial?.emitReplayComplete()
+    await useAppStore.getState().selectSession("session_other")
+    await useAppStore.getState().selectSession("session_1")
+    const resumed = fakeRef.current.streams.at(-1)
+    emitSnapshot(resumed, { ...sessionDetail, seq: 30 })
+    if (stage === "events")
+      resumed?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_interrupted_replay",
+              inputId: "input_interrupted_replay",
+              role: InputRole.User,
+              content: inputFixture(inputParts("pending catch-up")),
+            },
+          },
+        }),
+      )
+    await useAppStore.getState().selectSession("session_other")
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(1)
+    expect(useAppStore.getState().execution.entries).toEqual([])
+  })
+
+  it("retains buffered history when a disconnected replay resumes after received events", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams.at(-1)
+    emitSnapshot(stream, { ...sessionDetail, seq: 3 })
+    const admitted = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request_before_disconnect",
+          inputId: "input_before_disconnect",
+          role: InputRole.User,
+          content: inputFixture(inputParts("received before disconnect")),
+        },
+      },
+    })
+    stream?.emitEvent(admitted)
+    stream?.disconnect(new Error("Disconnected during replay"))
+    emitSnapshot(stream, { ...sessionDetail, seq: 3 })
+    // Received records may be repeated by another transport. Fold them once.
+    stream?.emitEvent(admitted)
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().execution.entries).toEqual([
+      expect.objectContaining({
+        kind: "user_input",
+        text: "received before disconnect",
+      }),
+    ])
+    expect(useAppStore.getState().execution.lastSeq).toBe(3)
+  })
+
   it("keeps an acknowledged interrupt pending until its turn completes without touching draft or queue", async () => {
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]
@@ -852,6 +961,9 @@ describe("app store event stream", () => {
     })
     stream?.emitEvent(admitted)
     expect(useAppStore.getState().hydratingSessionId).toBe("session_1")
+    expect(useAppStore.getState().execution.entries).toEqual([])
+    expect(useAppStore.getState().selectedSession?.counts.inputs).toBe(1)
+    stream?.emitReplayComplete()
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([
@@ -861,8 +973,6 @@ describe("app store event stream", () => {
         content: inputParts("hello"),
       }),
     ])
-    expect(useAppStore.getState().selectedSession?.counts.inputs).toBe(1)
-    stream?.emitReplayComplete()
     expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
     expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
 
@@ -1158,6 +1268,7 @@ describe("delete session", () => {
   function summary(id: string) {
     return {
       id,
+      rolloutId: `rollout_${id}`,
       conversationId: `conversation_${id}`,
       seq: 1,
       createdAt: "2026-07-24T00:00:00.000Z",
@@ -1363,8 +1474,8 @@ describe("session drafts", () => {
   })
 })
 
-describe("fork session", () => {
-  it("edits through one fork request and selects the new Session", async () => {
+describe("revert session", () => {
+  it("edits through one revert request and replaces history in the same Session", async () => {
     globalThis.localStorage.clear()
     const activeSession: ApiSessionDetail = {
       ...sessionDetail,
@@ -1372,30 +1483,23 @@ describe("fork session", () => {
       activeTurnId: "turn_1",
       counts: { ...sessionDetail.counts, inputs: 1, turns: 1 },
     }
-    const forkedSession: ApiSessionDetail = {
+    const revertedSession: ApiSessionDetail = {
       ...sessionDetail,
-      id: "session_fork",
+      rolloutId: "rollout_reverted",
       seq: 2,
-      parentSessionId: "session_1",
-      forkedFromInputId: "input_1",
-      forkReason: "edit",
       counts: { ...sessionDetail.counts, inputs: 1 },
     }
-    const forkEvents = [
+    const revertEvents = [
       createEventEnvelope({
-        sessionId: "session_fork",
+        sessionId: "session_1",
         seq: 1,
         event: {
           type: EventType.SessionCreated,
-          data: {
-            parentSessionId: "session_1",
-            forkedFromInputId: "input_1",
-            forkReason: "edit",
-          },
+          data: {},
         },
       }),
       createEventEnvelope({
-        sessionId: "session_fork",
+        sessionId: "session_1",
         seq: 2,
         event: {
           type: EventType.InputAdmitted,
@@ -1415,15 +1519,15 @@ describe("fork session", () => {
       }),
     ]
     fakeRef.current.respond = (method) => {
-      if (method === "session/fork") {
+      if (method === "session/revert") {
         return {
-          session: forkedSession,
-          historyEndSeqExclusive: 2,
-          events: forkEvents,
+          session: revertedSession,
+          historyEndSeqExclusive: 3,
+          events: revertEvents,
         }
       }
       if (method === "session/list") {
-        return { sessions: [forkedSession, activeSession] }
+        return { sessions: [revertedSession] }
       }
       return notFound()
     }
@@ -1462,14 +1566,45 @@ describe("fork session", () => {
       }),
     )
 
+    const draft = inputParts("next human draft")
+    const excerpt = {
+      id: "excerpt_draft",
+      text: "file context",
+      attachedAt: "2026-07-24T00:00:00.000Z",
+      source: { kind: "file" as const, label: "README", path: "/p/README" },
+    }
+    const editorState = { undoDepth: 3 }
+    useAppStore.setState({
+      threadId: "draft_promoted",
+      sessionThreadIds: { session_1: "draft_promoted" },
+      promptDraft: draft,
+      promptExcerpts: [excerpt],
+      sessionsByProject: { "": { sessions: [activeSession] } },
+    })
+    useWorkspaceStore.getState().setSession("draft_promoted")
+    useWorkspaceStore.getState().openFile("/p/README", "/p")
+    const workspace = useWorkspaceStore.getState()
+    writeThreadScopeValue("draft_promoted", "scroll.position", { top: 99 })
+    writeThreadScopeValue(
+      "http://api.test:draft_promoted",
+      "prompt-editor.state",
+      editorState,
+    )
+    writeThreadScopeValue(
+      "http://api.test:draft_promoted",
+      "composer.history",
+      {
+        index: 3,
+      },
+    )
     await useAppStore
       .getState()
-      .forkSession("input_1", "edit", inputFixture(inputParts("replacement")))
+      .revertSession("input_1", "edit", inputFixture(inputParts("replacement")))
 
     expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([])
-    expect(fakeRef.current.requestsFor("session/fork")).toEqual([
+    expect(fakeRef.current.requestsFor("session/revert")).toEqual([
       {
-        method: "session/fork",
+        method: "session/revert",
         params: {
           sessionId: "session_1",
           atInputId: "input_1",
@@ -1483,14 +1618,44 @@ describe("fork session", () => {
         },
       },
     ])
-    expect(useAppStore.getState().selectedSession).toEqual(forkedSession)
-    expect(useAppStore.getState().selection.sessionId).toBe("session_fork")
-    expect(useAppStore.getState().modelSelections.session_fork).toEqual({
+    expect(useAppStore.getState().selectedSession).toEqual(revertedSession)
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
       provider: "openai",
       model: "gpt-test",
       effort: "high",
     })
     expect(useAppStore.getState().composerFocusRevision).toBe(1)
+    expect(useAppStore.getState().sessionHistoryRevisions).toEqual({
+      session_1: 1,
+    })
+    expect(useAppStore.getState().promptDraft).toBe(draft)
+    expect(useAppStore.getState().promptExcerpts).toEqual([excerpt])
+    expect(useAppStore.getState().threadId).toBe("draft_promoted")
+    expect(useAppStore.getState().sessionThreadIds).toEqual({
+      session_1: "draft_promoted",
+    })
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toHaveLength(
+      1,
+    )
+    expect(useWorkspaceStore.getState()).toBe(workspace)
+    expect(
+      readThreadScopeValue("draft_promoted", "scroll.position", undefined),
+    ).toBeUndefined()
+    expect(
+      readThreadScopeValue(
+        "http://api.test:draft_promoted",
+        "prompt-editor.state",
+        undefined,
+      ),
+    ).toBe(editorState)
+    expect(
+      readThreadScopeValue(
+        "http://api.test:draft_promoted",
+        "composer.history",
+        undefined,
+      ),
+    ).toBeUndefined()
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([
@@ -1502,9 +1667,422 @@ describe("fork session", () => {
       }),
     ])
     expect(stream?.closed).toBe(true)
-    const forkStream = fakeRef.current.streams[1]
-    expect(forkStream?.sessionId).toBe("session_fork")
-    expect(forkStream?.after).toBe(2)
+    const revertStream = fakeRef.current.streams[1]
+    expect(revertStream?.sessionId).toBe("session_1")
+    expect(revertStream?.after).toBe(2)
+  })
+
+  it("undo replaces a high sequence history without submitting input or restoring queued recovery", async () => {
+    const oldQueue = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/queue/list") return oldQueue.promise
+      if (method === "session/revert")
+        return { session: sessionDetail, events: [], historyEndSeqExclusive: 2 }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    const oldStream = fakeRef.current.streams[0]
+    emitSnapshot(oldStream, { ...sessionDetail, seq: 50 })
+    inputRecoveryMemory.reserveAdmission({
+      apiBase: "http://api.test",
+      sessionId: "session_1",
+      content: inputFixture(inputParts("old unknown delivery")),
+    })
+    oldStream?.emitReplayComplete()
+    await useAppStore.getState().revertSession("input_1", "undo")
+    oldQueue.resolve({ items: [] })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(
+      inputRecoveryMemory.listAdmissionsForSession(
+        "http://api.test",
+        "session_1",
+      ),
+    ).toEqual([])
+    expect(fakeRef.current.requestsFor("session/input")).toEqual([])
+    expect(fakeRef.current.requestsFor("session/revert")[0]?.params).toEqual({
+      sessionId: "session_1",
+      atInputId: "input_1",
+      reason: "undo",
+    })
+    const stream = fakeRef.current.streams.at(-1)
+    expect(stream?.after).toBe(1)
+    emitSnapshot(stream)
+    stream?.emitReplayComplete()
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "fresh",
+            inputId: "fresh_input",
+            role: InputRole.User,
+            content: inputFixture(inputParts("fresh rollout")),
+          },
+        },
+      }),
+    )
+    oldStream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 51,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "obsolete",
+            inputId: "obsolete_input",
+            role: InputRole.User,
+            content: inputFixture(inputParts("obsolete rollout")),
+          },
+        },
+      }),
+    )
+    expect(useAppStore.getState().execution.lastSeq).toBe(2)
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([expect.objectContaining({ inputId: "fresh_input" })])
+    await useAppStore.getState().selectSession("session_other")
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(2)
+  })
+
+  it.each([
+    false,
+    true,
+  ])("invalidates old history after navigation while revert is pending (return before response: %s)", async (returnBeforeResponse) => {
+    const response = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/revert" ? response.promise : notFound()
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, seq: 40 })
+    stream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("keep draft"))
+    const revert = useAppStore.getState().revertSession("input_1", "undo")
+    await useAppStore.getState().selectSession("session_other")
+    if (returnBeforeResponse)
+      await useAppStore.getState().selectSession("session_1")
+    response.resolve({
+      session: sessionDetail,
+      events: [],
+      historyEndSeqExclusive: 2,
+    })
+    await revert
+    if (!returnBeforeResponse) {
+      expect(useAppStore.getState().selection.sessionId).toBe("session_other")
+      await useAppStore.getState().selectSession("session_1")
+    }
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(
+      returnBeforeResponse ? 1 : 0,
+    )
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("keep draft"))
+    expect(useAppStore.getState().execution.lastSeq).toBeLessThan(40)
+  })
+
+  it("rejects an earlier history page arriving after same-session undo", async () => {
+    const history = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/history") return history.promise
+      if (method === "session/revert")
+        return { session: sessionDetail, events: [], historyEndSeqExclusive: 2 }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 30 },
+      historyBefore: 10,
+    })
+    stream?.emitReplayComplete()
+    const earlier = useAppStore.getState().loadEarlierHistory()
+    await useAppStore.getState().revertSession("input_1", "undo")
+    history.resolve({ events: [], historyBefore: 5 })
+    expect(await earlier).toBe(false)
+    expect(useAppStore.getState().historyBefore).toBeUndefined()
+    expect(useAppStore.getState().execution.lastSeq).toBe(1)
+  })
+
+  it("replaces sidebar rollout state immediately and rejects earlier summary and list reads", async () => {
+    const oldSummary = deferredResponse()
+    const oldList = deferredResponse()
+    const previous = {
+      ...sessionDetail,
+      seq: 40,
+      active: true,
+      status: "failed" as const,
+      latestCompletionSeq: 38,
+    }
+    const replacement = {
+      ...sessionDetail,
+      rolloutId: "rollout_reverted",
+      seq: 2,
+      active: false,
+      status: "idle" as const,
+    }
+    let listReads = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/list") {
+        listReads += 1
+        return listReads === 1 ? { sessions: [previous] } : oldList.promise
+      }
+      if (method === "session/summary") return oldSummary.promise
+      if (method === "session/revert")
+        return { session: replacement, events: [], historyEndSeqExclusive: 3 }
+      return notFound()
+    }
+    await useAppStore.getState().boot()
+    await useAppStore.getState().selectSession("session_1")
+    fakeRef.current.emitSidebarChanged({ sessionId: "session_1" })
+    const pendingList = useAppStore.getState().loadSessions(undefined)
+    await useAppStore.getState().revertSession("input_1", "undo")
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([
+      replacement,
+    ])
+    expect(
+      useAppStore.getState().sessionsByProject[""]?.loading,
+    ).toBeUndefined()
+    oldSummary.resolve(previous)
+    oldList.resolve({ sessions: [previous] })
+    expect(await pendingList).toBe(false)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([
+      replacement,
+    ])
+    expect(useAppStore.getState().selectedSession).toEqual(replacement)
+  })
+
+  it("clears and refreshes an inactive session's rollout status after remote reset", async () => {
+    const freshSummary = deferredResponse()
+    const previous = {
+      ...sessionDetail,
+      title: "Retained title",
+      seq: 40,
+      active: true,
+      status: "failed" as const,
+      latestCompletionSeq: 38,
+    }
+    fakeRef.current.respond = (method) => {
+      if (method === "session/list") return { sessions: [previous] }
+      if (method === "session/summary") return freshSummary.promise
+      return notFound()
+    }
+    await useAppStore.getState().boot()
+    await useAppStore.getState().selectSession("session_other")
+    const stream = useAppStore.getState().stream
+    fakeRef.current.emitHistoryReset("session_1")
+    const row = useAppStore.getState().sessionsByProject[""]?.sessions[0]
+    expect(row?.seq).toBe(0)
+    expect(row?.title).toBe("Retained title")
+    expect(row).not.toHaveProperty("active")
+    expect(row).not.toHaveProperty("status")
+    expect(row).not.toHaveProperty("latestCompletionSeq")
+    const replacement = {
+      ...sessionDetail,
+      title: "Retained title",
+      rolloutId: "rollout_reverted",
+      seq: 2,
+      active: false,
+      status: "idle" as const,
+    }
+    freshSummary.resolve(replacement)
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([
+        replacement,
+      ]),
+    )
+    expect(useAppStore.getState().stream).toBe(stream)
+    expect(useAppStore.getState().selection.sessionId).toBe("session_other")
+  })
+
+  it.each([
+    "admission",
+    "steer",
+  ] as const)("ignores an old %s acknowledgement after replacing the rollout", async (kind) => {
+    const acknowledgement = deferredResponse()
+    const nextAcknowledgement = deferredResponse()
+    let sends = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input" || method === "session/input/steer") {
+        sends += 1
+        return sends === 1
+          ? acknowledgement.promise
+          : nextAcknowledgement.promise
+      }
+      if (method === "session/revert")
+        return { session: sessionDetail, events: [], historyEndSeqExclusive: 2 }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, {
+      ...sessionDetail,
+      ...(kind === "steer" ? { activeTurnId: "turn_old" } : {}),
+    })
+    stream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("same human draft"))
+    const send = useAppStore
+      .getState()
+      .admitInput(inputParts("same human draft"))
+    await useAppStore.getState().revertSession("input_1", "undo")
+    const freshStream = fakeRef.current.streams.at(-1)
+    emitSnapshot(freshStream)
+    freshStream?.emitReplayComplete()
+    const nextSend = useAppStore
+      .getState()
+      .admitInput(inputParts("same human draft"))
+    expect(sends).toBe(2)
+    const request = fakeRef.current.requestsFor(
+      kind === "steer" ? "session/input/steer" : "session/input",
+    )[0]?.params as { requestId: string }
+    acknowledgement.resolve({
+      requestId: request.requestId,
+      turnId: "turn_old",
+      content: inputFixture(inputParts("same human draft")),
+    })
+    await send
+    expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+      true,
+    )
+    nextAcknowledgement.reject(
+      new ApiRequestError("New input rejected", "conflict"),
+    )
+    await nextSend
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("same human draft"),
+    )
+    expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
+    expect(
+      inputRecoveryMemory.readSteers("http://api.test", "session_1"),
+    ).toEqual([])
+    expect(
+      inputRecoveryMemory.listAdmissionsForSession(
+        "http://api.test",
+        "session_1",
+      ),
+    ).toEqual([])
+  })
+
+  it("rebuilds a selected session on history reset while retaining its draft", async () => {
+    await useAppStore.getState().boot()
+    await useAppStore.getState().selectSession("session_1")
+    const oldStream = fakeRef.current.streams.at(-1)
+    emitSnapshot(oldStream, { ...sessionDetail, seq: 20 })
+    oldStream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("human draft"))
+    fakeRef.current.emitHistoryReset("session_1")
+    expect(oldStream?.closed).toBe(true)
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(0)
+    expect(useAppStore.getState().execution.lastSeq).toBe(0)
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("human draft"),
+    )
+  })
+
+  it("invalidates an inactive session cache on a remote history reset", async () => {
+    await useAppStore.getState().boot()
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams.at(-1)
+    emitSnapshot(stream, { ...sessionDetail, seq: 20 })
+    stream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("parked human draft"))
+    await useAppStore.getState().selectSession("session_other")
+    const otherStream = fakeRef.current.streams.at(-1)
+    fakeRef.current.emitHistoryReset("session_1")
+    expect(useAppStore.getState().selection.sessionId).toBe("session_other")
+    expect(useAppStore.getState().stream).toBe(otherStream)
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(0)
+    expect(useAppStore.getState().execution.lastSeq).toBe(0)
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("parked human draft"),
+    )
+  })
+
+  it("invalidates every cached history on reconnect without changing drafts or navigation versions", async () => {
+    await useAppStore.getState().boot()
+    await useAppStore.getState().selectSession("session_1")
+    const firstStream = fakeRef.current.streams.at(-1)
+    emitSnapshot(firstStream, { ...sessionDetail, seq: 20 })
+    firstStream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("first draft"))
+    await useAppStore.getState().selectSession("session_other")
+    const otherStream = fakeRef.current.streams.at(-1)
+    emitSnapshot(otherStream, {
+      ...sessionDetail,
+      id: "session_other",
+      seq: 30,
+    })
+    otherStream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("other draft"))
+    for (const sessionId of ["session_1", "session_other"])
+      inputRecoveryMemory.reserveAdmission({
+        apiBase: "http://api.test",
+        sessionId,
+        content: inputFixture(inputParts("old recovery")),
+      })
+    expect(useAppStore.getState().sessionHistoryRevisions).toEqual({})
+    fakeRef.current.emitHistoryReset()
+    expect(useAppStore.getState().selection.sessionId).toBe("session_other")
+    expect(otherStream?.closed).toBe(true)
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(0)
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("other draft"),
+    )
+    expect(useAppStore.getState().sessionHistoryRevisions).toEqual({
+      session_1: 1,
+      session_other: 1,
+    })
+    expect(
+      inputRecoveryMemory.listAdmissionsForApiBase("http://api.test"),
+    ).toEqual([])
+    await useAppStore.getState().selectSession("session_1")
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(0)
+    expect(useAppStore.getState().promptDraft).toEqual(
+      inputParts("first draft"),
+    )
+    expect(useAppStore.getState().sessionHistoryRevisions).toEqual({
+      session_1: 1,
+      session_other: 1,
+    })
+    fakeRef.current.emitHistoryReset("session_1")
+    expect(useAppStore.getState().sessionHistoryRevisions).toEqual({
+      session_1: 2,
+      session_other: 1,
+    })
+  })
+
+  it.each([
+    "response",
+    "lost acknowledgement",
+  ] as const)("defers a local history reset until the revert %s settles", async (outcome) => {
+    await useAppStore.getState().boot()
+    const response = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/revert" ? response.promise : notFound()
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams.at(-1)
+    emitSnapshot(stream, { ...sessionDetail, seq: 20 })
+    stream?.emitReplayComplete()
+    const revert = useAppStore.getState().revertSession("input_1", "undo")
+    fakeRef.current.emitHistoryReset("session_1")
+    expect(fakeRef.current.streams).toHaveLength(1)
+    if (outcome === "response")
+      response.resolve({
+        session: sessionDetail,
+        events: [],
+        historyEndSeqExclusive: 2,
+      })
+    else response.reject(new Error("The connection to the server was lost."))
+    await revert
+    expect(fakeRef.current.streams).toHaveLength(2)
+    expect(fakeRef.current.streams.at(-1)?.after).toBe(
+      outcome === "response" ? 1 : 0,
+    )
+    expect(useAppStore.getState().execution.lastSeq).toBeLessThan(20)
   })
 })
 
@@ -1836,12 +2414,7 @@ describe("project state", () => {
       useAppStore.getState().sessionDrafts.session_existing?.content,
     ).toEqual(inputParts("unfinished message"))
     expect(useAppStore.getState().collapsedProjects.project_b).toBeUndefined()
-    expect(fakeRef.current.requestsFor("session/create")).toEqual([
-      {
-        method: "session/create",
-        params: { projectId: "project_b", workingDirectory: "/p/b" },
-      },
-    ])
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
   })
 
   it("toggleProjectPinned reorders immediately and absorbs the update response", async () => {
@@ -3182,6 +3755,7 @@ describe("model selection", () => {
     })
     await useAppStore.getState().selectSession("session_1")
     emitSnapshot(fakeRef.current.streams[0])
+    fakeRef.current.streams[0]?.emitReplayComplete()
     useAppStore.setState({ promptDraft: inputParts("Please review this") })
 
     await useAppStore.getState().admitInput(inputParts("Please review this"))
@@ -3716,7 +4290,7 @@ it("resumes the source event stream after an edit request fails", async () => {
   first?.emitReplayComplete()
   await useAppStore
     .getState()
-    .forkSession("input_1", "edit", inputFixture(inputParts("Replacement")))
+    .revertSession("input_1", "edit", inputFixture(inputParts("Replacement")))
   expect(useAppStore.getState().selection.sessionId).toBe("session_1")
   expect(useAppStore.getState().message).toBe("Edit failed")
   const resumed = fakeRef.current.streams[1]
@@ -3742,6 +4316,41 @@ it("resumes the source event stream after an edit request fails", async () => {
 })
 
 describe("new session drafts", () => {
+  it("opens a local draft and only focuses it when new is repeated in the same project", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_existing" },
+      projects: [makeProject("project_a", "/p/a")],
+      sessionsByProject: { project_a: { sessions: [] } },
+    })
+    useAppStore.getState().startNewSession("project_a")
+    useAppStore.getState().setPromptDraft(inputParts("keep this"))
+    const { threadId, sessionSelectionIntentRevision, composerFocusRevision } =
+      useAppStore.getState()
+    useAppStore.setState({
+      settingsSection: "general",
+      commandPanel: { kind: "status" },
+    })
+
+    useAppStore.getState().startNewSession("project_a")
+
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().selectedSession).toBeUndefined()
+    expect(useAppStore.getState().settingsSection).toBeUndefined()
+    expect(useAppStore.getState().commandPanel).toBeUndefined()
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("keep this"))
+    expect(useAppStore.getState().threadId).toBe(threadId)
+    expect(useAppStore.getState().sessionSelectionIntentRevision).toBe(
+      sessionSelectionIntentRevision,
+    )
+    expect(useAppStore.getState().composerFocusRevision).toBe(
+      composerFocusRevision + 1,
+    )
+    expect(
+      useAppStore.getState().sessionsByProject.project_a?.sessions,
+    ).toEqual([])
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
+  })
+
   it("recovers a first send interrupted before session creation", async () => {
     const creation = deferredResponse()
     fakeRef.current.respond = (method) =>
@@ -3863,11 +4472,13 @@ describe("new session drafts", () => {
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("existing task"),
     )
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("keeps a typed draft on the created session when new session is opened again", async () => {
-    fakeRef.current.respond = (method) => {
+  it("returns to the created session after its first admission fails and retries there", async () => {
+    const respond = admissionResponder()
+    let rejectAdmission = true
+    fakeRef.current.respond = (method, params) => {
       if (method === "session/create")
         return {
           session: sessionDetail,
@@ -3877,17 +4488,20 @@ describe("new session drafts", () => {
             event: { type: EventType.SessionCreated, data: {} },
           }),
         }
-      return notFound()
+      if (method === "session/input" && rejectAdmission)
+        throw new ApiRequestError("Input rejected", "not_found")
+      return respond(method, params)
     }
     useAppStore.getState().startNewSession()
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selection.sessionId).toBe("session_1"),
-    )
     useAppStore.getState().setPromptDraft(inputParts("keep this"))
+    const threadId = useAppStore.getState().threadId
+    await useAppStore.getState().admitInput(inputParts("keep this"))
+    expect(useAppStore.getState().message).toBe("Input rejected")
 
     useAppStore.getState().startNewSession()
     expect(useAppStore.getState().selection.sessionId).toBe("session_1")
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("keep this"))
+    expect(useAppStore.getState().threadId).toBe(threadId)
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
 
     await useAppStore.getState().selectSession("session_existing")
@@ -3903,9 +4517,20 @@ describe("new session drafts", () => {
         .getState()
         .sessionsByProject[""]?.sessions.map((session) => session.id),
     ).toContain("session_1")
+
+    rejectAdmission = false
+    emitSnapshot(fakeRef.current.streams.at(-1))
+    fakeRef.current.streams.at(-1)?.emitReplayComplete()
+    await useAppStore.getState().admitInput(inputParts("keep this"))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(2)
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().threadId).not.toBe(threadId)
   })
 
-  it("creates on opening and carries the draft model into first admission", async () => {
+  it("creates on first admission and carries the draft model and workspace draft id", async () => {
     globalThis.localStorage.clear()
     const respond = admissionResponder()
     fakeRef.current.respond = (method, params) => {
@@ -3922,7 +4547,7 @@ describe("new session drafts", () => {
     }
     useAppStore.getState().startNewSession()
     const threadId = useAppStore.getState().threadId
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     useAppStore
       .getState()
       .setModelSelection(undefined, { provider: "faux", model: "scripted" })
@@ -3994,16 +4619,18 @@ describe("new session drafts", () => {
     })
   })
 
-  it("keeps creation out of busy while tracking concurrent work", async () => {
+  it("keeps first-send creation out of busy while tracking concurrent work", async () => {
     const create = deferredResponse()
     const update = deferredResponse()
-    fakeRef.current.respond = (method) => {
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) => {
       if (method === "session/create") return create.promise
       if (method === "project/update") return update.promise
       if (method === "project/list") return { projects: [] }
-      return notFound()
+      return respond(method, params)
     }
     useAppStore.getState().startNewSession()
+    const sending = useAppStore.getState().admitInput(inputParts("hello"))
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     expect(useAppStore.getState().busy).toBe(false)
     const updating = useAppStore
@@ -4022,9 +4649,8 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selection.sessionId).toBe("session_1"),
-    )
+    await sending
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
     expect(useAppStore.getState().busy).toBe(false)
   })
 
@@ -4049,7 +4675,7 @@ describe("new session drafts", () => {
       method === "session/create" ? create.promise : respond(method, params)
     useAppStore.getState().startNewSession()
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     useAppStore
       .getState()
       .setModelSelection(undefined, { provider: "faux", model: "first" })
@@ -4077,7 +4703,17 @@ describe("new session drafts", () => {
     const duplicate = useAppStore
       .getState()
       .admitInput(inputParts("first", [image]))
-    useAppStore.getState().setPromptDraft(inputParts("next"))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    const { threadId, sessionSelectionIntentRevision, composerFocusRevision } =
+      useAppStore.getState()
+    useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().threadId).toBe(threadId)
+    expect(useAppStore.getState().sessionSelectionIntentRevision).toBe(
+      sessionSelectionIntentRevision,
+    )
+    expect(useAppStore.getState().composerFocusRevision).toBe(
+      composerFocusRevision + 1,
+    )
     useAppStore.getState().setPromptDraft(inputParts("next"))
     useAppStore.getState().removePromptExcerpt(excerpt.id)
     useAppStore
@@ -4145,19 +4781,29 @@ describe("new session drafts", () => {
     const first = deferredResponse()
     const second = deferredResponse()
     let requests = 0
-    fakeRef.current.respond = (method) => {
+    fakeRef.current.respond = (method, params) => {
       if (method === "session/create") {
         requests += 1
         return requests === 1 ? first.promise : second.promise
       }
+      if (method === "session/input")
+        return {
+          requestId: (params as { requestId: string }).requestId,
+          inputId: "input_2",
+          content: inputFixture(inputParts("second")),
+        }
       if (method === "session/delete") return { sessionId: "session_1" }
       return notFound()
     }
     useAppStore.getState().startNewSession()
+    const firstSend = useAppStore.getState().admitInput(inputParts("first"))
     useAppStore.getState().startNewSession()
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     await useAppStore.getState().selectSession("session_existing")
     useAppStore.getState().startNewSession()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    useAppStore.getState().setPromptDraft(inputParts("second"))
+    const secondSend = useAppStore.getState().admitInput(inputParts("second"))
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
     first.resolve({
       session: sessionDetail,
@@ -4167,8 +4813,7 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    // Let the older request settle while the second one remains unresolved.
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await firstSend
     expect(fakeRef.current.requestsFor("session/delete")).toEqual([
       { method: "session/delete", params: { sessionId: "session_1" } },
     ])
@@ -4181,19 +4826,31 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selection.sessionId).toBe("session_2"),
-    )
+    await secondSend
+    expect(useAppStore.getState().selection.sessionId).toBe("session_2")
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      sessionId: "session_2",
+      content: inputFixture(inputParts("second")),
+    })
   })
 
-  it("starts a different project's draft while the old project's create is pending", async () => {
+  it("does not delete the active project when an older create responds last", async () => {
     const first = deferredResponse()
     const second = deferredResponse()
     let requests = 0
-    fakeRef.current.respond = (method) => {
+    fakeRef.current.respond = (method, params) => {
       if (method === "session/create")
         return ++requests === 1 ? first.promise : second.promise
       if (method === "session/delete") return { sessionId: "session_a" }
+      if (method === "session/input")
+        return {
+          requestId: (params as { requestId: string }).requestId,
+          inputId: "input_b",
+          content: inputFixture(inputParts("work in B")),
+        }
       return notFound()
     }
     useAppStore.setState({
@@ -4203,8 +4860,13 @@ describe("new session drafts", () => {
       ],
     })
     useAppStore.getState().startNewSession("project_a")
-    useAppStore.getState().startNewSession("project_a")
+    const firstSend = useAppStore.getState().admitInput(inputParts("work in A"))
     useAppStore.getState().startNewSession("project_b")
+    useAppStore.getState().setPromptDraft(inputParts("work in B"))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    const secondSend = useAppStore
+      .getState()
+      .admitInput(inputParts("work in B"))
     expect(fakeRef.current.requestsFor("session/create")).toEqual([
       {
         method: "session/create",
@@ -4215,20 +4877,6 @@ describe("new session drafts", () => {
         params: { projectId: "project_b", workingDirectory: "/p/b" },
       },
     ])
-    first.resolve({
-      session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
-      event: createEventEnvelope({
-        sessionId: "session_a",
-        seq: 1,
-        event: { type: EventType.SessionCreated, data: {} },
-      }),
-    })
-    await vi.waitFor(() =>
-      expect(fakeRef.current.requestsFor("session/delete")).toEqual([
-        { method: "session/delete", params: { sessionId: "session_a" } },
-      ]),
-    )
-    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     second.resolve({
       session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
       event: createEventEnvelope({
@@ -4237,43 +4885,8 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selectedSession).toMatchObject({
-        id: "session_b",
-        projectId: "project_b",
-      }),
-    )
-  })
-
-  it("does not delete the active project when an older create responds last", async () => {
-    const first = deferredResponse()
-    const second = deferredResponse()
-    let requests = 0
-    fakeRef.current.respond = (method) => {
-      if (method === "session/create")
-        return ++requests === 1 ? first.promise : second.promise
-      if (method === "session/delete") return { sessionId: "session_a" }
-      return notFound()
-    }
-    useAppStore.setState({
-      projects: [
-        makeProject("project_a", "/p/a"),
-        makeProject("project_b", "/p/b"),
-      ],
-    })
-    useAppStore.getState().startNewSession("project_a")
-    useAppStore.getState().setNewSessionProject("project_b")
-    second.resolve({
-      session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
-      event: createEventEnvelope({
-        sessionId: "session_b",
-        seq: 1,
-        event: { type: EventType.SessionCreated, data: {} },
-      }),
-    })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selection.sessionId).toBe("session_b"),
-    )
+    await secondSend
+    expect(useAppStore.getState().selection.sessionId).toBe("session_b")
     first.resolve({
       session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
       event: createEventEnvelope({
@@ -4282,13 +4895,13 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    await vi.waitFor(() =>
-      expect(fakeRef.current.requestsFor("session/delete")).toEqual([
-        { method: "session/delete", params: { sessionId: "session_a" } },
-      ]),
-    )
+    await firstSend
+    expect(fakeRef.current.requestsFor("session/delete")).toEqual([
+      { method: "session/delete", params: { sessionId: "session_a" } },
+    ])
     expect(useAppStore.getState().selection.sessionId).toBe("session_b")
     expect(useAppStore.getState().selectedSession?.projectId).toBe("project_b")
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
   })
 
   it("reports a failed cleanup for an abandoned successful create", async () => {
@@ -4300,6 +4913,7 @@ describe("new session drafts", () => {
       return notFound()
     }
     useAppStore.getState().startNewSession()
+    const sending = useAppStore.getState().admitInput(inputParts("abandoned"))
     await useAppStore.getState().selectSession("session_existing")
     create.resolve({
       session: sessionDetail,
@@ -4309,23 +4923,31 @@ describe("new session drafts", () => {
         event: { type: EventType.SessionCreated, data: {} },
       }),
     })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().message).toBe(
-        "Could not remove abandoned conversation session_1: Deletion failed",
-      ),
+    await sending
+    expect(useAppStore.getState().message).toBe(
+      "Could not remove abandoned conversation session_1: Deletion failed",
     )
     expect(useAppStore.getState().selection.sessionId).toBe("session_existing")
   })
 
-  it("recreates a pending draft when its project dropdown changes and preserves its draft", async () => {
-    const first = deferredResponse()
-    const second = deferredResponse()
-    let requests = 0
-    fakeRef.current.respond = (method) => {
-      if (method === "session/create")
-        return ++requests === 1 ? first.promise : second.promise
-      if (method === "session/delete") return { sessionId: "session_a" }
-      return notFound()
+  it("changes an unsent draft's project locally and creates in the current project on first send", async () => {
+    const create = deferredResponse()
+    const respond = admissionResponder(() =>
+      inputFixture(
+        inputParts("work in B", [
+          {
+            ...attachment,
+            file: {
+              rolloutId: "session_1",
+              path: "attachments/requests/project_b/1.png",
+            },
+          },
+        ]),
+      ),
+    )
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/create") return create.promise
+      return respond(method, params)
     }
     useAppStore.setState({
       projects: [
@@ -4334,7 +4956,6 @@ describe("new session drafts", () => {
       ],
     })
     useAppStore.getState().startNewSession("project_a")
-    useAppStore.getState().setPromptDraft(inputParts("work in B"))
     const attachment = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -4343,42 +4964,57 @@ describe("new session drafts", () => {
       file: { rolloutId: "draft_1", path: "attachments/staging/1.png" },
     }
     useAppStore.getState().setPromptDraft(inputParts("work in B", [attachment]))
+    useAppStore
+      .getState()
+      .setModelSelection(undefined, { provider: "faux", model: "scripted" })
+    const threadId = useAppStore.getState().threadId
     const revision = useAppStore.getState().sessionSelectionIntentRevision
     useAppStore.getState().setNewSessionProject("project_b")
     expect(
       useAppStore.getState().sessionSelectionIntentRevision,
     ).toBeGreaterThan(revision)
-    expect(fakeRef.current.requestsFor("session/create")[1]?.params).toEqual({
-      projectId: "project_b",
-      workingDirectory: "/p/b",
-    })
-    first.resolve({
-      session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
-      event: createEventEnvelope({
-        sessionId: "session_a",
-        seq: 1,
-        event: { type: EventType.SessionCreated, data: {} },
-      }),
-    })
-    await vi.waitFor(() =>
-      expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1),
-    )
-    second.resolve({
-      session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
-      event: createEventEnvelope({
-        sessionId: "session_b",
-        seq: 1,
-        event: { type: EventType.SessionCreated, data: {} },
-      }),
-    })
-    await vi.waitFor(() =>
-      expect(useAppStore.getState().selection.sessionId).toBe("session_b"),
-    )
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(useAppStore.getState().currentProject).toBe("project_b")
-    expect(useAppStore.getState().selectedSession?.projectId).toBe("project_b")
+    expect(useAppStore.getState().threadId).toBe(threadId)
     expect(useAppStore.getState().promptDraft).toEqual(
       inputParts("work in B", [attachment]),
     )
+    expect(useAppStore.getState().draftModelSelection).toEqual({
+      provider: "faux",
+      model: "scripted",
+    })
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
+    expect(fakeRef.current.requestsFor("session/delete")).toEqual([])
+
+    const sending = useAppStore
+      .getState()
+      .admitInput(inputParts("work in B", [attachment]))
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([
+      {
+        method: "session/create",
+        params: { projectId: "project_b", workingDirectory: "/p/b" },
+      },
+    ])
+    create.resolve({
+      session: { ...sessionDetail, projectId: "project_b" },
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await sending
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    expect(useAppStore.getState().currentProject).toBe("project_b")
+    expect(useAppStore.getState().selectedSession?.projectId).toBe("project_b")
+    expect(useAppStore.getState().threadId).toBe(threadId)
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      content: inputFixture(inputParts("work in B", [attachment])),
+      modelSelection: { provider: "faux", model: "scripted" },
+    })
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
   it("retains the queued draft on creation failure and permits retry", async () => {
@@ -4410,35 +5046,167 @@ describe("new session drafts", () => {
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
   })
 
-  it("admits the first input before the session list refresh finishes", async () => {
-    globalThis.localStorage.clear()
+  it("keeps the admitted session when an earlier session list returns empty", async () => {
     const list = deferredResponse()
+    const sidebar = deferredResponse()
+    const created = { ...sessionDetail, projectId: "project_a" }
     const respond = admissionResponder()
+    const request = fakeRef.current.request.bind(fakeRef.current)
+    // Hold the post-admission refresh so only the pre-creation reads can settle.
+    const requests = vi
+      .spyOn(fakeRef.current, "request")
+      .mockImplementation((method, params) =>
+        method === "sidebar/read" ? sidebar.promise : request(method, params),
+      )
     fakeRef.current.respond = (method, params) => {
       if (method === "session/create")
         return {
-          session: sessionDetail,
+          session: created,
           event: createEventEnvelope({
             sessionId: "session_1",
             seq: 1,
             event: { type: EventType.SessionCreated, data: {} },
           }),
         }
-      if (method === "session/list") return list.promise
+      if (method === "session/list")
+        return fakeRef.current.requestsFor(method).length <= 2
+          ? list.promise
+          : { sessions: [created] }
+      return respond(method, params)
+    }
+    useAppStore.setState({ projects: [makeProject("project_a", "/p/a")] })
+    useAppStore.getState().startNewSession("project_a")
+    const loading = Promise.all([
+      useAppStore.getState().loadSessions(undefined),
+      useAppStore.getState().loadSessions("project_a"),
+    ])
+
+    try {
+      await useAppStore.getState().admitInput(inputParts("hello"))
+      expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+      expect(fakeRef.current.requestsFor("session/list")).toHaveLength(2)
+      expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+      expect(useAppStore.getState().unsentSessionByProject).toEqual({})
+      for (const key of ["", "project_a"]) {
+        expect(
+          useAppStore
+            .getState()
+            .sessionsByProject[key]?.sessions.map(({ id }) => id),
+        ).toEqual(["session_1"])
+        expect(useAppStore.getState().sessionsByProject[key]?.loading).toBe(
+          false,
+        )
+      }
+
+      list.resolve({ sessions: [] })
+      await loading
+
+      for (const key of ["", "project_a"]) {
+        expect(
+          useAppStore
+            .getState()
+            .sessionsByProject[key]?.sessions.map(({ id }) => id),
+        ).toEqual(["session_1"])
+        expect(useAppStore.getState().sessionsByProject[key]?.loading).toBe(
+          false,
+        )
+      }
+    } finally {
+      list.resolve({ sessions: [] })
+      sidebar.resolve({ sections: [], entries: {} })
+      await loading
+      requests.mockRestore()
+    }
+  })
+
+  it("keeps a first-send row until the durable session index publishes it", async () => {
+    const respond = admissionResponder()
+    let listedSessions: readonly ApiSessionDetail[] = []
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/create")
+        return {
+          session: sessionDetail,
+          event: createEventEnvelope({
+            sessionId: sessionDetail.id,
+            seq: 1,
+            event: { type: EventType.SessionCreated, data: {} },
+          }),
+        }
+      if (method === "session/list") return { sessions: listedSessions }
       return respond(method, params)
     }
     useAppStore.getState().startNewSession()
+    await useAppStore.getState().admitInput(inputParts("first send"))
+    expect(useAppStore.getState().unsentSessionByProject).toEqual({})
+    await useAppStore.getState().loadSessions(undefined)
+    expect(
+      useAppStore
+        .getState()
+        .sessionsByProject[""]?.sessions.map(({ id }) => id),
+    ).toEqual([sessionDetail.id])
 
-    const sending = useAppStore.getState().admitInput(inputParts("hello"))
+    listedSessions = [sessionDetail]
+    await useAppStore.getState().loadSessions(undefined)
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toHaveLength(
+      1,
+    )
+
+    // Once publication is observed, ordinary list updates own membership.
+    listedSessions = []
+    await useAppStore.getState().loadSessions(undefined)
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([])
+  })
+
+  it("keeps draft edits made during first-send creation when boot recovery finishes late", async () => {
+    const list = deferredResponse()
+    const create = deferredResponse()
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "provider/list")
+        return {
+          accounts: [],
+          providers: [],
+          defaultProvider: "faux",
+          defaultModel: "scripted",
+        }
+      if (method === "project/list") return { projects: [] }
+      if (method === "sidebar/read") return { sections: [], entries: {} }
+      if (method === "session/list")
+        return fakeRef.current.requestsFor(method).length === 1
+          ? list.promise
+          : { sessions: [sessionDetail] }
+      if (method === "session/create") return create.promise
+      return respond(method, params)
+    }
+    const booting = useAppStore.getState().boot()
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/list")).toHaveLength(1),
+    )
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptDraft(inputParts("first"))
+    const sending = useAppStore.getState().admitInput(inputParts("first"))
+    useAppStore.getState().setPromptDraft(inputParts("next"))
+
     try {
-      await vi.waitFor(() =>
-        expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
-      )
-      expect(useAppStore.getState().selection.sessionId).toBe("session_1")
-    } finally {
       list.resolve({ sessions: [] })
+      await booting
+      expect(useAppStore.getState().promptDraft).toEqual(inputParts("next"))
+      expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    } finally {
+      create.resolve({
+        session: sessionDetail,
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      })
       await sending
     }
+    expect(useAppStore.getState().promptDraft).toEqual(inputParts("next"))
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({ content: inputFixture(inputParts("first")) })
   })
 
   it("reveals a search result in its collapsed project without duplicating later pagination", async () => {
@@ -4446,7 +5214,6 @@ describe("new session drafts", () => {
       ...sessionDetail,
       id: "session_found",
       projectId: "project_a",
-      navigationId: "session_original",
     }
     fakeRef.current.respond = (method) =>
       method === "session/list" ? { sessions: [found] } : notFound()
@@ -4510,7 +5277,6 @@ it("reveals a grouped search result in its section without inserting it into the
     ...sessionDetail,
     id: "session_found",
     projectId: "project_a",
-    navigationId: "session_original",
     sectionId: "section_work",
   }
   fakeRef.current.respond = () => notFound()
@@ -4531,6 +5297,32 @@ it("reveals a grouped search result in its section without inserting it into the
       ),
   ).toEqual(["session_found"])
   expect(useAppStore.getState().currentProject).toBe("project_a")
+})
+
+it("keeps an explicit fork independent from its source when merging session pages", async () => {
+  const fork = {
+    ...sessionDetail,
+    id: "session_fork",
+    parentSessionId: sessionDetail.id,
+  }
+  fakeRef.current.respond = (method) =>
+    method === "session/list" ? { sessions: [fork] } : notFound()
+  useAppStore.setState({
+    sessionsByProject: { "": { sessions: [sessionDetail] } },
+  })
+  await useAppStore.getState().loadSessions(undefined, { append: true })
+  expect(
+    useAppStore
+      .getState()
+      .sessionsByProject[""]?.sessions.map((session) => session.id),
+  ).toEqual(["session_1", "session_fork"])
+  await useAppStore.getState().selectSession(sessionDetail.id)
+  useAppStore.getState().setPromptDraft(inputParts("source draft"))
+  await useAppStore.getState().selectSession(fork.id)
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(useAppStore.getState().threadId).toBe(fork.id)
+  await useAppStore.getState().selectSession(sessionDetail.id)
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("source draft"))
 })
 
 it("moves a session into pinned before persistence completes", async () => {
@@ -4784,7 +5576,6 @@ it("keeps a newly pinned session beyond an already loaded page cursor", async ()
   const existing = {
     ...sessionDetail,
     id: "session_2",
-    navigationId: "session_2",
     sectionId: "pinned",
     sectionPosition: 1_000_000,
   }
@@ -4841,7 +5632,6 @@ it("drops the page anchor after it moves beyond its old cursor", async () => {
   const preceding = {
     ...sessionDetail,
     id: "session_2",
-    navigationId: "session_2",
     sectionId: "pinned",
     sectionPosition: 500_000,
   }
@@ -5561,6 +6351,45 @@ describe("goal projections", () => {
   })
 
   it.each([
+    "read",
+    "set",
+    "clear",
+  ] as const)("ignores a goal %s response from before a history replacement", async (operation) => {
+    await boot()
+    const response = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === `goal/${operation}`) return response.promise
+      if (method === "session/revert")
+        return {
+          session: {
+            ...sessionDetail,
+            rolloutId: "rollout_reverted",
+            goal,
+          },
+          events: [],
+          historyEndSeqExclusive: 2,
+        }
+      return notFound()
+    }
+    let saving: Promise<unknown> | undefined
+    if (operation === "read") fakeRef.current.emitGoalChanged(undefined)
+    else if (operation === "set")
+      saving = useAppStore
+        .getState()
+        .setGoal({ sessionId: "session_1", status: "paused" })
+    else saving = useAppStore.getState().clearGoal("session_1")
+    await useAppStore.getState().revertSession("input_1", "undo")
+    response.resolve({ goal: null })
+    await saving
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(useAppStore.getState().selectedSession?.goal).toEqual(goal)
+    expect(
+      useAppStore.getState().sessionsByProject[""]?.sessions[0]?.goal,
+    ).toEqual(goal)
+  })
+
+  it.each([
     "complete",
     "clear",
   ])("keeps a newer %s notification when an older mutation response arrives", async (change) => {
@@ -5688,7 +6517,7 @@ describe("selected queue ownership", () => {
     "clear",
     "new",
     "create",
-    "fork",
+    "revert",
     "delete",
   ])("releases the old queue when %s changes the selection", async (action) => {
     const nextSession = {
@@ -5698,7 +6527,7 @@ describe("selected queue ownership", () => {
     }
     const nextItem = {
       id: "queued_next",
-      sessionId: "session_2",
+      sessionId: action === "revert" ? sessionDetail.id : "session_2",
       input: {
         submissionId: "request_next",
         content: inputFixture(inputParts("next")),
@@ -5715,8 +6544,8 @@ describe("selected queue ownership", () => {
             event: { type: "session.created", data: {} },
           }),
         }
-      if (method === "session/fork")
-        return { session: nextSession, events: [], historyEndSeqExclusive: 1 }
+      if (method === "session/revert")
+        return { session: sessionDetail, events: [], historyEndSeqExclusive: 2 }
       if (method === "session/queue/list") return { items: [nextItem] }
       if (method === "session/skills") return { skills: [] }
       if (method === "session/delete") return { sessionId: sessionDetail.id }
@@ -5733,26 +6562,31 @@ describe("selected queue ownership", () => {
     if (action === "clear") useAppStore.getState().clearSessionSelection()
     if (action === "new") useAppStore.getState().startNewSession()
     if (action === "create") await useAppStore.getState().createSession()
-    if (action === "fork")
+    if (action === "revert")
       await useAppStore
         .getState()
-        .forkSession("input_1", "edit", inputFixture(inputParts("replacement")))
+        .revertSession(
+          "input_1",
+          "edit",
+          inputFixture(inputParts("replacement")),
+        )
     if (action === "delete")
       await useAppStore.getState().deleteSession(sessionDetail.id)
-    if (action === "clear" || action === "delete") {
+    if (action === "clear" || action === "new" || action === "delete") {
       expect(useAppStore.getState().selection.sessionId).toBeUndefined()
       expect(useAppStore.getState().queuedItems).toEqual([])
     } else {
+      const selected = action === "revert" ? sessionDetail : nextSession
       await vi.waitFor(() =>
-        expect(useAppStore.getState().selection.sessionId).toBe(nextSession.id),
+        expect(useAppStore.getState().selection.sessionId).toBe(selected.id),
       )
       const stream = fakeRef.current.streams.at(-1)
-      emitSnapshot(stream, nextSession)
+      emitSnapshot(stream, selected)
       stream?.emitReplayComplete()
       await vi.waitFor(() =>
         expect(useAppStore.getState().queuedItems).toEqual([nextItem]),
       )
-      expect(useAppStore.getState().selection.sessionId).toBe(nextSession.id)
+      expect(useAppStore.getState().selection.sessionId).toBe(selected.id)
     }
   })
 })

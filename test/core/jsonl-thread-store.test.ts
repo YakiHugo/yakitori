@@ -945,11 +945,11 @@ describe("JsonlThreadStore", () => {
       archived: true,
       sectionId: "pinned",
     })
-    expect(await store.sessionPresentation(id)).toMatchObject({
-      navigationId: id,
+    expect(await store.sessionPresentation(id)).toEqual({
       title: "Renamed draft",
       archived: true,
       sectionId: "pinned",
+      sectionPosition: expect.any(Number),
     })
     expect((await store.readSessionSidebar()).entries[id]).toMatchObject({
       title: "Renamed draft",
@@ -976,11 +976,11 @@ describe("JsonlThreadStore", () => {
     await store.persistThread(id, "turn_start")
     await store.shutdownThread(id)
     const reopened = new JsonlThreadStore({ root })
-    expect(await reopened.sessionPresentation(id)).toMatchObject({
-      navigationId: id,
+    expect(await reopened.sessionPresentation(id)).toEqual({
       title: "Renamed draft",
       archived: true,
       sectionId: "pinned",
+      sectionPosition: expect.any(Number),
     })
     expect(
       (await reopened.listThreads({ view: "sessions", archived: true }))

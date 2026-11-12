@@ -2,14 +2,24 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { usePinnedScroll } from "../../src/gui/hooks/use-pinned-scroll.ts"
-import { clearThreadScopes } from "../../src/gui/store/thread-scope-store.ts"
+import {
+  clearThreadScopes,
+  readThreadScopeValue,
+  removeThreadScope,
+} from "../../src/gui/store/thread-scope-store.ts"
 
 let scroll: ReturnType<typeof usePinnedScroll>
 let resize: () => void
 let frames: Map<number, FrameRequestCallback>
 let nextFrame: number
-function Fixture({ sessionId = "one" }: { sessionId?: string }) {
-  scroll = usePinnedScroll(sessionId)
+function Fixture({
+  sessionId = "one",
+  historyRevision = 0,
+}: {
+  sessionId?: string
+  historyRevision?: number
+}) {
+  scroll = usePinnedScroll(sessionId, historyRevision)
   return (
     <div ref={scroll.viewportRef} onScroll={scroll.onScroll}>
       <div ref={scroll.contentRef} />
@@ -79,6 +89,47 @@ it("restores each thread's scroll position without animating and keeps layout gr
   expect(frames.size).toBe(0)
   rerender(<Fixture />)
   expect(viewport.scrollTop).toBe(300)
+})
+it("resets replaced history without letting the old cleanup restore its scroll cache", () => {
+  const { rerender } = render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  const target = document.createElement("div")
+  Object.defineProperty(target, "getBoundingClientRect", {
+    value: () => ({ top: 400 - viewport.scrollTop }),
+  })
+  act(() => scroll.jumpToElement(target))
+  frame(100)
+  expect(frames.size).toBe(1)
+  removeThreadScope("one")
+
+  rerender(<Fixture historyRevision={1} />)
+
+  expect(frames.size).toBe(0)
+  expect(viewport.scrollTop).toBe(800)
+  expect(scroll.atBottom).toBe(true)
+  expect(
+    readThreadScopeValue("one", "scroll.position", undefined),
+  ).toBeUndefined()
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(1000)
+
+  viewport.scrollTop = 300
+  fireEvent.wheel(viewport, { deltaY: -20 })
+  fireEvent.scroll(viewport)
+  rerender(<Fixture sessionId="two" />)
+  rerender(<Fixture historyRevision={1} />)
+  expect(viewport.scrollTop).toBe(300)
+})
+it("does not restore a cached position from an older history revision after navigation", () => {
+  const { rerender } = render(<Fixture />)
+  const viewport = geometry()
+  viewport.scrollTop = 300
+  fireEvent.wheel(viewport, { deltaY: -20 })
+  rerender(<Fixture sessionId="two" />)
+  rerender(<Fixture historyRevision={1} />)
+  expect(viewport.scrollTop).toBe(800)
 })
 it("scrolling up inside the bottom threshold stays detached", () => {
   render(<Fixture />)

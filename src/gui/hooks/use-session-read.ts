@@ -6,6 +6,11 @@ import { useSessionReadStore } from "../store/session-read-store.ts"
 export function useSessionRead(): void {
   const apiBase = useAppStore((state) => state.apiBase)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const rolloutId = useAppStore((state) =>
+    state.selectedSession?.id === state.selection.sessionId
+      ? state.selectedSession?.rolloutId
+      : undefined,
+  )
   const completionSeq = useAppStore((state) =>
     state.selectedSession?.id === state.selection.sessionId
       ? state.selectedSession?.latestCompletionSeq
@@ -31,11 +36,17 @@ export function useSessionRead(): void {
   }, [syncFromStorage])
 
   useEffect(() => {
-    if (!sessionId || completionSeq === undefined || !visible || externalEngine)
+    if (
+      !sessionId ||
+      !rolloutId ||
+      completionSeq === undefined ||
+      !visible ||
+      externalEngine
+    )
       return
     const read = () => {
       if (document.visibilityState === "visible" && document.hasFocus())
-        markRead(apiBase, sessionId, completionSeq)
+        markRead(apiBase, sessionId, rolloutId, completionSeq)
     }
     read()
     window.addEventListener("focus", read)
@@ -44,5 +55,13 @@ export function useSessionRead(): void {
       window.removeEventListener("focus", read)
       document.removeEventListener("visibilitychange", read)
     }
-  }, [apiBase, sessionId, completionSeq, visible, externalEngine, markRead])
+  }, [
+    apiBase,
+    sessionId,
+    rolloutId,
+    completionSeq,
+    visible,
+    externalEngine,
+    markRead,
+  ])
 }

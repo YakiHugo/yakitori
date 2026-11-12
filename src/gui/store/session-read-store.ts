@@ -2,8 +2,12 @@ import { create } from "zustand"
 
 const STORAGE_PREFIX = "yakitori.sessionReadSeq:"
 
-export function sessionReadKey(apiBase: string, sessionId: string): string {
-  return JSON.stringify([apiBase, sessionId])
+export function sessionReadKey(
+  apiBase: string,
+  sessionId: string,
+  rolloutId: string,
+): string {
+  return JSON.stringify([apiBase, sessionId, rolloutId])
 }
 
 function initialReadSeqs(): Record<string, number> {
@@ -21,19 +25,24 @@ function initialReadSeqs(): Record<string, number> {
 
 type SessionReadStore = {
   readSeqs: Record<string, number>
-  markRead(apiBase: string, sessionId: string, completionSeq: number): void
+  markRead(
+    apiBase: string,
+    sessionId: string,
+    rolloutId: string,
+    completionSeq: number,
+  ): void
   syncFromStorage(): void
 }
 
 export const useSessionReadStore = create<SessionReadStore>((set, get) => ({
   readSeqs: initialReadSeqs(),
-  markRead(apiBase, sessionId, completionSeq) {
-    const key = sessionReadKey(apiBase, sessionId)
+  markRead(apiBase, sessionId, rolloutId, completionSeq) {
+    const key = sessionReadKey(apiBase, sessionId, rolloutId)
     const stored = Number(localStorage.getItem(STORAGE_PREFIX + key))
     const persisted = Number.isSafeInteger(stored) && stored > 0 ? stored : 0
     const current = get().readSeqs[key] ?? 0
     const next = Math.max(current, persisted, completionSeq)
-    // Each session owns one key so another tab cannot replace unrelated reads.
+    // Reverting keeps the session ID but starts a new sequence space.
     if (next > persisted)
       localStorage.setItem(STORAGE_PREFIX + key, String(next))
     if (next > current) set({ readSeqs: { ...get().readSeqs, [key]: next } })

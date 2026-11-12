@@ -43,6 +43,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
 function session(id = "session-1", cwd = "/repo"): ApiSessionDetail {
   return {
     id,
+    rolloutId: `rollout_${id}`,
     conversationId: "conversation-1",
     workingDirectory: cwd,
     title: "Build the context panel",

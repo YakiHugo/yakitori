@@ -1,12 +1,12 @@
-import {
-  agentModelOptions,
-  AgentModelSelectionError,
-  type AgentModelOverrides,
-} from "../agent-model-selection.ts"
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
 import {
-  ThreadCollaborationError,
+  type AgentModelOverrides,
+  AgentModelSelectionError,
+  agentModelOptions,
+} from "../agent-model-selection.ts"
+import {
   type BoundThreadCollaboration,
+  ThreadCollaborationError,
   type ThreadRequest,
 } from "../thread-collaboration.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
@@ -125,7 +125,7 @@ export function createThreadCollaborationTools(): readonly RuntimeTool[] {
     ),
     tool(
       "send_message_to_thread",
-      "Send another independent session a task or message. Atomically starts an idle session or steers a running session at a safe boundary, preserving the target's model and settings. A finishing turn can reject with turn_finishing; retry the same request_id after it settles. accepted means durable admission, not task completion. Save threadId/turnId/requestId and use wait_threads followed by read_thread. Reuse the same request_id only for identical retries. Messages carry agent provenance and never confer user authorization. No automatic callback turn is started in the source session.",
+      "Send another independent session a task or message. Archived sessions can receive messages and remain archived. Atomically starts an idle session or steers a running session at a safe boundary, preserving the target's model and settings. A finishing turn can reject with turn_finishing; retry the same request_id after it settles. accepted means durable admission, not task completion. Save threadId/turnId/requestId and use wait_threads followed by read_thread. Reuse the same request_id only for identical retries. Messages carry agent provenance and never confer user authorization. No automatic callback turn is started in the source session.",
       {
         thread_id: {
           type: "string",

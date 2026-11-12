@@ -527,7 +527,7 @@ describe("composer", () => {
     ).toEqual(inputParts("", [draftImage("high")]).attachments)
   })
 
-  it("keeps session prewarming quiet while the first input remains available", async () => {
+  it("creates a local draft only when its first input is sent", async () => {
     const user = userEvent.setup()
     let rejectCreate!: (error: Error) => void
     fakeRef.current.respond = (method) => {
@@ -541,6 +541,7 @@ describe("composer", () => {
     useAppStore.getState().setPromptDraft(inputParts("hello"))
     render(<Composer />)
 
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     expect(screen.queryByRole("status")).toBeNull()
     expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
       "disabled",
@@ -554,6 +555,7 @@ describe("composer", () => {
       false,
     )
     await user.click(screen.getByRole("button", { name: "Send" }))
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     const sending = screen.getByRole("button", { name: "Sending" })
     expect(sending).toHaveProperty("disabled", true)
     expect(sending.getAttribute("aria-busy")).toBe("true")
@@ -1071,101 +1073,6 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("reuses a session that finishes creating while the picker is open", async () => {
-    const user = userEvent.setup()
-    const bridge = window.yakitoriDesktop
-    if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    let resolvePick!: (selection: { readonly selectionId: string }) => void
-    let resolveCreate!: (value: unknown) => void
-    fakeRef.current.respond = (method) => {
-      if (method === "session/create")
-        return new Promise((resolve) => {
-          resolveCreate = resolve
-        })
-      if (method === "session/skills") return { skills: [] }
-      throw new ApiRequestError("not found", "not_found")
-    }
-    vi.mocked(bridge.pickAttachments).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolvePick = resolve
-      }),
-    )
-    useAppStore.getState().startNewSession()
-    render(<Composer />)
-
-    await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
-    await act(async () => {
-      resolveCreate({
-        session: createdSession,
-        event: createEventEnvelope({
-          sessionId: createdSession.id,
-          seq: 1,
-          event: { type: EventType.SessionCreated, data: {} },
-        }),
-      })
-    })
-    resolvePick({ selectionId: "selection_during_create" })
-
-    await waitFor(() => {
-      expect(bridge.importPickedAttachments).toHaveBeenCalledWith({
-        sessionId: createdSession.id,
-        selectionId: "selection_during_create",
-      })
-    })
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
-  })
-
-  it("keeps an image imported before its draft activates after creation", async () => {
-    const user = userEvent.setup()
-    const bridge = window.yakitoriDesktop
-    if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    let resolveCreate!: (value: unknown) => void
-    let resolveImport!: (value: ReturnType<typeof draftImage>[]) => void
-    fakeRef.current.respond = (method) => {
-      if (method === "session/create")
-        return new Promise((resolve) => {
-          resolveCreate = resolve
-        })
-      if (method === "session/skills") return { skills: [] }
-      throw new ApiRequestError("not found", "not_found")
-    }
-    vi.mocked(bridge.importPickedAttachments).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveImport = resolve
-      }),
-    )
-    useAppStore.getState().startNewSession()
-    const intent = useAppStore.getState().sessionSelectionIntentRevision
-    render(<Composer />)
-    await user.click(screen.getByRole("button", { name: "Add context" }))
-    await user.click(screen.getByRole("option", { name: "Add images or PDFs" }))
-    await waitFor(() =>
-      expect(bridge.importPickedAttachments).toHaveBeenCalledOnce(),
-    )
-    await act(async () => {
-      resolveCreate({
-        session: createdSession,
-        event: createEventEnvelope({
-          sessionId: createdSession.id,
-          seq: 1,
-          event: { type: EventType.SessionCreated, data: {} },
-        }),
-      })
-    })
-    expect(useAppStore.getState().sessionSelectionIntentRevision).toBe(intent)
-    expect(useAppStore.getState().selection.sessionId).toBe(createdSession.id)
-    await act(async () => resolveImport([draftImage("high")]))
-    await waitFor(() =>
-      expect(
-        (useAppStore.getState().promptDraft?.attachments ?? []).filter(
-          (attachment) => attachment.mediaType !== "application/pdf",
-        ),
-      ).toEqual(inputParts("", [draftImage("high")]).attachments),
-    )
-    expect(bridge.discardDraftAttachments).not.toHaveBeenCalled()
-  })
-
   it("discards an image import when navigation supersedes the draft", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
@@ -1490,6 +1397,7 @@ function draftImage(detail: "high" | "original") {
 
 const createdSession: ApiSessionDetail = {
   id: "session_1",
+  rolloutId: "rollout_1",
   conversationId: "conversation_1",
   seq: 1,
   createdAt: "2026-09-18T00:00:00.000Z",

@@ -62,6 +62,7 @@ const docsServer = {
 function session(id: string): ApiSessionDetail {
   return {
     id,
+    rolloutId: `rollout_${id}`,
     conversationId: `conversation-${id}`,
     workingDirectory: "/repo",
     title: id,

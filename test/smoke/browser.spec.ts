@@ -2,7 +2,7 @@ import { once } from "node:events"
 import { readFile, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { join, resolve } from "node:path"
-import { expect, test, type WebSocketRoute } from "@playwright/test"
+import { expect, type Page, test, type WebSocketRoute } from "@playwright/test"
 import { parse, stringify } from "smol-toml"
 import {
   type ServerProcess,
@@ -603,6 +603,127 @@ test("new Kimi, OpenAI and xAI accounts default to Responses and persist Kimi K3
     await new Promise<void>((resolve, reject) =>
       endpoint.close((error) => (error ? reject(error) : resolve())),
     )
+    await environment.cleanup()
+  }
+})
+
+test("edit and undo replace history in one session across open windows", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  let observer: Page | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+    })
+    await page.goto(server.url)
+    await runFauxTurn(page)
+    client = createAppRpcClient({ apiBase: server.url })
+    const original = (await client.request("session/list", {})).sessions[0]
+    if (!original) throw new Error("Missing original session")
+    await client.request("sidebar/update", {
+      type: "session",
+      sessionId: original.id,
+      title: "Stable conversation",
+      sectionId: "pinned",
+    })
+    observer = await page.context().newPage()
+    await observer.goto(server.url)
+    await observer
+      .getByRole("button", { name: "Stable conversation", exact: true })
+      .click()
+    await expect(
+      observer.getByRole("main").getByText("Check the CI smoke flow.", {
+        exact: true,
+      }),
+    ).toBeVisible()
+    const composer = page.getByRole("textbox", { name: "Message the Mate" })
+    await composer.fill("Unsent follow-up")
+    await page
+      .getByRole("button", { name: "Show workspace", exact: true })
+      .click()
+    await page
+      .getByRole("button", { name: "Add workspace tab", exact: true })
+      .click()
+    await page.getByRole("menuitem", { name: /^Files/ }).click()
+    await page
+      .getByRole("main")
+      .getByRole("button", { name: "Edit & resubmit", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Edit message", exact: true })
+      .fill("Edited stable prompt")
+    await page
+      .locator(".conversation-inline-edit")
+      .getByRole("button", { name: "Send", exact: true })
+      .click()
+    for (const window of [page, observer]) {
+      const main = window.getByRole("main")
+      await expect(
+        main.getByText("Edited stable prompt", { exact: true }),
+      ).toBeVisible()
+      await expect(
+        main.getByText("Check the CI smoke flow.", { exact: true }),
+      ).toHaveCount(0)
+      await expect(
+        main.getByText("Hello from faux.", { exact: true }),
+      ).toBeVisible()
+      await expect(
+        window.getByRole("button", { name: "Interrupt", exact: true }),
+      ).toHaveCount(0)
+    }
+    await expect(composer).toHaveText("Unsent follow-up")
+    await expect(
+      page.getByRole("tab", { name: "Files", exact: true }),
+    ).toHaveAttribute("aria-selected", "true")
+    const edited = page
+      .getByRole("main")
+      .locator('[data-context-kind="message"]')
+      .filter({ hasText: "Edited stable prompt" })
+    const inputId = await edited.getAttribute("data-context-message-id")
+    if (!inputId) throw new Error("Missing edited input")
+    const undone = await client.request("session/revert", {
+      sessionId: original.id,
+      atInputId: inputId,
+      reason: "undo",
+    })
+    expect(undone.session.id).toBe(original.id)
+    for (const window of [page, observer]) {
+      await expect(
+        window.getByRole("main").getByText("Edited stable prompt", {
+          exact: true,
+        }),
+      ).toHaveCount(0)
+      await expect(
+        window.getByRole("main").getByText("Hello from faux.", { exact: true }),
+      ).toHaveCount(0)
+    }
+    await expect(composer).toHaveText("Unsent follow-up")
+    const listed = (await client.request("session/list", {})).sessions
+    expect(listed.map(({ id }) => id)).toEqual([original.id])
+    expect(listed[0]).toMatchObject({
+      title: "Stable conversation",
+      sectionId: "pinned",
+    })
+    await observer.reload()
+    await observer
+      .getByRole("button", { name: "Stable conversation", exact: true })
+      .click()
+    await expect(
+      observer.getByRole("main").getByRole("heading", {
+        name: "What would you like to build in workspace?",
+        exact: true,
+      }),
+    ).toBeVisible()
+  } finally {
+    client?.close()
+    await observer?.close()
+    await server?.stop()
     await environment.cleanup()
   }
 })
@@ -1530,7 +1651,18 @@ test("window history restores sessions and drafts without creating duplicate con
     await page.goto(server.url)
     const project = page.getByRole("combobox", { name: "New session project" })
     await expect(project).not.toHaveText("No project")
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(project).toBeEnabled()
+    const client = createAppRpcClient({ apiBase: server.url })
+    expect((await client.request("session/list", {})).sessions).toHaveLength(0)
+    expect(creations).toBe(0)
     await runFauxTurn(page)
+    expect((await client.request("session/list", {})).sessions).toHaveLength(1)
+    await expect(
+      page.locator(
+        '.sidebar-session [data-sidebar-drag="session"][aria-current="true"]',
+      ),
+    ).toBeVisible()
     const composer = page.getByRole("textbox", { name: "Message the Mate" })
     const reply = page.getByText("Hello from faux.", { exact: true })
     await composer.fill("Keep the first unfinished draft")
@@ -1550,8 +1682,8 @@ test("window history restores sessions and drafts without creating duplicate con
     })
     const files = page.getByRole("tab", { name: "Files", exact: true })
     await page.getByRole("button", { name: "New session", exact: true }).click()
-    await expect(project).toBeDisabled()
-    // Creation passes through the draft workspace, which has its own layout.
+    await expect(project).toBeEnabled()
+    // The local draft workspace has its own layout.
     await expect(workspace).toBeHidden()
     await page
       .getByRole("button", { name: "Show workspace", exact: true })
@@ -1590,7 +1722,8 @@ test("window history restores sessions and drafts without creating duplicate con
     await forward.click()
     await expect(workspace).toBeVisible()
     await expect(workspace.getByRole("tab")).toHaveCount(0)
-    expect(creations).toBe(2)
+    expect(creations).toBe(1)
+    expect((await client.request("session/list", {})).sessions).toHaveLength(1)
     await page.getByRole("button", { name: "Settings", exact: true }).click()
     await page
       .getByRole("button", { name: "Notifications", exact: true })
@@ -1617,7 +1750,7 @@ test("window history restores sessions and drafts without creating duplicate con
     ).toBeVisible()
     await page.keyboard.press("Alt+ArrowRight")
     await expect(composer).toHaveText("Keep the second unfinished draft")
-    expect(creations).toBe(2)
+    expect(creations).toBe(1)
   } finally {
     const timer = setTimeout(() => void server?.forceStop(), 5_000)
     try {

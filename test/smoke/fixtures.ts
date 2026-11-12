@@ -297,6 +297,9 @@ export async function runIndependentSessionFlow(
         .getByRole("main")
         .getByText("Independent worker result", { exact: true }),
     ).toBeVisible()
+    await expect(
+      page.getByRole("article", { name: "Agent message", exact: true }),
+    ).toContainText("Work in a fresh session")
     const selector = page.getByRole("button", {
       name: "Select model and effort",
     })
@@ -330,6 +333,9 @@ export async function runIndependentSessionFlow(
         .getByRole("main")
         .getByText("Independent worker result", { exact: true }),
     ).toBeVisible()
+    await expect(
+      page.getByRole("article", { name: "Agent message", exact: true }),
+    ).toContainText("Work in a fresh session")
     await page.screenshot({
       path: testInfo.outputPath("independent-session.png"),
     })
@@ -952,7 +958,7 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
       page.getByRole("combobox", { name: "New session project", exact: true }),
-    ).toBeDisabled()
+    ).toBeEnabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()
@@ -1150,7 +1156,7 @@ export async function runProviderFlow(
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
       page.getByRole("combobox", { name: "New session project", exact: true }),
-    ).toBeDisabled()
+    ).toBeEnabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()

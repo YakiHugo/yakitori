@@ -7,7 +7,15 @@ import {
   readJsonlTail,
   selectDisplayWindow,
 } from "../../src/core/display-window.ts"
-import type { StoredRolloutItem } from "../../src/core/rollout.ts"
+import type {
+  ResponseItemEnvelope,
+  StoredRolloutItem,
+} from "../../src/core/rollout.ts"
+import { turnInputSubmissionMetadata } from "../../src/core/turn-input-metadata.ts"
+import {
+  createUserInput,
+  inputContentToModelMessage,
+} from "../../src/core/user-input.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
 const roots: string[] = []
@@ -45,6 +53,29 @@ function userInput(seq: number, id: string, text: string): StoredRolloutItem {
 
 function turnStart(seq: number, turnId: string): StoredRolloutItem {
   return record(seq, { type: "turn_started", turnId })
+}
+
+function threadInput(seq: number, id: string, turnId = id): StoredRolloutItem {
+  const content = createUserInput("A task from another thread.")
+  const provenance = {
+    sourceThreadId: "thread_sender",
+    sourceRequestId: `request_${id}`,
+  }
+  return record(seq, {
+    type: "response_item",
+    item: {
+      id,
+      turnId,
+      createdAt: "2026-11-11T00:00:00.000Z",
+      item: inputContentToModelMessage(content, undefined, provenance),
+      ...turnInputSubmissionMetadata({
+        submissionId: `submission_${id}`,
+        source: "agent",
+        content,
+        provenance,
+      }),
+    },
+  })
 }
 
 function turnContext(seq: number, turnId: string): StoredRolloutItem {
@@ -147,6 +178,120 @@ describe("selectDisplayWindow", () => {
     expect([...earlier.records, ...latest.records]).toEqual(records)
   })
 
+  it("pages consecutive thread tasks from the latest owning Turn", () => {
+    const records = [
+      turnStart(1, "input_early"),
+      turnContext(2, "input_early"),
+      threadInput(3, "input_early"),
+      record(4, {
+        type: "token_count",
+        turnId: "input_early",
+        activeContextTokens: 12,
+      }),
+      record(5, {
+        type: "turn_completed",
+        turnId: "input_early",
+        outcome: "completed",
+      }),
+      turnStart(6, "input_latest"),
+      turnContext(7, "input_latest"),
+      threadInput(8, "input_latest"),
+      threadInput(9, "message_steered", "input_latest"),
+    ]
+
+    const latest = selectDisplayWindow(records)
+    expect(latest.records.map((entry) => entry.seq)).toEqual([6, 7, 8, 9])
+    expect(latest.lookbehind.map((entry) => entry.seq)).toEqual([2, 4, 5])
+    expect(latest.hasEarlier).toBe(true)
+    const earlier = selectDisplayWindow(records, 6)
+    expect(earlier.records.map((entry) => entry.seq)).toEqual([1, 2, 3, 4, 5])
+    expect(earlier.hasEarlier).toBe(false)
+    expect([...earlier.records, ...latest.records]).toEqual(records)
+  })
+
+  it("keeps steered thread messages with their initial task without Turn state", () => {
+    const records = [
+      threadInput(1, "input_initial"),
+      threadInput(2, "message_steered", "input_initial"),
+      threadInput(3, "message_followup", "input_initial"),
+    ]
+
+    const window = selectDisplayWindow(records)
+    expect(window.records).toEqual(records)
+    expect(window.hasEarlier).toBe(false)
+  })
+
+  const hostContent = createUserInput("Host authored input.")
+  const provenance = {
+    sourceThreadId: "thread_sender",
+    sourceRequestId: "request_sender",
+  }
+  const hostSubmission = {
+    source: "agent" as const,
+    content: hostContent,
+    provenance,
+  }
+  const hiddenInputs: ReadonlyArray<
+    Pick<ResponseItemEnvelope, "item" | "submissionMetadata">
+  > = [
+    {
+      item: {
+        role: "developer",
+        content: [{ type: "text", text: "Instructions" }],
+      },
+      submissionMetadata: hostSubmission,
+    },
+    {
+      item: {
+        role: "developer",
+        content: [{ type: "text", text: "Continue the goal." }],
+        context: { type: "goal", goalId: "goal_current" },
+      },
+      submissionMetadata: hostSubmission,
+    },
+    {
+      item: {
+        role: "developer",
+        content: [{ type: "text", text: "Runtime state." }],
+        context: { type: "world_state", sectionId: "runtime", revision: "1" },
+      },
+      submissionMetadata: hostSubmission,
+    },
+    {
+      item: inputContentToModelMessage(hostContent, undefined, provenance),
+      submissionMetadata: { source: "agent", provenance },
+    },
+    {
+      item: inputContentToModelMessage(hostContent, undefined, provenance),
+      submissionMetadata: { source: "agent", content: hostContent },
+    },
+  ]
+
+  it.each(
+    hiddenInputs,
+  )("keeps hidden or incomplete developer inputs from splitting a window: %j", ({
+    item,
+    submissionMetadata,
+  }) => {
+    const records = [
+      userInput(1, "input_owner", "Owner task."),
+      record(2, {
+        type: "response_item",
+        item: {
+          id: "input_hidden",
+          turnId: "turn_hidden",
+          createdAt: "2026-11-11T00:00:00.000Z",
+          item,
+            ...(submissionMetadata === undefined ? {} : { submissionMetadata }),
+        },
+      }),
+    ]
+
+    const window = selectDisplayWindow(records)
+    expect(window.records).toEqual(records)
+    expect(window.hasEarlier).toBe(false)
+  })
+
   it("keeps successful cache context across a later failed Turn", () => {
     const records = [
       turnContext(1, "input_cached"),
@@ -178,6 +323,30 @@ describe("selectDisplayWindow", () => {
 })
 
 describe("displayTailReady", () => {
+  it("stops scanning once a thread task and its owning Turn state are available", () => {
+    const records = [
+      turnContext(1, "input_cached"),
+      record(2, {
+        type: "turn_completed",
+        turnId: "input_cached",
+        outcome: "completed",
+      }),
+      turnStart(3, "input_latest"),
+      turnContext(4, "input_latest"),
+      threadInput(5, "input_latest"),
+      record(6, {
+        type: "token_count",
+        turnId: "input_latest",
+        activeContextTokens: 12,
+      }),
+    ]
+
+    expect(displayTailReady(records, false)).toBe(true)
+    expect(
+      selectDisplayWindow(records).records.map((entry) => entry.seq),
+    ).toEqual([3, 4, 5, 6])
+  })
+
   it("requires owning Turn state and matching cache context before stopping", () => {
     const prompt = userInput(8, "input_latest", "current")
     expect(
@@ -219,6 +388,43 @@ describe("displayTailReady", () => {
 })
 
 describe("readJsonlTail", () => {
+  it("stops at preceding model state while the latest prompt awaits resolution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-display-pending-"))
+    roots.push(root)
+    const path = join(root, "rollout.jsonl")
+    const records = [
+      turnContext(2_001, "input_previous"),
+      record(2_002, {
+        type: "token_count",
+        turnId: "input_previous",
+        activeContextTokens: 20,
+      }),
+      record(2_003, {
+        type: "turn_completed",
+        turnId: "input_previous",
+        outcome: "completed",
+      }),
+      turnStart(2_004, "input_latest"),
+      userInput(2_005, "input_latest", "pending"),
+    ]
+    const padding =
+      `${JSON.stringify(userInput(1, "input_old", "old"))}\n`.repeat(2_000)
+    await writeFile(
+      path,
+      `{not-json\n${padding}${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    )
+    const tail = await readJsonlTail(path, {
+      parse: (line) => JSON.parse(line) as StoredRolloutItem,
+      enough: displayTailReady,
+    })
+    expect(tail.reachedStart).toBe(false)
+    const window = selectDisplayWindow(tail.records)
+    expect(window.records.map((entry) => entry.seq)).toEqual([2_004, 2_005])
+    expect(window.lookbehind.map((entry) => entry.seq)).toEqual([
+      2_001, 2_002, 2_003,
+    ])
+  })
+
   it("stops before a corrupt prefix once the latest prompt is in hand", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-display-window-"))
     roots.push(root)

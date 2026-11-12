@@ -129,11 +129,10 @@ async function persistedHandlers(
 }
 
 describe("authoritative session sidebar status", () => {
-  it("marks newly created roots and independent forks eligible while excluding subagents and replaced edit heads", async () => {
+  it("lists independent forks separately and excludes subagents from root entries", async () => {
     const { handlers, store } = await persistedHandlers([])
     const independentId = "session_00000000-0000-4000-8000-000000000092"
     const subagentId = "session_00000000-0000-4000-8000-000000000093"
-    const editedId = "session_00000000-0000-4000-8000-000000000094"
     for (const id of [independentId, subagentId]) {
       await store.createThread({
         id,
@@ -148,7 +147,7 @@ describe("authoritative session sidebar status", () => {
       })
     }
     cleanups.push(async () => {
-      for (const id of [independentId, subagentId, editedId])
+      for (const id of [independentId, subagentId])
         await store.shutdownThread(id)
     })
     expect(
@@ -158,7 +157,6 @@ describe("authoritative session sidebar status", () => {
       value: {
         id: independentId,
         title: "Independent worker",
-        navigationId: independentId,
         parentSessionId: sessionId,
         status: "idle",
       },
@@ -166,31 +164,11 @@ describe("authoritative session sidebar status", () => {
     const child = await handlers.readSessionSummary({ sessionId: subagentId })
     if (!child.ok) throw new Error(child.error.message)
     expect(child.value.metadata).toEqual({ agent: { kind: "subagent" } })
-    expect(child.value).not.toHaveProperty("navigationId")
-    const prepared = await store.prepareFork({
-      sourceThreadId: sessionId,
-      boundary: { type: "latest" },
-    })
-    await store.createFork({
-      prepared,
-      target: {
-        id: editedId,
-        conversationId: sessionId,
-        createdAt,
-        updatedAt: createdAt,
-        parentThreadId: sessionId,
-        forkReason: "edit",
-      },
-    })
-    expect(
-      await handlers.readSessionSummary({ sessionId: editedId }),
-    ).toMatchObject({
-      ok: true,
-      value: { id: editedId, navigationId: sessionId, forkReason: "edit" },
-    })
-    const historical = await handlers.readSessionSummary({ sessionId })
-    if (!historical.ok) throw new Error(historical.error.message)
-    expect(historical.value).not.toHaveProperty("navigationId")
+    const listed = await handlers.listSessions()
+    if (!listed.ok) throw new Error(listed.error.message)
+    expect(listed.value.sessions.map(({ id }) => id).sort()).toEqual(
+      [sessionId, independentId].sort(),
+    )
   })
 
   it("returns current sidebar presentation and suppresses deleted project ownership", async () => {
@@ -214,7 +192,6 @@ describe("authoritative session sidebar status", () => {
     expect(await handlers.readSessionSummary({ sessionId })).toMatchObject({
       ok: true,
       value: {
-        navigationId: sessionId,
         title: "Renamed worker",
         archived: true,
         sectionId: "pinned",
@@ -255,7 +232,6 @@ describe("authoritative session sidebar status", () => {
       ).toMatchObject({
         result: {
           id: sessionId,
-          navigationId: sessionId,
           status: "failed",
           latestCompletionSeq: 3,
         },
@@ -265,7 +241,6 @@ describe("authoritative session sidebar status", () => {
         ok: true,
         value: {
           id: sessionId,
-          navigationId: sessionId,
           status: "failed",
           latestCompletionSeq: 3,
         },

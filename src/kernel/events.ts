@@ -25,7 +25,6 @@ import {
   type EventEnvelopeBase,
   EventType,
   type FileChange,
-  ForkReason,
   type ItemCompletedEvent,
   type ItemContent,
   ItemStatus,
@@ -55,7 +54,6 @@ export {
   type FileChangeDiff,
   type FileReadResult,
   type FileSearchResult,
-  ForkReason,
   type InputAdmittedEvent,
   InputRole,
   type ItemCompletedEvent,
@@ -70,6 +68,7 @@ export {
   type McpToolCallResult,
   type ModelSelection,
   type ReasoningExecutionItem,
+  RevertReason,
   type SessionCreatedEvent,
   type SessionHistoryPosition,
   type StartedExecutionItem,
@@ -311,12 +310,9 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             "mateRevisionId",
             "conversationId",
             "parentSessionId",
-            "forkedFromInputId",
-            "forkReason",
             "historyBase",
             "metadata",
           ]) &&
-          (data.forkReason === undefined || isForkReason(data.forkReason)) &&
           (data.historyBase === undefined ||
             isSessionHistoryPosition(data.historyBase))
         )
@@ -1236,7 +1232,6 @@ function optionalFieldsAreValid(data: Record<string, unknown>): boolean {
     "mateRevisionId",
     "conversationId",
     "parentSessionId",
-    "forkedFromInputId",
     "parentInputId",
     "parentTurnId",
   ] as const) {
@@ -1260,10 +1255,6 @@ function isSessionHistoryPosition(
     Number.isSafeInteger(value.endByteOffset) &&
     value.endByteOffset > 0
   )
-}
-
-function isForkReason(value: unknown): value is ForkReason {
-  return value === ForkReason.Undo || value === ForkReason.Edit
 }
 
 function onlyKeys(

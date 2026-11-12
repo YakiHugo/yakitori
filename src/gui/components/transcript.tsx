@@ -30,6 +30,7 @@ import {
 import { useThreadScopeState } from "../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { ActivityBatch } from "./activity-batch.tsx"
+import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -65,7 +66,7 @@ function containsMessageSource(
   messageId: string,
 ): boolean {
   return entries.some((entry) =>
-    entry.kind === "user_input"
+    entry.kind === "user_input" || entry.kind === "agent_input"
       ? entry.inputId === messageId
       : entry.kind === "assistant" && entry.itemId === messageId,
   )
@@ -111,6 +112,11 @@ export function Transcript({
 }>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const historyRevision = useAppStore((state) =>
+    sessionId === undefined
+      ? 0
+      : (state.sessionHistoryRevisions[sessionId] ?? 0),
+  )
   const historyBefore = useAppStore((state) => state.historyBefore)
   const loadEarlierHistory = useAppStore((state) => state.loadEarlierHistory)
   const loadHistoryThrough = useAppStore((state) => state.loadHistoryThrough)
@@ -121,7 +127,7 @@ export function Transcript({
     (state) => state.hydratingSessionId === state.selection.sessionId,
   )
   const threadId = useAppStore(selectCurrentThreadId)
-  const scroll = usePinnedScroll(threadId)
+  const scroll = usePinnedScroll(threadId, historyRevision)
   const surfaceRef = useRef<HTMLDivElement>(null)
   const dockRef = useRef<HTMLDivElement>(null)
   const anchors = useRef(new Map<string, HTMLDivElement>())
@@ -129,18 +135,25 @@ export function Transcript({
     new Set(),
   )
   const previousBlocks = useRef<readonly TranscriptBlock[]>([])
-  const previousSessionId = useRef(sessionId)
+  const previousScope = useRef({ sessionId, historyRevision })
+  const previousAnswers = useRef(new Map<string, FinalAnswer>())
   const selectionRevision = useAppStore(
     (state) => state.sessionSelectionIntentRevision,
   )
   const loadingEarlier = useRef<
-    Readonly<{ sessionId: string; selectionRevision: number }> | undefined
+    | Readonly<{
+        sessionId: string
+        selectionRevision: number
+        historyRevision: number
+      }>
+    | undefined
   >(undefined)
   const earlierAnchor = useRef<
     | Readonly<{
         request: object
         sessionId: string
         selectionRevision: number
+        historyRevision: number
         before: number
         node: Element
         top: number
@@ -153,18 +166,23 @@ export function Transcript({
     | Readonly<{
         navigation: ContextSourceNavigation
         selectionRevision: number
+        historyRevision: number
       }>
     | undefined
   >(undefined)
   const blocks = useMemo(() => {
-    if (previousSessionId.current !== sessionId) {
+    if (
+      previousScope.current.sessionId !== sessionId ||
+      previousScope.current.historyRevision !== historyRevision
+    ) {
       previousBlocks.current = []
-      previousSessionId.current = sessionId
+      previousAnswers.current.clear()
+      previousScope.current = { sessionId, historyRevision }
     }
     const next = groupEntries(view.entries, previousBlocks.current)
     previousBlocks.current = next
     return next
-  }, [sessionId, view.entries])
+  }, [sessionId, historyRevision, view.entries])
   // Steering inputs can split a turn into several blocks. Its current retry
   // belongs only to the latest block, even when earlier activity is expanded.
   const activeBlockIndex =
@@ -175,7 +193,6 @@ export function Transcript({
             block.turnId === view.activeTurnId ? index : last,
           -1,
         )
-  const previousAnswers = useRef(new Map<string, FinalAnswer>())
   const finalAnswers = useMemo(() => {
     const turns = new Map<
       string,
@@ -247,7 +264,9 @@ export function Transcript({
     return answers
   }, [view.entries, view.turnTimings, view.activeTurnId])
   const inputs = view.entries
-    .filter((entry) => entry.kind === "user_input")
+    .filter(
+      (entry) => entry.kind === "user_input" || entry.kind === "agent_input",
+    )
     .filter((entry) => !entry.steered)
   const inputIds = inputs.map((entry) => entry.inputId).join("\0")
   const queued = new Set(view.queuedInputIds)
@@ -265,6 +284,7 @@ export function Transcript({
       setPendingSource({
         navigation,
         selectionRevision: state.sessionSelectionIntentRevision,
+        historyRevision: state.sessionHistoryRevisions[source.sessionId] ?? 0,
       })
     }
     window.addEventListener(revealContextSourceEvent, revealSource)
@@ -278,7 +298,8 @@ export function Transcript({
     if (
       source.kind !== "message" ||
       source.sessionId !== sessionId ||
-      pendingSource.selectionRevision !== selectionRevision
+      pendingSource.selectionRevision !== selectionRevision ||
+      pendingSource.historyRevision !== historyRevision
     ) {
       setPendingSource(undefined)
       return
@@ -290,7 +311,9 @@ export function Transcript({
         if (
           state.selection.sessionId !== source.sessionId ||
           state.sessionSelectionIntentRevision !==
-            pendingSource.selectionRevision
+            pendingSource.selectionRevision ||
+          (state.sessionHistoryRevisions[source.sessionId] ?? 0) !==
+            pendingSource.historyRevision
         )
           return
         setPendingSource(undefined)
@@ -322,6 +345,7 @@ export function Transcript({
     pendingSource,
     sessionId,
     selectionRevision,
+    historyRevision,
     view.entries,
     historyLoading,
     historyBefore,
@@ -364,7 +388,7 @@ export function Transcript({
     ) {
       return
     }
-    const request = { sessionId, selectionRevision }
+    const request = { sessionId, selectionRevision, historyRevision }
     loadingEarlier.current = request
     void loadEarlierHistory({
       beforePrepend: () => {
@@ -372,7 +396,8 @@ export function Transcript({
         if (
           loadingEarlier.current !== request ||
           state.selection.sessionId !== sessionId ||
-          state.sessionSelectionIntentRevision !== selectionRevision
+          state.sessionSelectionIntentRevision !== selectionRevision ||
+          (state.sessionHistoryRevisions[sessionId] ?? 0) !== historyRevision
         )
           return
         const node = scroll.contentRef.current?.firstElementChild
@@ -384,6 +409,7 @@ export function Transcript({
           request,
           sessionId,
           selectionRevision,
+          historyRevision,
           before: historyBefore,
           node,
           top: node.getBoundingClientRect().top,
@@ -410,7 +436,8 @@ export function Transcript({
     if (!saved || !viewport) return
     if (
       saved.sessionId !== sessionId ||
-      saved.selectionRevision !== selectionRevision
+      saved.selectionRevision !== selectionRevision ||
+      saved.historyRevision !== historyRevision
     ) {
       earlierAnchor.current = undefined
       return
@@ -425,6 +452,7 @@ export function Transcript({
     historyBefore,
     sessionId,
     selectionRevision,
+    historyRevision,
     scroll.contentRef,
     scroll.viewportRef,
     scroll.onScroll,
@@ -432,13 +460,15 @@ export function Transcript({
   useLayoutEffect(() => {
     if (
       loadingEarlier.current?.sessionId !== sessionId ||
-      loadingEarlier.current?.selectionRevision !== selectionRevision
+      loadingEarlier.current?.selectionRevision !== selectionRevision ||
+      loadingEarlier.current?.historyRevision !== historyRevision
     ) {
       loadingEarlier.current = undefined
       earlierAnchor.current = undefined
       previousScrollTop.current = scroll.viewportRef.current?.scrollTop ?? 0
+      previousTouchY.current = undefined
     }
-  }, [sessionId, selectionRevision, scroll.viewportRef])
+  }, [sessionId, selectionRevision, historyRevision, scroll.viewportRef])
   // Streaming text changes entries but does not move input anchors. Measure
   // those only when the set of visible input anchors changes or on scroll.
   useLayoutEffect(updateVisibleInputs, [updateVisibleInputs])
@@ -538,7 +568,10 @@ export function Transcript({
             ) : (
               blocks.map((block, index) => {
                 const first = block.entries[0]
-                if (first?.kind === "user_input")
+                if (
+                  first?.kind === "user_input" ||
+                  first?.kind === "agent_input"
+                )
                   return (
                     <div
                       key={block.key}
@@ -547,15 +580,19 @@ export function Transcript({
                         else anchors.current.delete(first.inputId)
                       }}
                     >
-                      <UserMessageCell
-                        entry={first}
-                        queued={queued.has(first.inputId)}
-                      />
+                      {first.kind === "agent_input" ? (
+                        <AgentMessageCell entry={first} sessionId={sessionId} />
+                      ) : (
+                        <UserMessageCell
+                          entry={first}
+                          queued={queued.has(first.inputId)}
+                        />
+                      )}
                     </div>
                   )
                 return block.turnId ? (
                   <TurnBlock
-                    key={block.key}
+                    key={`${historyRevision}:${block.key}`}
                     entries={block.entries}
                     active={view.activeTurnId === block.turnId}
                     timing={view.turnTimings[block.turnId]}
@@ -575,7 +612,7 @@ export function Transcript({
             view.activeTurnId !== undefined &&
             activeBlockIndex === -1 ? (
               <TurnBlock
-                key={view.activeTurnId}
+                key={`${historyRevision}:${view.activeTurnId}`}
                 entries={[]}
                 active
                 timing={view.turnTimings[view.activeTurnId]}
@@ -875,6 +912,8 @@ const EntryCell = memo(function EntryCell({
     if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
   }
   switch (entry.kind) {
+    case "agent_input":
+      return <AgentMessageCell entry={entry} sessionId={sessionId} />
     case "assistant":
       return (
         <AssistantMessageCell

@@ -17,6 +17,7 @@ import { inputParts } from "../gui/input-fixtures.ts"
 
 const session: ApiSessionDetail = {
   id: "session_retry",
+  rolloutId: "rollout_retry",
   conversationId: "session_retry",
   seq: 1,
   createdAt: "2026-09-17T00:00:00.000Z",

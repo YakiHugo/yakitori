@@ -5,9 +5,7 @@ import {
   parseSidebarChange,
 } from "../../src/core/session-sidebar.ts"
 
-const sessions = [
-  { id: "session_a", navigationId: "session_root", updatedAt: "2026-09-01" },
-]
+const sessions = [{ id: "session_a", updatedAt: "2026-09-01" }]
 
 describe("session sidebar", () => {
   it("rejects changes with no presentation fields", () => {
@@ -16,7 +14,7 @@ describe("session sidebar", () => {
     ).toThrow("No session changes supplied.")
   })
 
-  it("updates presentation on the navigation root without changing section membership", () => {
+  it("updates presentation on the stable session identity without changing section membership", () => {
     const initial = changeSessionSidebar(
       emptySessionSidebar(),
       {
@@ -38,12 +36,12 @@ describe("session sidebar", () => {
       sessions,
     )
     expect(renamed.entries).toMatchObject({
-      session_root: {
+      session_a: {
         title: "Renamed",
         archived: true,
         sectionId: "pinned",
       },
     })
-    expect(initial.entries.session_root?.title).toBe("First")
+    expect(initial.entries.session_a?.title).toBe("First")
   })
 })

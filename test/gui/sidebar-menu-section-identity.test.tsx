@@ -34,6 +34,7 @@ beforeEach(() => {
         sessions: [
           {
             id: "session_1",
+            rolloutId: "rollout_1",
             conversationId: "session_1",
             seq: 1,
             title: "My conversation",

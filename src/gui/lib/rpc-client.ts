@@ -73,6 +73,7 @@ export type SessionStreamHandlers = {
   readonly onEvent: (event: AppSessionEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
   readonly onReplayComplete: () => void
+  readonly onHistoryReset?: () => void
   // The stream stays registered and will be re-subscribed after reconnect.
   readonly onDisconnected?: (error: unknown) => void
   // Terminal subscription failure (e.g. the Session is gone after a
@@ -133,6 +134,9 @@ export type AppRpcClient = {
     listener: (activeSessionIds: readonly string[] | undefined) => void,
   ): () => void
   subscribeToQueueChanges(listener: (sessionId: string) => void): () => void
+  subscribeToSessionHistoryChanges(
+    listener: (sessionId: string | undefined) => void,
+  ): () => void
   // Answers the pending session/permission/request for this permission;
   // throws when no answer channel is open (e.g. already answered, or the
   // request pruned while disconnected).
@@ -148,6 +152,8 @@ type StreamRecord = {
   readonly sessionId: string
   readonly recent: boolean
   lastSeq: number
+  subscribeRevision: number
+  snapshotRevision: number
   closed: boolean
 }
 
@@ -217,6 +223,9 @@ export function createAppRpcClient(options: {
     (activeSessionIds: readonly string[] | undefined) => void
   >()
   const queueChangeListeners = new Set<(sessionId: string) => void>()
+  const sessionHistoryListeners = new Set<
+    (sessionId: string | undefined) => void
+  >()
   const engineSessionListeners = new Set<
     (sessionId: string | undefined) => void
   >()
@@ -303,15 +312,20 @@ export function createAppRpcClient(options: {
         reconnectAttempt = 0
         connecting = undefined
         inflight.delete(id)
-        resubscribeAll()
         if (initializedOnce) {
+          const previousStreams = [...streams.values()]
+          // A replacement rollout can outgrow the old sequence while offline.
+          // Rebuild every cached history before resuming instead of guessing
+          // whether an unseen reset occurred from its sequence watermark.
+          for (const listener of sessionHistoryListeners) listener(undefined)
+          for (const record of previousStreams) resetStreamHistory(record)
           for (const listener of providerChangeListeners) listener()
           for (const listener of goalChangeListeners) listener(undefined)
           for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
           for (const listener of sideChatListeners) listener(undefined)
           for (const listener of engineSessionListeners) listener(undefined)
-        }
+        } else resubscribeAll()
         initializedOnce = true
         scheduleHeartbeat(ws)
         resolve()
@@ -445,6 +459,11 @@ export function createAppRpcClient(options: {
   }
 
   function onNotification(message: { method: string; params?: unknown }): void {
+    if (message.method === "session/historyReset") {
+      const { sessionId } = message.params as { sessionId: string }
+      resetSessionHistory(sessionId)
+      return
+    }
     if (message.method === goalChangedMethod) {
       const params = message.params as GoalChangedNotification
       for (const listener of goalChangeListeners) listener(params)
@@ -468,7 +487,12 @@ export function createAppRpcClient(options: {
     if (message.method === sessionEventMethod) {
       const params = message.params as SessionEventNotification
       const record = streams.get(params.sessionId)
-      if (record === undefined || record.closed) return
+      if (
+        record === undefined ||
+        record.closed ||
+        record.snapshotRevision !== record.subscribeRevision
+      )
+        return
       record.lastSeq = Math.max(record.lastSeq, params.seq)
       record.handlers.onEvent(params.event)
       return
@@ -487,14 +511,24 @@ export function createAppRpcClient(options: {
     if (message.method === sessionReplayCompleteMethod) {
       const params = message.params as SessionReplayCompleteNotification
       const record = streams.get(params.sessionId)
-      if (record === undefined || record.closed) return
+      if (
+        record === undefined ||
+        record.closed ||
+        record.snapshotRevision !== record.subscribeRevision
+      )
+        return
       record.handlers.onReplayComplete()
       return
     }
     if (message.method === sessionSubscriptionErrorMethod) {
       const params = message.params as SessionSubscriptionErrorNotification
       const record = streams.get(params.sessionId)
-      if (record === undefined || record.closed) return
+      if (
+        record === undefined ||
+        record.closed ||
+        record.snapshotRevision !== record.subscribeRevision
+      )
+        return
       streams.delete(params.sessionId)
       record.closed = true
       record.handlers.onError?.(new ApiRequestError(params.message))
@@ -541,8 +575,30 @@ export function createAppRpcClient(options: {
 
   function dispatchTransient(event: LiveSessionEvent): void {
     const record = streams.get(event.sessionId)
-    if (record === undefined || record.closed) return
+    if (
+      record === undefined ||
+      record.closed ||
+      record.snapshotRevision !== record.subscribeRevision
+    )
+      return
     record.handlers.onTransient(event)
+  }
+
+  function resetSessionHistory(sessionId: string): void {
+    const record = streams.get(sessionId)
+    for (const listener of sessionHistoryListeners) listener(sessionId)
+    if (record !== undefined) resetStreamHistory(record)
+  }
+
+  function resetStreamHistory(record: StreamRecord): void {
+    // A global listener may have replaced the stream with a new one. Only
+    // reset the surviving subscription; a replacement already starts at 0.
+    if (record.closed || streams.get(record.sessionId) !== record) return
+    record.lastSeq = 0
+    record.subscribeRevision += 1
+    record.handlers.onHistoryReset?.()
+    if (!record.closed && streams.get(record.sessionId) === record)
+      void subscribe(record)
   }
 
   function resubscribeAll(): void {
@@ -552,18 +608,37 @@ export function createAppRpcClient(options: {
   }
 
   async function subscribe(record: StreamRecord): Promise<void> {
+    const revision = ++record.subscribeRevision
+    const after = record.lastSeq
     try {
       // The server replays events after the cursor, so a reconnect only needs
       // the last durable seq this stream observed.
       const response = await request("session/subscribe", {
         sessionId: record.sessionId,
-        after: record.lastSeq,
-        ...(record.recent && record.lastSeq === 0 ? { recent: true } : {}),
+        after,
+        ...(record.recent ? { recent: true } : {}),
       })
-      if (record.closed || streams.get(record.sessionId) !== record) return
+      if (
+        record.closed ||
+        streams.get(record.sessionId) !== record ||
+        record.subscribeRevision !== revision
+      )
+        return
+      // A reset broadcast can be missed while disconnected. A cursor beyond
+      // the authoritative snapshot proves that this history was replaced.
+      if (response.session.seq < after) {
+        resetSessionHistory(record.sessionId)
+        return
+      }
+      record.snapshotRevision = revision
       record.handlers.onSnapshot(response)
     } catch (error) {
-      if (record.closed || streams.get(record.sessionId) !== record) return
+      if (
+        record.closed ||
+        streams.get(record.sessionId) !== record ||
+        record.subscribeRevision !== revision
+      )
+        return
       // A dropped connection is not terminal: the stream stays registered and
       // the next successful handshake re-subscribes it.
       if (!ready) return
@@ -668,6 +743,10 @@ export function createAppRpcClient(options: {
       queueChangeListeners.add(listener)
       return () => queueChangeListeners.delete(listener)
     },
+    subscribeToSessionHistoryChanges(listener) {
+      sessionHistoryListeners.add(listener)
+      return () => sessionHistoryListeners.delete(listener)
+    },
     subscribeToEngineSessionChanges(listener) {
       engineSessionListeners.add(listener)
       return () => {
@@ -686,6 +765,8 @@ export function createAppRpcClient(options: {
         handlers,
         recent: options?.recent === true,
         lastSeq: after,
+        subscribeRevision: 0,
+        snapshotRevision: -1,
         closed: false,
       }
       streams.set(sessionId, record)

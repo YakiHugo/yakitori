@@ -15,6 +15,7 @@ import { inputParts } from "./input-fixtures.ts"
 const at = "2026-09-20T00:00:00.000Z"
 const snapshot: ApiSessionDetail = {
   id: "child",
+  rolloutId: "rollout_child",
   conversationId: "child",
   title: "Review child",
   seq: 4,

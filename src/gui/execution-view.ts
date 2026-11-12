@@ -21,6 +21,15 @@ import { inputContentText } from "../protocol/user-input.ts"
 import { type CitationSource, citationSources } from "./citation-sources.ts"
 
 export type ExecutionEntry =
+  | Readonly<{
+      kind: "agent_input"
+      inputId: string
+      requestId: string
+      sourceSessionId?: string
+      steered?: boolean
+      text: string
+      at: string
+    }>
   | {
       readonly kind: "user_input"
       readonly contextAttachments?: readonly ContextExcerpt[]
@@ -223,6 +232,7 @@ const EMPTY_TELEMETRY: SessionTelemetry = {
 
 export function executionEntryKey(entry: ExecutionEntry): string {
   switch (entry.kind) {
+    case "agent_input":
     case "user_input":
       return entry.inputId
     case "assistant":
@@ -822,6 +832,37 @@ function applyDurable(
     case "session.created":
       return next
     case "input.admitted": {
+      if (
+        event.data.source === "agent" ||
+        event.data.provenance !== undefined
+      ) {
+        const input: ExecutionEntry = {
+          kind: "agent_input",
+          inputId: event.data.inputId,
+          requestId: event.data.requestId,
+          ...(event.data.provenance === undefined
+            ? {}
+            : { sourceSessionId: event.data.provenance.sourceThreadId }),
+          ...(event.data.steered === true ? { steered: true } : {}),
+          text: inputContentText(event.data.content),
+          at: event.createdAt,
+        }
+        const existing = next.entries.findIndex(
+          (entry) =>
+            entry.kind === "agent_input" && entry.inputId === input.inputId,
+        )
+        return {
+          ...next,
+          admittedRequestIds: {
+            ...next.admittedRequestIds,
+            [event.data.requestId]: true,
+          },
+          entries:
+            existing === -1
+              ? [...next.entries, input]
+              : replaceAt(next.entries, existing, input),
+        }
+      }
       const pendingIndex = next.entries.findIndex(
         (entry) =>
           entry.kind === "user_input" &&

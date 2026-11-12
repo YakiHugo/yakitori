@@ -415,16 +415,24 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it("reconnects with bounded backoff and re-subscribes with the last cursor", async () => {
+  it.each([
+    false,
+    true,
+  ])("reconnects with bounded backoff and rebuilds history from zero (recent: %s)", async (recent) => {
     vi.useFakeTimers()
     const snapshots: number[] = []
     const client = createAppRpcClient({ apiBase: "http://api.test" })
-    client.openSessionStream("session_1", 0, {
-      onSnapshot: () => snapshots.push(1),
-      onEvent: () => {},
-      onTransient: () => {},
-      onReplayComplete: () => {},
-    })
+    client.openSessionStream(
+      "session_1",
+      0,
+      {
+        onSnapshot: () => snapshots.push(1),
+        onEvent: () => {},
+        onTransient: () => {},
+        onReplayComplete: () => {},
+      },
+      { recent },
+    )
     const first = FakeWebSocket.instances[0]
     completeHandshake(first)
     await flushMicrotasks()
@@ -448,13 +456,17 @@ describe("app RPC client", () => {
     completeHandshake(second)
     await flushMicrotasks()
 
-    // Re-subscribe resumes from the last received durable seq, not from 0.
+    // A reset could have happened while offline, even beyond the old cursor.
     const resubscribe = second
       ?.sentFrames()
       .find((frame) => frame.method === "session/subscribe")
     expect(resubscribe).toMatchObject({
       method: "session/subscribe",
-      params: { sessionId: "session_1", after: 5 },
+      params: {
+        sessionId: "session_1",
+        after: 0,
+        ...(recent ? { recent: true } : {}),
+      },
     })
     second?.emitMessage({
       id: resubscribe?.id,
@@ -475,6 +487,155 @@ describe("app RPC client", () => {
     expect(FakeWebSocket.instances).toHaveLength(3)
     await vi.advanceTimersByTimeAsync(1)
     expect(FakeWebSocket.instances).toHaveLength(4)
+    client.close()
+  })
+
+  it("resets a private stream and subscribes from zero on historyReset", async () => {
+    const received: string[] = []
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 5, {
+      onSnapshot: () => received.push("snapshot"),
+      onEvent: () => received.push("event"),
+      onTransient: () => received.push("transient"),
+      onReplayComplete: () => received.push("replayComplete"),
+      onHistoryReset: () => received.push("reset"),
+    })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({
+      id: 1,
+      result: { session: { id: "session_1", seq: 5 } },
+    })
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/historyReset",
+      params: { sessionId: "session_1" },
+    })
+    expect(received).toEqual(["snapshot", "reset"])
+    await flushMicrotasks()
+    const subscriptions = socket
+      .sentFrames()
+      .filter((frame) => frame.method === "session/subscribe")
+    expect(subscriptions).toHaveLength(2)
+    expect(subscriptions[1]).toMatchObject({
+      params: { sessionId: "session_1", after: 0 },
+    })
+    socket.emitMessage({
+      id: subscriptions[1]?.id,
+      result: { session: { id: "session_1", seq: 2 } },
+    })
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 2 },
+    })
+    expect(received).toEqual([
+      "snapshot",
+      "reset",
+      "snapshot",
+      "replayComplete",
+    ])
+    client.close()
+  })
+
+  it("does not subscribe twice when a global history listener replaces the stream", async () => {
+    const oldReset = vi.fn()
+    const newSnapshot = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const handlers: SessionStreamHandlers = {
+      onSnapshot: newSnapshot,
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete: () => {},
+    }
+    client.openSessionStream("session_1", 5, {
+      ...handlers,
+      onHistoryReset: oldReset,
+    })
+    client.subscribeToSessionHistoryChanges((sessionId) => {
+      if (sessionId) client.openSessionStream(sessionId, 0, handlers)
+    })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/historyReset",
+      params: { sessionId: "session_1" },
+    })
+    await flushMicrotasks()
+    const subscriptions = socket
+      .sentFrames()
+      .filter((frame) => frame.method === "session/subscribe")
+    expect(subscriptions).toHaveLength(2)
+    expect(subscriptions[1]).toMatchObject({
+      params: { sessionId: "session_1", after: 0 },
+    })
+    expect(oldReset).not.toHaveBeenCalled()
+    socket.emitMessage({
+      id: subscriptions[1]?.id,
+      result: { session: { id: "session_1", seq: 2 } },
+    })
+    await flushMicrotasks()
+    expect(newSnapshot).toHaveBeenCalledOnce()
+    client.close()
+  })
+
+  it.each([
+    "snapshot",
+    "error",
+  ] as const)("ignores an old subscribe %s and replay notifications while replacement history is pending", async (oldResponse) => {
+    const onSnapshot = vi.fn()
+    const onReplayComplete = vi.fn()
+    const onError = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 5, {
+      onSnapshot,
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete,
+      onError,
+    })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/historyReset",
+      params: { sessionId: "session_1" },
+    })
+    await flushMicrotasks()
+    socket.emitMessage(
+      oldResponse === "snapshot"
+        ? { id: 1, result: { session: { id: "session_1", seq: 5 } } }
+        : { id: 1, error: { code: -32603, message: "Old replay failed" } },
+    )
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 5 },
+    })
+    socket.emitMessage({
+      method: "session/subscriptionError",
+      params: { sessionId: "session_1", message: "Old replay failed" },
+    })
+    expect(onSnapshot).not.toHaveBeenCalled()
+    expect(onReplayComplete).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+    const subscription = socket
+      .sentFrames()
+      .filter((frame) => frame.method === "session/subscribe")
+      .at(-1)
+    socket.emitMessage({
+      id: subscription?.id,
+      result: { session: { id: "session_1", seq: 2 } },
+    })
+    await flushMicrotasks()
+    socket.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 2 },
+    })
+    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith({
+      session: { id: "session_1", seq: 2 },
+    })
+    expect(onReplayComplete).toHaveBeenCalledOnce()
+    expect(onError).not.toHaveBeenCalled()
     client.close()
   })
 

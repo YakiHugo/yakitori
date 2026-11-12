@@ -12,6 +12,7 @@ export type SessionDelivery =
       readonly events: readonly StoredEventEnvelope[]
     }
   | { readonly kind: "transient"; readonly event: LiveSessionEvent }
+  | { readonly kind: "reset"; readonly sessionId: string }
 
 export type SessionDeliveryListener = (
   delivery: SessionDelivery,
@@ -24,6 +25,7 @@ export type SessionEventSubscription = {
 export type SessionEventHub = {
   publishDurable(events: readonly StoredEventEnvelope[]): void
   publishTransient(event: LiveSessionEvent): void
+  resetSession(sessionId: string): void
   subscribe(
     sessionId: string,
     listener: SessionDeliveryListener,
@@ -134,7 +136,9 @@ export function createSessionEventHub(
     const sessionId =
       delivery.kind === "durable"
         ? firstEvent?.sessionId
-        : delivery.event.sessionId
+        : delivery.kind === "transient"
+          ? delivery.event.sessionId
+          : delivery.sessionId
     reportOperationalFailure(reporter, {
       component: "session-event-hub",
       operation: "deliver",
@@ -205,6 +209,17 @@ export function createSessionEventHub(
       if (event.type === "turn.finished")
         clearTurn(event.sessionId, event.turnId)
       publish(event.sessionId, { kind: "transient", event })
+    },
+    resetSession(sessionId) {
+      clearTurn(sessionId)
+      // Discard every queued delivery before notifying any listener: a reset
+      // listener may synchronously close or replace other subscriptions.
+      const current = Array.from(subscribers.get(sessionId) ?? [])
+      for (const subscriber of current) {
+        subscriber.pending.length = 0
+        subscriber.pending.push({ kind: "reset", sessionId })
+      }
+      for (const subscriber of current) drain(subscriber)
     },
     subscribe(sessionId, listener) {
       const sessionSubscribers = subscribers.get(sessionId) ?? new Set()

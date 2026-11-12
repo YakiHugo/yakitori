@@ -34,6 +34,7 @@ function project(
 function session(id: string, title: string): ApiSessionSummary {
   return {
     id,
+    rolloutId: `rollout_${id}`,
     conversationId: id,
     seq: 1,
     createdAt: "2026-09-12T00:00:00Z",
@@ -102,19 +103,29 @@ describe("sidebar", () => {
     expect(toggleProject).toHaveBeenCalledWith("project_2")
   })
 
-  it("opens a local draft and starts session creation immediately", async () => {
+  it("opens a local draft without creating a server session", async () => {
     const createSession = vi.fn(async () => undefined)
-    useAppStore.setState({ createSession })
+    useAppStore.setState({
+      selection: { sessionId: "session_previous" },
+      promptDraft: inputParts("Keep the previous conversation draft"),
+      createSession,
+    })
     const user = userEvent.setup()
     render(<App />)
 
     await user.click(screen.getByLabelText("New session"))
 
-    expect(createSession).toHaveBeenCalledOnce()
+    expect(createSession).not.toHaveBeenCalled()
     expect(
       screen.getByRole("combobox", { name: "New session project" }),
-    ).toBeDefined()
+    ).toHaveProperty("disabled", false)
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(
+      screen.getByRole("textbox", { name: "Message the Mate" }).textContent,
+    ).toBe("")
+    expect(
+      useAppStore.getState().sessionDrafts.session_previous?.content?.text,
+    ).toBe("Keep the previous conversation draft")
   })
 
   it("shows current subscription states without restarting an in-flight refresh", async () => {

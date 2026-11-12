@@ -25,7 +25,7 @@ export class FakeSessionStream implements SessionStream {
 
   constructor(
     readonly sessionId: string,
-    readonly after: number,
+    public after: number,
     private readonly handlers: SessionStreamHandlers,
     readonly options?: Readonly<{ recent?: boolean }>,
   ) {}
@@ -48,6 +48,11 @@ export class FakeSessionStream implements SessionStream {
 
   emitReplayComplete(): void {
     this.handlers.onReplayComplete()
+  }
+
+  emitHistoryReset(): void {
+    this.after = 0
+    this.handlers.onHistoryReset?.()
   }
 
   disconnect(error: unknown): void {
@@ -227,6 +232,25 @@ export class FakeRpcClient {
   }
   emitQueueChanged(sessionId: string): void {
     for (const listener of this.queueChangeListeners) listener(sessionId)
+  }
+
+  readonly sessionHistoryListeners = new Set<
+    (sessionId: string | undefined) => void
+  >()
+  subscribeToSessionHistoryChanges(
+    listener: (sessionId: string | undefined) => void,
+  ): () => void {
+    this.sessionHistoryListeners.add(listener)
+    return () => this.sessionHistoryListeners.delete(listener)
+  }
+  emitHistoryReset(sessionId?: string): void {
+    const streams = this.streams.filter(
+      (stream) =>
+        (sessionId === undefined || stream.sessionId === sessionId) &&
+        !stream.closed,
+    )
+    for (const listener of this.sessionHistoryListeners) listener(sessionId)
+    for (const stream of streams) if (!stream.closed) stream.emitHistoryReset()
   }
 
   close(): void {}

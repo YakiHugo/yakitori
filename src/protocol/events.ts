@@ -4,6 +4,7 @@ import type {
   ModelToolContentBlock,
 } from "./conversation.ts"
 import type { ContextExcerpt } from "./input-context.ts"
+import type { InputSource, ThreadMessageProvenance } from "./input-queue.ts"
 import type { ModelOutputSource } from "./model-output.ts"
 import type { InputContent } from "./user-input.ts"
 export const EventType = {
@@ -16,12 +17,12 @@ export const EventType = {
   ContextTokens: "context.tokens",
 } as const
 
-export const ForkReason = {
+export const RevertReason = {
   Undo: "undo",
   Edit: "edit",
 } as const
 
-export type ForkReason = (typeof ForkReason)[keyof typeof ForkReason]
+export type RevertReason = (typeof RevertReason)[keyof typeof RevertReason]
 export const InputRole = {
   Runtime: "runtime",
   System: "system",
@@ -125,8 +126,6 @@ export type SessionCreatedEvent = {
     readonly mateRevisionId?: string
     readonly conversationId?: string
     readonly parentSessionId?: string
-    readonly forkedFromInputId?: string
-    readonly forkReason?: ForkReason
     readonly historyBase?: SessionHistoryPosition
     readonly metadata?: EventMetadata
   }
@@ -138,21 +137,23 @@ export type SessionHistoryPosition = {
   readonly endByteOffset: number
 }
 
-export type InputAdmittedEvent = {
-  readonly type: typeof EventType.InputAdmitted
-  readonly data: {
-    readonly requestId: string
-    readonly inputId: string
-    readonly role: InputRole
-    readonly content: InputContent
-    readonly modelSelection?: ModelSelection
-    readonly parentInputId?: string
-    readonly metadata?: EventMetadata
+export type InputAdmittedEvent = Readonly<{
+  type: typeof EventType.InputAdmitted
+  data: Readonly<{
+    requestId: string
+    inputId: string
+    role: InputRole
+    content: InputContent
+    source?: InputSource
+    provenance?: ThreadMessageProvenance
+    modelSelection?: ModelSelection
+    parentInputId?: string
+    metadata?: EventMetadata
     // Steered inputs join an active Turn instead of starting one: they are
     // recorded when the Turn next samples and never occupy the input queue.
-    readonly steered?: boolean
-  }
-}
+    steered?: boolean
+  }>
+}>
 
 export type TurnStartedEvent = Readonly<{
   type: typeof EventType.TurnStarted

@@ -143,7 +143,7 @@ function activityEntries(): ExecutionEntry[] {
         ? [{ ...entry, text, content: textInputDraft(text) }]
         : []
     }
-    if (entry.turnId !== "turn_1") return []
+    if (!("turnId" in entry) || entry.turnId !== "turn_1") return []
     if (entry.kind === "reasoning" && entry.itemId === "item_reason_1")
       return [
         {
@@ -601,6 +601,7 @@ export function seedMockTranscript(): void {
       : buildExecution(entries())
   const session: ApiSessionDetail = {
     id: SESSION_ID,
+    rolloutId: `rollout_${SESSION_ID}`,
     conversationId: SESSION_ID,
     seq: 42,
     createdAt: at("11:00:00"),

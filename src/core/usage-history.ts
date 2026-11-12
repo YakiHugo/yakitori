@@ -29,6 +29,11 @@ export type UsageHistory = Readonly<{
   rollout: readonly UsageHistoryRecord[]
 }>
 
+type UsageVersion = Readonly<{
+  rollout: readonly UsageHistoryRecord[]
+  previousRolloutId?: string
+}>
+
 const nonAccountingRecords: Record<
   Exclude<
     RolloutItem["type"],
@@ -68,7 +73,7 @@ export async function readUsageHistory(
     rolloutId: string,
     position?: HistoryPosition,
     expectedThreadId?: string,
-  ): Promise<UsageHistoryRecord[]> => {
+  ): Promise<UsageVersion> => {
     if (!isStorageKey(rolloutId) || seen.has(rolloutId))
       throw new Error("Invalid usage history identity or cycle.")
     seen.add(rolloutId)
@@ -81,6 +86,7 @@ export async function readUsageHistory(
         throw new Error("Invalid usage history boundary.")
       let owner: string | undefined
       let base: HistoryPosition | undefined
+      let previousRolloutId: string | undefined
       let expectedSeq = 0
       const records: UsageHistoryRecord[] = []
       let start = 0
@@ -122,6 +128,11 @@ export async function readUsageHistory(
             if (!isPosition(item.metadata.historyBase))
               throw new Error("Invalid usage history reference.")
             base = item.metadata.historyBase
+          }
+          if (item.metadata.previousRolloutId !== undefined) {
+            if (!isStorageKey(item.metadata.previousRolloutId))
+              throw new Error("Invalid previous usage history identity.")
+            previousRolloutId = item.metadata.previousRolloutId
           }
           expectedSeq = base?.endSeqExclusive ?? 1
           continue
@@ -217,18 +228,43 @@ export async function readUsageHistory(
         (position !== undefined && expectedSeq !== position.endSeqExclusive)
       )
         throw new Error("Incomplete usage history boundary.")
-      return [
-        ...(base === undefined ? [] : await materialize(base.rolloutId, base)),
-        ...records,
-      ]
+      return {
+        rollout: [
+          ...(base === undefined
+            ? []
+            : (await materialize(base.rolloutId, base)).rollout),
+          ...records,
+        ],
+        ...(previousRolloutId === undefined ? {} : { previousRolloutId }),
+      }
     } finally {
       seen.delete(rolloutId)
     }
   }
-  return {
-    metadata,
-    rollout: await materialize(metadata.rolloutId, undefined, metadata.id),
+  const versions: UsageVersion[] = []
+  const versionIds = new Set<string>()
+  let rolloutId: string | undefined = metadata.rolloutId
+  while (rolloutId !== undefined) {
+    if (versionIds.has(rolloutId))
+      throw new Error("Usage versions contain a cycle.")
+    versionIds.add(rolloutId)
+    const version = await materialize(rolloutId, undefined, metadata.id)
+    versions.unshift(version)
+    rolloutId =
+      rolloutId === metadata.rolloutId
+        ? metadata.previousRolloutId
+        : version.previousRolloutId
   }
+  // Spent belongs to every same-Session version. An explicit fork inherits
+  // only its visible prefix; it does not inherit its ancestor's old versions.
+  // Versions share immutable prefixes, so count each physical record once.
+  const records = new Map<string, UsageHistoryRecord>()
+  for (const version of versions) {
+    for (const record of version.rollout) {
+      records.set(`${record.rolloutId}:${record.seq}`, record)
+    }
+  }
+  return { metadata, rollout: [...records.values()] }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

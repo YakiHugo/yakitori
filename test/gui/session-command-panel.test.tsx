@@ -85,6 +85,7 @@ it("uses the last model context and the provider's reported quota window", async
     selection: { sessionId: "session_a" },
     selectedSession: {
       id: "session_a",
+      rolloutId: "rollout_a",
       conversationId: "conversation_a",
       seq: 0,
       createdAt: "2026-09-28T00:00:00Z",

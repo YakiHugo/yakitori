@@ -25,6 +25,7 @@ vi.mock("../../src/gui/lib/open-resource.ts", () => ({ openUrlTarget }))
 function session(id: string): ApiSessionDetail {
   return {
     id,
+    rolloutId: `rollout_${id}`,
     conversationId: `conversation-${id}`,
     workingDirectory: "/repo",
     title: id,
