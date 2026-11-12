@@ -195,6 +195,66 @@ test("conversation history opens at the latest prompt and loads older search tar
   expect(desktop.rendererErrors).toEqual([])
 })
 
+test("desktop edit and undo replace history in the same session", async ({
+  desktop,
+}) => {
+  const { page, sidecarUrl } = desktop
+  await runFauxTurn(page)
+  const client = createAppRpcClient({ apiBase: sidecarUrl.href })
+  try {
+    const original = (await client.request("session/list", {})).sessions[0]
+    if (!original) throw new Error("Missing original session")
+    await page
+      .getByRole("main")
+      .getByRole("button", { name: "Edit & resubmit", exact: true })
+      .click()
+    await page
+      .getByRole("textbox", { name: "Edit message", exact: true })
+      .fill("Edited desktop prompt")
+    await page
+      .locator(".conversation-inline-edit")
+      .getByRole("button", { name: "Send", exact: true })
+      .click()
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Edited desktop prompt", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole("button", { name: "Interrupt", exact: true }),
+    ).toHaveCount(0)
+    const edited = page
+      .getByRole("main")
+      .locator('[data-context-kind="message"]')
+      .filter({ hasText: "Edited desktop prompt" })
+    const inputId = await edited.getAttribute("data-context-message-id")
+    if (!inputId) throw new Error("Missing edited input")
+    const replacement = (await client.request("session/list", {})).sessions
+    expect(replacement).toHaveLength(1)
+    expect(replacement[0]?.id).toBe(original.id)
+    expect(replacement[0]?.rolloutId).not.toBe(original.rolloutId)
+    await client.request("session/revert", {
+      sessionId: original.id,
+      atInputId: inputId,
+      reason: "undo",
+    })
+    await expect(
+      page
+        .getByRole("main")
+        .getByText("Edited desktop prompt", { exact: true }),
+    ).toHaveCount(0)
+    await expect(
+      page.getByRole("main").getByText("Hello from faux.", { exact: true }),
+    ).toHaveCount(0)
+    expect(
+      (await client.request("session/list", {})).sessions.map(({ id }) => id),
+    ).toEqual([original.id])
+    expect(desktop.rendererErrors).toEqual([])
+  } finally {
+    client.close()
+  }
+})
+
 test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit", async ({
   desktop,
 }) => {
@@ -1872,7 +1932,7 @@ test("agent browser observations and actions use the exact owned tab through rea
     await page.getByRole("button", { name: "New session", exact: true }).click()
     await expect(
       page.getByRole("combobox", { name: "New session project", exact: true }),
-    ).toBeDisabled()
+    ).toBeEnabled()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()

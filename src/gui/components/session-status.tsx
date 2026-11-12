@@ -12,7 +12,9 @@ export function SessionStatus({
 }: Readonly<{ session: ApiSessionSummary }>) {
   const apiBase = useAppStore((state) => state.apiBase)
   const readSeq = useSessionReadStore(
-    (state) => state.readSeqs[sessionReadKey(apiBase, session.id)] ?? 0,
+    (state) =>
+      state.readSeqs[sessionReadKey(apiBase, session.id, session.rolloutId)] ??
+      0,
   )
   const status =
     session.status === "waiting"

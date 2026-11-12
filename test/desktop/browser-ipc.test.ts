@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { expect, it } from "vitest"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
+import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import {
   BrowserControlError,
   type DesktopBrowser,
@@ -76,7 +77,7 @@ it("does not retain browser IPC when application startup fails", async () => {
     script,
     `
 import {runYakitoriServerProcess} from ${JSON.stringify(pathToFileURL(resolve("src/server/server-process.ts")).href)};
-try {await runYakitoriServerProcess({host:'127.0.0.1',port:0,application:{rootDir:${JSON.stringify(join(root, "store"))},workspace:${JSON.stringify(workspace)},provider:'faux'},onListening(){throw new Error('Unexpected listening server')}})}
+try {await runYakitoriServerProcess({host:'127.0.0.1',port:0,desktopBrowserIpc:true,application:{rootDir:${JSON.stringify(join(root, "store"))},workspace:${JSON.stringify(workspace)},provider:'faux'},onListening(){throw new Error('Unexpected listening server')}})}
 catch(error){process.send({error:error.message})}
 `,
   )
@@ -107,9 +108,56 @@ catch(error){process.send({error:error.message})}
   }
 }, 15_000)
 
+it.each([
+  "src/server/start.ts",
+  "src/server/desktop-entry.ts",
+])("enables the supplied browser bridge through the real %s entry", async (entry) => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-browser-entry-"))
+  const closed: string[] = []
+  let server: Awaited<ReturnType<typeof spawnServerProcess>> | undefined
+  let client: ReturnType<typeof createAppRpcClient> | undefined
+  try {
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve(entry)],
+      cwd: root,
+      env: {
+        ...process.env,
+        YAKITORI_STORE_DIR: join(root, "store"),
+        YAKITORI_WORKSPACE: root,
+        YAKITORI_PROVIDER: "faux",
+        HOST: "127.0.0.1",
+        PORT: "0",
+      },
+      desktopBrowser: {
+        async request() {
+          return {}
+        },
+        async finishTurn() {},
+        async closeSession(sessionId) {
+          closed.push(sessionId)
+        },
+      },
+    })
+    client = createAppRpcClient({ apiBase: server.url })
+    const { session } = await client.request("session/create", {})
+    await client.request("session/close", { sessionId: session.id })
+    expect(closed).toEqual([session.id])
+    client.close()
+    await server.stop()
+    expect(server.child.exitCode).toBe(0)
+  } finally {
+    client?.close()
+    await server?.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 async function fixture(
-  browser: Pick<DesktopBrowser, "request"> &
-    Partial<Pick<DesktopBrowser, "finishTurn" | "closeSession">>,
+  browser:
+    | (Pick<DesktopBrowser, "request"> &
+        Partial<Pick<DesktopBrowser, "finishTurn" | "closeSession">>)
+    | undefined,
 ) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-browser-ipc-"))
   const script = join(root, "child.mjs")
@@ -120,8 +168,9 @@ import {createDesktopBrowserClient} from ${JSON.stringify(pathToFileURL(resolve(
 const client=createDesktopBrowserClient();const cancellation=new AbortController();
 process.on('message',async message=>{
  if(message.type==='test/abort') cancellation.abort();
- if(!['test/request','test/finish'].includes(message.type)) return;
- try { const owner={sessionId:"session_owned",turnId:"turn_owned"}; const result=message.type==='test/finish'?await client.finishTurn(owner).then(()=>({finished:true})):await client.request(message.input,owner,cancellation.signal);process.send({type:'test/result',operation:message.type,ok:true,result}); }
+ if(message.type==='test/capability') process.send({type:'test/result',operation:message.type,enabled:process.env.YAKITORI_DESKTOP_BROWSER});
+ if(!['test/request','test/finish','test/close'].includes(message.type)) return;
+ try { const owner={sessionId:"session_owned",turnId:"turn_owned"}; const result=message.type==='test/finish'?await client.finishTurn(owner).then(()=>({finished:true})):message.type==='test/close'?await client.closeSession(owner.sessionId).then(()=>({closed:true})):await client.request(message.input,owner,cancellation.signal);process.send({type:'test/result',operation:message.type,ok:true,result}); }
  catch(error) {process.send({type:'test/result',operation:message.type,ok:false,code:error.code,message:error.message});}
 });
 process.on('SIGTERM',()=>{client.close();process.exit(0)});
@@ -132,11 +181,16 @@ console.log('yakitori-listening http://127.0.0.1:1');
     const server = await spawnServerProcess({
       command: process.execPath,
       args: [script],
-      desktopBrowser: {
-        async finishTurn() {},
-        async closeSession() {},
-        ...browser,
-      },
+      env: { ...process.env, YAKITORI_DESKTOP_BROWSER: "1" },
+      ...(browser
+        ? {
+            desktopBrowser: {
+              async finishTurn() {},
+              async closeSession() {},
+              ...browser,
+            },
+          }
+        : {}),
     })
     const nextResult = (operation = "test/request") =>
       new Promise<unknown>((resolve) => {
@@ -168,6 +222,56 @@ console.log('yakitori-listening http://127.0.0.1:1');
     throw cause
   }
 }
+
+it.each([
+  false,
+  true,
+])("advertises browser IPC according to its own host capability (%s)", async (enabled) => {
+  const f = await fixture(
+    enabled
+      ? {
+          async request() {
+            return {}
+          },
+        }
+      : undefined,
+  )
+  try {
+    const capability = f.nextResult("test/capability")
+    f.server.child.send({ type: "test/capability" })
+    expect(await capability).toMatchObject({ enabled: enabled ? "1" : "0" })
+  } finally {
+    await f.close()
+  }
+})
+
+it("acknowledges browser cleanup in a host without browser capability", async () => {
+  const f = await fixture(undefined)
+  try {
+    const request = f.nextResult()
+    f.server.child.send({ type: "test/request", input: { action: "list" } })
+    expect(await request).toMatchObject({
+      ok: false,
+      code: "browser_unavailable",
+    })
+    for (const operation of [
+      "test/finish",
+      "test/close",
+      "test/finish",
+      "test/close",
+    ]) {
+      const result = f.nextResult(operation)
+      f.server.child.send({ type: operation })
+      expect(await result).toMatchObject({
+        ok: true,
+        result:
+          operation === "test/finish" ? { finished: true } : { closed: true },
+      })
+    }
+  } finally {
+    await f.close()
+  }
+})
 
 it("round-trips a real sidecar browser request without exposing attachment IPC", async () => {
   const input = {
@@ -292,25 +396,46 @@ it("drains pending requests before acknowledging the owning turn cleanup", async
   }
 })
 
-it("preserves browser cleanup failure across the process boundary", async () => {
+it.each([
+  {
+    cause: new BrowserControlError(
+      "browser_cleanup_failed",
+      "The owned debugger could not detach.",
+    ),
+    code: "browser_cleanup_failed",
+  },
+  {
+    cause: new BrowserControlError(
+      "browser_unavailable",
+      "The owned debugger could not detach.",
+    ),
+    code: "browser_unavailable",
+  },
+  {
+    cause: new Error("Unexpected adapter cleanup failure."),
+    code: "browser_internal_error",
+  },
+])("preserves adapter cleanup failure $code across the process boundary", async ({
+  cause,
+  code,
+}) => {
   const f = await fixture({
     async request() {
       return {}
     },
     async finishTurn() {
-      throw new BrowserControlError(
-        "browser_cleanup_failed",
-        "The owned debugger could not detach.",
-      )
+      throw cause
+    },
+    async closeSession() {
+      throw cause
     },
   })
   try {
-    const result = f.nextResult("test/finish")
-    f.server.child.send({ type: "test/finish" })
-    expect(await result).toMatchObject({
-      ok: false,
-      code: "browser_cleanup_failed",
-    })
+    for (const operation of ["test/finish", "test/close"]) {
+      const result = f.nextResult(operation)
+      f.server.child.send({ type: operation })
+      expect(await result).toMatchObject({ ok: false, code })
+    }
   } finally {
     await f.close()
   }

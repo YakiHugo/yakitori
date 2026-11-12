@@ -61,9 +61,9 @@ export function SessionItems({
     <>
       {visibleSessions.map((session, index) => (
         <div
-          key={session.navigationId ?? session.id}
+          key={session.id}
           className="sidebar-session group"
-          data-sidebar-layout={`session:${sessionListKey(projectId, filter)}:${session.navigationId ?? session.id}`}
+          data-sidebar-layout={`session:${sessionListKey(projectId, filter)}:${session.id}`}
           data-sidebar-drop={archived ? undefined : "session"}
           data-drop-id={session.id}
           data-drop-section={sectionId}
@@ -191,13 +191,9 @@ export function SessionItems({
               {session.sectionId === "pinned" && (
                 <Pin size={12} className="shrink-0 text-muted-foreground" />
               )}
-              {session.parentSessionId !== undefined &&
-                session.forkReason === undefined && (
-                  <GitFork
-                    size={13}
-                    className="shrink-0 text-muted-foreground"
-                  />
-                )}
+              {session.parentSessionId !== undefined && (
+                <GitFork size={13} className="shrink-0 text-muted-foreground" />
+              )}
             </button>
           </SidebarMenu>
         </div>

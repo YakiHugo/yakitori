@@ -15,12 +15,20 @@ export type DisplayWindowRead = DisplayWindow &
     endSeq: number
   }>
 
-export function isDisplayUserInput(record: StoredRolloutItem): boolean {
+export function isDisplayInput(record: StoredRolloutItem): boolean {
+  if (
+    record.item.type !== "response_item" ||
+    !record.item.item.id.startsWith("input_")
+  )
+    return false
+  const message = record.item.item.item
+  const submission = record.item.item.submissionMetadata
   return (
-    record.item.type === "response_item" &&
-    record.item.item.id.startsWith("input_") &&
-    record.item.item.item.role === "user" &&
-    record.item.item.item.context === undefined
+    (message.role === "user" && message.context === undefined) ||
+    (message.role === "developer" &&
+      message.context?.type === "thread_message" &&
+      submission?.content !== undefined &&
+      submission.provenance !== undefined)
   )
 }
 
@@ -29,7 +37,7 @@ function displayStart(records: readonly StoredRolloutItem[]): {
   hasTurnStart: boolean
   hasTurnContext: boolean
 } {
-  const promptIndex = records.findLastIndex(isDisplayUserInput)
+  const promptIndex = records.findLastIndex(isDisplayInput)
   const prompt = records[promptIndex]
   if (prompt?.item.type !== "response_item") {
     return { index: 0, hasTurnStart: false, hasTurnContext: false }
@@ -129,7 +137,14 @@ export function displayTailReady(
       (beforeSeqExclusive === undefined || record.seq < beforeSeqExclusive),
   )
   const start = displayStart(considered)
-  if (!start.hasTurnStart || !start.hasTurnContext) return false
+  if (!start.hasTurnStart) return false
+  // A newly admitted prompt may still be resolving its model. In that case
+  // the preceding context is the current model until a new one is committed.
+  if (
+    !start.hasTurnContext &&
+    !considered.some((record) => record.item.type === "turn_context")
+  )
+    return false
   if (!considered.some((record) => record.item.type === "token_count")) {
     return false
   }

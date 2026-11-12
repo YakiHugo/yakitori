@@ -1,4 +1,3 @@
-import { pngImageBytes } from "../fixtures/images.ts"
 import {
   mkdir,
   mkdtemp,
@@ -12,7 +11,6 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { createRolloutAssets } from "../../src/core/rollout-assets.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
@@ -21,8 +19,9 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApplicationResult } from "../../src/server/application-result.ts"
-
+import { pngImageBytes } from "../fixtures/images.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import {
   createFauxProvider,
   readRequestAsset,
@@ -223,27 +222,35 @@ describe("rollout asset lineage", () => {
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
 
-    const child = await application.handlers.forkSession({
-      sessionId: sourceId,
-      atInputId: second.value.inputId,
-      reason: "edit",
+    const child = await application.threadManager.forkThread({
+      sourceThreadId: sourceId,
+      beforeTurnId: second.value.turnId,
+    })
+    const childId = child.thread.id
+    expect(childId).not.toBe(sourceId)
+    const childInput = await application.handlers.admitInput({
+      sessionId: childId,
+      requestId: "request_lineage_child",
       content: inputFixture([{ type: "text" as const, text: "child input" }]),
     })
-    expectOk(child)
-    const childId = child.value.session.id
+    expectOk(childInput)
     await waitForThreadIdle(application, childId)
-    const childInputId = await localInputId(application, childId)
 
-    const grandchild = await application.handlers.forkSession({
-      sessionId: childId,
-      atInputId: childInputId,
-      reason: "edit",
-      content: inputFixture([
-        { type: "text" as const, text: "grandchild input" },
-      ]),
+    const grandchild = await application.threadManager.forkThread({
+      sourceThreadId: childId,
+      beforeTurnId: childInput.value.turnId,
     })
-    expectOk(grandchild)
-    const grandchildId = grandchild.value.session.id
+    const grandchildId = grandchild.thread.id
+    expect(grandchildId).not.toBe(childId)
+    expectOk(
+      await application.handlers.admitInput({
+        sessionId: grandchildId,
+        requestId: "request_lineage_grandchild",
+        content: inputFixture([
+          { type: "text" as const, text: "grandchild input" },
+        ]),
+      }),
+    )
     await waitForThreadIdle(application, grandchildId)
 
     expectOk(await application.handlers.deleteSession({ sessionId: sourceId }))
@@ -330,14 +337,19 @@ describe("rollout asset lineage", () => {
     })
     expectOk(second)
     await waitForThreadIdle(application, sourceId)
-    const child = await application.handlers.forkSession({
-      sessionId: sourceId,
-      atInputId: second.value.inputId,
-      reason: "edit",
-      content: inputFixture([{ type: "text" as const, text: "child" }]),
+    const child = await application.threadManager.forkThread({
+      sourceThreadId: sourceId,
+      beforeTurnId: second.value.turnId,
     })
-    expectOk(child)
-    const childId = child.value.session.id
+    const childId = child.thread.id
+    expect(childId).not.toBe(sourceId)
+    expectOk(
+      await application.handlers.admitInput({
+        sessionId: childId,
+        requestId: "request_command_child",
+        content: inputFixture([{ type: "text" as const, text: "child" }]),
+      }),
+    )
     await waitForThreadIdle(application, childId)
     expectOk(await application.handlers.deleteSession({ sessionId: sourceId }))
     await application.close()
@@ -427,24 +439,6 @@ async function closeServer(server: HttpServer): Promise<void> {
     })
     server.closeAllConnections()
   })
-}
-
-async function localInputId(
-  application: YakitoriApplication,
-  threadId: string,
-): Promise<string> {
-  const stored = await application.threadStore.readThread(threadId)
-  const input = stored?.rollout.find(
-    (record) =>
-      record.rolloutId === threadId &&
-      record.item.type === "response_item" &&
-      record.item.item.item.role === "user" &&
-      record.item.item.item.context === undefined,
-  )
-  if (input?.item.type !== "response_item") {
-    throw new Error("Local fork input was not found.")
-  }
-  return input.item.item.id
 }
 
 async function durableImageFile(

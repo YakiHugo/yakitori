@@ -6,11 +6,7 @@ import type {
   StoredThread,
   ThreadSummary,
 } from "../../src/core/rollout.ts"
-import {
-  advanceSessionHead,
-  type SessionHeads,
-  sessionEntries,
-} from "../../src/core/session-navigation.ts"
+import { sessionEntries } from "../../src/core/session-navigation.ts"
 import {
   changeSessionSidebar,
   compareSectionSessions,
@@ -28,18 +24,20 @@ import {
   startAfterThreadCursor,
   threadCursor,
 } from "../../src/core/thread-search.ts"
+import { advanceThreadStatus } from "../../src/core/thread-status.ts"
 import type {
   CreateForkInput,
   CreateThreadMetadata,
   PersistContext,
   PreparedFork,
   PrepareForkInput,
+  RevertThreadInput,
+  RevertThreadResult,
   ThreadStore,
   ThreadStoreListInput,
   ThreadStoreOccurrenceSearchInput,
   ThreadStoreSearchInput,
 } from "../../src/core/thread-store.ts"
-import { advanceThreadStatus } from "../../src/core/thread-status.ts"
 
 type Writer = {
   readonly pending: RolloutItem[]
@@ -49,7 +47,6 @@ type Writer = {
 }
 
 export class MemoryThreadStore implements ThreadStore {
-  #sessionHeads: SessionHeads = {}
   #sidebar = emptySessionSidebar()
   async readSessionSidebar() {
     return structuredClone(this.#sidebar)
@@ -60,14 +57,13 @@ export class MemoryThreadStore implements ThreadStore {
   ) {
     const sessions = sessionEntries(
       [...this.#threads.values()].map((thread) => thread.metadata),
-      this.#sessionHeads,
     )
     if (options.onlyIfUntitled && change.type === "session") {
       const session = sessions.find((entry) => entry.id === change.sessionId)
       if (
         session !== undefined &&
         (session.title !== undefined ||
-          this.#sidebar.entries[session.navigationId]?.title !== undefined)
+          this.#sidebar.entries[session.id]?.title !== undefined)
       )
         return this.readSessionSidebar()
     }
@@ -77,16 +73,11 @@ export class MemoryThreadStore implements ThreadStore {
   async sessionPresentation(threadId: string) {
     const session = sessionEntries(
       [...this.#threads.values()].map((thread) => thread.metadata),
-      this.#sessionHeads,
     ).find((entry) => entry.id === threadId)
-    return session
-      ? {
-          navigationId: session.navigationId,
-          ...this.#sidebar.entries[session.navigationId],
-        }
-      : {}
+    return session ? { ...this.#sidebar.entries[session.id] } : {}
   }
   readonly #threads = new Map<string, StoredThread>()
+  readonly #versions = new Map<string, StoredThread>()
   readonly #writers = new Map<string, Writer>()
   readonly #forks = new Map<
     string,
@@ -106,7 +97,15 @@ export class MemoryThreadStore implements ThreadStore {
   prepareForkStarted: (() => void) | undefined
   createForkBarrier: Promise<void> | undefined
 
+  async readThreadMetadata(threadId: string) {
+    const metadata = this.#threads.get(threadId)?.metadata
+    return metadata === undefined ? undefined : structuredClone(metadata)
+  }
+
   async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
+    if ("previousRolloutId" in metadata) {
+      throw new Error("New Threads cannot provide previous versions.")
+    }
     if (this.#threads.has(metadata.id))
       throw new Error("Thread already exists.")
     const storedMetadata = {
@@ -247,7 +246,11 @@ export class MemoryThreadStore implements ThreadStore {
       throw new Error("Fork reservation was not found.")
     const inherited = structuredClone(reservation.prefix)
     const target = structuredClone(input.target)
-    if ("rolloutId" in target || "historyBase" in target) {
+    if (
+      "rolloutId" in target ||
+      "historyBase" in target ||
+      "previousRolloutId" in target
+    ) {
       throw new Error(
         "Fork targets cannot provide physical rollout or inherited history.",
       )
@@ -295,12 +298,105 @@ export class MemoryThreadStore implements ThreadStore {
     }
   }
 
+  async revertThread(input: RevertThreadInput): Promise<RevertThreadResult> {
+    if (this.#writers.has(input.threadId)) {
+      throw new Error(`Thread ${input.threadId} still has a live writer.`)
+    }
+    const source = this.#requireThread(input.threadId)
+    if (source.metadata.rolloutId !== input.expectedRolloutId) {
+      throw new Error(`Thread ${input.threadId} rollout changed before revert.`)
+    }
+    const prepared = await this.prepareFork({
+      sourceThreadId: input.threadId,
+      boundary: { type: "before_turn", turnId: input.beforeTurnId },
+    })
+    try {
+      await this.createForkBarrier
+      if (this.failNextCreateFork) {
+        this.failNextCreateFork = false
+        throw new Error("create fork failed")
+      }
+      if (this.#writers.has(input.threadId)) {
+        throw new Error(`Thread ${input.threadId} still has a live writer.`)
+      }
+      const current = this.#requireThread(input.threadId)
+      if (current.metadata.rolloutId !== input.expectedRolloutId) {
+        throw new Error(
+          `Thread ${input.threadId} rollout changed before revert.`,
+        )
+      }
+      const reservation = this.#forks.get(prepared.reservationId)
+      if (reservation === undefined)
+        throw new Error("Fork reservation was not found.")
+      const { historyBase: _historyBase, ...identity } = current.metadata
+      const metadata = {
+        ...identity,
+        rolloutId: `rollout_${globalThis.crypto.randomUUID()}`,
+        previousRolloutId: current.metadata.rolloutId,
+        updatedAt: new Date().toISOString(),
+        ...(prepared.historyPosition === undefined
+          ? {}
+          : { historyBase: prepared.historyPosition }),
+      }
+      const thread: StoredThread = {
+        metadata,
+        rollout: [
+          record(input.threadId, metadata.rolloutId, 0, {
+            type: "session_meta",
+            metadata,
+          }),
+          ...structuredClone(reservation.prefix),
+        ],
+      }
+      this.#versions.set(current.metadata.rolloutId, structuredClone(current))
+      this.#threads.set(input.threadId, thread)
+      this.#writers.set(input.threadId, {
+        pending: [],
+        rolloutId: metadata.rolloutId,
+        tail: Promise.resolve(),
+        nextSeq: prepared.historyPosition?.endSeqExclusive ?? 1,
+      })
+      return {
+        thread: structuredClone(thread),
+        ...(prepared.historyPosition === undefined
+          ? {}
+          : {
+              historyEndSeqExclusive: prepared.historyPosition.endSeqExclusive,
+            }),
+      }
+    } finally {
+      await this.releasePreparedFork(prepared)
+    }
+  }
+
   async readThread(threadId: string): Promise<StoredThread | undefined> {
     const thread = this.#threads.get(threadId)
     return thread === undefined ? undefined : structuredClone(thread)
   }
 
-  async readThreadSummary(threadId: string): Promise<ThreadSummary | undefined> {
+  async readThreadVersions(threadId: string): Promise<readonly StoredThread[]> {
+    const current = this.#threads.get(threadId)
+    if (current === undefined) return []
+    const versions = [current]
+    const seen = new Set([current.metadata.rolloutId])
+    let rolloutId = current.metadata.previousRolloutId
+    while (rolloutId !== undefined) {
+      if (seen.has(rolloutId))
+        throw new Error("Thread versions contain a cycle.")
+      seen.add(rolloutId)
+      const version = this.#versions.get(rolloutId)
+      if (version?.metadata.id !== threadId) {
+        throw new Error("Thread version belongs to a different Thread.")
+      }
+      versions.push(version)
+      rolloutId = version.metadata.previousRolloutId
+    }
+    return structuredClone(versions)
+  }
+
+  async readThreadSummary(
+    threadId: string,
+  ): Promise<ThreadSummary | undefined> {
     const thread = this.#threads.get(threadId)
     return thread === undefined
       ? undefined
@@ -348,7 +444,7 @@ export class MemoryThreadStore implements ThreadStore {
       input.view === "sessions" && typeof input.sectionId === "string"
     const threads =
       input.view === "sessions"
-        ? sessionEntries(summaries, this.#sessionHeads)
+        ? sessionEntries(summaries)
             .map((entry) => presentSession(entry, this.#sidebar))
             .filter((entry) => sessionInView(entry, input))
             .sort(ordered ? compareSectionSessions : compareThreadSummaries)
@@ -368,20 +464,6 @@ export class MemoryThreadStore implements ThreadStore {
           }
         : {}),
     }
-  }
-
-  async setSessionHead(
-    sourceThreadId: string,
-    targetThreadId: string,
-  ): Promise<void> {
-    const threads = (await this.listThreads({ limit: Number.MAX_SAFE_INTEGER }))
-      .threads
-    this.#sessionHeads = advanceSessionHead(
-      threads,
-      this.#sessionHeads,
-      sourceThreadId,
-      targetThreadId,
-    )
   }
 
   async searchThreads(input: ThreadStoreSearchInput) {
@@ -444,12 +526,22 @@ export class MemoryThreadStore implements ThreadStore {
   async readUsageSummary() {
     const projection = new SqliteThreadUsageProjection(":memory:")
     for (const stored of this.#threads.values()) {
-      projection.rebuild(stored, {
-        metadataSize: 0,
-        metadataMtimeMs: 0,
-        rolloutSize: 0,
-        rolloutMtimeMs: 0,
-      })
+      const records = new Map<string, StoredRolloutItem>()
+      const versions = await this.readThreadVersions(stored.metadata.id)
+      for (const version of versions.toReversed()) {
+        for (const record of version.rollout) {
+          records.set(`${record.rolloutId}:${record.seq}`, record)
+        }
+      }
+      projection.rebuild(
+        { ...stored, rollout: [...records.values()] },
+        {
+          metadataSize: 0,
+          metadataMtimeMs: 0,
+          rolloutSize: 0,
+          rolloutMtimeMs: 0,
+        },
+      )
     }
     return projection.readUsage()
   }
@@ -468,6 +560,9 @@ export class MemoryThreadStore implements ThreadStore {
     }
     this.#writers.delete(threadId)
     this.#threads.delete(threadId)
+    for (const [rolloutId, version] of this.#versions) {
+      if (version.metadata.id === threadId) this.#versions.delete(rolloutId)
+    }
   }
 
   #enqueue<T>(writer: Writer, operation: () => Promise<T>): Promise<T> {

@@ -100,15 +100,13 @@ export function parseSidebarChange(value: unknown): SidebarChange {
   }
 }
 
-// Codex sections are independent entities; pinning is membership in a built-in
-// section. Yakitori binds presentation to the navigation root because edit/undo
-// replaces its execution thread. It must not copy presentation onto every fork.
+// Presentation belongs to the stable session identity. Replacing its rollout
+// does not move membership, title or archive state.
 export function changeSessionSidebar(
   current: SessionSidebar,
   change: SidebarChange,
   sessions: readonly Readonly<{
     id: string
-    navigationId: string
     updatedAt: string
   }>[],
 ): SessionSidebar {
@@ -125,10 +123,10 @@ export function changeSessionSidebar(
         !state.sections.some((section) => section.id === change.sectionId)
       )
         invalid("Section no longer exists.")
-      const entry = { ...entries[session.navigationId] }
+      const entry = { ...entries[session.id] }
       if (change.title !== undefined) entry.title = change.title
       if (change.archived !== undefined) entry.archived = change.archived
-      entries[session.navigationId] = entry
+      entries[session.id] = entry
       const next = { ...state, entries }
       return change.sectionId !== undefined &&
         change.sectionId !== (entry.sectionId ?? null)
@@ -147,7 +145,7 @@ export function changeSessionSidebar(
       const source = sessions.find((entry) => entry.id === change.sessionId)
       if (!source)
         invalid("This conversation changed. Reopen it before moving it.")
-      const entry = { ...entries[source.navigationId] }
+      const entry = { ...entries[source.id] }
       if (change.sectionId === null) {
         if (change.beforeSessionId !== undefined)
           invalid("beforeSessionId requires a section.")
@@ -167,16 +165,16 @@ export function changeSessionSidebar(
           change.beforeSessionId !== undefined &&
           (!before ||
             before.id === source.id ||
-            entries[before.navigationId]?.sectionId !== change.sectionId)
+            entries[before.id]?.sectionId !== change.sectionId)
         )
           invalid("The destination conversation changed. Try the move again.")
         const members = sessions
           .filter(
             (session) =>
               session.id !== source.id &&
-              entries[session.navigationId]?.sectionId === change.sectionId,
+              entries[session.id]?.sectionId === change.sectionId,
           )
-          .map((session) => ({ ...session, ...entries[session.navigationId] }))
+          .map((session) => ({ ...session, ...entries[session.id] }))
           .sort(compareSectionSessions)
         // Match Codex's sparse positions: use a gap/midpoint; renumber only
         // when a gap is exhausted or previously unranked entries are moved.
@@ -201,8 +199,8 @@ export function changeSessionSidebar(
         ) {
           members.forEach((member, i) => {
             member.sectionPosition = (i + 1) * gap
-            entries[member.navigationId] = {
-              ...entries[member.navigationId],
+            entries[member.id] = {
+              ...entries[member.id],
               sectionPosition: member.sectionPosition,
             }
           })
@@ -211,7 +209,7 @@ export function changeSessionSidebar(
         entry.sectionId = change.sectionId
         entry.sectionPosition = position
       }
-      entries[source.navigationId] = entry
+      entries[source.id] = entry
       return { ...state, entries }
     }
     case "create-section":
@@ -268,15 +266,13 @@ export function changeSessionSidebar(
   }
 }
 
-export function presentSession<T extends Readonly<{ navigationId?: string }>>(
+export function presentSession<T extends Readonly<{ id: string }>>(
   session: T,
   sidebar: SessionSidebar,
 ): T & SessionPresentation {
   return {
     ...session,
-    ...(session.navigationId === undefined
-      ? {}
-      : sidebar.entries[session.navigationId]),
+    ...sidebar.entries[session.id],
   }
 }
 export function sessionInView(
@@ -292,7 +288,6 @@ export function sessionInView(
 
 type OrderedSession = Readonly<{
   id: string
-  navigationId?: string
   updatedAt: string
   sectionPosition?: number
 }>
@@ -305,17 +300,15 @@ export function compareSectionSessions(
     (right.sectionPosition ?? Number.MAX_SAFE_INTEGER)
   if (position) return position
   if (left.sectionPosition !== undefined && right.sectionPosition !== undefined)
-    return (left.navigationId ?? left.id).localeCompare(
-      right.navigationId ?? right.id,
-    )
+    return left.id.localeCompare(right.id)
   return (
     right.updatedAt.localeCompare(left.updatedAt) ||
-    (right.navigationId ?? right.id).localeCompare(left.navigationId ?? left.id)
+    right.id.localeCompare(left.id)
   )
 }
 export function sectionSessionCursor(session: OrderedSession): string {
   return JSON.stringify({
-    id: session.navigationId ?? session.id,
+    id: session.id,
     updatedAt: session.updatedAt,
     ...(session.sectionPosition === undefined
       ? {}

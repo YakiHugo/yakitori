@@ -23,6 +23,7 @@ import { inputDisplayParts } from "../input-draft.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
+import { AgentMessageCell } from "./cells/agent-message-cell.tsx"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
@@ -65,12 +66,13 @@ function ChildTrace({
   const [error, setError] = useState<string>()
   const [permissionError, setPermissionError] = useState<string>()
   const [attempt, setAttempt] = useState(0)
+  const [historyRevision, setHistoryRevision] = useState(0)
   const clientRef = useRef<AppRpcClient | undefined>(undefined)
   const executionRef = useRef(execution)
   // A snapshot watermark can precede undelivered history. Only received
   // durable events advance the cursor used when replacing the connection.
   const lastReceivedEventSeq = useRef(0)
-  const scroll = usePinnedScroll(sessionId)
+  const scroll = usePinnedScroll(sessionId, historyRevision)
   const view = useMemo(() => projectExecutionView(execution), [execution])
   const dispatch = useCallback((action: ExecutionViewAction) => {
     executionRef.current = reduceExecutionView(executionRef.current, action)
@@ -98,6 +100,17 @@ function ChildTrace({
       sessionId,
       lastReceivedEventSeq.current,
       {
+        onHistoryReset: () => {
+          if (disposed) return
+          lastReceivedEventSeq.current = 0
+          replaySnapshot = undefined
+          executionRef.current = createExecutionViewState()
+          setExecution(executionRef.current)
+          setHistoryRevision((revision) => revision + 1)
+          setLoading(true)
+          setError(undefined)
+          setPermissionError(undefined)
+        },
         onSnapshot: ({ session: snapshot }) => {
           if (disposed) return
           replaySnapshot = snapshot
@@ -426,6 +439,8 @@ function TraceEntry({
 }>) {
   const [openError, setOpenError] = useState<string>()
   switch (entry.kind) {
+    case "agent_input":
+      return <AgentMessageCell entry={entry} sessionId={sessionId} />
     case "user_input":
       return (
         <article className="subagent-task">

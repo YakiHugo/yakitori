@@ -209,6 +209,57 @@ describe("session/subscribe", () => {
   })
 
   it.each([
+    5, 8,
+  ])("resumes a cached view after %s with a bounded snapshot and complete catch-up", async (after) => {
+    const calls = { snapshot: 0, events: 0 }
+    const older = makeTurnStarted(sessionId, 6, "turn_previous")
+    const latest = makeTurnStarted(sessionId, 9, "turn_latest")
+    const handlers = createFakeHandlers({
+      readSession: async () => {
+        calls.snapshot += 1
+        throw new Error("Cached display reads must not load all history.")
+      },
+      readSessionEvents: async () => {
+        calls.events += 1
+        return okResult({ events: [older, latest] })
+      },
+      readDisplayWindow: async () =>
+        okResult({
+          session: makeSessionDetail(sessionId, { seq: 9 }),
+          events: [latest],
+          historyBefore: 8,
+        }),
+    })
+    const { processor } = createTestProcessor({ handlers })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    const response = await connection.sendRequest("session/subscribe", {
+      sessionId,
+      after,
+      recent: true,
+    })
+    await flush()
+    expect(response).toMatchObject({
+      result: { session: { id: sessionId, seq: 9 } },
+    })
+    if (!("result" in response)) throw new Error("Session subscription failed.")
+    expect(response.result).not.toHaveProperty("historyBefore")
+    expect(
+      connection.notifications("session/event").map((frame) => frame.params),
+    ).toEqual(
+      (after === 5 ? [older, latest] : [latest]).map((event) => ({
+        sessionId,
+        seq: event.seq,
+        event,
+      })),
+    )
+    expect(calls).toEqual({
+      snapshot: 0,
+      events: after === 5 ? 1 : 0,
+    })
+  })
+
+  it.each([
     false,
     true,
   ])("reconciles retry against progress already in the snapshot (newer retry: %s)", async (retryAfterProgress) => {
@@ -796,6 +847,7 @@ describe("session/subscribe", () => {
     const countingHub: SessionEventHub = {
       publishDurable: (events) => baseHub.publishDurable(events),
       publishTransient: (event) => baseHub.publishTransient(event),
+      resetSession: (id) => baseHub.resetSession(id),
       subscribe: (subscribedSessionId, listener) => {
         liveSubscriptions += 1
         const subscription = baseHub.subscribe(subscribedSessionId, listener)
@@ -842,6 +894,261 @@ describe("session/subscribe", () => {
     await expect(closing).resolves.toBe("drained")
     // The post-drain sweep must not leave the late subscription behind.
     expect(liveSubscriptions).toBe(0)
+  })
+})
+
+describe("session history reset", () => {
+  it("retires permission channels after the last subscriber disconnects", async () => {
+    const eventHub = createSessionEventHub()
+    const pendingRequests = new PendingServerRequests()
+    const resolvePermission = vi.fn()
+    const permission = makePendingPermission({ permissionRequestId: "perm_1" })
+    const subscriptions = createSessionSubscriptions({
+      eventHub,
+      pendingRequests,
+      notify: () => {},
+      sendRequest: () => {},
+      handlers: createFakeHandlers({
+        readSession: async () =>
+          okResult({
+            session: makeSessionDetail(sessionId, {
+              pendingPermissions: [permission],
+            }),
+          }),
+        resolvePermission,
+      }),
+    })
+    const outcome = await subscriptions.subscribe({
+      connectionId: 1,
+      sessionId,
+      after: 0,
+    })
+    if (!outcome.ok) throw new Error("Expected permission subscription")
+    await outcome.replay()
+    const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
+    if (oldRequest === undefined) throw new Error("Expected pending permission")
+    subscriptions.removeConnection(1)
+    expect(pendingRequests.size).toBe(1)
+    eventHub.resetSession(sessionId)
+    expect(pendingRequests.size).toBe(0)
+    expect(pendingRequests.resolve(oldRequest.id, { behavior: "allow" })).toBe(
+      false,
+    )
+    await flush()
+    expect(resolvePermission).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    "old page",
+    "old error",
+  ])("closes live and replaying subscribers before new low-sequence history (%s)", async (oldPageResult) => {
+    const eventHub = createSessionEventHub()
+    const pendingRequests = new PendingServerRequests()
+    const oldPage = deferred<void>()
+    const resolvePermission = vi.fn(async () =>
+      okResult({
+        sessionId,
+        turnId: "turn_new",
+        permissionRequestId: "perm_1",
+        behavior: "allow" as const,
+      }),
+    )
+    const notify = vi.fn()
+    const sendRequest = vi.fn()
+    let reset = false
+    let reads = 0
+    const oldEvent = makeTurnStarted(sessionId, 90, "turn_old")
+    const newEvent = makeTurnStarted(sessionId, 1, "turn_new")
+    const subscriptions = createSessionSubscriptions({
+      eventHub,
+      pendingRequests,
+      notify,
+      sendRequest,
+      reportOperationalFailure: () => {},
+      handlers: createFakeHandlers({
+        readSession: async () =>
+          okResult({
+            session: makeSessionDetail(sessionId, {
+              seq: reset ? 1 : 90,
+              activeTurnId: reset ? "turn_new" : "turn_old",
+            }),
+          }),
+        readSessionEvents: async () => {
+          if (++reads === 2) {
+            await oldPage.promise
+            if (oldPageResult === "old error")
+              throw new Error("Old history read failed")
+            return okResult({ events: [oldEvent] })
+          }
+          return okResult({ events: [reset ? newEvent : oldEvent] })
+        },
+        resolvePermission,
+      }),
+    })
+    const live = await subscriptions.subscribe({
+      connectionId: 1,
+      sessionId,
+      after: 0,
+    })
+    if (!live.ok) throw new Error("Expected old live subscription")
+    await live.replay()
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_old", "perm_1"),
+    )
+    const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
+    if (oldRequest === undefined) throw new Error("Expected old permission")
+
+    const replaying = await subscriptions.subscribe({
+      connectionId: 2,
+      sessionId,
+      after: 0,
+    })
+    if (!replaying.ok) throw new Error("Expected old replay subscription")
+    const oldReplay = replaying.replay()
+    eventHub.publishTransient(
+      makeAssistantDelta(sessionId, "turn_old", "old buffered display"),
+    )
+    notify.mockClear()
+    sendRequest.mockClear()
+
+    reset = true
+    eventHub.resetSession(sessionId)
+    expect(pendingRequests.size).toBe(0)
+    expect(pendingRequests.resolve(oldRequest.id, { behavior: "allow" })).toBe(
+      false,
+    )
+    expect(notify).not.toHaveBeenCalled()
+    // Reuse the replaying connection: an old page failure must not clean up
+    // this newly installed subscription.
+    const replacement = await subscriptions.subscribe({
+      connectionId: 2,
+      sessionId,
+      after: 0,
+    })
+    if (!replacement.ok) throw new Error("Expected new subscription")
+    expect(replacement.response.session.seq).toBe(1)
+    await replacement.replay()
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_new", "perm_1"),
+    )
+    const newRequest = pendingRequests.pendingForSession(sessionId)[0]
+    expect(newRequest).toBeDefined()
+    expect(newRequest?.id).not.toBe(oldRequest?.id)
+    oldPage.resolve()
+    await oldReplay
+    await flush()
+    expect(pendingRequests.size).toBe(1)
+    if (newRequest === undefined) throw new Error("Expected new permission")
+    expect(pendingRequests.resolve(newRequest.id, { behavior: "allow" })).toBe(
+      true,
+    )
+    await flush()
+    expect(resolvePermission).toHaveBeenCalledExactlyOnceWith({
+      sessionId,
+      turnId: "turn_new",
+      permissionRequestId: "perm_1",
+      behavior: "allow",
+    })
+    eventHub.publishDurable([makeTurnCompleted(sessionId, 2, "turn_new")])
+    expect(
+      notify.mock.calls
+        .filter(([, method]) => method === "session/event")
+        .map(([connectionId, , params]) => [connectionId, params.seq]),
+    ).toEqual([
+      [2, 1],
+      [2, 2],
+    ])
+    expect(
+      notify.mock.calls
+        .filter(([, method]) => method === "session/replayComplete")
+        .map(([connectionId, , params]) => [connectionId, params.seq]),
+    ).toEqual([[2, 1]])
+    expect(
+      notify.mock.calls
+        .filter(([, method]) => method === "session/transient")
+        .map(([, , params]) => params),
+    ).toEqual([makePermissionRequested(sessionId, "turn_new", "perm_1")])
+    expect(sendRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    false,
+    true,
+  ])("rejects a snapshot crossing reset without disturbing its replacement (recent: %s)", async (recent) => {
+    const eventHub = createSessionEventHub()
+    const pendingRequests = new PendingServerRequests()
+    const snapshotGate = deferred<void>()
+    const notify = vi.fn()
+    const sendRequest = vi.fn()
+    const permission = makePendingPermission({ permissionRequestId: "perm_1" })
+    let reads = 0
+    const snapshot = async () => {
+      if (++reads === 2) {
+        await snapshotGate.promise
+        return makeSessionDetail(sessionId, { seq: 90, pendingPermissions: [] })
+      }
+      return makeSessionDetail(sessionId, {
+        seq: reads === 1 ? 90 : 1,
+        pendingPermissions: [permission],
+      })
+    }
+    const subscriptions = createSessionSubscriptions({
+      eventHub,
+      pendingRequests,
+      notify,
+      sendRequest,
+      handlers: createFakeHandlers({
+        readSession: async () => okResult({ session: await snapshot() }),
+        readDisplayWindow: async () =>
+          okResult({
+            session: await snapshot(),
+            events: [],
+            historyBefore: 80,
+          }),
+        readSessionEvents: async () => okResult({ events: [] }),
+      }),
+    })
+    const initial = await subscriptions.subscribe({
+      connectionId: 1,
+      sessionId,
+      after: 0,
+    })
+    if (!initial.ok) throw new Error("Expected initial subscription")
+    await initial.replay()
+    const oldRequest = pendingRequests.pendingForSession(sessionId)[0]
+    expect(oldRequest).toBeDefined()
+    const oldSnapshot = subscriptions.subscribe({
+      connectionId: 2,
+      sessionId,
+      after: 0,
+      recent,
+    })
+    expect(reads).toBe(2)
+    eventHub.resetSession(sessionId)
+    const replacement = await subscriptions.subscribe({
+      connectionId: 2,
+      sessionId,
+      after: 0,
+    })
+    if (!replacement.ok) throw new Error("Expected replacement subscription")
+    await replacement.replay()
+    const newRequest = pendingRequests.pendingForSession(sessionId)[0]
+    expect(newRequest?.id).not.toBe(oldRequest?.id)
+    snapshotGate.resolve()
+    expect(await oldSnapshot).toMatchObject({
+      ok: false,
+      result: { ok: false, error: { code: "conflict" } },
+    })
+    await flush()
+    expect(pendingRequests.pendingForSession(sessionId)).toEqual([newRequest])
+    notify.mockClear()
+    eventHub.publishDurable([makeTurnStarted(sessionId, 2, "turn_new")])
+    expect(notify).toHaveBeenCalledWith(
+      2,
+      "session/event",
+      expect.objectContaining({ seq: 2 }),
+    )
+    expect(notify).toHaveBeenCalledTimes(1)
   })
 })
 

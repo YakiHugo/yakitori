@@ -28,6 +28,7 @@ export type YakitoriServerProcessInput = Readonly<{
   host: string
   port: number
   application: YakitoriApplicationOptions
+  desktopBrowserIpc?: boolean
   onListening: (url: string, application: YakitoriApplication) => void
   reportOperationalFailure?: OperationalFailureReporter
 }>
@@ -49,9 +50,7 @@ export async function runYakitoriServerProcess(
   const reporter =
     input.reportOperationalFailure ?? consoleOperationalFailureReporter
   const browserClient =
-    !input.application.desktopBrowser &&
-    process.send &&
-    process.env.YAKITORI_DESKTOP_BROWSER === "1"
+    !input.application.desktopBrowser && process.send && input.desktopBrowserIpc
       ? createDesktopBrowserClient()
       : undefined
   const application = await createYakitoriApplication({

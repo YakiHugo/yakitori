@@ -43,12 +43,6 @@ export function mapRolloutEvent(
           ...(metadata.parentThreadId === undefined
             ? {}
             : { parentSessionId: metadata.parentThreadId }),
-          ...(metadata.forkedFromInputId === undefined
-            ? {}
-            : { forkedFromInputId: metadata.forkedFromInputId }),
-          ...(metadata.forkReason === undefined
-            ? {}
-            : { forkReason: metadata.forkReason }),
           ...(metadata.metadata === undefined
             ? {}
             : { metadata: metadata.metadata }),
@@ -58,40 +52,55 @@ export function mapRolloutEvent(
   }
   if (
     item.type === "response_item" &&
-    item.item.item.role === "user" &&
-    (item.item.id.startsWith("input_") ||
-      item.item.id.startsWith("message_")) &&
-    item.item.item.context === undefined
+    (item.item.id.startsWith("input_") || item.item.id.startsWith("message_"))
   ) {
-    // message_-prefixed user items are steered inputs, recorded when the
-    // active Turn sampled them; input_-prefixed items start Turns.
-    const steered = item.item.id.startsWith("message_")
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "input.admitted",
-        data: {
-          requestId: item.item.turnId,
-          inputId: item.item.id,
-          role: InputRole.User,
-          ...(steered ? { steered: true } : {}),
-          content:
-            item.item.submissionMetadata?.content ??
-            modelUserInputContent(item.item.item),
-          ...(item.item.submissionMetadata?.modelSelection === undefined
-            ? {}
-            : {
-                modelSelection: item.item.submissionMetadata.modelSelection,
-              }),
-          ...(item.item.submissionMetadata?.parentInputId === undefined
-            ? {}
-            : { parentInputId: item.item.submissionMetadata.parentInputId }),
-          ...(item.item.submissionMetadata?.metadata === undefined
-            ? {}
-            : { metadata: item.item.submissionMetadata.metadata }),
+    const message = item.item.item
+    const submission = item.item.submissionMetadata
+    const threadMessage =
+      message.role === "developer" &&
+      message.context?.type === "thread_message" &&
+      submission?.content !== undefined &&
+      submission.provenance !== undefined
+    // Thread-message model text contains a security wrapper. Only host metadata
+    // supplies its authored display content; arbitrary developer text stays hidden.
+    const content =
+      message.role === "user" && message.context === undefined
+        ? (submission?.content ?? modelUserInputContent(message))
+        : threadMessage
+          ? submission.content
+          : undefined
+    if (content !== undefined) {
+      // message_-prefixed items are steered inputs, recorded when the active
+      // Turn sampled them; input_-prefixed items start Turns.
+      const steered = item.item.id.startsWith("message_")
+      const source = threadMessage ? "agent" : submission?.source
+      return createEventEnvelope({
+        ...base,
+        event: {
+          type: "input.admitted",
+          data: {
+            requestId: item.item.turnId,
+            inputId: item.item.id,
+            role: threadMessage ? InputRole.Runtime : InputRole.User,
+            ...(steered ? { steered: true } : {}),
+            content,
+            ...(source === undefined ? {} : { source }),
+            ...(submission?.provenance === undefined
+              ? {}
+              : { provenance: submission.provenance }),
+            ...(submission?.modelSelection === undefined
+              ? {}
+              : { modelSelection: submission.modelSelection }),
+            ...(submission?.parentInputId === undefined
+              ? {}
+              : { parentInputId: submission.parentInputId }),
+            ...(submission?.metadata === undefined
+              ? {}
+              : { metadata: submission.metadata }),
+          },
         },
-      },
-    })
+      })
+    }
   }
   if (item.type === "turn_started") {
     return createEventEnvelope({

@@ -417,10 +417,10 @@ describe("goal runtime", () => {
     expect((await readGoal(application, sessionId))?.id).toBe(replacement.id)
   })
 
-  it("inherits an independent goal snapshot and starts the fork on explicit resume", async () => {
+  it("preserves the paused goal identity and usage through undo and explicit resume", async () => {
     const first = step(final("Original answer"))
     const finish = step(complete)
-    const wrap = step(final("Fork completed"))
+    const wrap = step(final("Goal completed"))
     const provider = script(first, finish, wrap)
     const { application } = await app(provider.stream)
     const sessionId = await createSession(application)
@@ -438,38 +438,39 @@ describe("goal runtime", () => {
     body(
       await application.handlers.setGoal({
         sessionId,
-        objective: "Carry the goal to the fork",
+        objective: "Carry the goal through undo",
         status: "paused",
       }),
     )
-    const forked = body(
-      await application.handlers.forkSession({
+    const sourceGoal = await readGoal(application, sessionId)
+    const reverted = body(
+      await application.handlers.revertSession({
         sessionId,
         atInputId: admitted.inputId,
         reason: "undo",
       }),
     )
-    const forkId = forked.session.id
-    const sourceGoal = await readGoal(application, sessionId)
-    const forkGoal = await readGoal(application, forkId)
-    expect(forkGoal).toMatchObject({
-      threadId: forkId,
+    const revertedId = reverted.session.id
+    expect(revertedId).toBe(sessionId)
+    const goalAfterUndo = await readGoal(application, revertedId)
+    expect(goalAfterUndo).toMatchObject({
+      threadId: revertedId,
       objective: sourceGoal?.objective,
       status: "paused",
       tokensUsed: sourceGoal?.tokensUsed,
     })
-    expect(forkGoal?.id).not.toBe(sourceGoal?.id)
+    expect(goalAfterUndo).toEqual(sourceGoal)
     expect(provider.requests).toHaveLength(1)
     body(
       await application.handlers.setGoal({
-        sessionId: forkId,
+        sessionId: revertedId,
         status: "active",
       }),
     )
     await wrap.entered.promise
-    await idle(application, forkId)
-    expect((await readGoal(application, forkId))?.status).toBe("complete")
-    expect((await readGoal(application, sessionId))?.status).toBe("paused")
+    await idle(application, revertedId)
+    expect((await readGoal(application, revertedId))?.status).toBe("complete")
+    expect((await readGoal(application, sessionId))?.id).toBe(sourceGoal?.id)
   })
   it("stops after three empty automatic turns", async () => {
     const last = step(final(""))
@@ -673,11 +674,23 @@ describe("goal runtime", () => {
     expect((await readGoal(application, sessionId))?.tokensUsed).toBe(47)
   })
 
-  it("keeps an active fork deferred until an actual user turn without pausing the source goal", async () => {
+  it("keeps the active goal and usage after undo but defers continuation until new user input", async () => {
     const first = step(final("Original answer"))
-    const active = step(final("Interrupted by fork"), deferred<void>())
-    const wrap = step(final("Fork completed"))
-    const provider = script(first, active, step(complete), wrap)
+    const active = step(final("Interrupted by undo"), deferred<void>())
+    const wrap = step(final("Goal completed"))
+    const provider = script(
+      first,
+      step(
+        final("Progress before undo", {
+          inputTokens: 30,
+          cacheReadInputTokens: 10,
+          outputTokens: 5,
+        }),
+      ),
+      active,
+      step(complete),
+      wrap,
+    )
     const { application } = await app(provider.stream)
     const sessionId = await createSession(application)
     const admitted = body(
@@ -698,20 +711,35 @@ describe("goal runtime", () => {
       }),
     )
     await active.entered.promise
-    const forked = body(
-      await application.handlers.forkSession({
+    const originalActor = application.threadManager.getThread(sessionId)
+    const originalGoal = await readGoal(application, sessionId)
+    expect(originalGoal).toMatchObject({ status: "active", tokensUsed: 25 })
+    const reverted = body(
+      await application.handlers.revertSession({
         sessionId,
         atInputId: admitted.inputId,
         reason: "undo",
       }),
     )
-    const forkId = forked.session.id
-    expect((await readGoal(application, sessionId))?.status).toBe("active")
-    expect((await readGoal(application, forkId))?.status).toBe("active")
-    expect(provider.requests).toHaveLength(2)
+    const revertedId = reverted.session.id
+    expect(revertedId).toBe(sessionId)
+    expect(originalActor?.status).toBe("shutdown")
+    expect(application.threadManager.getThread(sessionId)).not.toBe(
+      originalActor,
+    )
+    const revertedGoal = await readGoal(application, sessionId)
+    expect(revertedGoal).toEqual({
+      ...originalGoal,
+      timeUsedSeconds: expect.any(Number),
+      updatedAt: expect.any(String),
+    })
+    expect(revertedGoal?.timeUsedSeconds).toBeGreaterThanOrEqual(
+      originalGoal?.timeUsedSeconds ?? 0,
+    )
+    expect(provider.requests).toHaveLength(3)
     body(
       await application.handlers.admitInput({
-        sessionId: forkId,
+        sessionId: revertedId,
         requestId: "request_fork_continue",
         content: inputFixture([
           { type: "text" as const, text: "Continue this branch" },
@@ -719,10 +747,10 @@ describe("goal runtime", () => {
       }),
     )
     await wrap.entered.promise
-    await idle(application, forkId)
-    expect((await readGoal(application, forkId))?.status).toBe("complete")
-    expect((await readGoal(application, sessionId))?.status).toBe("active")
-    expect(provider.requests).toHaveLength(4)
+    await idle(application, revertedId)
+    expect((await readGoal(application, revertedId))?.status).toBe("complete")
+    expect((await readGoal(application, sessionId))?.id).toBe(originalGoal?.id)
+    expect(provider.requests).toHaveLength(5)
   })
 
   it("preempts the old objective and completes only after the updated developer context is delivered", async () => {

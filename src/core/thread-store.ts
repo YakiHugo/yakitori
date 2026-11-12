@@ -40,7 +40,7 @@ export type PreparedFork = {
 
 export type CreateThreadMetadata = Omit<
   ThreadMetadata,
-  "rolloutId" | "historyBase"
+  "rolloutId" | "historyBase" | "previousRolloutId"
 >
 
 export type CreateForkInput = {
@@ -52,6 +52,17 @@ export type ThreadStoreForkResult = {
   readonly thread: StoredThread
   readonly historyEndSeqExclusive?: number
 }
+
+export type RevertThreadInput = Readonly<{
+  threadId: string
+  beforeTurnId: string
+  expectedRolloutId: string
+}>
+
+export type RevertThreadResult = Readonly<{
+  thread: StoredThread
+  historyEndSeqExclusive?: number
+}>
 
 export type ThreadStoreListInput = Readonly<{
   view?: "sessions"
@@ -117,8 +128,14 @@ export type ThreadStore = {
   discardThread(threadId: string): Promise<void>
   prepareFork(input: PrepareForkInput): Promise<PreparedFork>
   createFork(input: CreateForkInput): Promise<ThreadStoreForkResult>
+  // The previous writer must be shut down. Success owns a new live writer for
+  // the same Thread, with only the history before the selected turn retained.
+  revertThread(input: RevertThreadInput): Promise<RevertThreadResult>
   releasePreparedFork(prepared: PreparedFork): Promise<void>
+  readThreadMetadata(threadId: string): Promise<ThreadMetadata | undefined>
   readThread(threadId: string): Promise<StoredThread | undefined>
+  // Current history first, followed by retained versions of this same Thread.
+  readThreadVersions(threadId: string): Promise<readonly StoredThread[]>
   readThreadSummary(threadId: string): Promise<ThreadSummary | undefined>
   // Latest user prompt through the file end, without reading earlier history.
   readDisplayWindow(
@@ -135,11 +152,7 @@ export type ThreadStore = {
   ): Promise<SessionSidebar>
   sessionPresentation(
     threadId: string,
-  ): Promise<
-    Readonly<{ navigationId?: string }> &
-      import("./session-sidebar.ts").SessionPresentation
-  >
-  setSessionHead(sourceThreadId: string, targetThreadId: string): Promise<void>
+  ): Promise<import("./session-sidebar.ts").SessionPresentation>
   listThreads(input?: ThreadStoreListInput): Promise<ThreadStoreListResult>
   searchThreads(input: ThreadStoreSearchInput): Promise<ThreadStoreSearchResult>
   searchThreadOccurrences(

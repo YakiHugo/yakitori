@@ -25,12 +25,12 @@ import {
 } from "../../../src/server/handlers.ts"
 import type {
   ApiCreateSessionResponse,
-  ApiForkSessionResponse,
   ApiListProjectsResponse,
   ApiListProvidersResponse,
   ApiListSessionsResponse,
   ApiProject,
   ApiReadSessionResponse,
+  ApiRevertSessionResponse,
   ApiSearchSessionOccurrencesResponse,
   ApiSearchSessionsResponse,
 } from "../../../src/server/protocol.ts"
@@ -243,10 +243,10 @@ describe("session methods over real handlers", () => {
     })
   })
 
-  it("validates fork semantics and forks a pure undo", async () => {
+  it("validates revert semantics and undoes input within the original session", async () => {
     const { connection } = realSetup()
     await initializeConnection(connection)
-    const created = await createSession(connection, { title: "Fork route" })
+    const created = await createSession(connection, { title: "Revert route" })
     const sessionId = created.session.id
     const admitted = await rpc<{ requestId: string; inputId: string }>(
       connection,
@@ -272,7 +272,7 @@ describe("session methods over real handlers", () => {
         modelSelection: { provider: "openai", model: "gpt-test" },
       },
     ]) {
-      const error = await rpcError(connection, "session/fork", {
+      const error = await rpcError(connection, "session/revert", {
         sessionId,
         ...invalid,
       })
@@ -282,16 +282,14 @@ describe("session methods over real handlers", () => {
       })
     }
 
-    const forked = await rpc<ApiForkSessionResponse>(
+    const forked = await rpc<ApiRevertSessionResponse>(
       connection,
-      "session/fork",
+      "session/revert",
       { sessionId, atInputId: admitted.inputId, reason: "undo" },
     )
     expect(forked.session).toMatchObject({
-      parentSessionId: sessionId,
-      forkedFromInputId: admitted.inputId,
-      forkReason: "undo",
-      title: "Fork route",
+      id: sessionId,
+      title: "Revert route",
       counts: { inputs: 0, pendingInputs: 0, turns: 0 },
     })
     expect(forked.events).toEqual([
@@ -307,9 +305,9 @@ describe("session methods over real handlers", () => {
       { sessionId },
     )
     expect(source.session.counts).toMatchObject({
-      inputs: 1,
+      inputs: 0,
       pendingInputs: 0,
-      turns: 1,
+      turns: 0,
     })
   })
 
@@ -1095,7 +1093,7 @@ it("publishes sidebar changes across connections and requires restoring an archi
     sessionId: session.id,
     sidebar: {
       entries: {
-        [session.navigationId ?? session.id]: {
+        [session.id]: {
           title: "Renamed",
           archived: true,
           sectionId: "pinned",

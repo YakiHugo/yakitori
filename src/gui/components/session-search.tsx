@@ -125,7 +125,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
         {results.map(({ session, snippet }, index) => (
           <button
             type="button"
-            key={session.navigationId ?? session.id}
+            key={session.id}
             data-active={index === active}
             onMouseEnter={() => setActive(index)}
             onClick={() => open(index)}

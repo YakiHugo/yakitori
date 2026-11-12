@@ -40,6 +40,7 @@ import {
   goalChangedMethod,
   mcpStatusChangedMethod,
   sessionCompletedMethod,
+  sessionHistoryResetMethod,
   sessionQueueChangedMethod,
   sessionsActivityMethod,
   sidebarChangedMethod,
@@ -1573,6 +1574,8 @@ export async function createYakitoriApplication(
         broadcastNotification?.(sessionCompletedMethod, event),
       notifySidebarChanged: (sessionId) =>
         broadcastNotification?.(sidebarChangedMethod, { sessionId }),
+      notifySessionHistoryReset: (sessionId) =>
+        broadcastNotification?.(sessionHistoryResetMethod, { sessionId }),
       notifyQueueChanged: (sessionId) =>
         broadcastNotification?.(sessionQueueChangedMethod, { sessionId }),
       projectStore: ownedProjectStore,

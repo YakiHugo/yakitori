@@ -21,6 +21,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { createEventEnvelope } from "../../src/kernel/events.ts"
 import type { ContextExcerpt } from "../../src/protocol/input-context.ts"
 import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors.ts"
 import { inputParts } from "./input-fixtures.ts"
@@ -156,6 +157,44 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+it("shows an incoming agent task as a sourced message without user edit actions", () => {
+  const event = createEventEnvelope({
+    sessionId: "session_1",
+    seq: 1,
+    createdAt: at,
+    event: {
+      type: "input.admitted",
+      data: {
+        requestId: "request_agent",
+        inputId: "input_agent",
+        role: "runtime",
+        source: "agent",
+        provenance: {
+          sourceThreadId: "session_parent",
+          sourceRequestId: "request_parent",
+        },
+        content: inputParts("Review the persistence boundary"),
+      },
+    },
+  })
+  useAppStore.setState({
+    execution: reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event,
+    }),
+  })
+  render(<Transcript />)
+  const message = screen.getByRole("article", { name: "Agent message" })
+  expect(message.textContent).toContain("Review the persistence boundary")
+  expect(
+    within(message).queryByRole("button", { name: "Edit & resubmit" }),
+  ).toBeNull()
+  expect(
+    within(message).getByRole("button", { name: "Copy agent message" }),
+  ).toBeTruthy()
+  expect(screen.queryByText("Conversation will appear here")).toBeNull()
 })
 
 it("keeps the visible message stationary when streaming continues during an earlier-history request", async () => {

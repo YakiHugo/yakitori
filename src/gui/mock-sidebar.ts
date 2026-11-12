@@ -44,11 +44,18 @@ export function seedMockSidebar(): void {
   const sessions: ApiSessionSummary[] = samples.map((sample) => ({
     ...common,
     ...sample,
+    rolloutId: `rollout_${sample.id}`,
     conversationId: sample.id,
   }))
   const readSeqs = { ...useSessionReadStore.getState().readSeqs }
   for (const session of sessions)
-    delete readSeqs[sessionReadKey(useAppStore.getState().apiBase, session.id)]
+    delete readSeqs[
+      sessionReadKey(
+        useAppStore.getState().apiBase,
+        session.id,
+        session.rolloutId,
+      )
+    ]
   useSessionReadStore.setState({ readSeqs })
   useAppStore.setState({
     projects: [

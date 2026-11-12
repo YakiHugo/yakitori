@@ -29,28 +29,28 @@ export type HistoryPosition = {
   readonly endByteOffset: number
 }
 
-export type ThreadMetadata = {
-  readonly id: string
-  readonly rolloutId: string
-  readonly conversationId: string
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly gitInfo?: GitInfo
+export type ThreadMetadata = Readonly<{
+  id: string
+  rolloutId: string
+  conversationId: string
+  createdAt: string
+  updatedAt: string
+  title?: string
+  workingDirectory?: string
+  gitInfo?: GitInfo
   // Optional owning Project (C8-D2). The rollout is append-only, so deleting
   // a project cannot rewrite this field; the server read path treats a
   // projectId that no longer exists as absent (orphan-on-delete).
-  readonly projectId?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly parentThreadId?: string
-  readonly forkedFromTurnId?: string
-  readonly forkedFromInputId?: string
-  readonly forkReason?: import("../kernel/events.ts").ForkReason
-  readonly historyBase?: HistoryPosition
-  readonly metadata?: EventMetadata
-}
+  projectId?: string
+  mateId?: string
+  mateRevisionId?: string
+  parentThreadId?: string
+  forkedFromTurnId?: string
+  historyBase?: HistoryPosition
+  // Full prior history for durable receipts, separate from the visible prefix.
+  previousRolloutId?: string
+  metadata?: EventMetadata
+}>
 
 export type HistoryOutputBudget = Readonly<{
   maxBytes: number
@@ -244,7 +244,6 @@ export type ThreadSummary = ThreadMetadata &
     archived?: boolean
     sectionId?: string
     sectionPosition?: number
-    navigationId?: string
     seq: number
   }>
 

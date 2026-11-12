@@ -78,116 +78,9 @@ describe("session navigation persistence", () => {
     expect((await store.listThreads()).threads).toHaveLength(3)
     expect(await store.readThread("session_z")).toBeDefined()
   })
-
-  it("publishes edits only on commit and restores the committed head after restart", async () => {
-    const { root, store } = await setup()
-    await save(store, "session_original")
-    await store.setSessionHead("session_original", "session_original")
-    await save(store, "session_edit", {
-      parentThreadId: "session_original",
-      forkReason: "edit",
-      createdAt: "2026-09-13T01:00:00Z",
-    })
-    expect(
-      (await store.listThreads({ view: "sessions" })).threads.map(
-        (thread) => thread.id,
-      ),
-    ).toEqual(["session_original"])
-    await store.setSessionHead("session_original", "session_edit")
-    await store.setSessionHead("session_edit", "session_edit")
-    await save(store, "session_undo", {
-      parentThreadId: "session_edit",
-      forkReason: "undo",
-      createdAt: "2026-09-13T02:00:00Z",
-    })
-    await store.setSessionHead("session_edit", "session_undo")
-    // A late event on the old branch must not change the chosen edit.
-    await store.resumeThread("session_original")
-    await store.appendItems("session_original", [
-      { type: "turn_completed", turnId: "late_turn", outcome: "completed" },
-    ])
-    await store.shutdownThread("session_original")
-    const reopened = new JsonlThreadStore({ root })
-    const page = await reopened.listThreads({ view: "sessions" })
-    expect(
-      page.threads.map(({ id, navigationId }) => ({ id, navigationId })),
-    ).toEqual([{ id: "session_undo", navigationId: "session_original" }])
-    const search = await reopened.searchThreads({
-      view: "sessions",
-      searchTerm: "needle",
-      limit: 30,
-    })
-    expect(search.matches.map(({ summary }) => summary.id)).toEqual([
-      "session_undo",
-    ])
-    expect((await reopened.listThreads()).threads).toHaveLength(3)
-  })
-
-  it("rejects a stale competing edit without replacing the winning head", async () => {
-    const { root, store } = await setup()
-    await save(store, "session_original")
-    await store.setSessionHead("session_original", "session_original")
-    await save(store, "session_a", {
-      parentThreadId: "session_original",
-      forkReason: "edit",
-    })
-    await save(store, "session_b", {
-      parentThreadId: "session_original",
-      forkReason: "edit",
-    })
-    const other = new JsonlThreadStore({ root })
-    await other.initialize()
-    const results = await Promise.allSettled([
-      store.setSessionHead("session_original", "session_a"),
-      other.setSessionHead("session_original", "session_b"),
-    ])
-    expect(
-      results.filter((result) => result.status === "fulfilled"),
-    ).toHaveLength(1)
-    expect(
-      results.filter((result) => result.status === "rejected"),
-    ).toHaveLength(1)
-    const ids = (await store.listThreads({ view: "sessions" })).threads.map(
-      (thread) => thread.id,
-    )
-    expect(ids).toEqual([
-      results[0]?.status === "fulfilled" ? "session_a" : "session_b",
-    ])
-  })
-
-  it("recovers existing edit history by creation order and does not resurrect it after deleting its head", async () => {
-    const { root, store } = await setup()
-    await save(store, "session_original", { updatedAt: "2026-09-14T00:00:00Z" })
-    await save(store, "session_edit", {
-      parentThreadId: "session_original",
-      forkReason: "edit",
-      createdAt: "2026-09-13T01:00:00Z",
-    })
-    expect(
-      (await store.listThreads({ view: "sessions" })).threads.map(
-        (thread) => thread.id,
-      ),
-    ).toEqual(["session_edit"])
-    await store.setSessionHead("session_edit", "session_edit")
-    await store.deleteThread("session_edit")
-    const reopened = new JsonlThreadStore({ root })
-    expect((await reopened.listThreads({ view: "sessions" })).threads).toEqual(
-      [],
-    )
-    expect(
-      (
-        await reopened.searchThreads({
-          view: "sessions",
-          searchTerm: "needle",
-          limit: 10,
-        })
-      ).matches,
-    ).toEqual([])
-    expect(await reopened.readThread("session_original")).toBeDefined()
-  })
 })
 
-it("keeps names, section membership and archive state across edits, restarts and search rebuilds", async () => {
+it("keeps names, section membership and archive state across reverts, restarts and search rebuilds", async () => {
   const { root, store } = await setup()
   await save(store, "session_original")
   await save(store, "session_other")
@@ -197,15 +90,10 @@ it("keeps names, section membership and archive state across edits, restarts and
     title: "Renamed conversation",
     sectionId: "pinned",
   })
-  await store.setSessionHead("session_original", "session_original")
-  await save(store, "session_edit", {
-    parentThreadId: "session_original",
-    forkReason: "edit",
-  })
-  await store.setSessionHead("session_original", "session_edit")
+  await revertSavedSession(store, "session_original")
   await store.updateSessionSidebar({
     type: "session",
-    sessionId: "session_edit",
+    sessionId: "session_original",
     archived: true,
   })
   const restarted = new JsonlThreadStore({ root })
@@ -221,8 +109,7 @@ it("keeps names, section membership and archive state across edits, restarts and
   })
   expect(archived.threads).toMatchObject([
     {
-      id: "session_edit",
-      navigationId: "session_original",
+      id: "session_original",
       title: "Renamed conversation",
       sectionId: "pinned",
       archived: true,
@@ -245,7 +132,7 @@ it("keeps names, section membership and archive state across edits, restarts and
   })
   expect(found.matches).toMatchObject([
     {
-      summary: { id: "session_edit", title: "Renamed conversation" },
+      summary: { id: "session_original", title: "Renamed conversation" },
       snippet: "Renamed conversation",
     },
   ])
@@ -261,14 +148,14 @@ it("keeps names, section membership and archive state across edits, restarts and
   ).toEqual([])
   await restarted.updateSessionSidebar({
     type: "session",
-    sessionId: "session_edit",
+    sessionId: "session_original",
     archived: false,
   })
   expect(
     (
       await restarted.listThreads({ view: "sessions", sectionId: "pinned" })
     ).threads.map((s) => s.id),
-  ).toEqual(["session_edit"])
+  ).toEqual(["session_original"])
   expect(
     (
       await restarted.listThreads({ view: "sessions", sectionId: null })
@@ -324,7 +211,7 @@ it("persists independent section identities and returns members to default when 
   ).rejects.toThrow("Custom section does not exist")
 })
 
-it("pages a manual section order without activity or edited execution IDs shifting the boundary", async () => {
+it("pages a manual section order without rollout changes shifting the boundary", async () => {
   const { store, root } = await setup()
   for (const id of ["session_a", "session_b", "session_c", "session_d"])
     await save(store, id)
@@ -344,13 +231,7 @@ it("pages a manual section order without activity or edited execution IDs shifti
     "session_c",
   ])
   if (!first.nextCursor) throw new Error("Missing ordered cursor")
-  await store.setSessionHead("session_c", "session_c")
-  await save(store, "session_edit", {
-    parentThreadId: "session_c",
-    forkReason: "edit",
-    updatedAt: "2026-01-01T00:00:00Z",
-  })
-  await store.setSessionHead("session_c", "session_edit")
+  await revertSavedSession(store, "session_c")
   const reopened = new JsonlThreadStore({ root })
   const second = await reopened.listThreads({
     view: "sessions",
@@ -367,7 +248,7 @@ it("pages a manual section order without activity or edited execution IDs shifti
     (
       await reopened.listThreads({ view: "sessions", sectionId: "pinned" })
     ).threads.map((thread) => thread.id),
-  ).toEqual(["session_d", "session_edit", "session_b", "session_a"])
+  ).toEqual(["session_d", "session_c", "session_b", "session_a"])
   await reopened.updateSessionSidebar({
     type: "move-session",
     sessionId: "session_a",
@@ -378,18 +259,40 @@ it("pages a manual section order without activity or edited execution IDs shifti
     (
       await reopened.listThreads({ view: "sessions", sectionId: "pinned" })
     ).threads.map((thread) => thread.id),
-  ).toEqual(["session_a", "session_d", "session_edit", "session_b"])
+  ).toEqual(["session_a", "session_d", "session_c", "session_b"])
   const before = await reopened.readSessionSidebar()
   await expect(
     reopened.updateSessionSidebar({
       type: "move-session",
       sessionId: "session_b",
       sectionId: "pinned",
-      beforeSessionId: "session_c",
+      beforeSessionId: "session_missing",
     }),
   ).rejects.toThrow("destination conversation changed")
   expect(await reopened.readSessionSidebar()).toEqual(before)
 })
+
+async function revertSavedSession(store: JsonlThreadStore, id: string) {
+  const prior = await store.resumeThread(id)
+  if (prior === undefined) throw new Error("Missing saved session.")
+  await store.appendItems(id, [
+    {
+      type: "turn_started",
+      turnId: "turn_discarded",
+      inputItemId: "input_discarded",
+    },
+    { type: "turn_completed", turnId: "turn_discarded", outcome: "completed" },
+  ])
+  await store.shutdownThread(id)
+  const reverted = await store.revertThread({
+    threadId: id,
+    beforeTurnId: "turn_discarded",
+    expectedRolloutId: prior.metadata.rolloutId,
+  })
+  expect(reverted.thread.metadata.id).toBe(id)
+  expect(reverted.thread.metadata.rolloutId).not.toBe(prior.metadata.rolloutId)
+  await store.shutdownThread(id)
+}
 
 it("renumbers exhausted section positions without changing the requested order", async () => {
   const { store, root } = await setup()

@@ -6,7 +6,7 @@ import {
 
 // Codex's thread scroll controller distinguishes layout restoration, following,
 // and a cancelable 260ms user jump. Native scroll events alone cannot tell them apart.
-export function usePinnedScroll(sessionId?: string) {
+export function usePinnedScroll(sessionId?: string, historyRevision = 0) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const following = useRef(true)
@@ -14,6 +14,8 @@ export function usePinnedScroll(sessionId?: string) {
   const animation = useRef<number | undefined>(undefined)
   const lastScrollTop = useRef(0)
   const [atBottom, setAtBottom] = useState(true)
+  const currentScope = useRef({ sessionId, historyRevision })
+  currentScope.current = { sessionId, historyRevision }
 
   const cancelAnimation = useCallback(() => {
     if (animation.current !== undefined) cancelAnimationFrame(animation.current)
@@ -143,6 +145,7 @@ export function usePinnedScroll(sessionId?: string) {
     const scopeId = sessionId ?? "draft"
     const saved = readThreadScopeValue<
       | Readonly<{
+          historyRevision: number
           scrollTop: number
           following: boolean
           followingPaused: boolean
@@ -150,30 +153,38 @@ export function usePinnedScroll(sessionId?: string) {
         }>
       | undefined
     >(scopeId, "scroll.position", undefined)
+    const position =
+      saved?.historyRevision === historyRevision ? saved : undefined
     cancelAnimation()
-    following.current = saved?.following ?? true
-    followingPaused.current = saved?.followingPaused ?? false
+    following.current = position?.following ?? true
+    followingPaused.current = position?.followingPaused ?? false
     const viewport = viewportRef.current
     if (viewport)
-      writeScrollTop(viewport, saved?.scrollTop ?? viewport.scrollHeight)
-    setAtBottom(saved?.atBottom ?? true)
-  }, [sessionId, cancelAnimation, writeScrollTop])
-
-  useLayoutEffect(() => {
-    const scopeId = sessionId ?? "draft"
+      writeScrollTop(viewport, position?.scrollTop ?? viewport.scrollHeight)
+    setAtBottom(position?.atBottom ?? true)
     return () => {
+      // A history replacement may clear the scope before React cleans up the
+      // old effect. Never put that old position back into the new history.
+      if (
+        currentScope.current.sessionId === sessionId &&
+        currentScope.current.historyRevision !== historyRevision
+      )
+        return
       const viewport = viewportRef.current
       writeThreadScopeValue(scopeId, "scroll.position", {
+        historyRevision,
         scrollTop: viewport?.scrollTop ?? 0,
         following: following.current,
         followingPaused: followingPaused.current,
         atBottom: viewport
-          ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
+          ? viewport.scrollHeight -
+              viewport.scrollTop -
+              viewport.clientHeight <=
             24
           : true,
       })
     }
-  }, [sessionId])
+  }, [sessionId, historyRevision, cancelAnimation, writeScrollTop])
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current

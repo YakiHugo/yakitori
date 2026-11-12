@@ -29,7 +29,7 @@ beforeEach(() => {
       "sidebar:section:section_work": {
         sessions: ["a", "b"].map((id) => ({
           id: `session_${id}`,
-          navigationId: `session_${id}`,
+          rolloutId: `rollout_${id}`,
           conversationId: `conversation_${id}`,
           seq: 1,
           title: `Task ${id}`,
@@ -143,7 +143,7 @@ it("dropping on the lower half of a row moves after it", async () => {
       "sidebar:section:section_work": {
         sessions: ["a", "b", "c"].map((id) => ({
           id: `session_${id}`,
-          navigationId: `session_${id}`,
+          rolloutId: `rollout_${id}`,
           conversationId: `conversation_${id}`,
           seq: 1,
           title: `Task ${id}`,

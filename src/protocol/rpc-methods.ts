@@ -11,8 +11,6 @@ import type {
   ApiCreateSessionRequest,
   ApiCreateSessionResponse,
   ApiDeleteSessionResponse,
-  ApiForkSessionRequest,
-  ApiForkSessionResponse,
   ApiListAgentsResponse,
   ApiListProjectsResponse,
   ApiListProvidersResponse,
@@ -29,6 +27,8 @@ import type {
   ApiResolvePermissionRequest,
   ApiResumeTurnRequest,
   ApiResumeTurnResponse,
+  ApiRevertSessionRequest,
+  ApiRevertSessionResponse,
   ApiSearchSessionOccurrencesRequest,
   ApiSearchSessionOccurrencesResponse,
   ApiSearchSessionsRequest,
@@ -252,7 +252,8 @@ export type RpcMethodParams = Readonly<
       }>
       "session/delete": ApiReadSessionRequest
       "session/close": ApiReadSessionRequest
-      "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
+      "session/revert": ApiRevertSessionRequest &
+        Readonly<{ sessionId: string }>
       "session/compact": Readonly<{ sessionId: string; requestId?: string }>
       "session/input": ApiAdmitInputRequest
       "session/input/queue": ApiAdmitInputRequest
@@ -322,7 +323,7 @@ export type RpcMethodResponses = Readonly<
       "session/skill/read": WorkspaceReadResponse
       "session/delete": ApiDeleteSessionResponse
       "session/close": ApiDeleteSessionResponse
-      "session/fork": ApiForkSessionResponse
+      "session/revert": ApiRevertSessionResponse
       "session/compact": ApiCompactSessionResponse
       "session/input": ApiAdmitInputResponse
       "session/input/queue": ApiAdmitInputResponse

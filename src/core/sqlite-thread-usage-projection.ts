@@ -22,7 +22,7 @@ type StampRow = Readonly<{
   rollout_mtime_ms: number
 }>
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // Disposable SQLite materialization of turn and auxiliary token usage. The rollout
 // remains authoritative; stamps let readers rebuild only stale projections.

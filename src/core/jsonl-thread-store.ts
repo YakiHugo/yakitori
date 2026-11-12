@@ -45,11 +45,7 @@ import type {
   ThreadMetadata,
   ThreadSummary,
 } from "./rollout.ts"
-import {
-  advanceSessionHead,
-  type SessionHeads,
-  sessionEntries,
-} from "./session-navigation.ts"
+import { sessionEntries } from "./session-navigation.ts"
 import {
   changeSessionSidebar,
   compareSectionSessions,
@@ -75,12 +71,15 @@ import {
   startAfterThreadCursor,
   threadCursor,
 } from "./thread-search.ts"
+import { advanceThreadStatus } from "./thread-status.ts"
 import {
   type CreateForkInput,
   type CreateThreadMetadata,
   PersistContext,
   type PreparedFork,
   type PrepareForkInput,
+  type RevertThreadInput,
+  type RevertThreadResult,
   type RolloutAppend,
   type ThreadStore,
   type ThreadStoreForkResult,
@@ -89,7 +88,6 @@ import {
   type ThreadStoreSearchInput,
 } from "./thread-store.ts"
 import { readUsageHistory } from "./usage-history.ts"
-import { advanceThreadStatus } from "./thread-status.ts"
 import { isInputContent } from "./user-input.ts"
 
 type PendingWrite = {
@@ -152,7 +150,6 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #searchProjection: SqliteThreadSearchProjection
   readonly #usageProjection: SqliteThreadUsageProjection
   readonly #sessionSidebarPath: string
-  readonly #sessionHeadsPath: string
   readonly #threadsDirectory: string
   readonly #rolloutsDirectory: string
   readonly #writerLocksDirectory: string
@@ -177,7 +174,6 @@ export class JsonlThreadStore implements ThreadStore {
       join(root, "thread-usage.sqlite"),
     )
     this.#sessionSidebarPath = join(root, "session-sidebar.json")
-    this.#sessionHeadsPath = join(root, "session-heads.json")
     this.#threadsDirectory = join(root, "threads")
     this.#rolloutsDirectory = join(root, "rollouts")
     this.#writerLocksDirectory = join(root, "locks", "writers")
@@ -277,7 +273,11 @@ export class JsonlThreadStore implements ThreadStore {
   async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
     await this.#ready
     requireThreadId(metadata.id)
-    if ("rolloutId" in metadata || "historyBase" in metadata) {
+    if (
+      "rolloutId" in metadata ||
+      "historyBase" in metadata ||
+      "previousRolloutId" in metadata
+    ) {
       throw new Error(
         "New Threads cannot provide physical rollout or inherited history.",
       )
@@ -650,7 +650,11 @@ export class JsonlThreadStore implements ThreadStore {
       throw new Error("Fork reservation is not live in this store.")
     }
     const target = structuredClone(input.target)
-    if ("rolloutId" in target || "historyBase" in target) {
+    if (
+      "rolloutId" in target ||
+      "historyBase" in target ||
+      "previousRolloutId" in target
+    ) {
       throw new Error(
         "Fork targets cannot provide physical rollout or inherited history.",
       )
@@ -698,6 +702,149 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
+  async revertThread(input: RevertThreadInput): Promise<RevertThreadResult> {
+    await this.#ready
+    requireThreadId(input.threadId)
+    requireThreadId(input.expectedRolloutId)
+    if (this.#writers.has(input.threadId) || this.#staged.has(input.threadId)) {
+      throw new Error(`Thread ${input.threadId} still has a live writer.`)
+    }
+    const current = await this.#readMetadata(input.threadId)
+    if (current.rolloutId !== input.expectedRolloutId) {
+      throw new Error(`Thread ${input.threadId} rollout changed before revert.`)
+    }
+    const prepared = await this.prepareFork({
+      sourceThreadId: input.threadId,
+      boundary: { type: "before_turn", turnId: input.beforeTurnId },
+    })
+    let writerLock: OwnedFileLock | undefined
+    let lockTransferred = false
+    try {
+      writerLock = await acquireOwnedLock(
+        this.#writerLockPath(input.threadId),
+        `Thread ${input.threadId} still has a live writer.`,
+      )
+      const claimedLock = writerLock
+      // Readers of either projection wait for the canonical metadata switch
+      // and both rebuilds. Reservations and the writer lease also protect the
+      // old immutable prefix from collection throughout publication/rollback.
+      return await this.#withSearchProjection(() =>
+        this.#withUsageProjection(async () => {
+          const coordinationLock = await acquireOwnedLock(
+            this.#coordinationLockPath,
+            "Thread storage is being updated.",
+            false,
+            true,
+          )
+          let rolloutDirectory: string | undefined
+          let prior: StoredThread | undefined
+          let metadataWriteAttempted = false
+          try {
+            const metadata = await this.#readMetadata(input.threadId)
+            if (metadata.rolloutId !== input.expectedRolloutId) {
+              throw new Error(
+                `Thread ${input.threadId} rollout changed before revert.`,
+              )
+            }
+            prior = await this.#readRequiredThread(input.threadId)
+            const { historyBase: _historyBase, ...identity } = metadata
+            const target = normalizeMetadata({
+              ...identity,
+              rolloutId: `rollout_${globalThis.crypto.randomUUID()}`,
+              previousRolloutId: metadata.rolloutId,
+              updatedAt: new Date().toISOString(),
+              ...(prepared.historyPosition === undefined
+                ? {}
+                : { historyBase: prepared.historyPosition }),
+            })
+            const directory = this.#rolloutDirectory(target.rolloutId)
+            await mkdir(directory)
+            rolloutDirectory = directory
+            await syncDirectory(this.#rolloutsDirectory)
+            await this.#writePhysicalRollout(target)
+            const thread: StoredThread = {
+              metadata: target,
+              rollout: await this.#materialize(target.rolloutId),
+            }
+            // Opening the new writer can still fail; do it before publishing.
+            await this.#openClaimedWriter(target, false, claimedLock, false)
+            metadataWriteAttempted = true
+            await atomicWrite(
+              this.#metadataPath(input.threadId),
+              `${JSON.stringify(target)}\n`,
+            )
+            const stamp = await this.#searchProjectionStamp(target)
+            this.#searchProjection.rebuild(thread, stamp)
+            this.#usageProjection.rebuild(
+              await readUsageHistory(target, this.#rolloutsDirectory),
+              stamp,
+            )
+            this.#searchProjectionErrors.delete(input.threadId)
+            const writer = this.#writers.get(input.threadId)
+            if (writer === undefined)
+              throw new Error("Revert writer is missing.")
+            writer.accepting = true
+            lockTransferred = true
+            return {
+              thread,
+              ...(prepared.historyPosition === undefined
+                ? {}
+                : {
+                    historyEndSeqExclusive:
+                      prepared.historyPosition.endSeqExclusive,
+                  }),
+            }
+          } catch (error) {
+            const writer = this.#writers.get(input.threadId)
+            if (writer?.lock === claimedLock) {
+              this.#writers.delete(input.threadId)
+              await writer.file.close()
+            }
+            if (metadataWriteAttempted && prior !== undefined) {
+              // A failed restoration must leave search repair enabled too.
+              this.#searchProjectionDirty = true
+              await atomicWrite(
+                this.#metadataPath(input.threadId),
+                `${JSON.stringify(prior.metadata)}\n`,
+              )
+              const stamp = await this.#searchProjectionStamp(prior.metadata)
+              this.#searchProjection.rebuild(prior, stamp)
+              this.#usageProjection.rebuild(
+                await readUsageHistory(prior.metadata, this.#rolloutsDirectory),
+                stamp,
+              )
+            }
+            if (rolloutDirectory !== undefined) {
+              await durableRemoveTree(rolloutDirectory)
+            }
+            throw error
+          } finally {
+            await releaseOwnedLock(coordinationLock)
+          }
+        }),
+      )
+    } finally {
+      try {
+        if (writerLock !== undefined && !lockTransferred) {
+          await releaseOwnedLock(writerLock)
+        }
+      } finally {
+        await this.releasePreparedFork(prepared)
+      }
+    }
+  }
+
+  async readThreadMetadata(
+    threadId: string,
+  ): Promise<ThreadMetadata | undefined> {
+    await this.#ready
+    requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) return structuredClone(staged.metadata)
+    if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
+    return this.#readMetadata(threadId)
+  }
+
   async readThread(threadId: string): Promise<StoredThread | undefined> {
     await this.#ready
     requireThreadId(threadId)
@@ -726,6 +873,32 @@ export class JsonlThreadStore implements ThreadStore {
     }
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
     return this.#readRequiredThread(threadId)
+  }
+
+  async readThreadVersions(threadId: string): Promise<readonly StoredThread[]> {
+    const current = await this.readThread(threadId)
+    if (current === undefined) return []
+    const versions = [current]
+    const seen = new Set([current.metadata.rolloutId])
+    let rolloutId = current.metadata.previousRolloutId
+    while (rolloutId !== undefined) {
+      if (seen.has(rolloutId))
+        throw new Error("Thread versions contain a cycle.")
+      seen.add(rolloutId)
+      const rollout = await this.#materialize(rolloutId)
+      const sessionMeta = rollout[0]
+      if (
+        sessionMeta?.item.type !== "session_meta" ||
+        sessionMeta.threadId !== threadId ||
+        sessionMeta.item.metadata.id !== threadId
+      ) {
+        throw new Error("Thread version belongs to a different Thread.")
+      }
+      const metadata = sessionMeta.item.metadata
+      versions.push({ metadata, rollout })
+      rolloutId = metadata.previousRolloutId
+    }
+    return versions
   }
 
   async readDisplayWindow(
@@ -800,7 +973,7 @@ export class JsonlThreadStore implements ThreadStore {
         : emptySessionSidebar()
     const entries =
       input.view === "sessions"
-        ? sessionEntries(summaries, await this.#readSessionHeads())
+        ? sessionEntries(summaries)
             .map((entry) => presentSession(entry, sidebar))
             .filter((entry) => sessionInView(entry, input))
         : summaries
@@ -833,7 +1006,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async readThreadSummary(threadId: string): Promise<ThreadSummary | undefined> {
+  async readThreadSummary(
+    threadId: string,
+  ): Promise<ThreadSummary | undefined> {
     await this.#ready
     requireThreadId(threadId)
     const staged = this.#staged.get(threadId)
@@ -898,27 +1073,6 @@ export class JsonlThreadStore implements ThreadStore {
     )
   }
 
-  async #readSessionHeads(): Promise<SessionHeads> {
-    let contents: string
-    try {
-      contents = await readFile(this.#sessionHeadsPath, "utf8")
-    } catch (error) {
-      if (isRecord(error) && error.code === "ENOENT") return {}
-      throw error
-    }
-    const value: unknown = JSON.parse(contents)
-    if (
-      !isRecord(value) ||
-      !Object.entries(value).every(
-        ([key, head]) =>
-          isStorageKey(key) && typeof head === "string" && isStorageKey(head),
-      )
-    ) {
-      throw new Error("Invalid session navigation state.")
-    }
-    return value as SessionHeads
-  }
-
   async readSessionSidebar(): Promise<SessionSidebar> {
     await this.#ready
     const state = await this.#readDurableSessionSidebar()
@@ -974,24 +1128,16 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async sessionPresentation(
-    threadId: string,
-  ): Promise<SessionPresentation & { navigationId?: string }> {
+  async sessionPresentation(threadId: string): Promise<SessionPresentation> {
     await this.#ready
-    const entries = sessionEntries(
-      [
-        ...(await this.#navigationMetadata()),
-        ...[...this.#staged.values()].map(({ metadata }) => metadata),
-      ],
-      await this.#readSessionHeads(),
-    )
+    const entries = sessionEntries([
+      ...(await this.#navigationMetadata()),
+      ...[...this.#staged.values()].map(({ metadata }) => metadata),
+    ])
     const session = entries.find((entry) => entry.id === threadId)
     if (!session) return {}
     const state = await this.readSessionSidebar()
-    return {
-      navigationId: session.navigationId,
-      ...state.entries[session.navigationId],
-    }
+    return { ...state.entries[session.id] }
   }
 
   async updateSessionSidebar(
@@ -1010,18 +1156,15 @@ export class JsonlThreadStore implements ThreadStore {
     )
     try {
       const metadata = await this.#navigationMetadata()
-      const sessions = sessionEntries(
-        [
-          ...metadata,
-          ...[...this.#staged.values()]
-            .filter(
-              ({ metadata: staged }) =>
-                !metadata.some(({ id }) => id === staged.id),
-            )
-            .map(({ metadata }) => metadata),
-        ],
-        await this.#readSessionHeads(),
-      )
+      const sessions = sessionEntries([
+        ...metadata,
+        ...[...this.#staged.values()]
+          .filter(
+            ({ metadata: staged }) =>
+              !metadata.some(({ id }) => id === staged.id),
+          )
+          .map(({ metadata }) => metadata),
+      ])
       const durable = await this.#readDurableSessionSidebar()
       const current = await this.readSessionSidebar()
       if (options.onlyIfUntitled && change.type === "session") {
@@ -1029,7 +1172,7 @@ export class JsonlThreadStore implements ThreadStore {
         if (
           session !== undefined &&
           (session.title !== undefined ||
-            current.entries[session.navigationId]?.title !== undefined)
+            current.entries[session.id]?.title !== undefined)
         )
           return current
       }
@@ -1053,30 +1196,6 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async setSessionHead(
-    sourceThreadId: string,
-    targetThreadId: string,
-  ): Promise<void> {
-    await this.#ready
-    const lock = await acquireOwnedLock(
-      this.#coordinationLockPath,
-      "Session navigation is being updated.",
-      false,
-      true,
-    )
-    try {
-      const heads = advanceSessionHead(
-        await this.#navigationMetadata(),
-        await this.#readSessionHeads(),
-        sourceThreadId,
-        targetThreadId,
-      )
-      await atomicWrite(this.#sessionHeadsPath, JSON.stringify(heads))
-    } finally {
-      await releaseOwnedLock(lock)
-    }
-  }
-
   async searchThreads(input: ThreadStoreSearchInput) {
     await this.#ready
     const sidebar =
@@ -1085,10 +1204,7 @@ export class JsonlThreadStore implements ThreadStore {
         : emptySessionSidebar()
     const entries =
       input.view === "sessions"
-        ? sessionEntries(
-            await this.#navigationMetadata(),
-            await this.#readSessionHeads(),
-          )
+        ? sessionEntries(await this.#navigationMetadata())
             .map((entry) => presentSession(entry, sidebar))
             .filter((entry) => sessionInView(entry, input))
         : undefined
@@ -1107,9 +1223,6 @@ export class JsonlThreadStore implements ThreadStore {
               ),
             }),
       })
-      const navigationIds = new Map(
-        entries?.map((entry) => [entry.id, entry.navigationId]),
-      )
       const unavailableThreadCount =
         entries === undefined
           ? this.#searchProjectionErrors.size
@@ -1119,19 +1232,13 @@ export class JsonlThreadStore implements ThreadStore {
       return {
         ...result,
         ...(unavailableThreadCount === 0 ? {} : { unavailableThreadCount }),
-        matches: result.matches.map((match) => {
-          const navigationId = navigationIds.get(match.summary.id)
-          return {
-            ...match,
-            summary: {
-              ...match.summary,
-              ...(navigationId === undefined
-                ? {}
-                : sidebar.entries[navigationId]),
-              ...(navigationId === undefined ? {} : { navigationId }),
-            },
-          }
-        }),
+        matches: result.matches.map((match) => ({
+          ...match,
+          summary: {
+            ...match.summary,
+            ...sidebar.entries[match.summary.id],
+          },
+        })),
       }
     })
   }
@@ -1281,13 +1388,6 @@ export class JsonlThreadStore implements ThreadStore {
     const rolloutDirectory = this.#rolloutDirectory(rolloutId)
     const rolloutPath = this.#rolloutPath(rolloutId)
     const metadataPath = this.#metadataPath(normalized.id)
-    const sessionMeta: StoredRolloutItem = {
-      threadId: normalized.id,
-      rolloutId,
-      seq: 0,
-      createdAt: normalized.createdAt,
-      item: { type: "session_meta", metadata: normalized },
-    }
     let lockTransferred = false
     let ownsCreationPaths = false
     let hadAssetDirectory = false
@@ -1315,10 +1415,7 @@ export class JsonlThreadStore implements ThreadStore {
         await mkdir(rolloutDirectory)
         await syncDirectory(this.#rolloutsDirectory)
       }
-      await atomicWrite(
-        rolloutPath,
-        `${(initialRollout ?? [sessionMeta]).map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-      )
+      await this.#writePhysicalRollout(normalized, initialRollout)
       await atomicWrite(metadataPath, `${JSON.stringify(normalized)}\n`)
       const sidebar =
         stagedLock === undefined
@@ -1365,14 +1462,31 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
+  async #writePhysicalRollout(
+    metadata: ThreadMetadata,
+    initialRollout?: readonly StoredRolloutItem[],
+  ): Promise<void> {
+    const sessionMeta: StoredRolloutItem = {
+      threadId: metadata.id,
+      rolloutId: metadata.rolloutId,
+      seq: 0,
+      createdAt: metadata.createdAt,
+      item: { type: "session_meta", metadata },
+    }
+    await atomicWrite(
+      this.#rolloutPath(metadata.rolloutId),
+      `${(initialRollout ?? [sessionMeta]).map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    )
+  }
+
   async #openWriter(threadId: string, repairTrailingLine: boolean) {
-    const metadata = await this.#readMetadata(threadId)
     const writerLock = await acquireOwnedLock(
       this.#writerLockPath(threadId),
       `Thread ${threadId} already has an active writer.`,
     )
     let lockTransferred = false
     try {
+      const metadata = await this.#readMetadata(threadId)
       await this.#openClaimedWriter(metadata, repairTrailingLine, writerLock)
       lockTransferred = true
     } finally {
@@ -1384,6 +1498,7 @@ export class JsonlThreadStore implements ThreadStore {
     metadata: ThreadMetadata,
     repairTrailingLine: boolean,
     writerLock: OwnedFileLock,
+    accepting = true,
   ) {
     const threadId = metadata.id
     const rolloutId = metadata.rolloutId
@@ -1409,7 +1524,7 @@ export class JsonlThreadStore implements ThreadStore {
       tail: Promise.resolve(),
       shutdownPromise: undefined,
       nextSeq,
-      accepting: true,
+      accepting,
     })
   }
 
@@ -1831,10 +1946,13 @@ export class JsonlThreadStore implements ThreadStore {
     const retained = new Set(metadata.map((thread) => thread.rolloutId))
     const pending: string[] = [...retained]
     for (const thread of metadata) {
-      if (thread.historyBase !== undefined) {
-        if (!retained.has(thread.historyBase.rolloutId)) {
-          retained.add(thread.historyBase.rolloutId)
-          pending.push(thread.historyBase.rolloutId)
+      for (const rolloutId of [
+        thread.historyBase?.rolloutId,
+        thread.previousRolloutId,
+      ]) {
+        if (rolloutId !== undefined && !retained.has(rolloutId)) {
+          retained.add(rolloutId)
+          pending.push(rolloutId)
         }
       }
     }
@@ -1860,10 +1978,14 @@ export class JsonlThreadStore implements ThreadStore {
         return
       }
       if (sessionMeta?.item.type !== "session_meta") continue
-      const base = sessionMeta.item.metadata.historyBase
-      if (base !== undefined && !retained.has(base.rolloutId)) {
-        retained.add(base.rolloutId)
-        pending.push(base.rolloutId)
+      for (const ancestor of [
+        sessionMeta.item.metadata.historyBase?.rolloutId,
+        sessionMeta.item.metadata.previousRolloutId,
+      ]) {
+        if (ancestor !== undefined && !retained.has(ancestor)) {
+          retained.add(ancestor)
+          pending.push(ancestor)
+        }
       }
     }
     const rolloutDirectories = await readdir(this.#rolloutsDirectory, {
@@ -2257,9 +2379,8 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       "mateRevisionId",
       "parentThreadId",
       "forkedFromTurnId",
-      "forkedFromInputId",
-      "forkReason",
       "historyBase",
+      "previousRolloutId",
       "metadata",
     ]) &&
     isStorageKey(value.id) &&
@@ -2275,11 +2396,9 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
     optionalString(value.mateRevisionId) &&
     optionalString(value.parentThreadId) &&
     optionalString(value.forkedFromTurnId) &&
-    optionalString(value.forkedFromInputId) &&
-    (value.forkReason === undefined ||
-      value.forkReason === "undo" ||
-      value.forkReason === "edit") &&
     (value.historyBase === undefined || isHistoryPosition(value.historyBase)) &&
+    (value.previousRolloutId === undefined ||
+      isStorageKey(value.previousRolloutId)) &&
     (value.metadata === undefined || isJsonObject(value.metadata))
   )
 }

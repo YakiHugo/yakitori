@@ -188,11 +188,6 @@ export function bindDesktopBrowserRequests(
       return
     }
     void reply(requestId, async () => {
-      if (!browser)
-        throw new BrowserControlError(
-          "browser_unavailable",
-          "Desktop browser control is unavailable in this host.",
-        )
       if ("operation" in value && value.operation === "finishTurn") {
         const owner = parsedOwner(),
           key = ownerKey(owner)
@@ -203,7 +198,9 @@ export function bindDesktopBrowserRequests(
           )
         const settled = (async () => {
           await drain((current) => ownerKey(current) === key)
-          await browser.finishTurn(owner)
+          // A host without browser capability owns no browser resources.
+          // Cleanup still drains IPC requests and acknowledges that boundary.
+          await browser?.finishTurn(owner)
         })()
         finishing.set(key, { owner, settled })
         try {
@@ -232,7 +229,7 @@ export function bindDesktopBrowserRequests(
               .filter((entry) => entry.owner.sessionId === sessionId)
               .map((entry) => entry.settled),
           )
-          await browser.closeSession(sessionId)
+          await browser?.closeSession(sessionId)
           sessions.delete(sessionId)
         } finally {
           closing.delete(sessionId)

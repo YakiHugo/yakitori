@@ -3,7 +3,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import sharp from "sharp"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { requireStoredAssetSource } from "../support/asset-source.ts"
 import type { ContextExcerpt } from "../../src/core/input-context.ts"
 import { createUserInput } from "../../src/core/user-input.ts"
 import { draftToEditorParts } from "../../src/gui/input-draft.ts"
@@ -20,6 +19,7 @@ import {
 import { handleServerControlRequest } from "../../src/server/server-process.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
+import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { readRequestAsset } from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -113,7 +113,7 @@ const excerpts: readonly ContextExcerpt[] = [
 ]
 
 describe("structured context and ephemeral forks", () => {
-  it("retains external URLs through admission, restart, edit forks and side chats", async () => {
+  it("retains external URLs through admission, restart, edit reverts and side chats", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
@@ -157,21 +157,20 @@ describe("structured context and ephemeral forks", () => {
     expect(
       events.value.events.find((event) => event.type === "input.admitted"),
     ).toMatchObject({ data: { content } })
-    const fork = await context.app.handlers.forkSession({
+    const reverted = await context.app.handlers.revertSession({
       sessionId: id,
       atInputId: admitted.value.inputId,
       reason: "edit",
       modelSelection: { provider: "openai", model: "gpt-5" },
       content: { ...content, text: `${content.text} again` },
     })
-    if (!fork.ok) throw new Error(fork.error.message)
+    if (!reverted.ok) throw new Error(reverted.error.message)
+    expect(reverted.value.session.id).toBe(id)
     await until(
-      () =>
-        context.app.threadManager.getThread(fork.value.session.id)?.status ===
-        "idle",
+      () => context.app.threadManager.getThread(id)?.status === "idle",
     )
     const side = await context.app.sideChats.create({
-      sourceSessionId: fork.value.session.id,
+      sourceSessionId: id,
     })
     await context.app.sideChats.send({
       sideChatId: side.id,
@@ -190,10 +189,10 @@ describe("structured context and ephemeral forks", () => {
       expect(images).toHaveLength(1)
       expect(images[0]).toMatchObject({ file: source, sizeBytes: 0 })
     }
+    await context.app.sideChats.remove(side.id)
     expect(
       await context.app.handlers.deleteSession({ sessionId: id }),
     ).toMatchObject({ ok: true })
-    await context.app.sideChats.remove(side.id)
   })
   it.each([
     "steer",
@@ -522,6 +521,10 @@ describe("structured context and ephemeral forks", () => {
     }
     const accepted = await submit(content)
     if (!accepted.ok) throw new Error(accepted.error.message)
+    const promoteRetry = vi.spyOn(
+      context.app.rolloutAssets,
+      "promoteAttachments",
+    )
     expect(await submit(content)).toMatchObject(
       route === "queue"
         ? { ok: true, value: accepted.value }
@@ -540,6 +543,8 @@ describe("structured context and ephemeral forks", () => {
         ),
       }),
     ).toMatchObject({ ok: false, error: { code: "conflict" } })
+    if (route === "steer") expect(promoteRetry).not.toHaveBeenCalled()
+    promoteRetry.mockRestore()
     release()
     await until(
       () =>
@@ -589,6 +594,18 @@ describe("structured context and ephemeral forks", () => {
     expect(await context.app.rolloutAssets.read(storedPdf.file)).toEqual(
       pdfBytes,
     )
+    if (route === "steer") {
+      const promoteAfterRestart = vi.spyOn(
+        context.app.rolloutAssets,
+        "promoteAttachments",
+      )
+      expect(await submit(content)).toMatchObject({
+        ok: false,
+        error: { code: "conflict", details: { reason: "request_conflict" } },
+      })
+      expect(promoteAfterRestart).not.toHaveBeenCalled()
+      promoteAfterRestart.mockRestore()
+    }
     expect(
       await context.app.handlers.admitInput({
         sessionId: id,
@@ -598,7 +615,7 @@ describe("structured context and ephemeral forks", () => {
       }),
     ).toMatchObject({ ok: false, error: { code: "conflict" } })
     if (route === "direct") {
-      const foreign = await context.app.handlers.forkSession({
+      const foreign = await context.app.handlers.revertSession({
         sessionId: id,
         atInputId: admission.data.inputId,
         reason: "edit",
@@ -616,32 +633,28 @@ describe("structured context and ephemeral forks", () => {
         ok: false,
         error: { code: "invalid_input" },
       })
-      const forked = await context.app.handlers.forkSession({
+      const reverted = await context.app.handlers.revertSession({
         sessionId: id,
         atInputId: admission.data.inputId,
         reason: "edit",
         content: inputFixture([storedPdf, { type: "text", text: "PDF first" }]),
       })
-      if (!forked.ok) throw new Error(forked.error.message)
+      if (!reverted.ok) throw new Error(reverted.error.message)
+      expect(reverted.value.session.id).toBe(id)
       await until(
-        () =>
-          context.app.threadManager.getThread(forked.value.session.id)
-            ?.status === "idle",
+        () => context.app.threadManager.getThread(id)?.status === "idle",
       )
-      expect(
-        await context.app.handlers.deleteSession({ sessionId: id }),
-      ).toMatchObject({ ok: true })
-      const fork = await context.app.threadStore.readThread(
-        forked.value.session.id,
-      )
-      const document = fork?.rollout.flatMap(({ item }) =>
+      await context.restart()
+      const stored = await context.app.threadStore.readThread(id)
+      expect(stored?.metadata.rolloutId).not.toBe(id)
+      const document = stored?.rollout.flatMap(({ item }) =>
         item.type === "response_item" && item.item.item.role === "user"
           ? item.item.item.content.filter((block) => block.type === "document")
           : [],
       )[0]
-      if (!document) throw new Error("Missing fork PDF")
+      if (!document) throw new Error("Missing reverted PDF")
       expect(requireStoredAssetSource(document.file).rolloutId).toBe(
-        forked.value.session.id,
+        stored?.metadata.rolloutId,
       )
       expect(await context.app.rolloutAssets.read(document.file)).toEqual(
         pdfBytes,
@@ -649,7 +662,7 @@ describe("structured context and ephemeral forks", () => {
     }
   })
 
-  it("retains edited image positions, rejects foreign assets, and copies source images across parent deletion", async () => {
+  it("retains edited image positions and copied assets across physical rollouts and restart", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
@@ -711,7 +724,8 @@ describe("structured context and ephemeral forks", () => {
     if (!firstImage || !secondImage)
       throw new Error("Missing durable source images")
     const beforeInvalid = await context.app.threadStore.listThreadIds()
-    const invalid = await context.app.handlers.forkSession({
+    const sourceStored = await context.app.threadStore.readThread(id)
+    const invalid = await context.app.handlers.revertSession({
       sessionId: id,
       atInputId: initial.value.inputId,
       reason: "edit",
@@ -728,9 +742,13 @@ describe("structured context and ephemeral forks", () => {
     })
     expect(invalid).toMatchObject({
       ok: false,
-      error: { message: expect.stringContaining("edited source input") },
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining("attachments from the source input"),
+      },
     })
     expect(await context.app.threadStore.listThreadIds()).toEqual(beforeInvalid)
+    expect(await context.app.threadStore.readThread(id)).toEqual(sourceStored)
     let releaseReceipt!: () => void
     const receiptGate = new Promise<void>((resolve) => {
       releaseReceipt = resolve
@@ -740,15 +758,15 @@ describe("structured context and ephemeral forks", () => {
       finishPublication = resolve
     })
     let heldReceipt = false
-    const forkThread = context.app.threadManager.forkThread.bind(
+    const revertThread = context.app.threadManager.revertThread.bind(
       context.app.threadManager,
     )
-    const forkSpy = vi
-      .spyOn(context.app.threadManager, "forkThread")
+    const revertSpy = vi
+      .spyOn(context.app.threadManager, "revertThread")
       .mockImplementationOnce(async (input) => {
-        const forked = await forkThread(input)
-        const nextEvent = forked.thread.nextEvent.bind(forked.thread)
-        forked.thread.nextEvent = async () => {
+        const reverted = await revertThread(input)
+        const nextEvent = reverted.thread.nextEvent.bind(reverted.thread)
+        reverted.thread.nextEvent = async () => {
           const event = await nextEvent()
           if (
             event?.type === "rollout.appended" &&
@@ -758,19 +776,19 @@ describe("structured context and ephemeral forks", () => {
             )
           ) {
             heldReceipt = true
-            // The fork response publishes its replay while this receipt is queued.
+            // The revert response publishes its replay while this receipt is queued.
             await receiptGate
           }
           if (event?.type === "turn.completed") finishPublication()
           return event
         }
-        return forked
+        return reverted
       })
     cleanups.push(async () => {
       releaseReceipt()
-      forkSpy.mockRestore()
+      revertSpy.mockRestore()
     })
-    const edited = await context.app.handlers.forkSession({
+    const edited = await context.app.handlers.revertSession({
       sessionId: id,
       atInputId: initial.value.inputId,
       reason: "edit",
@@ -787,10 +805,10 @@ describe("structured context and ephemeral forks", () => {
     await until(() => heldReceipt)
     releaseReceipt()
     await publicationFinished
-    forkSpy.mockRestore()
-    const childId = edited.value.session.id
+    revertSpy.mockRestore()
+    expect(edited.value.session.id).toBe(id)
     await until(
-      () => context.app.threadManager.getThread(childId)?.status === "idle",
+      () => context.app.threadManager.getThread(id)?.status === "idle",
     )
     const user = requests
       .at(-1)
@@ -809,17 +827,21 @@ describe("structured context and ephemeral forks", () => {
         },
       ],
     })
-    const stored = await context.app.threadStore.readThread(childId)
-    const childInput = stored?.rollout.find(
+    const stored = await context.app.threadStore.readThread(id)
+    expect(stored?.metadata.rolloutId).not.toBe(
+      sourceStored?.metadata.rolloutId,
+    )
+    expect(await context.app.threadStore.listThreadIds()).toEqual(beforeInvalid)
+    const editedInput = stored?.rollout.find(
       ({ item }) =>
         item.type === "response_item" && item.item.item.role === "user",
     )?.item
     if (
-      childInput?.type !== "response_item" ||
-      childInput.item.item.role !== "user"
+      editedInput?.type !== "response_item" ||
+      editedInput.item.item.role !== "user"
     )
-      throw new Error("Missing child input")
-    const copied = childInput.item.item.content.filter(
+      throw new Error("Missing edited input")
+    const copied = editedInput.item.item.content.filter(
       (part) => part.type === "image",
     )
     expect(
@@ -827,40 +849,13 @@ describe("structured context and ephemeral forks", () => {
     ).toEqual(["second.png", "first.png"])
     expect(
       copied.map((part) => requireStoredAssetSource(part.file)?.rolloutId),
-    ).toEqual([childId, childId])
-    const removed = await context.app.handlers.forkSession({
-      sessionId: childId,
-      atInputId: childInput.item.id,
-      reason: "edit",
-      modelSelection: { provider: "openai", model: "gpt-6-astra" },
-      content: createUserInput("remove the images"),
-    })
-    if (!removed.ok) throw new Error(removed.error.message)
-    await until(
-      () =>
-        context.app.threadManager.getThread(removed.value.session.id)
-          ?.status === "idle",
-    )
-    expect(
-      requests
-        .at(-1)
-        ?.messages.filter(
-          (message) => message.role === "user" && message.context === undefined,
-        )
-        .at(-1),
-    ).toEqual({
-      role: "user",
-      content: [{ type: "text", text: "remove the images" }],
-    })
-    expect(
-      await context.app.handlers.deleteSession({ sessionId: id }),
-    ).toMatchObject({ ok: true })
+    ).toEqual([stored?.metadata.rolloutId, stored?.metadata.rolloutId])
     for (const image of copied) {
       if (!image.file) throw new Error("Missing copied image reference")
       expect(await context.app.rolloutAssets.read(image.file)).toEqual(bytes)
     }
     await context.restart()
-    await admit(context.app, childId, "fork_resume", "continue")
+    await admit(context.app, id, "revert_resume", "continue")
     expect(
       requests
         .at(-1)
@@ -882,6 +877,31 @@ describe("structured context and ephemeral forks", () => {
         },
       ],
     })
+    const removed = await context.app.handlers.revertSession({
+      sessionId: id,
+      atInputId: editedInput.item.id,
+      reason: "edit",
+      modelSelection: { provider: "openai", model: "gpt-6-astra" },
+      content: createUserInput("remove the images"),
+    })
+    if (!removed.ok) throw new Error(removed.error.message)
+    expect(removed.value.session.id).toBe(id)
+    await until(
+      () => context.app.threadManager.getThread(id)?.status === "idle",
+    )
+    const removedStored = await context.app.threadStore.readThread(id)
+    expect(removedStored?.metadata.rolloutId).not.toBe(
+      stored?.metadata.rolloutId,
+    )
+    expect(
+      requests
+        .at(-1)
+        ?.messages.filter(
+          (message) => message.role === "user" && message.context === undefined,
+        ),
+    ).toEqual([
+      { role: "user", content: [{ type: "text", text: "remove the images" }] },
+    ])
   })
 
   it("resumes authored text and portable media after restart", async () => {
@@ -1012,7 +1032,7 @@ describe("structured context and ephemeral forks", () => {
     })
   })
 
-  it("keeps user text clean across model hydration, restart, replay, and edit forks", async () => {
+  it("keeps user text clean across model hydration, restart, replay, and edit reverts", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
@@ -1120,7 +1140,7 @@ describe("structured context and ephemeral forks", () => {
         },
       ],
     })
-    const forked = await context.app.handlers.forkSession({
+    const reverted = await context.app.handlers.revertSession({
       sessionId: id,
       atInputId: inputId,
       reason: "edit",
@@ -1128,17 +1148,17 @@ describe("structured context and ephemeral forks", () => {
         { type: "text" as const, text: "Fresh question" },
       ]),
     })
-    if (!forked.ok) throw new Error(forked.error.message)
+    if (!reverted.ok) throw new Error(reverted.error.message)
+    expect(reverted.value.session.id).toBe(id)
     await until(
-      () =>
-        context.app.threadManager.getThread(forked.value.session.id)?.status ===
-        "idle",
+      () => context.app.threadManager.getThread(id)?.status === "idle",
     )
-    const child = await context.app.threadStore.readThread(
-      forked.value.session.id,
+    const revertedStored = await context.app.threadStore.readThread(id)
+    expect(revertedStored?.metadata.rolloutId).not.toBe(
+      stored?.metadata.rolloutId,
     )
     expect(
-      child?.rollout.find(
+      revertedStored?.rollout.find(
         ({ item }) =>
           item.type === "response_item" && item.item.id.startsWith("input_"),
       )?.item,

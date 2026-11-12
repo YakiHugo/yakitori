@@ -3,9 +3,9 @@ import type {
   AppSessionEventEnvelope,
   EventEnvelope,
   EventMetadata,
-  ForkReason,
   InputRole,
   ModelSelection,
+  RevertReason,
   TokenUsage,
 } from "./events.ts"
 import type { GoalStatus, ThreadGoal } from "./goal.ts"
@@ -45,18 +45,18 @@ export type ApiCreateSessionResponse = {
   readonly event: EventEnvelope
 }
 
-export type ApiForkSessionRequest = {
-  readonly atInputId: string
-  readonly reason: ForkReason
-  readonly content?: InputContent
-  readonly modelSelection?: ModelSelection
-}
+export type ApiRevertSessionRequest = Readonly<{
+  atInputId: string
+  reason: RevertReason
+  content?: InputContent
+  modelSelection?: ModelSelection
+}>
 
-export type ApiForkSessionResponse = {
-  readonly session: ApiSessionDetail
-  readonly historyEndSeqExclusive: number
-  readonly events: readonly AppSessionEventEnvelope[]
-}
+export type ApiRevertSessionResponse = Readonly<{
+  session: ApiSessionDetail
+  historyEndSeqExclusive: number
+  events: readonly AppSessionEventEnvelope[]
+}>
 
 export type ApiListSessionsResponse = {
   readonly sessions: readonly ApiSessionSummary[]
@@ -401,8 +401,9 @@ export type ApiSessionSummary = Readonly<{
   archived?: boolean
   sectionId?: string
   sectionPosition?: number
-  navigationId?: string
   id: string
+  // Revert preserves id and replaces the history sequence identified here.
+  rolloutId: string
   conversationId: string
   seq: number
   createdAt: string
@@ -422,8 +423,6 @@ export type ApiSessionSummary = Readonly<{
   mateId?: string
   mateRevisionId?: string
   parentSessionId?: string
-  forkedFromInputId?: string
-  forkReason?: ForkReason
   metadata?: EventMetadata
 }>
 

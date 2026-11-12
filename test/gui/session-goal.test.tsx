@@ -33,6 +33,7 @@ const goal: ThreadGoal = {
 }
 const session: ApiSessionDetail = {
   id: "session_1",
+  rolloutId: "rollout_1",
   conversationId: "conversation_1",
   seq: 1,
   createdAt: goal.createdAt,

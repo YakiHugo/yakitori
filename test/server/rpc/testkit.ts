@@ -195,9 +195,9 @@ export function createFakeHandlers(
     listSkills: async () => okResult({ skills: [] }),
     deleteSession: async () => okResult({ sessionId: "session_1" }),
     closeSession: async () => okResult({ sessionId: "session_1" }),
-    forkSession: async () =>
+    revertSession: async () =>
       okResult({
-        session: makeSessionDetail("session_forked"),
+        session: makeSessionDetail("session_1"),
         historyEndSeqExclusive: 1,
         events: [],
       }),
@@ -323,6 +323,7 @@ export function makeSessionDetail(
 ): ApiSessionDetail {
   return {
     id: sessionId,
+    rolloutId: `rollout_${sessionId}`,
     conversationId: "conversation_1",
     seq: 1,
     createdAt: "2026-09-04T00:00:00.000Z",

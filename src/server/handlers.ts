@@ -32,7 +32,6 @@ import {
   AttachmentConflictError,
   createRequestId,
   type EventMetadata,
-  ForkReason,
   type InputContent,
   InputRole,
   isGeneratedSessionId,
@@ -41,6 +40,7 @@ import {
   isRequestId,
   isYakitoriError,
   type ModelSelection,
+  RevertReason,
   type RolloutAssets,
   type StoredEventEnvelope,
   type TokenUsage,
@@ -83,7 +83,6 @@ import {
   type ApiDeleteSessionResponse,
   type ApiDisplayWindowResponse,
   ApiErrorCode,
-  type ApiForkSessionResponse,
   type ApiListAgentsResponse,
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
@@ -91,6 +90,7 @@ import {
   type ApiReadSessionResponse,
   type ApiReadUsageResponse,
   type ApiResolvePermissionResponse,
+  type ApiRevertSessionResponse,
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
   type ApiSessionDetail,
@@ -139,6 +139,7 @@ export type ThreadServerHandlerOptions = {
     publishTransient(
       event: import("../runtime/live-events.ts").LiveSessionEvent,
     ): void
+    resetSession(sessionId: string): void
   }
   readonly sessionDefaults?: SessionCreateDefaults
   readonly resolvePermission?: (input: {
@@ -174,6 +175,7 @@ export type ThreadServerHandlerOptions = {
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly onRootTurnCompleted?: (event: SessionCompletedNotification) => void
   readonly notifySidebarChanged?: (sessionId: string) => void
+  readonly notifySessionHistoryReset?: (sessionId: string) => void
 }
 
 export type ServerHandlers = {
@@ -209,9 +211,9 @@ export type ServerHandlers = {
   closeSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiDeleteSessionResponse>>
-  forkSession(
+  revertSession(
     input: unknown,
-  ): Promise<ApplicationResult<ApiForkSessionResponse>>
+  ): Promise<ApplicationResult<ApiRevertSessionResponse>>
   admitInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
   admitQuestionAnswer(
     input: unknown,
@@ -715,16 +717,7 @@ export function createThreadServerHandlers(
         if (closing || inputQueue.list(thread.id).length > 0) return false
         const presentation = await options.store.sessionPresentation(thread.id)
         if (presentation.archived) return false
-        const agent = thread.snapshot().metadata.metadata?.agent
-        const subagent =
-          typeof agent === "object" &&
-          agent !== null &&
-          "kind" in agent &&
-          agent.kind === "subagent"
-        // Historical edit heads have no navigation entry. They must not keep
-        // pursuing an inherited goal after the visible conversation moves on.
         return (
-          (subagent || presentation.navigationId !== undefined) &&
           inputQueue.list(thread.id).length === 0 &&
           ![...admissionTails.keys()].some((key) =>
             key.startsWith(`${thread.id}\0`),
@@ -1452,15 +1445,6 @@ export function createThreadServerHandlers(
         if ((await options.store.readThread(sessionId)) === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-        if (
-          (await options.store.sessionPresentation(sessionId)).navigationId !==
-            undefined &&
-          (await options.store.listThreadIds()).includes(sessionId)
-        ) {
-          // Keep an explicit head while deleting, so retained edit history can
-          // never reappear as an unrelated conversation after the head is gone.
-          await options.store.setSessionHead(sessionId, sessionId)
-        }
         await queuedItems.withLock(sessionId, async () => {
           await (options.discardThread?.(sessionId) ??
             options.manager.discardThread(sessionId))
@@ -1486,9 +1470,9 @@ export function createThreadServerHandlers(
       }
     },
 
-    async forkSession(input) {
+    async revertSession(input) {
       try {
-        const request = requireForkSessionRequest(
+        const request = requireRevertSessionRequest(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
@@ -1500,139 +1484,145 @@ export function createThreadServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const source = await requireStoredThread(
-          options.store,
-          request.sessionId,
-        )
-        const beforeTurnId = turnIdForInput(source, request.atInputId)
-        const sourceInput = source.rollout.find(
-          ({ item }) =>
-            item.type === "response_item" && item.item.id === request.atInputId,
-        )?.item
-        let forkContent: InputContent | undefined
-        if (request.content !== undefined) {
-          if (
-            sourceInput?.type !== "response_item" ||
-            sourceInput.item.item.role !== "user"
-          )
-            throw invalidInput("Fork input must be a user message.")
-          const sourceContent = modelUserInputContent(sourceInput.item.item)
-          const sourceAttachments = inputContentAttachments(sourceContent)
-          forkContent = {
-            ...request.content,
-            ...(request.content.references === undefined &&
-            sourceContent.references !== undefined
-              ? { references: sourceContent.references }
-              : {}),
-          }
-          for (const attachment of inputContentAttachments(forkContent)) {
-            if (
-              !sourceAttachments.some(
-                (original) =>
-                  assetSourceKey(original.file) ===
-                    assetSourceKey(attachment.file) &&
-                  original.name === attachment.name &&
-                  original.mediaType === attachment.mediaType &&
-                  original.sizeBytes === attachment.sizeBytes,
-              )
-            )
-              throw invalidInput(
-                "Fork attachments must reference attachments from the edited source input.",
-              )
-          }
-        }
-        await options.store.setSessionHead(request.sessionId, request.sessionId)
-        const previouslyDeferred =
-          options.goals?.deferContinuation(request.sessionId, true) ?? false
-        let forked: Awaited<ReturnType<ThreadManager["forkThread"]>>
-        try {
-          forked = await options.manager.forkThread({
-            sourceThreadId: request.sessionId,
-            beforeTurnId,
-            forkedFromInputId: request.atInputId,
-            forkReason: request.reason,
-          })
-        } catch (error) {
-          options.goals?.deferContinuation(
+        return await queuedItems.withLock(request.sessionId, async () => {
+          const source = await requireStoredThread(
+            options.store,
             request.sessionId,
-            previouslyDeferred,
           )
-          throw error
-        }
-        const forkRolloutId = forked.thread.snapshot().metadata.rolloutId
-        let submissionId: string | undefined
-        try {
-          options.goals?.fork(request.sessionId, forked.thread.id)
-          await ensureEventPump(forked.thread)
-          if (forkContent !== undefined) {
-            submissionId = createRequestId()
-            const attachments = inputContentAttachments(forkContent)
-            const copied =
-              attachments.length === 0
-                ? undefined
-                : await requireRolloutAssets(options).copyAttachments(
-                    forkRolloutId,
-                    submissionId,
-                    attachments,
-                  )
-            const submitted = await forked.thread.startIfIdle({
-              submissionId,
-              content:
-                copied === undefined
-                  ? forkContent
-                  : replaceInputAttachments(forkContent, copied.attachments),
-              ...(request.modelSelection === undefined
-                ? {}
-                : { modelSelection: request.modelSelection }),
-            })
-            if (submitted.type !== "started") {
-              await options.rolloutAssets?.discardRequestAttachments(
-                forkRolloutId,
-                submissionId,
+          const beforeTurnId = turnIdForInput(source, request.atInputId)
+          const sourceInput = source.rollout.find(
+            ({ item }) =>
+              item.type === "response_item" &&
+              item.item.id === request.atInputId,
+          )?.item
+          let editedContent: InputContent | undefined
+          if (request.content !== undefined) {
+            if (
+              sourceInput?.type !== "response_item" ||
+              sourceInput.item.item.role !== "user"
+            )
+              throw invalidInput("Edited input must be a user message.")
+            const sourceContent = modelUserInputContent(sourceInput.item.item)
+            const sourceAttachments = inputContentAttachments(sourceContent)
+            editedContent = {
+              ...request.content,
+              ...(request.content.references === undefined &&
+              sourceContent.references !== undefined
+                ? { references: sourceContent.references }
+                : {}),
+            }
+            for (const attachment of inputContentAttachments(editedContent)) {
+              if (
+                !sourceAttachments.some(
+                  (original) =>
+                    assetSourceKey(original.file) ===
+                      assetSourceKey(attachment.file) &&
+                    original.name === attachment.name &&
+                    original.mediaType === attachment.mediaType &&
+                    original.sizeBytes === attachment.sizeBytes,
+                )
               )
-              throw conflict(`Fork input was not started: ${submitted.type}.`)
+                throw invalidInput(
+                  "Edited attachments must reference attachments from the source input.",
+                )
             }
           }
-          await options.store.flushThread(forked.thread.id)
-          await options.store.setSessionHead(
-            request.sessionId,
-            forked.thread.id,
-          )
-        } catch (error) {
+          const previouslyDeferred =
+            options.goals?.deferContinuation(request.sessionId, true) ?? false
+          let replaced = false
+          let resubmitted = false
           try {
-            await options.manager.discardThread(forked.thread.id)
-            options.goals?.clear(forked.thread.id)
-          } catch (cleanupError) {
-            reportOperationalFailure(reporter, {
-              component: "thread-handlers",
-              operation: "rollback-fork",
-              cause: cleanupError,
-              sessionId: forked.thread.id,
+            const reverted = await options.manager.revertThread({
+              threadId: request.sessionId,
+              beforeTurnId,
+              onHistoryReplaced: async () => {
+                replaced = true
+                // Drain the old actor before resetting cursor and display state.
+                await Promise.all(
+                  [...pumps.entries()]
+                    .filter(([thread]) => thread.id === request.sessionId)
+                    .map(([, pump]) => pump),
+                )
+                publishedThrough.delete(request.sessionId)
+                for (const pending of [
+                  pendingInitialDrafts,
+                  pendingSteerDrafts,
+                  startingQueuedInputs,
+                ])
+                  for (const key of pending.keys())
+                    if (key.startsWith(`${request.sessionId}\0`))
+                      pending.delete(key)
+                queuedItems.deleteSession(request.sessionId)
+                options.eventHub?.resetSession(request.sessionId)
+                options.notifySessionHistoryReset?.(request.sessionId)
+              },
             })
+            const rolloutId = reverted.thread.snapshot().metadata.rolloutId
+            await ensureEventPump(reverted.thread)
+            if (editedContent !== undefined) {
+              const submissionId = createRequestId()
+              const attachments = inputContentAttachments(editedContent)
+              const copied =
+                attachments.length === 0
+                  ? undefined
+                  : await requireRolloutAssets(options).copyAttachments(
+                      rolloutId,
+                      submissionId,
+                      attachments,
+                    )
+              const submitted = await reverted.thread.startIfIdle({
+                submissionId,
+                content:
+                  copied === undefined
+                    ? editedContent
+                    : replaceInputAttachments(
+                        editedContent,
+                        copied.attachments,
+                      ),
+                ...(request.modelSelection === undefined
+                  ? {}
+                  : { modelSelection: request.modelSelection }),
+              })
+              if (submitted.type !== "started") {
+                await options.rolloutAssets?.discardRequestAttachments(
+                  rolloutId,
+                  submissionId,
+                )
+                throw conflict(
+                  `Edited input was not started: ${submitted.type}.`,
+                )
+              }
+              resubmitted = true
+            }
+            await options.store.flushThread(request.sessionId)
+            const stored = await requireStoredThread(
+              options.store,
+              request.sessionId,
+            )
+            const events = stored.rollout.map((record) =>
+              mapRolloutEvent(record, request.sessionId),
+            )
+            publishedThrough.set(request.sessionId, threadSeq(stored))
+            options.notifySidebarChanged?.(request.sessionId)
+            return ok({
+              session: await mapStoredThread(
+                stored,
+                reverted.thread,
+                queueOptions,
+              ),
+              historyEndSeqExclusive:
+                (reverted.result.historyEndSeqExclusive ?? 1) + 1,
+              events,
+            })
+          } finally {
+            options.goals?.deferContinuation(
+              request.sessionId,
+              replaced ? !resubmitted : previouslyDeferred,
+            )
           }
-          options.goals?.deferContinuation(
-            request.sessionId,
-            previouslyDeferred,
-          )
-          throw error
-        }
-        const stored = await requireStoredThread(
-          options.store,
-          forked.thread.id,
-        )
-        const events = stored.rollout.map((record) =>
-          mapRolloutEvent(record, forked.thread.id),
-        )
-        publishedThrough.set(forked.thread.id, threadSeq(stored))
-        options.eventHub?.publishDurable(events)
-        return ok({
-          session: await mapStoredThread(stored, forked.thread, queueOptions),
-          historyEndSeqExclusive:
-            (forked.result.historyEndSeqExclusive ?? 1) + 1,
-          events,
         })
       } catch (error) {
-        return fail(error, reporter, "fork-session")
+        return fail(error, reporter, "revert-session")
       }
     },
 
@@ -2038,70 +2028,95 @@ export function createThreadServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const thread = await resumeRequired(request.sessionId)
-        const rolloutId = thread.snapshot().metadata.rolloutId
-        const promoted = await promoteRequestAttachments(
-          rolloutId,
+        return await withAdmissionLock(
+          request.sessionId,
           request.requestId,
-          request.content,
-        )
-        const steerKey = `${request.sessionId}\0${request.requestId}`
-        const submitted = await thread
-          .steer(
-            {
-              submissionId: request.requestId,
-              content: promoted.content,
-              ...(request.modelSelection === undefined
-                ? {}
-                : { modelSelection: request.modelSelection }),
-              ...(request.metadata === undefined
-                ? {}
-                : { metadata: request.metadata }),
-            },
-            request.expectedTurnId,
-          )
-          .catch(async (error: unknown) => {
-            await promoted.rollback?.()
-            throw error
-          })
-        if (submitted.type === "not_submitted") {
-          await promoted.rollback?.()
-          throw conflict(`Input was not submitted: ${submitted.reason}.`, {
-            reason: submitted.reason,
-          })
-        }
-        if (inputContentAttachments(request.content).length !== 0) {
-          pendingSteerDrafts.set(steerKey, [
-            ...(pendingSteerDrafts.get(steerKey) ?? []),
-            request.content,
-          ])
-          const stored = await options.store.readThread(request.sessionId)
-          const recorded = stored?.rollout.some(
-            ({ item }) =>
-              item.type === "response_item" &&
-              item.item.turnId === request.requestId &&
-              item.item.item.role === "user" &&
-              item.item.item.context === undefined,
-          )
-          if (recorded) {
-            const drafts = pendingSteerDrafts.get(steerKey) ?? []
-            pendingSteerDrafts.delete(steerKey)
-            for (const draft of drafts)
-              await discardAdmittedDraftAttachments(
-                request.sessionId,
-                request.requestId,
-                draft,
+          async () => {
+            const thread = await resumeRequired(request.sessionId)
+            const steerKey = `${request.sessionId}\0${request.requestId}`
+            // A consumed steering draft can disappear while attachment promotion
+            // reads it. Reject accepted human request IDs before touching assets.
+            const stored = await options.store.readThread(request.sessionId)
+            if (
+              pendingSteerDrafts.has(steerKey) ||
+              stored?.rollout.some(
+                ({ item }) =>
+                  (item.type === "turn_started" &&
+                    item.turnId === request.requestId) ||
+                  (item.type === "response_item" &&
+                    item.item.turnId === request.requestId &&
+                    item.item.item.role === "user" &&
+                    item.item.item.context === undefined),
               )
-          }
-        }
-        // Steering acceptance is ephemeral. Preserve draft assets until the
-        // model records this input, so a lost response or an interrupted Turn
-        // leaves the client's draft retryable.
-        return ok({
-          requestId: request.requestId,
-          turnId: submitted.turnId,
-          content: promoted.content,
-        })
+            ) {
+              throw conflict("Input was not submitted: request_conflict.", {
+                reason: "request_conflict",
+              })
+            }
+            const rolloutId = thread.snapshot().metadata.rolloutId
+            const promoted = await promoteRequestAttachments(
+              rolloutId,
+              request.requestId,
+              request.content,
+            )
+            const submitted = await thread
+              .steer(
+                {
+                  submissionId: request.requestId,
+                  content: promoted.content,
+                  ...(request.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: request.modelSelection }),
+                  ...(request.metadata === undefined
+                    ? {}
+                    : { metadata: request.metadata }),
+                },
+                request.expectedTurnId,
+              )
+              .catch(async (error: unknown) => {
+                await promoted.rollback?.()
+                throw error
+              })
+            if (submitted.type === "not_submitted") {
+              await promoted.rollback?.()
+              throw conflict(`Input was not submitted: ${submitted.reason}.`, {
+                reason: submitted.reason,
+              })
+            }
+            if (inputContentAttachments(request.content).length !== 0) {
+              pendingSteerDrafts.set(steerKey, [
+                ...(pendingSteerDrafts.get(steerKey) ?? []),
+                request.content,
+              ])
+              const stored = await options.store.readThread(request.sessionId)
+              const recorded = stored?.rollout.some(
+                ({ item }) =>
+                  item.type === "response_item" &&
+                  item.item.turnId === request.requestId &&
+                  item.item.item.role === "user" &&
+                  item.item.item.context === undefined,
+              )
+              if (recorded) {
+                const drafts = pendingSteerDrafts.get(steerKey) ?? []
+                pendingSteerDrafts.delete(steerKey)
+                for (const draft of drafts)
+                  await discardAdmittedDraftAttachments(
+                    request.sessionId,
+                    request.requestId,
+                    draft,
+                  )
+              }
+            }
+            // Steering acceptance is ephemeral. Preserve draft assets until the
+            // model records this input, so a lost response or an interrupted Turn
+            // leaves the client's draft retryable.
+            return ok({
+              requestId: request.requestId,
+              turnId: submitted.turnId,
+              content: promoted.content,
+            })
+          },
+        )
       } catch (error) {
         return fail(error, reporter, "steer-input")
       }
@@ -2403,10 +2418,8 @@ function mapThreadSummary(
       : { sectionPosition: thread.sectionPosition }),
     ...(thread.sectionId === undefined ? {} : { sectionId: thread.sectionId }),
     id: thread.id,
+    rolloutId: thread.rolloutId,
     conversationId: thread.conversationId,
-    ...(thread.navigationId === undefined
-      ? {}
-      : { navigationId: thread.navigationId }),
     seq: thread.seq + 1,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
@@ -2426,12 +2439,6 @@ function mapThreadSummary(
     ...(thread.parentThreadId === undefined
       ? {}
       : { parentSessionId: thread.parentThreadId }),
-    ...(thread.forkedFromInputId === undefined
-      ? {}
-      : { forkedFromInputId: thread.forkedFromInputId }),
-    ...(thread.forkReason === undefined
-      ? {}
-      : { forkReason: thread.forkReason }),
     ...(thread.metadata === undefined ? {} : { metadata: thread.metadata }),
   }
 }
@@ -2844,10 +2851,13 @@ function requireDeleteSessionRequest(input: unknown) {
   }
 }
 
-function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
-  const record = requireRecord(input, "Session fork request must be an object.")
+function requireRevertSessionRequest(input: unknown, maxInputBytes: number) {
+  const record = requireRecord(
+    input,
+    "Session revert request must be an object.",
+  )
   const reason = record.reason
-  if (reason !== ForkReason.Undo && reason !== ForkReason.Edit) {
+  if (reason !== RevertReason.Undo && reason !== RevertReason.Edit) {
     throw invalidInput('reason must be "undo" or "edit".', { field: "reason" })
   }
   const content =
@@ -2855,18 +2865,18 @@ function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
       ? undefined
       : requireAdmissionInputContent(record.content, maxInputBytes)
   const modelSelection = optionalModelSelectionField(record, "modelSelection")
-  if (reason === ForkReason.Edit && content === undefined) {
+  if (reason === RevertReason.Edit && content === undefined) {
     throw invalidInput("content is required when reason is edit.", {
       field: "content",
     })
   }
-  if (reason === ForkReason.Undo && content !== undefined) {
+  if (reason === RevertReason.Undo && content !== undefined) {
     throw invalidInput("content is not allowed when reason is undo.", {
       field: "content",
     })
   }
   if (
-    reason === ForkReason.Undo &&
+    reason === RevertReason.Undo &&
     modelSelection.modelSelection !== undefined
   ) {
     throw invalidInput("modelSelection is not allowed when reason is undo.", {

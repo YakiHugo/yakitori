@@ -91,6 +91,7 @@ function project(id: string, root: string): ApiProject {
 function session(id: string, workingDirectory: string): ApiSessionDetail {
   return {
     id,
+    rolloutId: `rollout_${id}`,
     conversationId: id,
     seq: 1,
     createdAt: "2026-09-19T00:00:00Z",

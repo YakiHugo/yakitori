@@ -8,11 +8,12 @@ import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
 import type { GitInfo, ModelContextSettings, StoredThread } from "./rollout.ts"
 import { Session } from "./session.ts"
-import type { SessionTaskRunner } from "./session-task.ts"
 import { SessionStatus } from "./session-io.ts"
+import type { SessionTaskRunner } from "./session-task.ts"
 import {
-  PersistContext,
   type CreateThreadMetadata,
+  PersistContext,
+  type RevertThreadResult,
   type ThreadStore,
   type ThreadStoreForkResult,
   type ThreadStoreListInput,
@@ -44,8 +45,6 @@ export type ForkThreadInput = {
   readonly beforeTurnId: string
   readonly title?: string
   readonly metadata?: EventMetadata
-  readonly forkedFromInputId?: string
-  readonly forkReason?: import("../kernel/events.ts").ForkReason
 }
 
 export type ThreadManagerOptions = {
@@ -83,6 +82,7 @@ export class ThreadManager {
   readonly #loads = new Map<string, Promise<AgentThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
   readonly #closingThreads = new Set<string>()
+  readonly #revertingThreads = new Set<string>()
   readonly #lastUsed = new Map<string, number>()
   readonly #maxResidentSubagentThreads: number
   #useSequence = 0
@@ -261,6 +261,8 @@ export class ThreadManager {
 
   resumeThread(threadId: string): Promise<AgentThread | undefined> {
     this.#requireOpen()
+    if (this.#revertingThreads.has(threadId))
+      return Promise.reject(new Error(`Thread ${threadId} is being reverted.`))
     if (this.#discarding.has(threadId)) {
       return Promise.reject(new Error(`Thread ${threadId} is being discarded.`))
     }
@@ -310,8 +312,7 @@ export class ThreadManager {
       const {
         rolloutId: _rolloutId,
         historyBase: _historyBase,
-        forkReason: _forkReason,
-        forkedFromInputId: _forkedFromInputId,
+        previousRolloutId: _previousRolloutId,
         ...forkableMetadata
       } = sourceMetadata
       const now = new Date().toISOString()
@@ -322,12 +323,6 @@ export class ThreadManager {
         updatedAt: now,
         parentThreadId: source.id,
         forkedFromTurnId: input.beforeTurnId,
-        ...(input.forkedFromInputId === undefined
-          ? {}
-          : { forkedFromInputId: input.forkedFromInputId }),
-        ...(input.forkReason === undefined
-          ? {}
-          : { forkReason: input.forkReason }),
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
       }
@@ -354,6 +349,43 @@ export class ThreadManager {
         await this.#store.discardThread(target.id).catch(() => undefined)
         await this.#store.deleteThread(target.id)
         throw error
+      }
+    })
+  }
+
+  revertThread(
+    input: Readonly<{
+      threadId: string
+      beforeTurnId: string
+      onHistoryReplaced?(result: RevertThreadResult): Promise<void>
+    }>,
+  ): Promise<{ thread: AgentThread; result: RevertThreadResult }> {
+    this.#requireOpen()
+    if (this.#revertingThreads.has(input.threadId))
+      throw new Error(`Thread ${input.threadId} is already being reverted.`)
+    this.#revertingThreads.add(input.threadId)
+    return this.#trackStarting(async () => {
+      try {
+        await this.#loads.get(input.threadId)
+        const metadata = await this.#store.readThreadMetadata(input.threadId)
+        if (metadata === undefined)
+          throw new Error(`Thread ${input.threadId} was not found.`)
+        await this.closeThread(input.threadId)
+        const result = await this.#store.revertThread({
+          threadId: input.threadId,
+          beforeTurnId: input.beforeTurnId,
+          expectedRolloutId: metadata.rolloutId,
+        })
+        try {
+          await input.onHistoryReplaced?.(result)
+          this.#requireOpen()
+          return { thread: await this.#installStored(result.thread), result }
+        } catch (error) {
+          await this.#store.shutdownThread(input.threadId)
+          throw error
+        }
+      } finally {
+        this.#revertingThreads.delete(input.threadId)
       }
     })
   }

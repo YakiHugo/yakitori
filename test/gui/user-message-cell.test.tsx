@@ -30,7 +30,7 @@ import {
   InputRole,
 } from "../../src/kernel/events.ts"
 import type {
-  ApiForkSessionResponse,
+  ApiRevertSessionResponse,
   ApiSessionDetail,
 } from "../../src/server/protocol.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
@@ -212,7 +212,7 @@ describe("skill mentions", () => {
   })
 })
 
-describe("user message fork actions", () => {
+describe("user message revert actions", () => {
   it("offers only copy and edit actions below a message", () => {
     render(<UserMessageCell entry={entry} queued={false} />)
     expect(
@@ -224,24 +224,24 @@ describe("user message fork actions", () => {
 
   it("honors the configured send shortcut while editing a message", async () => {
     const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
+    const revertSession = vi.fn(async () => {})
     usePreferencesStore.setState({ sendShortcut: "mod-enter" })
-    useAppStore.setState({ forkSession })
+    useAppStore.setState({ revertSession })
     render(<UserMessageCell entry={entry} queued={false} />)
     await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
     await user.keyboard("{Enter}")
-    expect(forkSession).not.toHaveBeenCalled()
+    expect(revertSession).not.toHaveBeenCalled()
     await user.keyboard("{Control>}{Enter}{/Control}")
-    expect(forkSession).toHaveBeenCalledWith(
+    expect(revertSession).toHaveBeenCalledWith(
       "input_1",
       "edit",
       inputFixture(inputParts("Original request")),
     )
   })
-  it("edits and resubmits the message in a new branch", async () => {
+  it("edits and resubmits the message in the same session", async () => {
     const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
-    useAppStore.setState({ forkSession })
+    const revertSession = vi.fn(async () => {})
+    useAppStore.setState({ revertSession })
     render(<UserMessageCell entry={entry} queued={false} />)
 
     await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
@@ -249,17 +249,17 @@ describe("user message fork actions", () => {
     await pastePrompt(editor, "Replacement request", true)
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    expect(forkSession).toHaveBeenCalledWith(
+    expect(revertSession).toHaveBeenCalledWith(
       "input_1",
       "edit",
       inputFixture(inputParts("Replacement request")),
     )
   })
 
-  it("disables fork actions and edit controls while the session is busy", async () => {
+  it("disables revert actions and edit controls while the session is busy", async () => {
     const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
-    useAppStore.setState({ busy: true, forkSession })
+    const revertSession = vi.fn(async () => {})
+    useAppStore.setState({ busy: true, revertSession })
     render(<UserMessageCell entry={entry} queued={false} />)
 
     expect(
@@ -288,13 +288,13 @@ describe("user message fork actions", () => {
       true,
     )
     await user.keyboard("{Enter}")
-    expect(forkSession).not.toHaveBeenCalled()
+    expect(revertSession).not.toHaveBeenCalled()
   })
 
   it("blocks submitting an emptied edit unless attachments remain", async () => {
     const user = userEvent.setup()
-    const forkSession = vi.fn(async () => {})
-    useAppStore.setState({ forkSession })
+    const revertSession = vi.fn(async () => {})
+    useAppStore.setState({ revertSession })
     render(<UserMessageCell entry={entry} queued={false} />)
 
     await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
@@ -306,14 +306,14 @@ describe("user message fork actions", () => {
       true,
     )
     await user.keyboard("{Enter}")
-    expect(forkSession).not.toHaveBeenCalled()
+    expect(revertSession).not.toHaveBeenCalled()
   })
 })
 
 it("edits in place, cancels with Escape and preserves skill mentions when sending", async () => {
   const user = userEvent.setup()
-  const forkSession = vi.fn(async () => {})
-  useAppStore.setState({ forkSession })
+  const revertSession = vi.fn(async () => {})
+  useAppStore.setState({ revertSession })
   render(
     <UserMessageCell
       entry={{
@@ -332,7 +332,7 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
   expect(editor.textContent).toBe("Original request review")
   await user.keyboard("{Escape}")
   expect(screen.getByText("Original request")).toBeDefined()
-  expect(forkSession).not.toHaveBeenCalled()
+  expect(revertSession).not.toHaveBeenCalled()
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
   editor = screen.getByRole("textbox", { name: "Edit message" })
   await pastePrompt(
@@ -341,7 +341,7 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
     true,
   )
   await user.keyboard("{Enter}")
-  expect(forkSession).toHaveBeenCalledWith(
+  expect(revertSession).toHaveBeenCalledWith(
     "input_1",
     "edit",
     inputFixture(
@@ -350,10 +350,11 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
   )
 })
 
-it("keeps the edited draft until the replacement conversation is activated", async () => {
+it("keeps the edited draft until replacement history is activated in the same session", async () => {
   const user = userEvent.setup()
   const source: ApiSessionDetail = {
     id: "session_source",
+    rolloutId: "rollout_source",
     conversationId: "conversation_source",
     seq: 2,
     createdAt: entry.at,
@@ -369,21 +370,19 @@ it("keeps the edited draft until the replacement conversation is activated", asy
       tools: 0,
     },
   }
-  let completeFork!: (response: ApiForkSessionResponse) => void
-  const response = new Promise<ApiForkSessionResponse>((resolve) => {
-    completeFork = resolve
+  let completeRevert!: (response: ApiRevertSessionResponse) => void
+  const response = new Promise<ApiRevertSessionResponse>((resolve) => {
+    completeRevert = resolve
   })
   const replacement: ApiSessionDetail = {
     ...source,
-    id: "session_replacement",
-    parentSessionId: source.id,
-    forkedFromInputId: "input_1",
-    forkReason: "edit",
+    rolloutId: "rollout_replacement",
+    seq: 3,
   }
   fakeRef.current.respond = (method) => {
-    if (method === "session/fork") return response
+    if (method === "session/revert") return response
     if (method === "skill/list") return { skills: [] }
-    if (method === "session/list") return { sessions: [source, replacement] }
+    if (method === "session/list") return { sessions: [replacement] }
     throw new Error(`Unexpected RPC: ${method}`)
   }
   useAppStore.setState({
@@ -400,9 +399,9 @@ it("keeps the edited draft until the replacement conversation is activated", asy
     true,
   )
   await user.keyboard("{Enter}")
-  expect(fakeRef.current.requestsFor("session/fork")).toEqual([
+  expect(fakeRef.current.requestsFor("session/revert")).toEqual([
     {
-      method: "session/fork",
+      method: "session/revert",
       params: {
         sessionId: "session_source",
         atInputId: "input_1",
@@ -417,12 +416,12 @@ it("keeps the edited draft until the replacement conversation is activated", asy
     "Keep this draft",
   )
   await act(async () => {
-    completeFork({
+    completeRevert({
       session: replacement,
       historyEndSeqExclusive: 2,
       events: [
         createEventEnvelope({
-          sessionId: "session_replacement",
+          sessionId: source.id,
           seq: 2,
           event: {
             type: EventType.InputAdmitted,
@@ -439,7 +438,7 @@ it("keeps the edited draft until the replacement conversation is activated", asy
     })
     await response
   })
-  expect(useAppStore.getState().selection.sessionId).toBe("session_replacement")
+  expect(useAppStore.getState().selection.sessionId).toBe("session_source")
   expect(screen.queryByRole("textbox", { name: "Edit message" })).toBeNull()
   expect(screen.getByText("Keep this draft", { selector: "p" })).toBeDefined()
   expect(screen.queryByText("Original request")).toBeNull()

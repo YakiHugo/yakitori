@@ -10,7 +10,11 @@ import {
 } from "../../protocol/rpc-wire.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApplicationResult } from "../application-result.ts"
-import type { SessionDelivery, SessionEventHub } from "../event-hub.ts"
+import type {
+  SessionDelivery,
+  SessionEventHub,
+  SessionEventSubscription,
+} from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import {
   consoleOperationalFailureReporter,
@@ -92,6 +96,21 @@ export function createSessionSubscriptions(
     string,
     PendingServerRequest & { params: SessionPermissionRequestParams }
   >()
+  // Permission channels can outlive the last client subscription. Keep their
+  // reset observer until the final channel settles so an offline reset still
+  // retires answers against the previous history.
+  const permissionResetSubscriptions = new Map<
+    string,
+    SessionEventSubscription
+  >()
+
+  function releasePermissionResetSubscription(sessionId: string): void {
+    for (const request of pendingPermissionRequests.values()) {
+      if (request.params.sessionId === sessionId) return
+    }
+    permissionResetSubscriptions.get(sessionId)?.close()
+    permissionResetSubscriptions.delete(sessionId)
+  }
 
   function ensurePermissionRequest(
     sessionId: string,
@@ -112,7 +131,16 @@ export function createSessionSubscriptions(
       params,
     }
     pendingPermissionRequests.set(key, request)
+    if (!permissionResetSubscriptions.has(sessionId)) {
+      permissionResetSubscriptions.set(
+        sessionId,
+        options.eventHub.subscribe(sessionId, (delivery) => {
+          if (delivery.kind === "reset") resetSession(sessionId)
+        }),
+      )
+    }
     const settle = (answer: SessionPermissionRequestResult): void => {
+      if (pendingPermissionRequests.get(key) !== request) return
       void settlePermissionRequest(key, params, answer).then(
         undefined,
         onSettleFailure,
@@ -121,10 +149,12 @@ export function createSessionSubscriptions(
     void registered.response.then(
       (result) => settle(parseAnswer(result)),
       (error: unknown) => {
+        if (pendingPermissionRequests.get(key) !== request) return
         // A turn-transition abort means the Turn ended while nobody could
         // answer; the runtime already disposed of the wait, so stay silent.
         if (isTurnTransitionRejection(error)) {
           pendingPermissionRequests.delete(key)
+          releasePermissionResetSubscription(sessionId)
           return
         }
         // Errored or undelivered answers fail closed (Codex's
@@ -141,6 +171,7 @@ export function createSessionSubscriptions(
     answer: SessionPermissionRequestResult,
   ): Promise<void> {
     pendingPermissionRequests.delete(key)
+    releasePermissionResetSubscription(params.sessionId)
     const result = await options.handlers.resolvePermission({
       sessionId: params.sessionId,
       turnId: params.turnId,
@@ -210,11 +241,11 @@ export function createSessionSubscriptions(
     }
   }
 
-  function retirePermissionsForTurn(sessionId: string, turnId: string): void {
+  function retirePermissionsForTurn(sessionId: string, turnId?: string): void {
     for (const [key, request] of pendingPermissionRequests) {
       if (
         request.params.sessionId !== sessionId ||
-        request.params.turnId !== turnId
+        (turnId !== undefined && request.params.turnId !== turnId)
       )
         continue
       pendingPermissionRequests.delete(key)
@@ -224,6 +255,7 @@ export function createSessionSubscriptions(
         data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
       })
     }
+    releasePermissionResetSubscription(sessionId)
   }
 
   function remove(connectionId: number, sessionId: string): void {
@@ -233,6 +265,13 @@ export function createSessionSubscriptions(
     entry.close()
     set.delete(connectionId)
     if (set.size === 0) bySession.delete(sessionId)
+  }
+
+  function resetSession(sessionId: string): void {
+    const set = bySession.get(sessionId)
+    bySession.delete(sessionId)
+    for (const entry of set?.values() ?? []) entry.close()
+    retirePermissionsForTurn(sessionId)
   }
 
   async function subscribe(
@@ -249,6 +288,10 @@ export function createSessionSubscriptions(
 
     const deliver = (delivery: SessionDelivery): void => {
       if (closed) return
+      if (delivery.kind === "reset") {
+        resetSession(input.sessionId)
+        return
+      }
       if (delivery.kind === "durable") {
         for (const event of delivery.events) {
           if (isKernelEvent(event) && event.type === "turn.completed")
@@ -291,6 +334,11 @@ export function createSessionSubscriptions(
     }
 
     const hub = options.eventHub.subscribe(input.sessionId, (delivery) => {
+      if (closed) return
+      if (delivery.kind === "reset") {
+        resetSession(input.sessionId)
+        return
+      }
       if (live) {
         deliver(delivery)
         return
@@ -301,6 +349,7 @@ export function createSessionSubscriptions(
       close(): void {
         if (closed) return
         closed = true
+        buffered.length = 0
         hub.close()
       },
     }
@@ -313,6 +362,17 @@ export function createSessionSubscriptions(
         remove(input.connectionId, input.sessionId)
       else entry.close()
     }
+    const closedOutcome = (): SessionSubscribeOutcome => ({
+      ok: false,
+      result: {
+        ok: false,
+        error: {
+          code: "conflict",
+          message:
+            "Session subscription was closed while reading its snapshot.",
+        },
+      },
+    })
 
     // Only reconcile answer channels that predate this read. The handler can
     // sample pendingPermissions before asynchronous storage work finishes;
@@ -325,16 +385,24 @@ export function createSessionSubscriptions(
     let windowEvents: readonly AppSessionEventEnvelope[] | undefined
     let historyBefore: number | undefined
     try {
-      if (input.recent === true && input.after === 0) {
+      if (input.recent === true) {
         const window = await options.handlers.readDisplayWindow({
           sessionId: input.sessionId,
         })
+        if (closed) return closedOutcome()
         if (!window.ok) {
           removeOwnedSubscription()
           return { ok: false, result: window }
         }
         snapshot = { ok: true, value: { session: window.value.session } }
-        windowEvents = window.value.events
+        // A cached view usually needs only this window's suffix. If it missed
+        // older prompts too, ordinary paging must still fill that whole gap.
+        if (
+          input.after === 0 ||
+          window.value.historyBefore === undefined ||
+          input.after >= window.value.historyBefore
+        )
+          windowEvents = window.value.events
         historyBefore = window.value.historyBefore
       } else {
         snapshot = await options.handlers.readSession({
@@ -347,6 +415,10 @@ export function createSessionSubscriptions(
       removeOwnedSubscription()
       throw error
     }
+    // A reset or replacement can close this listener while storage is reading.
+    // Returning that snapshot would let the caller paint the previous history
+    // even though replay itself already observes `closed`.
+    if (closed) return closedOutcome()
     if (!snapshot.ok) {
       removeOwnedSubscription()
       return { ok: false, result: snapshot }
@@ -386,6 +458,7 @@ export function createSessionSubscriptions(
         data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
       })
     }
+    releasePermissionResetSubscription(input.sessionId)
 
     const replay = async (): Promise<void> => {
       try {
@@ -405,6 +478,7 @@ export function createSessionSubscriptions(
               through: watermark,
               limit: replayPageLimit,
             })
+            if (closed) return
             if (!page.ok) throw new Error(page.error.message)
             for (const event of page.value.events) {
               deliver({ kind: "durable", events: [event] })
@@ -449,7 +523,7 @@ export function createSessionSubscriptions(
         // become an error response. A replaced or closed subscription must
         // not terminate the current subscription for the same session.
         if (!closed) {
-          remove(input.connectionId, input.sessionId)
+          removeOwnedSubscription()
           options.notify(input.connectionId, sessionSubscriptionErrorMethod, {
             sessionId: input.sessionId,
             message: "Session event replay failed.",
@@ -467,7 +541,9 @@ export function createSessionSubscriptions(
       ok: true,
       response: {
         ...snapshot.value,
-        ...(historyBefore === undefined ? {} : { historyBefore }),
+        ...(input.after !== 0 || historyBefore === undefined
+          ? {}
+          : { historyBefore }),
       },
       replay,
     }

@@ -133,6 +133,7 @@ describe("independent session collaboration", () => {
       { content: [{ type: "text", text: "source result" }] },
       { content: [{ type: "text", text: "later user turn" }] },
       { content: [{ type: "text", text: "new fork result" }] },
+      { content: [{ type: "text", text: "source continued after fork" }] },
     ])
     try {
       const control = f.service.bind(f.source.id)
@@ -174,7 +175,24 @@ describe("independent session collaboration", () => {
       expect(await control.wait([newSent], 5_000)).toMatchObject({
         results: [{ status: "completed", consumed: true }],
       })
-      expect(f.provider.callCount).toBe(3)
+      const sourceFollowup = await control.send({
+        threadId: f.target.id,
+        requestId: "source_followup",
+        message: "Continue the original session",
+      })
+      expect(sourceFollowup.delivery).toBe("started")
+      expect(await control.wait([sourceFollowup], 5_000)).toMatchObject({
+        results: [{ status: "completed", consumed: true }],
+      })
+      expect(
+        JSON.stringify(
+          await control.read({
+            threadId: f.target.id,
+            turnId: sourceFollowup.turnId,
+          }),
+        ),
+      ).toContain("source continued after fork")
+      expect(f.provider.callCount).toBe(4)
     } finally {
       await f.cleanup()
     }
@@ -300,6 +318,60 @@ describe("independent session collaboration", () => {
     }
   })
 
+  it("sends to an archived session without restoring it and replays the receipt after restart", async () => {
+    const f = await fixture([
+      { content: [{ type: "text", text: "archived session result" }] },
+    ])
+    let restarted: ReturnType<typeof f.start> | undefined
+    try {
+      await f.store.updateSessionSidebar({
+        type: "session",
+        sessionId: f.target.id,
+        archived: true,
+      })
+      await f.manager.closeThread(f.target.id)
+      const control = f.service.bind(f.source.id)
+      const request = {
+        threadId: f.target.id,
+        requestId: "archived_request",
+        message: "Continue this independent task",
+      }
+      const sent = await control.send(request)
+      expect(await control.wait([sent], 5_000)).toMatchObject({
+        results: [{ status: "completed", consumed: true }],
+      })
+      expect(await f.store.sessionPresentation(f.target.id)).toMatchObject({
+        archived: true,
+      })
+      expect(
+        (await control.list()).threads.map(({ threadId }) => threadId),
+      ).not.toContain(f.target.id)
+      expect(
+        (await control.list({ archived: true })).threads.map(
+          ({ threadId }) => threadId,
+        ),
+      ).toEqual([f.target.id])
+      expect(
+        JSON.stringify(await control.read({ threadId: f.target.id })),
+      ).toContain("archived session result")
+
+      await f.manager.shutdown()
+      restarted = f.start()
+      const restored = restarted.service.bind(f.source.id)
+      expect(await restored.send(request)).toMatchObject({
+        ...sent,
+        delivery: "replayed",
+      })
+      expect(
+        await restarted.store.sessionPresentation(f.target.id),
+      ).toMatchObject({ archived: true })
+      expect(f.provider.callCount).toBe(1)
+    } finally {
+      await restarted?.manager.shutdown()
+      await f.cleanup()
+    }
+  })
+
   it("starts an unrelated root, tracks its exact result and replays durably after restart", async () => {
     const f = await fixture([
       { content: [{ type: "text", text: "independent result" }] },
@@ -366,6 +438,257 @@ describe("independent session collaboration", () => {
       ).toHaveLength(1)
     } finally {
       await restarted?.manager.shutdown()
+      await f.cleanup()
+    }
+  })
+
+  it("keeps accepted receipts and exact answer pages stable across same-session reverts and restart", async () => {
+    const answer = `retained receipt answer ${"😀old answer ".repeat(120)}`
+    const f = await fixture([
+      { content: [{ type: "text", text: "visible baseline" }] },
+      { content: [{ type: "text", text: answer }] },
+    ])
+    let restarted: ReturnType<typeof f.start> | undefined
+    try {
+      const baseline = await f.target.startIfIdle({
+        content: createUserInput("keep this turn"),
+      })
+      if (baseline.type !== "started") throw new Error("Expected baseline")
+      await expect.poll(() => f.target.status).toBe("idle")
+      const control = f.service.bind(f.source.id)
+      const request = {
+        threadId: f.target.id,
+        requestId: "reverted_receipt",
+        message: "produce retained receipt answer",
+      }
+      const sent = await control.send(request)
+      const completed = await control.wait([sent], 5_000)
+      const answerItemId = completed.results[0]?.answerItemIds?.[0]
+      if (answerItemId === undefined) throw new Error("Expected answer item")
+      const query = {
+        threadId: f.target.id,
+        turnId: sent.turnId,
+        itemId: answerItemId,
+        maxCharacters: 137,
+      }
+      let page = await control.read(query)
+      if (!("items" in page)) throw new Error("Expected transcript")
+      expect(page.truncated).toBe(true)
+      const firstCursor = page.nextCursor
+      if (firstCursor === undefined) throw new Error("Expected initial cursor")
+      const chunks = page.items.map((item) => item.text)
+      const originalRolloutId = (await f.store.readThread(f.target.id))
+        ?.metadata.rolloutId
+
+      await f.manager.revertThread({
+        threadId: f.target.id,
+        beforeTurnId: sent.turnId,
+      })
+      const current = await f.store.readThread(f.target.id)
+      expect(current?.metadata.id).toBe(f.target.id)
+      expect(current?.metadata.rolloutId).not.toBe(originalRolloutId)
+      expect(
+        current?.rollout.some(
+          ({ item }) =>
+            item.type === "thread_message_admitted" &&
+            item.sourceRequestId === request.requestId,
+        ),
+      ).toBe(false)
+      expect(await control.send(request)).toEqual({
+        ...sent,
+        delivery: "replayed",
+      })
+      expect(await control.wait([sent], 0)).toEqual(completed)
+      await expect(
+        control.send({ ...request, message: "different request content" }),
+      ).rejects.toMatchObject({ code: "request_conflict" })
+      expect(f.provider.callCount).toBe(2)
+      expect(
+        JSON.stringify(await control.read({ threadId: f.target.id })),
+      ).toContain("visible baseline")
+      expect(
+        JSON.stringify(await control.read({ threadId: f.target.id })),
+      ).not.toContain("retained receipt answer")
+      expect(
+        await control.read({
+          threadId: f.target.id,
+          searchTerm: "retained receipt answer",
+        }),
+      ).toMatchObject({ occurrences: [], truncated: false })
+      expect(
+        await control.list({ searchTerm: "retained receipt answer" }),
+      ).toMatchObject({ threads: [], truncated: false })
+      const oldTurn = await control.read({
+        threadId: f.target.id,
+        turnId: sent.turnId,
+      })
+      expect(JSON.stringify(oldTurn)).toContain("retained receipt answer")
+
+      // Select the retained rollout explicitly, then replace current history
+      // again before continuing either the original or historical cursor.
+      const oldPage = await control.read(query)
+      if (!("items" in oldPage)) throw new Error("Expected transcript")
+      if (oldPage.nextCursor === undefined)
+        throw new Error("Expected historical cursor")
+      await f.manager.revertThread({
+        threadId: f.target.id,
+        beforeTurnId: baseline.turnId,
+      })
+      expect(await control.read({ threadId: f.target.id })).toMatchObject({
+        items: [],
+      })
+      expect(
+        await control.read({ ...query, cursor: oldPage.nextCursor }),
+      ).toEqual(await control.read({ ...query, cursor: firstCursor }))
+      while (page.truncated) {
+        if (page.nextCursor === undefined) throw new Error("Expected cursor")
+        const next = await control.read({ ...query, cursor: page.nextCursor })
+        if (!("items" in next)) throw new Error("Expected transcript")
+        chunks.push(...next.items.map((item) => item.text))
+        page = next
+      }
+      expect(JSON.parse(chunks.join(""))).toEqual({
+        role: "assistant",
+        content: [{ type: "text", text: answer }],
+      })
+      expect(await control.send(request)).toEqual({
+        ...sent,
+        delivery: "replayed",
+      })
+      expect(await control.wait([sent], 0)).toEqual(completed)
+
+      await f.manager.shutdown()
+      restarted = f.start()
+      const restored = restarted.service.bind(f.source.id)
+      expect(restarted.manager.getThread(f.target.id)).toBeUndefined()
+      expect(await restored.send(request)).toEqual({
+        ...sent,
+        delivery: "replayed",
+      })
+      expect(restarted.manager.getThread(f.target.id)).toBeUndefined()
+      expect(await restored.wait([sent], 0)).toEqual(completed)
+      expect(
+        JSON.stringify(
+          await restored.read({
+            threadId: f.target.id,
+            itemId: answerItemId,
+          }),
+        ),
+      ).toContain("retained receipt answer")
+      await expect(
+        restored.send({ ...request, message: "changed after restart" }),
+      ).rejects.toMatchObject({ code: "request_conflict" })
+      expect(f.provider.callCount).toBe(2)
+    } finally {
+      await restarted?.manager.shutdown()
+      await f.cleanup()
+    }
+  })
+
+  it.each([
+    false,
+    true,
+  ])("rechecks a receipt when revert replaces its recipient before resume (changed content: %s)", async (changedContent) => {
+    const readEntered = Promise.withResolvers<void>()
+    const releaseRead = Promise.withResolvers<void>()
+    const f = await fixture([
+      { content: [{ type: "text", text: "original accepted answer" }] },
+      { content: [{ type: "text", text: "must not execute again" }] },
+    ])
+    try {
+      const control = f.service.bind(f.source.id)
+      const request = {
+        threadId: f.target.id,
+        requestId: "revert_during_receipt_read",
+        message: "perform this once",
+      }
+      const sent = await control.send(request)
+      const completed = await control.wait([sent], 5_000)
+      await expect.poll(() => f.target.status).toBe("idle")
+      const originalVersions = f.store.readThreadVersions.bind(f.store)
+      vi.spyOn(f.store, "readThreadVersions").mockImplementationOnce(
+        async (id) => {
+          const stale = await originalVersions(id)
+          readEntered.resolve()
+          await releaseRead.promise
+          return stale
+        },
+      )
+      const retry = control.send({
+        ...request,
+        message: changedContent ? "changed retry content" : request.message,
+      })
+      await readEntered.promise
+      await f.manager.revertThread({
+        threadId: f.target.id,
+        beforeTurnId: sent.turnId,
+      })
+      releaseRead.resolve()
+      if (changedContent)
+        await expect(retry).rejects.toMatchObject({
+          code: "request_conflict",
+        })
+      else
+        expect(await retry).toEqual({
+          ...sent,
+          delivery: "replayed",
+        })
+      expect(await control.wait([sent], 0)).toEqual(completed)
+      expect(f.provider.callCount).toBe(1)
+      expect(
+        (await f.store.readThread(f.target.id))?.rollout.some(
+          ({ item }) => item.type === "thread_message_admitted",
+        ),
+      ).toBe(false)
+    } finally {
+      releaseRead.resolve()
+      vi.restoreAllMocks()
+      await f.cleanup()
+    }
+  })
+
+  it("replays a reverted unconsumed steering receipt with its original recipient turn", async () => {
+    const entered = Promise.withResolvers<void>()
+    const f = await fixture([
+      { assertRequest: () => entered.resolve(), waitForAbort: true },
+    ])
+    try {
+      const original = await f.target.startIfIdle({
+        content: createUserInput("hold this turn"),
+      })
+      if (original.type !== "started") throw new Error("Expected original turn")
+      await entered.promise
+      const control = f.service.bind(f.source.id)
+      const request = {
+        threadId: f.target.id,
+        requestId: "reverted_steering",
+        message: "not consumed before interruption",
+      }
+      const sent = await control.send(request)
+      expect(sent).toMatchObject({
+        delivery: "steered",
+        turnId: original.turnId,
+      })
+      await f.target.interruptTurn(original.turnId)
+      await expect.poll(() => f.target.status).toBe("idle")
+      const incomplete = await control.wait([sent], 0)
+      expect(incomplete).toMatchObject({
+        results: [{ status: "delivery_incomplete", consumed: false }],
+      })
+      await f.manager.revertThread({
+        threadId: f.target.id,
+        beforeTurnId: original.turnId,
+      })
+      expect(await control.send(request)).toEqual({
+        ...sent,
+        delivery: "replayed",
+      })
+      expect(await control.wait([sent], 0)).toEqual(incomplete)
+      await expect(
+        control.send({ ...request, message: "changed steering" }),
+      ).rejects.toMatchObject({ code: "request_conflict" })
+      expect(f.provider.callCount).toBe(1)
+    } finally {
       await f.cleanup()
     }
   })

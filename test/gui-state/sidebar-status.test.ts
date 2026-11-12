@@ -26,6 +26,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
 
 const session: ApiSessionDetail = {
   id: "session_1",
+  rolloutId: "rollout_1",
   conversationId: "conversation_1",
   seq: 1,
   createdAt: "2026-11-01T00:00:00.000Z",
@@ -58,7 +59,7 @@ function sessionSummary(
 ): ApiSessionSummary {
   return {
     id: session.id,
-    navigationId: session.id,
+    rolloutId: session.rolloutId,
     conversationId: session.conversationId,
     seq: session.seq,
     createdAt: session.createdAt,
@@ -230,7 +231,6 @@ it("updates unopened rows without dropping loaded pages or the next cursor", asy
     if (method === "session/summary")
       return sessionSummary({
         id: "session_45",
-        navigationId: "session_45",
         active: true,
         status: "waiting",
       })
@@ -285,7 +285,6 @@ it("updates unopened rows without dropping loaded pages or the next cursor", asy
 describe("sidebar session discovery", () => {
   const independent = sessionSummary({
     id: "independent_worker",
-    navigationId: "independent_worker",
     conversationId: "independent_worker",
     parentSessionId: session.id,
     projectId: "project_1",
@@ -298,7 +297,6 @@ describe("sidebar session discovery", () => {
     const rows = Array.from({ length: 60 }, (_, index) =>
       sessionSummary({
         id: `loaded_${String(60 - index).padStart(2, "0")}`,
-        navigationId: `loaded_${String(60 - index).padStart(2, "0")}`,
         projectId: "project_1",
       }),
     )
@@ -358,13 +356,10 @@ describe("sidebar session discovery", () => {
     )
   })
 
-  it.each([
-    { metadata: { agent: { kind: "subagent" } } },
-    { parentSessionId: session.id, forkReason: "edit" as const },
-  ])("excludes addressable sessions without a current navigation entry: %j", async (patch) => {
+  it("excludes subagents from independent-session discovery", async () => {
     await boot()
-    const { navigationId: _, ...hidden } = sessionSummary({
-      ...patch,
+    const hidden = sessionSummary({
+      metadata: { agent: { kind: "subagent" } },
       id: "hidden_worker",
       updatedAt: independent.updatedAt,
     })
@@ -410,20 +405,22 @@ describe("sidebar session discovery", () => {
     expect(populated).toEqual(expectedKeys)
   })
 
-  it("replaces the displayed edit head without creating a duplicate navigation row", async () => {
+  it("replaces a session row with its new rollout without creating a duplicate", async () => {
     await boot([sessionSummary()])
-    const newHead = {
-      ...independent,
-      id: "edited_head",
-      navigationId: session.id,
-      forkReason: "edit" as const,
-    }
-    fakeRef.current.respond = () => newHead
-    fakeRef.current.emitSidebarChanged({ sessionId: newHead.id })
-    await vi.waitFor(() => expect(firstRow()?.id).toBe("edited_head"))
+    const replacement = sessionSummary({
+      rolloutId: "rollout_replacement",
+      seq: 0,
+      status: "idle",
+      updatedAt: independent.updatedAt,
+    })
+    fakeRef.current.respond = () => replacement
+    fakeRef.current.emitSidebarChanged({ sessionId: replacement.id })
+    await vi.waitFor(() =>
+      expect(firstRow()?.rolloutId).toBe("rollout_replacement"),
+    )
 
     expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([
-      newHead,
+      replacement,
     ])
     expect(useAppStore.getState().sessionsByProject[""]?.nextCursor).toBe(
       "page_2",

@@ -28,6 +28,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => ({
 const at = "2026-09-20T00:00:00.000Z"
 const snapshot: ApiSessionDetail = {
   id: "child",
+  rolloutId: "rollout_child",
   conversationId: "child",
   title: "Inspect renderer",
   seq: 0,
@@ -99,6 +100,28 @@ function answer(itemId: string, text: string, turnId = "turn") {
     },
   })
 }
+
+it("shows the child agent's initial task without treating it as the user's message", () => {
+  mount()
+  act(() => {
+    stream.emitSnapshot({ session: snapshot })
+    emit({
+      type: "input.admitted",
+      data: {
+        requestId: "request_child",
+        inputId: "input_child",
+        role: "user",
+        source: "agent",
+        content: inputFixture(inputParts("Inspect the child task boundary")),
+      },
+    })
+    stream.emitReplayComplete()
+  })
+  const task = screen.getByRole("article", { name: "Agent task" })
+  expect(task.textContent).toContain("Inspect the child task boundary")
+  expect(screen.queryByRole("button", { name: "Edit & resubmit" })).toBeNull()
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("Parent draft"))
+})
 
 beforeEach(() => {
   rpc = new FakeRpcClient()

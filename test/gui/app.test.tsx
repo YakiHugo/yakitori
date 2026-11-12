@@ -5,8 +5,8 @@ import {
   fireEvent,
   render,
   screen,
-  within,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -321,6 +321,7 @@ function sessionDetail(
 ): ApiSessionDetail {
   return {
     id: sessionId,
+    rolloutId: `rollout_${sessionId}`,
     conversationId: "conversation_1",
     projectId: "project_1",
     title: "Session",

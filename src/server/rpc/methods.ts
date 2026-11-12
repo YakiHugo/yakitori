@@ -70,7 +70,6 @@ import {
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
   ApiErrorCode,
-  type ApiForkSessionResponse,
   type ApiListAgentsResponse,
   type ApiListProjectsResponse,
   type ApiListProvidersResponse,
@@ -82,6 +81,7 @@ import {
   type ApiReadSubscriptionResponse,
   type ApiReadUsageResponse,
   type ApiResumeTurnResponse,
+  type ApiRevertSessionResponse,
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
@@ -831,10 +831,10 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     (handlers, params) => handlers.deleteSession(params),
     true,
   ),
-  handlerEntry<ApiForkSessionResponse>(
-    "session/fork",
+  handlerEntry<ApiRevertSessionResponse>(
+    "session/revert",
     sessionScope,
-    (handlers, params) => handlers.forkSession(params),
+    (handlers, params) => handlers.revertSession(params),
     true,
   ),
   handlerEntry<ApiCompactSessionResponse>(

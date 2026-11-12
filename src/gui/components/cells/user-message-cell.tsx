@@ -14,10 +14,7 @@ import {
   trimInputDraft,
 } from "../../input-draft.ts"
 import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
-import {
-  selectCurrentThreadId,
-  useAppStore,
-} from "../../store/app-store.ts"
+import { selectCurrentThreadId, useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
@@ -88,7 +85,7 @@ export function UserMessageCell({
   )
   const sentAsGoal = goalInputId !== undefined && goalInputId === entry.inputId
   const apiBase = useAppStore((state) => state.apiBase)
-  const forkSession = useAppStore((state) => state.forkSession)
+  const revertSession = useAppStore((state) => state.revertSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const threadId = useAppStore(selectCurrentThreadId)
   const [editing, setEditing] = useThreadScopeState(
@@ -213,7 +210,7 @@ export function UserMessageCell({
               busy
             )
               return
-            void forkSession(entry.inputId, "edit", inputContent(edited))
+            void revertSession(entry.inputId, "edit", inputContent(edited))
           }}
         >
           <PromptEditor
@@ -249,7 +246,11 @@ export function UserMessageCell({
                   !busy &&
                   (hasInputDraft(edited) || contextAttachments.length > 0)
                 )
-                  void forkSession(entry.inputId, "edit", inputContent(edited))
+                  void revertSession(
+                    entry.inputId,
+                    "edit",
+                    inputContent(edited),
+                  )
                 return true
               }
               return false

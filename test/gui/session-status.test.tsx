@@ -7,10 +7,6 @@ import {
   screen,
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type {
-  ApiSessionDetail,
-  ApiSessionSummary,
-} from "../../src/protocol/application.ts"
 import { SessionItems } from "../../src/gui/components/sidebar-sessions.tsx"
 import { useSessionRead } from "../../src/gui/hooks/use-session-read.ts"
 import {
@@ -22,9 +18,14 @@ import {
   sessionReadKey,
   useSessionReadStore,
 } from "../../src/gui/store/session-read-store.ts"
+import type {
+  ApiSessionDetail,
+  ApiSessionSummary,
+} from "../../src/protocol/application.ts"
 
 const summary: ApiSessionSummary = {
   id: "session_status",
+  rolloutId: "rollout_status",
   conversationId: "session_status",
   title: "Review changes",
   seq: 20,
@@ -65,6 +66,46 @@ afterEach(() => {
 })
 
 describe("sidebar session status", () => {
+  it("keeps new completions unread after history replacement under the same session id", () => {
+    const apiBase = "http://server-a"
+    useSessionReadStore
+      .getState()
+      .markRead(apiBase, summary.id, summary.rolloutId, 99)
+    useAppStore.setState({
+      apiBase,
+      sessionsByProject: { "": { sessions: [summary] } },
+    })
+    render(<SessionItems />)
+    expect(screen.queryByRole("status", { name: "Unread result" })).toBeNull()
+    act(() =>
+      useAppStore.setState({
+        sessionsByProject: {
+          "": {
+            sessions: [
+              {
+                ...summary,
+                rolloutId: "rollout_reverted",
+                seq: 5,
+                latestCompletionSeq: 4,
+              },
+            ],
+          },
+        },
+      }),
+    )
+    expect(screen.getByRole("status", { name: "Unread result" })).toBeDefined()
+    act(() =>
+      useSessionReadStore
+        .getState()
+        .markRead(apiBase, summary.id, "rollout_reverted", 4),
+    )
+    expect(screen.queryByRole("status", { name: "Unread result" })).toBeNull()
+    expect(useSessionReadStore.getState().readSeqs).toEqual({
+      [sessionReadKey(apiBase, summary.id, summary.rolloutId)]: 99,
+      [sessionReadKey(apiBase, summary.id, "rollout_reverted")]: 4,
+    })
+  })
+
   it("shows five states in the title gutter and preserves unread beneath execution states", () => {
     const sessions: ApiSessionSummary[] = [
       {
@@ -129,13 +170,13 @@ describe("sidebar session status", () => {
     act(() =>
       useSessionReadStore
         .getState()
-        .markRead("http://server-b", summary.id, 99),
+        .markRead("http://server-b", summary.id, summary.rolloutId, 99),
     )
     expect(screen.getByRole("status", { name: "Unread result" })).toBeDefined()
     act(() =>
       useSessionReadStore
         .getState()
-        .markRead("http://server-a", summary.id, 12),
+        .markRead("http://server-a", summary.id, summary.rolloutId, 12),
     )
     expect(screen.queryByRole("status", { name: "Unread result" })).toBeNull()
     act(() =>
@@ -147,11 +188,13 @@ describe("sidebar session status", () => {
     )
     expect(screen.getByRole("status", { name: "Unread result" })).toBeDefined()
     act(() =>
-      useSessionReadStore.getState().markRead("http://server-a", summary.id, 4),
+      useSessionReadStore
+        .getState()
+        .markRead("http://server-a", summary.id, summary.rolloutId, 4),
     )
     expect(useSessionReadStore.getState().readSeqs).toEqual({
-      [sessionReadKey("http://server-a", summary.id)]: 12,
-      [sessionReadKey("http://server-b", summary.id)]: 99,
+      [sessionReadKey("http://server-a", summary.id, summary.rolloutId)]: 12,
+      [sessionReadKey("http://server-b", summary.id, summary.rolloutId)]: 99,
     })
   })
 })
@@ -159,25 +202,25 @@ describe("sidebar session status", () => {
 describe("session read acknowledgement", () => {
   it("preserves another tab's persisted reads when a stale tab reads a different session", () => {
     const markRead = useSessionReadStore.getState().markRead
-    markRead("http://server-a", "session_a", 12)
+    markRead("http://server-a", "session_a", "rollout_session_a", 12)
     const firstKey = localStorage.key(0)
     if (firstKey === null) throw new Error("Missing persisted read")
     useSessionReadStore.setState({ readSeqs: {} })
-    markRead("http://server-a", "session_b", 25)
+    markRead("http://server-a", "session_b", "rollout_session_b", 25)
     expect(localStorage.length).toBe(2)
     expect(localStorage.getItem(firstKey)).toBe("12")
     useSessionReadStore.getState().syncFromStorage()
     expect(useSessionReadStore.getState().readSeqs).toEqual({
-      [sessionReadKey("http://server-a", "session_a")]: 12,
-      [sessionReadKey("http://server-a", "session_b")]: 25,
+      [sessionReadKey("http://server-a", "session_a", "rollout_session_a")]: 12,
+      [sessionReadKey("http://server-a", "session_b", "rollout_session_b")]: 25,
     })
   })
 
   it("keeps a newer persisted watermark when a stale tab acknowledges an older result", () => {
     const markRead = useSessionReadStore.getState().markRead
-    markRead("http://server-a", summary.id, 20)
+    markRead("http://server-a", summary.id, summary.rolloutId, 20)
     useSessionReadStore.setState({ readSeqs: {} })
-    markRead("http://server-a", summary.id, 4)
+    markRead("http://server-a", summary.id, summary.rolloutId, 4)
     useSessionReadStore.setState({ readSeqs: {} })
     useSessionReadStore.getState().syncFromStorage()
     expect(Object.values(useSessionReadStore.getState().readSeqs)).toEqual([20])
@@ -185,7 +228,9 @@ describe("session read acknowledgement", () => {
 
   it("updates unread indicators across tabs and repairs a concurrent older write", () => {
     const apiBase = useAppStore.getState().apiBase
-    useSessionReadStore.getState().markRead(apiBase, summary.id, 12)
+    useSessionReadStore
+      .getState()
+      .markRead(apiBase, summary.id, summary.rolloutId, 12)
     const storageKey = localStorage.key(0)
     if (storageKey === null) throw new Error("Missing persisted read")
     useSessionReadStore.setState({ readSeqs: {} })

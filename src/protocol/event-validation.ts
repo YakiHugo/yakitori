@@ -13,6 +13,7 @@ import {
   type TurnMetrics,
   type TurnOutcome,
 } from "./events.ts"
+import { isThreadMessageProvenance } from "./input-queue.ts"
 import { isJsonObject } from "./json.ts"
 import { isInputContent } from "./user-input.ts"
 export function isTokenUsage(value: unknown): value is TokenUsage {
@@ -160,6 +161,8 @@ export function isInputAdmittedData(data: Record<string, unknown>): boolean {
       "parentInputId",
       "metadata",
       "steered",
+      "source",
+      "provenance",
     ]) &&
     isString(data.requestId) &&
     isString(data.inputId) &&
@@ -168,6 +171,12 @@ export function isInputAdmittedData(data: Record<string, unknown>): boolean {
     (data.modelSelection === undefined ||
       isModelSelection(data.modelSelection)) &&
     (data.steered === undefined || data.steered === true) &&
+    (data.source === undefined ||
+      data.source === "human" ||
+      data.source === "agent" ||
+      data.source === "runtime") &&
+    (data.provenance === undefined ||
+      isThreadMessageProvenance(data.provenance)) &&
     (data.metadata === undefined || isJsonObject(data.metadata)) &&
     (data.parentInputId === undefined || isString(data.parentInputId))
   )

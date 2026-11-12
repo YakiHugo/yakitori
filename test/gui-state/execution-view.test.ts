@@ -24,6 +24,58 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it.each([
+    { role: InputRole.User, provenance: undefined },
+    {
+      role: InputRole.Runtime,
+      provenance: {
+        sourceThreadId: "session_parent",
+        sourceRequestId: "request_parent",
+      },
+    },
+  ])("projects agent-authored input separately from user input ($role)", ({
+    role,
+    provenance,
+  }) => {
+    const event = createEventEnvelope({
+      sessionId,
+      seq: 1,
+      createdAt: "2026-11-12T00:00:00.000Z",
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request_agent",
+          inputId: "input_agent",
+          role,
+          source: "agent",
+          ...(provenance === undefined ? {} : { provenance }),
+          content: inputFixture(inputParts("Inspect the renderer")),
+        },
+      },
+    })
+    expect(isKernelEvent(event)).toBe(true)
+    const state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event,
+    })
+    expect(state.entries).toEqual([
+      {
+        kind: "agent_input",
+        inputId: "input_agent",
+        requestId: "request_agent",
+        ...(provenance === undefined
+          ? {}
+          : { sourceSessionId: "session_parent" }),
+        text: "Inspect the renderer",
+        at: "2026-11-12T00:00:00.000Z",
+      },
+    ])
+    expect(state.admittedRequestIds.request_agent).toBe(true)
+    expect(
+      reduceExecutionView(state, { type: "durable", event }).entries,
+    ).toEqual(state.entries)
+  })
+
   it("restores a turn's start from earlier history without replacing its terminal outcome", () => {
     const startedAt = "2026-11-12T00:00:00.000Z"
     const completedAt = "2026-11-12T00:00:30.000Z"
@@ -68,6 +120,7 @@ describe("execution view", () => {
     const startedAt = "2026-11-12T00:00:00.000Z"
     const session: ApiSessionDetail = {
       id: sessionId,
+      rolloutId: "rollout_1",
       conversationId: "conversation_1",
       seq: 20,
       createdAt: startedAt,
@@ -645,6 +698,7 @@ describe("execution view", () => {
   it("shows queue snapshots without adding waiting input to the transcript", () => {
     const session: ApiSessionDetail = {
       id: sessionId,
+      rolloutId: "rollout_1",
       conversationId: "conversation_1",
       seq: 0,
       createdAt: "2026-07-24T00:00:00.000Z",
@@ -1452,6 +1506,7 @@ describe("execution view", () => {
     )
     const view = projectSnapshot(state, {
       id: sessionId,
+      rolloutId: "rollout_1",
       conversationId: "conversation_1",
       seq: facts.length,
       createdAt: "2026-07-24T00:00:00.000Z",
@@ -1518,6 +1573,7 @@ describe("execution view", () => {
   it("reports a Turn start after a queue snapshot is refreshed", () => {
     const session: ApiSessionDetail = {
       id: sessionId,
+      rolloutId: "rollout_1",
       conversationId: "conversation_1",
       seq: 0,
       createdAt: "2026-07-24T00:00:00.000Z",
@@ -1720,6 +1776,7 @@ describe("execution view", () => {
       type: "snapshot",
       session: {
         id: sessionId,
+        rolloutId: "rollout_1",
         conversationId: "conversation_1",
         seq: 0,
         createdAt: "2026-08-25T00:00:00.000Z",

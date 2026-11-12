@@ -1,23 +1,24 @@
-import {
-  createThreadCreator,
-  type ThreadCreationContext,
-  type ThreadCreateRequest,
-} from "./thread-creation.ts"
 import type { StoredThread } from "../core/rollout.ts"
+import { fingerprintTurnInput } from "../core/session-io.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
 import type { ThreadStore } from "../core/thread-store.ts"
 import { createUserInput } from "../core/user-input.ts"
-import { threadMessageSubmissionId } from "./thread-message-identity.ts"
 import {
   createThreadReader,
   ThreadCollaborationError,
 } from "./thread-collaboration-read.ts"
+import {
+  createThreadCreator,
+  type ThreadCreateRequest,
+  type ThreadCreationContext,
+} from "./thread-creation.ts"
+import { threadMessageSubmissionId } from "./thread-message-identity.ts"
 
-export { ThreadCollaborationError } from "./thread-collaboration-read.ts"
 export type {
   ListThreadsInput,
   ReadThreadInput,
 } from "./thread-collaboration-read.ts"
+export { ThreadCollaborationError } from "./thread-collaboration-read.ts"
 export type ThreadRequest = Readonly<{
   threadId: string
   turnId: string
@@ -95,13 +96,7 @@ export function createThreadCollaboration(input: {
               "target_is_subagent",
               "This target belongs to a subagent tree. Use its owning agent controller instead of independent-session messaging.",
             )
-          const target = await manager.resumeThread(request.threadId)
-          if (target === undefined)
-            throw new ThreadCollaborationError(
-              "thread_not_found",
-              `Thread ${request.threadId} was not found in this service's store.`,
-            )
-          const admitted = await target.startOrSteer({
+          const turnInput = {
             submissionId: threadMessageSubmissionId(
               sourceThreadId,
               request.threadId,
@@ -109,7 +104,71 @@ export function createThreadCollaboration(input: {
             ),
             content: createUserInput(request.message),
             provenance: { sourceThreadId, sourceRequestId: request.requestId },
-          })
+          }
+          // A revert replaces visible history, not a durable admission. Keep
+          // receipt lookup scoped to the recipient's own records: forks inherit
+          // readable history but never the source actor's accepted requests.
+          const replayRetainedReceipt = (versions: readonly StoredThread[]) => {
+            for (const [index, version] of versions.entries()) {
+              const admittedReceipt = version.rollout.find(
+                ({ threadId, item }) =>
+                  threadId === request.threadId &&
+                  item.type === "thread_message_admitted" &&
+                  item.submissionId === turnInput.submissionId &&
+                  item.sourceThreadId === sourceThreadId &&
+                  item.sourceRequestId === request.requestId,
+              )?.item
+              if (admittedReceipt?.type !== "thread_message_admitted") continue
+              // The live Session owns durability and retry repair for current
+              // admissions. Only retained versions need an out-of-session replay.
+              if (index === 0) break
+              if (
+                admittedReceipt.requestFingerprint !==
+                fingerprintTurnInput(turnInput)
+              )
+                throw new ThreadCollaborationError(
+                  "request_conflict",
+                  "This request_id was already used with different content. Reuse IDs only for an identical retry.",
+                )
+              return {
+                accepted: true as const,
+                requestId: request.requestId,
+                threadId: request.threadId,
+                turnId: admittedReceipt.targetTurnId,
+                delivery: "replayed" as const,
+              }
+            }
+          }
+          let versions = await input.store.readThreadVersions(request.threadId)
+          const replay = replayRetainedReceipt(versions)
+          if (replay !== undefined) return replay
+          const target = await manager.resumeThread(request.threadId)
+          if (target === undefined)
+            throw new ThreadCollaborationError(
+              "thread_not_found",
+              `Thread ${request.threadId} was not found in this service's store.`,
+            )
+          if (
+            manager.getThread(request.threadId) !== target ||
+            target.snapshot().metadata.rolloutId !==
+              versions[0]?.metadata.rolloutId
+          ) {
+            // Resume can cross a same-session revert. Recheck its new history
+            // before routing to an actor that no longer owns the checked receipt.
+            versions = await input.store.readThreadVersions(request.threadId)
+            const replay = replayRetainedReceipt(versions)
+            if (replay !== undefined) return replay
+          }
+          if (
+            manager.getThread(request.threadId) !== target ||
+            target.snapshot().metadata.rolloutId !==
+              versions[0]?.metadata.rolloutId
+          )
+            throw new ThreadCollaborationError(
+              "turn_finishing",
+              "The recipient changed while checking this request. Retry with the same request_id.",
+            )
+          const admitted = await target.startOrSteer(turnInput)
           if (admitted.type === "not_submitted")
             throw new ThreadCollaborationError(
               admitted.reason,
@@ -182,12 +241,26 @@ export function createThreadCollaboration(input: {
                     .getThread(request.threadId)
                     ?.snapshot().activeTurnId
                   const stored = await input.store.readThread(request.threadId)
-                  return requestResult(
+                  const result = requestResult(
                     stored,
                     request,
                     sourceThreadId,
                     activeTurnId,
                   )
+                  if (result.status !== "not_found") return result
+                  const versions = await input.store.readThreadVersions(
+                    request.threadId,
+                  )
+                  for (const version of versions) {
+                    const historical = requestResult(
+                      version,
+                      request,
+                      sourceThreadId,
+                      activeTurnId,
+                    )
+                    if (historical.status !== "not_found") return historical
+                  }
+                  return result
                 }),
               )
               if (signal?.aborted)

@@ -1,19 +1,19 @@
-import {
-  bindExecution,
-  type TestTurnRuntime,
-} from "../support/session-execution.ts"
 import { describe, expect, it } from "vitest"
 import type { AgentThread } from "../../src/core/agent-thread.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
-import type {
-  TurnControl,
-  SessionTaskRunner,
-} from "../../src/core/session-task.ts"
 import { SessionStatus, type TurnInput } from "../../src/core/session-io.ts"
+import type {
+  SessionTaskRunner,
+  TurnControl,
+} from "../../src/core/session-task.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createUserInput, inputContentText } from "../../src/core/user-input.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
+import {
+  bindExecution,
+  type TestTurnRuntime,
+} from "../support/session-execution.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
@@ -439,7 +439,7 @@ describe("live Session actor", () => {
     }
   })
 
-  it("an explicit fork of an edited thread remains a separate navigation entry", async () => {
+  it("an explicit fork after a revert remains a separate session", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run: async () => undefined }, store)
     const original = await manager.createThread()
@@ -448,12 +448,12 @@ describe("live Session actor", () => {
       content: inputFixture([{ type: "text" as const, text: "original" }]),
     })
     await nextEventOfType(original, "turn.completed")
-    const { thread: edited } = await manager.forkThread({
-      sourceThreadId: original.id,
+    const { thread: edited } = await manager.revertThread({
+      threadId: original.id,
       beforeTurnId: "turn_original",
-      forkReason: "edit",
-      forkedFromInputId: "input_original",
     })
+    expect(edited.id).toBe(original.id)
+    expect(edited).not.toBe(original)
     await edited.startIfIdle({
       submissionId: "turn_edited",
       content: inputFixture([{ type: "text" as const, text: "edited" }]),
@@ -469,7 +469,8 @@ describe("live Session actor", () => {
     expect(ids).toHaveLength(2)
     expect(ids).toContain(edited.id)
     expect(ids).toContain(fork.id)
-    expect(fork.snapshot().metadata.forkReason).toBeUndefined()
+    expect(fork.id).not.toBe(original.id)
+    expect(fork.snapshot().metadata.previousRolloutId).toBeUndefined()
     await manager.shutdown()
   })
 

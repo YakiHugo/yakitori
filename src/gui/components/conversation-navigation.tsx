@@ -1,6 +1,6 @@
 import { type RefObject, useLayoutEffect, useState } from "react"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ExecutionEntry } from "../execution-view.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 
 function previewText(text: string): string {
   return text
@@ -52,12 +52,15 @@ export function ConversationNavigation({
   }, [viewportRef, contentRef])
   const messages: { id: string; text: string; response: string }[] = []
   for (const entry of entries) {
-    if (entry.kind === "user_input" && !entry.steered)
+    if (
+      (entry.kind === "user_input" || entry.kind === "agent_input") &&
+      !entry.steered
+    )
       messages.push({
         id: entry.inputId,
         text:
           entry.text ||
-          (entry.contextAttachments?.length
+          (entry.kind === "user_input" && entry.contextAttachments?.length
             ? "Referenced context"
             : "Attached images"),
         response: "",

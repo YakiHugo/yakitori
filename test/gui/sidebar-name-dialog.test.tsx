@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import { SidebarDialog } from "../../src/gui/components/sidebar-surfaces.tsx"
 import { SessionItems } from "../../src/gui/components/sidebar-sessions.tsx"
+import { SidebarDialog } from "../../src/gui/components/sidebar-surfaces.tsx"
 import {
   createInitialAppState,
   sessionListKey,
@@ -27,6 +27,7 @@ it("keeps a reopened rename dialog when a cancelled dialog's save finishes", asy
         sessions: [
           {
             id: "session_a",
+            rolloutId: "rollout_a",
             conversationId: "session_a",
             seq: 1,
             title: "Original",

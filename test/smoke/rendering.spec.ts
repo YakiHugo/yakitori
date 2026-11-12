@@ -503,12 +503,12 @@ test("conversation scrolls at the page edge while the project overview stays on 
   })
 })
 
-test("new session composer stays centered through creation and docks after the first input", async ({
+test("new session composer stays centered in its draft and docks after the first input", async ({
   page,
   renderingApp,
 }) => {
   const project = page.getByRole("combobox", { name: "New session project" })
-  await expect(project).toBeDisabled()
+  await expect(project).toBeEnabled()
   await page.evaluate(() => document.fonts.ready.then(() => undefined))
   const recording = await page
     .getByRole("button", { name: "New session", exact: true })
@@ -535,15 +535,14 @@ test("new session composer stays centered through creation and docks after the f
         })
         requestAnimationFrame(sample)
       }
-      // Start before the click's first paint, including any intermediate
-      // create response or replay renders rather than only the settled layout.
+      // Include the click's first paint and draft updates before submission.
       button.click()
       requestAnimationFrame(sample)
       return recording
     })
   const prompt = "Check the composer layout."
   await page.getByRole("textbox", { name: "Message the Mate" }).fill(prompt)
-  await expect(project).toBeDisabled()
+  await expect(project).toBeEnabled()
   await expect(
     page.getByRole("button", { name: "Send", exact: true }),
   ).toBeEnabled()
