@@ -10,7 +10,11 @@ if (!root) throw new Error("Missing app root.")
 if (window.yakitoriDesktop?.platform === "darwin")
   document.documentElement.dataset.desktop = "macos"
 
-if (new URLSearchParams(window.location.search).get("mock") === "transcript") {
+const preview = new URLSearchParams(window.location.search).get("mock")
+if (import.meta.env.DEV && preview === "sidebar") {
+  const { seedMockSidebar } = await import("./mock-sidebar.ts")
+  seedMockSidebar()
+} else if (preview === "transcript") {
   const { seedMockTranscript } = await import("./mock-transcript.ts")
   seedMockTranscript()
 } else {

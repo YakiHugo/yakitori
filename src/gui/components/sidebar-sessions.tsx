@@ -16,7 +16,7 @@ import {
   sessionListKey,
   useAppStore,
 } from "../store/app-store.ts"
-import { ActivitySpinner } from "./activity-spinner.tsx"
+import { SessionStatus } from "./session-status.tsx"
 import { SidebarNameDialog } from "./sidebar-name-dialog.tsx"
 import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
@@ -181,9 +181,9 @@ export function SessionItems({
                 onSelect?.()
                 void selectSession(session.id, session)
               }}
-              className="sidebar-row min-w-0 flex-1 pl-8"
+              className="sidebar-row min-w-0 flex-1"
             >
-              {session.active === true && <ActivitySpinner />}
+              <SessionStatus session={session} />
               <span className="min-w-0 flex-1 truncate text-left">
                 {session.title ?? "Untitled session"}
               </span>

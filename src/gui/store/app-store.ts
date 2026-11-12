@@ -424,6 +424,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const sessionListRevisions: Record<string, number> = {}
   // Snapshot identity distinguishes a later clear from an earlier null goal.
   const goalSnapshots = new Map<string, Readonly<{ goal: ThreadGoal | null }>>()
+  const statusSnapshots = new Map<
+    string,
+    Pick<ApiSessionSummary, "active" | "status" | "latestCompletionSeq">
+  >()
+  const statusReadRevisions = new Map<string, number>()
   let sidebarReadRevision = 0
   let projectReadRevision = 0
   // Sidebar mutations are serialized through this chain so rapid pin/move
@@ -1426,6 +1431,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           void get().loadProviders()
         })
         goalSnapshots.clear()
+        statusSnapshots.clear()
+        statusReadRevisions.clear()
         client.subscribeToGoalChanges((notification) => {
           if (getAppRpcClient(get().apiBase) !== client) return
           if (notification === undefined) {
@@ -1457,8 +1464,48 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           )
         })
         client.subscribeToSidebarChanges((notification) => {
+          if (getAppRpcClient(get().apiBase) !== client) return
           const sidebar = notification.sidebar
           const sessionId = notification.sessionId
+          if (sidebar === undefined && sessionId !== undefined) {
+            const revision = (statusReadRevisions.get(sessionId) ?? 0) + 1
+            statusReadRevisions.set(sessionId, revision)
+            const isCurrent = () =>
+              getAppRpcClient(get().apiBase) === client &&
+              statusReadRevisions.get(sessionId) === revision
+            // Runtime status notifications must not reload the first page of
+            // every list: those lists may already contain paginated rows.
+            void runTask(
+              async () => {
+                const status = await client.request("session/status", {
+                  sessionId,
+                })
+                if (!isCurrent()) return
+                statusSnapshots.set(sessionId, status)
+                set((state) => ({
+                  sessionsByProject: Object.fromEntries(
+                    Object.entries(state.sessionsByProject).map(
+                      ([key, list]) => [
+                        key,
+                        {
+                          ...list,
+                          sessions: list.sessions.map((entry) =>
+                            entry.id === sessionId
+                              ? withSidebarStatus(entry, status)
+                              : entry,
+                          ),
+                        },
+                      ],
+                    ),
+                  ),
+                }))
+              },
+              isCurrent,
+              false,
+              false,
+            )
+            return
+          }
           if (sidebar !== undefined && sessionId !== undefined) {
             const pendingPin = pendingSidebarPins.get(sessionId)
             if (
@@ -1503,7 +1550,15 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   const nextActive = active.has(session.id)
                   if ((session.active ?? false) === nextActive) return session
                   listChanged = true
-                  return { ...session, active: nextActive }
+                  return {
+                    ...session,
+                    active: nextActive,
+                    ...(nextActive && session.status !== "waiting"
+                      ? { status: "working" as const }
+                      : session.status === "working"
+                        ? { status: "idle" as const }
+                        : {}),
+                  }
                 })
                 if (!listChanged) return [key, list]
                 changed = true
@@ -1600,6 +1655,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
     loadSessions: async (projectId, input = {}) => {
       const goalsAtRequest = new Map(goalSnapshots)
+      const statusesAtRequest = new Map(statusSnapshots)
       const key = sessionListKey(projectId, input)
       const requestRevision = (sessionListRevisions[key] ?? 0) + 1
       sessionListRevisions[key] = requestRevision
@@ -1636,10 +1692,16 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           if (sessionListRevisions[key] !== requestRevision) return
           const sessions = response.sessions.map((session) => {
             const latestGoal = goalSnapshots.get(session.id)
-            return latestGoal !== undefined &&
+            const withLatestGoal =
+              latestGoal !== undefined &&
               latestGoal !== goalsAtRequest.get(session.id)
-              ? withGoal(session, latestGoal.goal)
-              : session
+                ? withGoal(session, latestGoal.goal)
+                : session
+            const latestStatus = statusSnapshots.get(session.id)
+            return latestStatus !== undefined &&
+              latestStatus !== statusesAtRequest.get(session.id)
+              ? withSidebarStatus(withLatestGoal, latestStatus)
+              : withLatestGoal
           })
           set((state) => {
             const current = state.sessionsByProject[key]
@@ -3839,6 +3901,22 @@ function withGoal<T extends ApiSessionSummary>(
   return { ...base, ...(goal === null ? {} : { goal }) } as T
 }
 
+function withSidebarStatus(
+  session: ApiSessionSummary,
+  status: Pick<ApiSessionSummary, "active" | "status" | "latestCompletionSeq">,
+): ApiSessionSummary {
+  const latestCompletionSeq = Math.max(
+    session.latestCompletionSeq ?? 0,
+    status.latestCompletionSeq ?? 0,
+  )
+  return {
+    ...session,
+    active: status.active === true,
+    ...(status.status === undefined ? {} : { status: status.status }),
+    ...(latestCompletionSeq > 0 ? { latestCompletionSeq } : {}),
+  }
+}
+
 function sessionMatchesList(session: ApiSessionSummary, key: string): boolean {
   if (key === "sidebar:archived") return session.archived === true
   if (session.archived === true) return false
@@ -3922,11 +4000,20 @@ function applyDurableSessionDetail(
     case "turn.started":
       return {
         ...next,
+        active: true,
+        status: "working",
         activeTurnId: event.data.turnId,
       }
     case "turn.completed": {
       const { activeTurnId: _, ...withoutActiveTurn } = next
-      return withoutActiveTurn
+      return {
+        ...withoutActiveTurn,
+        active: false,
+        status: event.data.outcome.status === "failed" ? "failed" : "idle",
+        ...(event.data.outcome.status === "completed"
+          ? { latestCompletionSeq: event.seq }
+          : {}),
+      }
     }
     default:
       return next
@@ -3958,6 +4045,7 @@ function updateSessionSummary(
   const session = index < 0 ? undefined : sessions[index]
   if (
     session === undefined ||
+    selectedSession.seq < session.seq ||
     (session.seq === selectedSession.seq &&
       session.updatedAt === selectedSession.updatedAt)
   ) {
@@ -3969,6 +4057,14 @@ function updateSessionSummary(
           ...entry,
           seq: selectedSession.seq,
           updatedAt: selectedSession.updatedAt,
+          ...(selectedSession.latestCompletionSeq === undefined
+            ? {}
+            : {
+                latestCompletionSeq: Math.max(
+                  entry.latestCompletionSeq ?? 0,
+                  selectedSession.latestCompletionSeq,
+                ),
+              }),
         }
       : entry,
   )
