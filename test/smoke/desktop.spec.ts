@@ -195,6 +195,37 @@ test("conversation history opens at the latest prompt and loads older search tar
   expect(desktop.rendererErrors).toEqual([])
 })
 
+test("desktop opens healthy conversations alongside an invalid session index", async ({
+  desktop,
+}) => {
+  const { application, page } = desktop
+  await runFauxTurn(page)
+  const storeDir = await application.evaluate(
+    () => process.env.YAKITORI_STORE_DIR,
+  )
+  if (!storeDir) throw new Error("Missing isolated desktop store")
+  await writeFile(
+    join(storeDir, "sessions", "threads", "session_invalid.json"),
+    '{"id":',
+  )
+
+  await page.reload()
+  await page
+    .locator('.sidebar-session [data-sidebar-drag="session"]')
+    .first()
+    .click()
+  await expect(
+    page.getByRole("main").getByText("Hello from faux.", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("textbox", { name: "Message the Mate" }),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Unexpected server error.", { exact: true }),
+  ).toHaveCount(0)
+  expect(desktop.rendererErrors).toEqual([])
+})
+
 test("desktop edit and undo replace history in the same session", async ({
   desktop,
 }) => {
