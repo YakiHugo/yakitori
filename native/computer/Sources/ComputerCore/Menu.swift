@@ -15,6 +15,31 @@ func accessibilityActions(_ element: AXUIElement) -> [String] {
     return AXUIElementCopyActionNames(element, &names) == .success ? names as? [String] ?? [] : []
 }
 
+func validateMenuTarget(_ window: WindowIdentity, launched: Date?, focusedWindowID: CGWindowID?) throws {
+    guard let launched, launched == window.launched else {
+        throw ComputerFailure("stale_snapshot", "The menu target process exited or restarted.")
+    }
+    // An AX menu belongs to the application, not the observed document. Its
+    // responder-chain action can otherwise reach another retained key window,
+    // even when the application is in the background.
+    guard focusedWindowID == window.windowID else {
+        throw ComputerFailure("focus_unconfirmed", "The application's focused window does not match the menu's observed anchor. Observe the intended key window, or explicitly request foreground delivery; no menu action was sent at this checkpoint.", evidence: [
+            "target_window_id": window.windowID, "focused_window_id": focusedWindowID ?? 0,
+        ])
+    }
+}
+
+func confirmMenuTarget(_ window: WindowIdentity) throws {
+    try Task.checkCancellation()
+    guard processLaunchDate(window.pid) == window.launched, windowElement(window) != nil else {
+        throw ComputerFailure("stale_snapshot", "The menu's observed window is no longer accessible.")
+    }
+    let focused = elementAttribute(AXUIElementCreateApplication(window.pid), kAXFocusedWindowAttribute)
+    // Do not infer key focus from WindowServer order, geometry, or a sheet's
+    // parent. Unknown native identity must refuse an app-global mutation.
+    try validateMenuTarget(window, launched: processLaunchDate(window.pid), focusedWindowID: focused.flatMap(accessibilityWindowID))
+}
+
 func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
     guard let root = elementAttribute(AXUIElementCreateApplication(window.pid), kAXMenuBarAttribute) else { return nil }
     // Use the existing AX observation work boundary. An incomplete lookup must
@@ -97,21 +122,20 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
 
     do {
         for index in path.indices {
-            try Task.checkCancellation()
-            guard processLaunchDate(window.pid) == window.launched else {
-                throw ComputerFailure("stale_snapshot", "The menu target process exited or restarted.")
-            }
+            try confirmMenuTarget(window)
             let prefix = Array(path.prefix(index + 1))
             var item = try resolve(prefix)
             // Expand each parent once; only re-read while its children publish.
             while item == nil && !expanded.isEmpty && ProcessInfo.processInfo.systemUptime < deadline {
                 try await Task.sleep(nanoseconds: 20_000_000)
+                try confirmMenuTarget(window)
                 item = try resolve(prefix)
             }
             guard let item else { throw ComputerFailure("menu_not_found", "The exact menu path is not currently exposed.") }
             let actions = accessibilityActions(item)
             let action = index < path.count - 1 && actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : kAXPressAction
             guard actions.contains(action) else { throw ComputerFailure("action_refused", "The menu item does not expose the requested native action.") }
+            try confirmMenuTarget(window)
             let error = AXUIElementPerformAction(item, action as CFString)
             guard error == .success else { throw ComputerFailure("action_refused", "The menu action was refused (\(error.rawValue)).") }
             if index < path.count - 1 {
@@ -125,8 +149,10 @@ func pasteMenuItem(_ window: WindowIdentity) throws -> AXUIElement? {
         return ["menu_path": path, "cleanup_errors": closeMenus()]
     } catch {
         let failure = error as? ComputerFailure
+        var evidence = failure?.evidence ?? [:]
+        evidence.merge(["expanded_path": expanded, "cleanup_errors": closeMenus(), "effect": "unverified"]) { _, value in value }
         throw ComputerFailure(error is CancellationError ? "cancelled" : failure?.code ?? "menu_failed",
             failure?.message ?? error.localizedDescription,
-            evidence: ["expanded_path": expanded, "cleanup_errors": closeMenus(), "effect": "unverified"])
+            evidence: evidence)
     }
 }
