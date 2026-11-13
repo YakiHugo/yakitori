@@ -1064,6 +1064,9 @@ export class JsonlThreadStore implements ThreadStore {
           } catch (error) {
             // A thread may be deleted between directory enumeration and its read.
             if (isRecord(error) && error.code === "ENOENT") return undefined
+            // Invalid entries stay readable as errors by ID, but cannot block
+            // navigation or presentation changes for healthy sessions.
+            if (error instanceof InvalidThreadMetadataError) return undefined
             throw error
           }
         }),
@@ -1129,15 +1132,11 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async sessionPresentation(threadId: string): Promise<SessionPresentation> {
-    await this.#ready
-    const entries = sessionEntries([
-      ...(await this.#navigationMetadata()),
-      ...[...this.#staged.values()].map(({ metadata }) => metadata),
-    ])
-    const session = entries.find((entry) => entry.id === threadId)
-    if (!session) return {}
+    const metadata = await this.readThreadMetadata(threadId)
+    if (metadata === undefined || sessionEntries([metadata]).length === 0)
+      return {}
     const state = await this.readSessionSidebar()
-    return { ...state.entries[session.id] }
+    return { ...state.entries[threadId] }
   }
 
   async updateSessionSidebar(
@@ -1747,11 +1746,17 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async #readMetadata(threadId: string): Promise<ThreadMetadata> {
-    const value: unknown = JSON.parse(
-      await readFile(this.#metadataPath(threadId), "utf8"),
-    )
+    const contents = await readFile(this.#metadataPath(threadId), "utf8")
+    let value: unknown
+    try {
+      value = JSON.parse(contents)
+    } catch (error) {
+      if (error instanceof SyntaxError)
+        throw new InvalidThreadMetadataError(threadId, { cause: error })
+      throw error
+    }
     if (!isThreadMetadata(value) || value.id !== threadId) {
-      throw new Error(`Thread ${threadId} has invalid metadata.`)
+      throw new InvalidThreadMetadataError(threadId)
     }
     return value
   }
@@ -2360,6 +2365,12 @@ function normalizeMetadata(metadata: ThreadMetadata): ThreadMetadata {
   requireThreadId(copy.id)
   requireThreadId(copy.rolloutId)
   return copy
+}
+
+class InvalidThreadMetadataError extends Error {
+  constructor(threadId: string, options?: ErrorOptions) {
+    super(`Thread ${threadId} has invalid metadata.`, options)
+  }
 }
 
 function isThreadMetadata(value: unknown): value is ThreadMetadata {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -40,6 +40,79 @@ async function save(
 }
 
 describe("session navigation persistence", () => {
+  it.each([
+    "invalid JSON",
+    "unsupported fields",
+  ])("keeps healthy sessions usable alongside metadata with %s", async (invalid) => {
+    const { root, store } = await setup()
+    await save(store, "session_healthy")
+    await save(store, "session_invalid")
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId: "session_healthy",
+      title: "Healthy conversation",
+      sectionId: "pinned",
+    })
+    const path = join(root, "threads", "session_invalid.json")
+    const saved = JSON.parse(await readFile(path, "utf8")) as Record<
+      string,
+      unknown
+    >
+    const contents =
+      invalid === "invalid JSON"
+        ? '{"id":'
+        : JSON.stringify({ ...saved, unsupportedField: true })
+    await writeFile(path, contents)
+
+    const restarted = new JsonlThreadStore({ root })
+    expect(
+      await restarted.sessionPresentation("session_healthy"),
+    ).toMatchObject({
+      title: "Healthy conversation",
+      sectionId: "pinned",
+    })
+    const renamed = await restarted.updateSessionSidebar({
+      type: "session",
+      sessionId: "session_healthy",
+      title: "Renamed conversation",
+    })
+    expect(renamed.entries.session_healthy?.title).toBe("Renamed conversation")
+    const found = await restarted.searchThreads({
+      view: "sessions",
+      searchTerm: "Renamed",
+      limit: 10,
+    })
+    expect(found.matches.map(({ summary }) => summary.id)).toEqual([
+      "session_healthy",
+    ])
+    await expect(
+      restarted.readThreadMetadata("session_invalid"),
+    ).rejects.toThrow("invalid metadata")
+    expect(await readFile(path, "utf8")).toBe(contents)
+  })
+
+  it("reads one session's presentation independently while surfacing navigation I/O failures", async () => {
+    const { root, store } = await setup()
+    await save(store, "session_healthy")
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId: "session_healthy",
+      title: "Healthy conversation",
+    })
+    await mkdir(join(root, "threads", "session_unreadable.json"))
+
+    expect(await store.sessionPresentation("session_healthy")).toEqual({
+      title: "Healthy conversation",
+    })
+    await expect(
+      store.searchThreads({
+        view: "sessions",
+        searchTerm: "Healthy",
+        limit: 10,
+      }),
+    ).rejects.toMatchObject({ code: "EISDIR" })
+  })
+
   it("filters agent threads before list and search pagination while preserving explicit forks", async () => {
     const { store } = await setup()
     await save(store, "session_a")
