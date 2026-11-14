@@ -13,6 +13,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import { SideChatPanel } from "../../src/gui/components/side-chat-panel.tsx"
 import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "../../src/gui/execution-view.ts"
+import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
@@ -20,6 +24,7 @@ import {
   selectWorkspacePresentation,
   useWorkspaceStore,
 } from "../../src/gui/store/workspace-store.ts"
+import type { InputContent } from "../../src/protocol/user-input.ts"
 import type {
   SideChatSend,
   SideChatSnapshot,
@@ -45,24 +50,72 @@ vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
 const listeners = new Set<(snapshot: SideChatSnapshot | undefined) => void>()
 const modelA = { provider: "test", model: "a" }
 const modelB = { provider: "test", model: "b" }
-function snapshot(
-  revision = 0,
-  extra: Partial<SideChatSnapshot> = {},
-): SideChatSnapshot {
+type MessageFixture = { id: string; turnId: string; streaming: boolean } & (
+  | { role: "user"; content: InputContent }
+  | { role: "assistant"; text: string }
+)
+type SnapshotFixture = Partial<SideChatSnapshot> & {
+  messages?: MessageFixture[]
+}
+
+function snapshot(revision = 0, extra: SnapshotFixture = {}): SideChatSnapshot {
   return {
     id: "side-chat",
     revision,
     cwd: "/repo",
     modelSelection: modelA,
     expiresAt: "2099-01-01T00:00:00.000Z",
-    messages: [],
     ...extra,
+    execution: extra.execution ?? {
+      ...projectExecutionView(createExecutionViewState()),
+      ...(extra.activeTurnId === undefined
+        ? {}
+        : { activeTurnId: extra.activeTurnId }),
+      entries: (extra.messages ?? []).map((message) =>
+        message.role === "user"
+          ? {
+              kind: "user_input",
+              inputId: message.id,
+              requestId: message.id,
+              content: message.content,
+              text: message.content.text,
+              ...(message.content.references === undefined
+                ? {}
+                : { contextAttachments: message.content.references }),
+              at: "2026-01-01T00:00:00Z",
+            }
+          : {
+              kind: "assistant",
+              itemId: message.id,
+              turnId: message.turnId,
+              text: message.text,
+              status: message.streaming ? "streaming" : "completed",
+              at: "2026-01-01T00:00:00Z",
+            },
+      ),
+      turnTimings: Object.fromEntries(
+        (extra.messages ?? [])
+          .filter(
+            (message) =>
+              message.role === "assistant" &&
+              !message.streaming &&
+              message.turnId !== extra.activeTurnId,
+          )
+          .map((message) => [
+            message.turnId,
+            {
+              startedAt: "2026-01-01T00:00:00Z",
+              completedAt: "2026-01-01T00:00:01Z",
+            },
+          ]),
+      ),
+    },
   }
 }
 
 function acceptedSnapshot(
   revision = 1,
-  extra: Partial<SideChatSnapshot> = {},
+  extra: SnapshotFixture = {},
 ): SideChatSnapshot {
   const request = requests("sideChat/send").at(-1) as SideChatSend | undefined
   if (!request) throw new Error("Missing test side-chat send request")
@@ -170,7 +223,7 @@ describe("side chat panel", () => {
   it("copies authored user text and completed assistant Markdown, not a partial response", async () => {
     const writeText = vi.fn(async (_text: string) => {})
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } })
-    const messages: SideChatSnapshot["messages"] = [
+    const messages: MessageFixture[] = [
       {
         id: "user",
         turnId: "turn",
@@ -493,7 +546,7 @@ describe("side chat panel", () => {
       screen.queryByRole("textbox", { name: "Message side chat" }),
     ).toBeNull()
     expect(screen.getByText("Partial answer")).toBeDefined()
-    expect(screen.getByText("Responding…")).toBeDefined()
+    expect(screen.getByText("Working")).toBeDefined()
     expect(requests("sideChat/cancel")).toEqual([])
     expect(screen.getByRole("button", { name: "Stop response" })).toBeDefined()
     await act(async () => {
@@ -669,7 +722,7 @@ describe("side chat panel", () => {
     })
   })
 
-  it("renders consecutive turns with markdown spacing and bounded user bubbles", async () => {
+  it("renders consecutive turns with the shared user bubbles and assistant Markdown", async () => {
     client.request.mockImplementation(async (method) =>
       method === "sideChat/create"
         ? snapshot(1, {
@@ -701,23 +754,87 @@ describe("side chat panel", () => {
     )
     render(<Panel />)
     const log = await screen.findByRole("log", { name: "Side chat messages" })
-    await waitFor(() =>
-      expect(log.querySelectorAll(".side-chat-message")).toHaveLength(3),
-    )
-    const messages = [...log.querySelectorAll(".side-chat-message")]
-    expect(messages[0]?.textContent).toBe("First question")
-    expect(messages[2]?.textContent).toBe("Follow up")
-    expect(
-      messages[0]?.querySelector(".markdown.side-chat-user-bubble"),
-    ).not.toBeNull()
+    await waitFor(() => expect(log.children).toHaveLength(3))
+    const messages = [...log.children]
+    expect(messages[0]?.textContent).toContain("First question")
+    expect(messages[2]?.textContent).toContain("Follow up")
+    expect(messages[0]?.querySelector(".message-bubble")).not.toBeNull()
     expect(
       [...(messages[1]?.querySelectorAll(".markdown p") ?? [])].map(
         (paragraph) => paragraph.textContent?.trim(),
       ),
     ).toEqual(["First paragraph", "Second paragraph"])
+    expect(messages[2]?.querySelector(".message-bubble")).not.toBeNull()
+  })
+
+  it("renders side execution activity and failures without enabling main-session actions", async () => {
+    const execution = {
+      ...projectExecutionView(createExecutionViewState()),
+      workingDirectory: "/side-workspace",
+      entries: [
+        {
+          kind: "user_input" as const,
+          inputId: "u",
+          requestId: "r",
+          text: "Inspect",
+          content: inputParts("Inspect"),
+          at: "2026-01-01T00:00:00Z",
+        },
+        {
+          kind: "reasoning" as const,
+          itemId: "thought",
+          turnId: "turn",
+          text: "Investigating side files",
+          status: "completed" as const,
+          at: "2026-01-01T00:00:00Z",
+        },
+        {
+          kind: "tool" as const,
+          toolCallId: "side-tool",
+          turnId: "turn",
+          execution: {
+            type: "dynamic_tool_call" as const,
+            itemId: "tool-item",
+            toolCallId: "side-tool",
+            name: "request_user_input_async",
+            input: {},
+            requiresPermission: false,
+          },
+          state: "completed",
+          output: {
+            questions: [
+              { title: "Which environment?", options: ["Local", "CI"] },
+            ],
+          },
+        },
+        {
+          kind: "turn_terminal" as const,
+          turnId: "turn",
+          state: "failed" as const,
+          message: "Side failure",
+        },
+      ],
+    }
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create" ? snapshot(1, { execution }) : {},
+    )
+    render(<Panel />)
+    await screen.findByText("Turn failed — Side failure")
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Edit & resubmit" })).toBeNull()
     expect(
-      messages[2]?.querySelector(".markdown.side-chat-user-bubble"),
+      screen.queryByRole("form", { name: "Questions from your Mate" }),
+    ).toBeNull()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "Reasoning" }))
+    await screen.findByText("Investigating side files")
+    expect(
+      document.querySelector('[data-context-session-id="side-chat"]'),
     ).not.toBeNull()
+    expect(
+      document.querySelector('[data-context-session-id="main-session"]'),
+    ).toBeNull()
+    expect(requests("session/question/answer")).toHaveLength(0)
   })
 
   it("creates its fork on mount without sending and reuses pending creation for the first send", async () => {
@@ -835,7 +952,7 @@ describe("side chat panel", () => {
     expect(requests("sideChat/cancel")).toEqual([
       { sideChatId: "side-chat", turnId: "turn" },
     ])
-    expect(screen.queryByText("Responding…")).toBeNull()
+    expect(screen.queryByText("Working")).toBeNull()
     expect(screen.getByText("Streamed prefix")).toBeDefined()
     view.unmount()
     expect(requests("sideChat/close")).toEqual([{ sideChatId: "side-chat" }])

@@ -1449,6 +1449,30 @@ test("expired side chats dismiss excerpt actions and leave main chat quoting ava
     const sideResponse = side.getByText("Hello from faux.", { exact: true })
     await expect(sideResponse).toBeVisible()
     await expect(side.getByText("Responding…", { exact: true })).toHaveCount(0)
+    await expect(side.locator(".message-bubble")).toHaveText(
+      "Explain the response",
+    )
+    await expect(
+      side.getByRole("region", { name: "Response", exact: true }),
+    ).toBeVisible()
+    await expect(
+      side.getByRole("button", { name: "Copy response", exact: true }),
+    ).toBeVisible()
+    await expect(
+      side.getByRole("button", { name: "Edit & resubmit" }),
+    ).toHaveCount(0)
+    const source = sideResponse.locator(
+      "xpath=ancestor::*[@data-context-session-id][1]",
+    )
+    const sideSession = await source.getAttribute("data-context-session-id")
+    expect(sideSession).toBeTruthy()
+    const mainSource = page
+      .getByRole("main")
+      .locator("[data-context-session-id]")
+      .first()
+    expect(sideSession).not.toBe(
+      await mainSource.getAttribute("data-context-session-id"),
+    )
     const selectResponse = async (
       response: ReturnType<typeof page.getByText>,
     ) => {
@@ -1481,6 +1505,7 @@ test("expired side chats dismiss excerpt actions and leave main chat quoting ava
       page.getByRole("toolbar", { name: "Selected text actions" }),
     ).toHaveCount(0)
     const mainResponse = page
+      .getByRole("main")
       .getByRole("region", { name: "Response", exact: true })
       .getByText("Hello from faux.", { exact: true })
     await selectResponse(mainResponse)

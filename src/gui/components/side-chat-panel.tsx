@@ -1,31 +1,25 @@
-import { LoaderCircle, MessageCirclePlus } from "lucide-react"
+import { MessageCirclePlus } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { ImageAttachment } from "../../protocol/asset-types.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
 import type { SideChatSnapshot } from "../../protocol/side-chat.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
-  inputContentText,
 } from "../../protocol/user-input.ts"
-import {
-  attachmentUrl,
-  discardDraftAttachments,
-} from "../composer-attachments.ts"
-import { contextSourceAttributes } from "../conversation-context.ts"
+import { discardDraftAttachments } from "../composer-attachments.ts"
 import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { inputAttachmentOwnership } from "../input-attachment-ownership.ts"
 import {
   hasInputDraft,
-  inputDisplayParts,
   sameInputDraft,
   textInputDraft,
   trimInputDraft,
 } from "../input-draft.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
+import { removeThreadScope } from "../store/thread-scope-store.ts"
 import {
   useWorkspaceStore,
   type WorkspaceTab,
@@ -35,13 +29,11 @@ import {
   type ComposerAttachmentImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
-import { ContextExcerpts } from "./context-excerpts.tsx"
-import { ImageLightbox } from "./image-lightbox.tsx"
-import { MarkdownView } from "./markdown.tsx"
+import { ConversationMessages } from "./conversation-messages.tsx"
+import { ConversationScopeContext } from "./conversation-scope.tsx"
 import { ModelSelector } from "./model-selector.tsx"
-import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
+import { openPdfAttachment } from "./pdf-attachment.tsx"
 import { PromptEditor } from "./prompt-editor.tsx"
-import { CopyIconButton } from "./response-actions.tsx"
 
 export function SideChatPanel({
   tab,
@@ -61,7 +53,6 @@ export function SideChatPanel({
   const [, setExpiryTick] = useState(0)
   const [readingAttachments, setReadingAttachments] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string>()
-  const [previewImage, setPreviewImage] = useState<ImageAttachment>()
   const [resolvingPermissions, setResolvingPermissions] = useState<
     ReadonlySet<string>
   >(new Set())
@@ -139,10 +130,12 @@ export function SideChatPanel({
       const sent = attempt.current
       const accepted =
         sent &&
-        next.messages.find(
-          (message) => message.role === "user" && message.id === sent.requestId,
+        next.execution.entries.find(
+          (message) =>
+            message.kind === "user_input" &&
+            message.requestId === sent.requestId,
         )
-      if (sent && accepted?.role === "user") {
+      if (sent && accepted?.kind === "user_input") {
         inputAttachmentOwnership.promote(
           apiBase,
           sent.content,
@@ -215,6 +208,12 @@ export function SideChatPanel({
   }, [active, chat?.revision])
 
   useEffect(() => {
+    if (!chat?.id) return
+    const scope = `side:${chat.id}`
+    return () => removeThreadScope(scope)
+  }, [chat?.id])
+
+  useEffect(() => {
     if (!chat?.expiresAt) return
     let timeout: number
     const schedule = () => {
@@ -236,7 +235,7 @@ export function SideChatPanel({
   useEffect(() => {
     const currentError = error ?? chat?.error
     updateStatus(tab.id, {
-      hasMessages: (chat?.messages.length ?? 0) > 0,
+      hasMessages: (chat?.execution.entries.length ?? 0) > 0,
       expired,
       ...(chat?.activeTurnId ? { activeTurnId: chat.activeTurnId } : {}),
       ...(chat?.expiresAt ? { expiresAt: chat.expiresAt } : {}),
@@ -244,7 +243,7 @@ export function SideChatPanel({
     })
   }, [
     tab.id,
-    chat?.messages.length,
+    chat?.execution.entries.length,
     chat?.activeTurnId,
     chat?.expiresAt,
     chat?.error,
@@ -388,11 +387,12 @@ export function SideChatPanel({
         modelSelection: request.modelSelection ?? current.modelSelection,
       })
       if (disposed.current) return
-      const accepted = response.messages.find(
+      const accepted = response.execution.entries.find(
         (message) =>
-          message.id === request.requestId && message.role === "user",
+          message.kind === "user_input" &&
+          message.requestId === request.requestId,
       )
-      if (accepted?.role !== "user")
+      if (accepted?.kind !== "user_input")
         throw new Error("Side chat acknowledgement omitted its accepted input.")
       inputAttachmentOwnership.promote(
         apiBase,
@@ -520,87 +520,19 @@ export function SideChatPanel({
               48
         }}
       >
-        {chat?.messages.length ? (
-          chat.messages.map((message) => (
-            <article
-              key={message.id}
-              className={`side-chat-message ${message.role === "user" ? "side-chat-user" : ""}`}
-              {...contextSourceAttributes({
-                kind: "message",
-                label:
-                  message.role === "user"
-                    ? "Side chat message"
-                    : "Side chat response",
-                sessionId: chat.id,
-                messageId: message.id,
-              })}
-            >
-              {message.role === "user" ? (
-                <>
-                  {message.content.references?.length ? (
-                    <ContextExcerpts excerpts={message.content.references} />
-                  ) : null}
-                  {inputDisplayParts(message.content).map((part, index) =>
-                    part.type === "text" ? (
-                      <MarkdownView
-                        apiBase={apiBase}
-                        // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
-                        key={`${message.id}:${index}`}
-                        text={part.text}
-                        className="side-chat-user-bubble"
-                        workspaceRoot={chat.cwd}
-                      />
-                    ) : part.type === "document" ? (
-                      <PdfAttachmentCard
-                        // biome-ignore lint/suspicious/noArrayIndexKey: Part slots distinguish repeated references to the same asset.
-                        key={`${message.id}:${index}`}
-                        attachment={part}
-                        apiBase={apiBase}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        // biome-ignore lint/suspicious/noArrayIndexKey: Admitted user parts are immutable within this message ID.
-                        key={`${message.id}:${index}`}
-                        aria-label={`Preview ${part.name}`}
-                        onClick={() => setPreviewImage(part)}
-                        className="cursor-zoom-in"
-                      >
-                        <img
-                          src={attachmentUrl(part, apiBase)}
-                          alt={part.name}
-                          className="max-h-40 rounded-lg object-contain"
-                        />
-                      </button>
-                    ),
-                  )}
-                </>
-              ) : (
-                <MarkdownView
-                  apiBase={apiBase}
-                  text={message.text}
-                  streaming={message.streaming}
-                  workspaceRoot={chat.cwd}
-                />
-              )}
-              {!message.streaming &&
-              (message.role === "user"
-                ? inputContentText(message.content)
-                : message.text
-              ).trim() ? (
-                <div className="message-actions side-chat-message-actions">
-                  <CopyIconButton
-                    text={
-                      message.role === "user"
-                        ? inputContentText(message.content)
-                        : message.text
-                    }
-                    label={message.role === "user" ? "message" : "response"}
-                  />
-                </div>
-              ) : null}
-            </article>
-          ))
+        {chat?.execution.entries.length ? (
+          <ConversationScopeContext.Provider
+            value={{
+              sessionId: chat.id,
+              threadId: `side:${chat.id}`,
+              apiBase,
+              workspaceRoot: chat.cwd,
+              editable: false,
+              interactiveQuestions: false,
+            }}
+          >
+            <ConversationMessages view={chat.execution} />
+          </ConversationScopeContext.Provider>
         ) : (
           <div className="workspace-empty side-chat-empty">
             <MessageCirclePlus size={34} strokeWidth={1.5} />
@@ -609,14 +541,6 @@ export function SideChatPanel({
               Ask a question alongside your work. Side chats are temporary and
               disappear when you close the app.
             </p>
-          </div>
-        )}
-        {chat?.activeTurnId && (
-          <div
-            role="status"
-            className="flex items-center gap-2 py-3 text-xs text-muted-foreground"
-          >
-            <LoaderCircle size={13} className="animate-spin" /> Responding…
           </div>
         )}
       </div>
@@ -707,8 +631,8 @@ export function SideChatPanel({
               false)
           }
           historyParts={
-            chat?.messages.flatMap((message) =>
-              message.role === "user" ? [message.content] : [],
+            chat?.execution.entries.flatMap((message) =>
+              message.kind === "user_input" ? [message.content] : [],
             ) ?? []
           }
           setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}
@@ -751,13 +675,6 @@ export function SideChatPanel({
           }
         />
       )}
-      {previewImage ? (
-        <ImageLightbox
-          src={attachmentUrl(previewImage, apiBase)}
-          name={previewImage.name}
-          onClose={() => setPreviewImage(undefined)}
-        />
-      ) : null}
     </div>
   )
 }

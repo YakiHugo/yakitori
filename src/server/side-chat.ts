@@ -1,13 +1,11 @@
 import type {
   SideChatCreate,
-  SideChatMessage,
   SideChatSend,
   SideChatSnapshot,
 } from "../protocol/side-chat.ts"
 
 export type {
   SideChatCreate,
-  SideChatMessage,
   SideChatSend,
   SideChatSnapshot,
 } from "../protocol/side-chat.ts"
@@ -22,7 +20,7 @@ import type {
   RolloutAssets,
 } from "../core/rollout-assets.ts"
 import { Session, type SessionSnapshot } from "../core/session.ts"
-import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
+import type { TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionTaskRunner } from "../core/session-task.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
@@ -42,6 +40,15 @@ import {
 import { createSessionId } from "../kernel/ids.ts"
 import { InvalidImageDataError } from "../kernel/image-metadata.ts"
 import type { PermissionGate } from "../runtime/permission-gate.ts"
+
+import {
+  createExecutionViewState,
+  type ExecutionViewState,
+  projectExecutionView,
+  reduceExecutionView,
+} from "../shared/execution-view.ts"
+import { mapRolloutEvent } from "./session-event-projection.ts"
+import { createSessionLivePresentation } from "./session-live-presentation.ts"
 
 export const sideChatInstructions =
   "This is a temporary side conversation. Answer the new side-chat user's request. Do not spawn or delegate to subagents. You may inspect the workspace to answer questions. Make changes only when the user explicitly asks for those changes in this side conversation."
@@ -93,7 +100,8 @@ type LiveChat = {
   stored: StoredThread
   inheritedHistory: readonly ModelMessage[]
   importing: Set<Promise<unknown>>
-  snapshot: SideChatSnapshot
+  snapshot: Omit<SideChatSnapshot, "execution">
+  execution: ExecutionViewState
   pump: Promise<void>
   closing: boolean
   requests: Map<
@@ -140,7 +148,23 @@ export function createSideChatService(options: {
     return chat
   }
   const snapshot = (chat: LiveChat): SideChatSnapshot =>
-    structuredClone(chat.snapshot)
+    structuredClone({
+      ...chat.snapshot,
+      execution: projectExecutionView(chat.execution),
+    })
+  const catchUpRollout = (
+    chat: LiveChat,
+    throughSeq = Number.POSITIVE_INFINITY,
+  ) => {
+    for (const record of chat.stored.rollout) {
+      if (record.seq > throughSeq || record.seq + 1 <= chat.execution.lastSeq)
+        continue
+      chat.execution = reduceExecutionView(chat.execution, {
+        type: "durable",
+        event: mapRolloutEvent(record, chat.snapshot.id),
+      })
+    }
+  }
   const publish = (chat: LiveChat) => {
     chat.snapshot.revision += 1
     if (!chat.closing) options.changed(snapshot(chat))
@@ -460,6 +484,10 @@ export function createSideChatService(options: {
           }
           throw error
         }
+        const execution = {
+          ...createExecutionViewState(),
+          workingDirectory: cwd,
+        }
         const chat: LiveChat = {
           ...(parentSessionId === undefined ? {} : { parentSessionId }),
           thread,
@@ -472,18 +500,73 @@ export function createSideChatService(options: {
             cwd,
             modelSelection: structuredClone(modelSelection),
             expiresAt: new Date(createdAt + inactivityMs).toISOString(),
-            messages: [],
           },
+          execution,
           pump: Promise.resolve(),
           closing: false,
           requests: new Map(),
         }
         chats.set(id, chat)
+        const presentation = createSessionLivePresentation((event) => {
+          const execution = reduceExecutionView(chat.execution, {
+            type: "transient",
+            event,
+          })
+          if (execution !== chat.execution) {
+            chat.execution = execution
+            publish(chat)
+          }
+        })
         chat.pump = (async () => {
           for (;;) {
             const event = await thread.nextEvent()
-            if (event === undefined) return
-            if (reduceChat(chat, event)) publish(chat)
+            if (event === undefined) {
+              presentation.flush()
+              return
+            }
+            let changed = false
+            if (event.type === "rollout.appended") {
+              changed = true
+              presentation.flush()
+              catchUpRollout(chat, event.throughSeq)
+            } else {
+              presentation.publish(event)
+              if (event.type === "permission") {
+                changed = true
+                const permission = event.event
+                chat.snapshot.pendingPermissions = (
+                  chat.snapshot.pendingPermissions ?? []
+                ).filter(
+                  (entry) =>
+                    entry.permissionRequestId !==
+                    permission.permissionRequestId,
+                )
+                if (permission.type === "permission.requested")
+                  chat.snapshot.pendingPermissions = [
+                    ...chat.snapshot.pendingPermissions,
+                    permission,
+                  ]
+              } else if (event.type === "turn.started") {
+                changed = true
+                chat.snapshot.activeTurnId = event.input.submissionId
+                delete chat.snapshot.error
+                chat.execution = {
+                  ...chat.execution,
+                  activeTurnId: event.input.submissionId,
+                }
+              } else if (
+                event.type === "turn.completed" ||
+                event.type === "turn.interrupted" ||
+                event.type === "turn.failed"
+              ) {
+                changed = true
+                if (chat.snapshot.activeTurnId === event.input.submissionId)
+                  delete chat.snapshot.activeTurnId
+                if (event.type === "turn.failed")
+                  chat.snapshot.error = event.error.message
+              }
+            }
+            if (changed) publish(chat)
           }
         })()
         void chat.pump.catch(options.reportError)
@@ -597,23 +680,20 @@ export function createSideChatService(options: {
           modelSelection: structuredClone(selection),
         })
         chat.snapshot.modelSelection = structuredClone(selection)
+        catchUpRollout(chat)
         if (
-          !chat.snapshot.messages.some(
-            (message) => message.id === input.requestId,
+          !chat.execution.entries.some(
+            (entry) =>
+              entry.kind === "user_input" &&
+              entry.requestId === input.requestId,
           )
         ) {
-          const message: SideChatMessage = {
-            id: input.requestId,
-            turnId: result.turnId,
-            role: "user",
+          chat.execution = reduceExecutionView(chat.execution, {
+            type: "input_pending",
+            requestId: input.requestId,
             content,
-            streaming: false,
-          }
-          const responseIndex = chat.snapshot.messages.findIndex(
-            (entry) => entry.turnId === result.turnId,
-          )
-          if (responseIndex < 0) chat.snapshot.messages.push(message)
-          else chat.snapshot.messages.splice(responseIndex, 0, message)
+            at: new Date(now()).toISOString(),
+          })
         }
         publish(chat)
         // Admission is committed before staging cleanup. A failed unlink must
@@ -753,100 +833,4 @@ export function createSideChatService(options: {
     },
   }
   return service
-}
-
-function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
-  const state = chat.snapshot
-  if (event.type === "permission") {
-    const permission = event.event
-    state.pendingPermissions = (state.pendingPermissions ?? []).filter(
-      (entry) => entry.permissionRequestId !== permission.permissionRequestId,
-    )
-    if (permission.type === "permission.requested")
-      state.pendingPermissions = [...state.pendingPermissions, permission]
-    return true
-  }
-  if (event.type === "turn.started") {
-    state.activeTurnId = event.input.submissionId
-    delete state.error
-    return true
-  }
-  if (event.type === "model.stream" && event.kind === "assistant") {
-    const existing = state.messages.find(
-      (message) => message.id === event.itemId,
-    )
-    if (existing?.role === "assistant") {
-      existing.text += event.delta
-      existing.streaming = true
-    } else
-      state.messages.push({
-        id: event.itemId,
-        turnId: event.turnId,
-        role: "assistant",
-        text: event.delta,
-        streaming: true,
-      })
-    return true
-  }
-  if (event.type === "model.output_discarded") {
-    state.messages = state.messages.filter(
-      (message) =>
-        !event.itemIds.includes(message.id) ||
-        message.turnId !== event.turnId ||
-        !message.streaming,
-    )
-    return true
-  }
-  if (event.type === "runtime.warning" && event.code === "model.retry") {
-    const itemIds = event.details?.discardedResponseItemIds
-    const discarded = Array.isArray(itemIds) ? itemIds : []
-    state.messages = state.messages.filter(
-      (message) =>
-        !discarded.includes(message.id) ||
-        message.turnId !== event.turnId ||
-        !message.streaming,
-    )
-    return true
-  }
-  if (event.type === "rollout.appended") {
-    let changed = false
-    for (const { item } of event.records) {
-      if (item.type !== "response_item" || item.item.item.role !== "assistant")
-        continue
-      const text = item.item.item.content
-        .flatMap((block) => (block.type === "text" ? [block.text] : []))
-        .join("")
-      if (!text) continue
-      const existing = state.messages.find(
-        (message) => message.id === item.item.id,
-      )
-      if (existing?.role === "assistant") {
-        existing.text = text
-        existing.streaming = false
-      } else
-        state.messages.push({
-          id: item.item.id,
-          turnId: item.item.turnId,
-          role: "assistant",
-          text,
-          streaming: false,
-        })
-      changed = true
-    }
-    return changed
-  }
-  if (
-    event.type === "turn.completed" ||
-    event.type === "turn.interrupted" ||
-    event.type === "turn.failed"
-  ) {
-    if (state.activeTurnId === event.input.submissionId)
-      delete state.activeTurnId
-    for (const message of state.messages) {
-      if (message.turnId === event.input.submissionId) message.streaming = false
-    }
-    if (event.type === "turn.failed") state.error = event.error.message
-    return true
-  }
-  return false
 }

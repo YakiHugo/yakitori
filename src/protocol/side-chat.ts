@@ -1,15 +1,7 @@
+import type { ExecutionView } from "../shared/execution-view.ts"
 import type { ModelSelection } from "./events.ts"
 import type { RuntimePermissionRequest } from "./permissions.ts"
 import type { InputContent } from "./user-input.ts"
-
-export type SideChatMessage = {
-  id: string
-  turnId: string
-  streaming: boolean
-} & (
-  | { role: "user"; content: InputContent }
-  | { role: "assistant"; text: string }
-)
 
 export type SideChatSnapshot = {
   id: string
@@ -17,7 +9,7 @@ export type SideChatSnapshot = {
   cwd: string
   modelSelection: ModelSelection
   expiresAt: string
-  messages: SideChatMessage[]
+  execution: ExecutionView
   activeTurnId?: string
   error?: string
   pendingPermissions?: readonly RuntimePermissionRequest[]

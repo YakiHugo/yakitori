@@ -1,14 +1,11 @@
 import { ChevronRight } from "lucide-react"
 import { useId } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
-import {
-  selectCurrentThreadId,
-  useAppStore,
-} from "../../store/app-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
+import { useConversationScope } from "../conversation-scope.tsx"
 import { ReasoningTrace, reasoningSections } from "../reasoning-trace.tsx"
-import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
+import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 
 export function ReasoningCell({
   entry,
@@ -21,7 +18,7 @@ export function ReasoningCell({
   apiBase?: string | undefined
   onExpandedChange?: (open: boolean) => void
 }>) {
-  const threadId = useAppStore(selectCurrentThreadId)
+  const { threadId } = useConversationScope()
   const [open, setOpen] = useThreadScopeState(
     threadId,
     `reasoning:${entry.itemId}`,

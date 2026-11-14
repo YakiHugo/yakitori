@@ -1219,7 +1219,7 @@ describe("structured context and ephemeral forks", () => {
     expect(side).toMatchObject({
       cwd: context.app.workspace,
       modelSelection: { provider: "openai", model: "gpt-test" },
-      messages: [],
+      execution: { entries: [] },
     })
     const cancelled = await context.app.handlers.cancelTurn({
       sessionId: id,
@@ -1275,8 +1275,10 @@ describe("structured context and ephemeral forks", () => {
         },
       ],
     })
-    expect(context.app.sideChats.read(side.id).messages[0]).toMatchObject({
-      role: "user",
+    expect(
+      context.app.sideChats.read(side.id).execution.entries[0],
+    ).toMatchObject({
+      kind: "user_input",
       content: createUserInput(
         "Explain the decision only",
         [],
@@ -1395,7 +1397,7 @@ describe("structured context and ephemeral forks", () => {
     const side = await context.app.sideChats.create({
       sourceSessionId: parentId,
     })
-    expect(side.messages).toEqual([])
+    expect(side.execution.entries).toEqual([])
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "side_image_question",
@@ -1505,9 +1507,9 @@ describe("structured context and ephemeral forks", () => {
     await until(() =>
       context.app.sideChats
         .read(nested.id)
-        .messages.some(
+        .execution.entries.some(
           (message) =>
-            message.role === "assistant" && message.text === "working",
+            message.kind === "assistant" && message.text === "working",
         ),
     )
     const deleted = await context.app.handlers.deleteSession({
@@ -1551,7 +1553,10 @@ describe("structured context and ephemeral forks", () => {
           type: "response",
           response: {
             stopReason: ModelStopReason.EndTurn,
-            content: [{ type: "text", text: "inspected" }],
+            content: [
+              { type: "reasoning", text: "Checked the workspace" },
+              { type: "text", text: "inspected" },
+            ],
           },
         }
       }
@@ -1595,6 +1600,25 @@ describe("structured context and ephemeral forks", () => {
     await until(
       () => context.app.sideChats.read(side.id).activeTurnId === undefined,
     )
+    expect(context.app.sideChats.read(side.id).execution.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "user_input",
+          requestId: "side_image",
+        }),
+        expect.objectContaining({ kind: "tool", state: "completed" }),
+        expect.objectContaining({
+          kind: "reasoning",
+          text: "Checked the workspace",
+          status: "completed",
+        }),
+        expect.objectContaining({
+          kind: "assistant",
+          text: "inspected",
+          status: "completed",
+        }),
+      ]),
+    )
     expect(JSON.stringify(requests)).toContain("real workspace evidence")
     expect(JSON.stringify(requests)).toContain(
       "Project instruction: use the local fixture",
@@ -1611,7 +1635,9 @@ describe("structured context and ephemeral forks", () => {
     ).toBe(true)
     expect(
       requests[0]?.tools.some((tool) =>
-        /spawn_agent|send_message|wait_agent/.test(tool.name),
+        /spawn_agent|send_message|wait_agent|request_user_input_async/.test(
+          tool.name,
+        ),
       ),
     ).toBe(false)
     expect(
@@ -1629,16 +1655,17 @@ describe("structured context and ephemeral forks", () => {
         { type: "text", text: "Inspect the file[Image 1] and image" },
       ],
     })
-    const firstMessage = context.app.sideChats.read(side.id).messages[0]
+    const firstMessage = context.app.sideChats.read(side.id).execution
+      .entries[0]
     const attachment =
-      firstMessage?.role === "user"
+      firstMessage?.kind === "user_input"
         ? draftToEditorParts(firstMessage.content).find(
             (part) => part.type === "image",
           )
         : undefined
     if (!attachment) throw new Error("Missing promoted attachment")
     expect(firstMessage).toMatchObject({
-      role: "user",
+      kind: "user_input",
       content: inputFixture([
         { type: "text", text: "Inspect the file" },
         { type: "image" },
