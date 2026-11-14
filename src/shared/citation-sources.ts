@@ -1,12 +1,8 @@
 import type { ModelTextBlock } from "../protocol/conversation.ts"
+import type { CitationSource } from "../protocol/execution-view.ts"
 import { isJsonObject } from "../protocol/json.ts"
 
-export type CitationSource = Readonly<{
-  id: string
-  label: string
-  url?: string
-  location?: string
-}>
+export type { CitationSource } from "../protocol/execution-view.ts"
 
 export function citationSources(
   blocks: readonly ModelTextBlock[],

@@ -1,5 +1,5 @@
-import type { ExecutionView } from "../shared/execution-view.ts"
 import type { ModelSelection } from "./events.ts"
+import type { ExecutionView } from "./execution-view.ts"
 import type { RuntimePermissionRequest } from "./permissions.ts"
 import type { InputContent } from "./user-input.ts"
 
