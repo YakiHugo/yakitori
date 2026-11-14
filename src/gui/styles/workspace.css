@@ -188,6 +188,12 @@
 .side-chat-message {
   min-width: 0;
 }
+.side-chat-message-actions {
+  margin-top: var(--conversation-detail-gap);
+}
+.side-chat-user > .side-chat-message-actions {
+  margin-top: 0;
+}
 .side-chat-user {
   display: flex;
   flex-direction: column;
