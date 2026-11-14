@@ -27,14 +27,12 @@ import {
   openUrlTarget,
 } from "../../lib/open-resource.ts"
 import { cn } from "../../lib/utils.ts"
-import {
-  selectCurrentThreadId,
-  useAppStore,
-} from "../../store/app-store.ts"
+import { useAppStore } from "../../store/app-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
-import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
+import { useConversationScope } from "../conversation-scope.tsx"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
+import { Collapsible, CollapsibleTrigger } from "../ui/collapsible.tsx"
 import { PlanCell, UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
 import { ToolResultParts } from "./tool-result-parts.tsx"
@@ -62,7 +60,7 @@ export function ToolCell({
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
       : undefined
-  const threadId = useAppStore(selectCurrentThreadId)
+  const { threadId, interactiveQuestions } = useConversationScope()
   const [open, setOpen] = useThreadScopeState(
     threadId,
     `tool:${entry.toolCallId}`,
@@ -117,7 +115,10 @@ export function ToolCell({
   }, [entry.state, setOpen])
 
   if (!entry.resultError && entry.output !== undefined) {
-    if (entry.execution.name === "request_user_input_async") {
+    if (
+      interactiveQuestions &&
+      entry.execution.name === "request_user_input_async"
+    ) {
       const request = parseUserQuestions(entry.output)
       if (request)
         return (

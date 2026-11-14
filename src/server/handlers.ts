@@ -49,7 +49,6 @@ import {
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
-import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
@@ -108,6 +107,7 @@ import {
   mapRolloutEvent,
   modelUserInputContent,
 } from "./session-event-projection.ts"
+import { createSessionLivePresentation } from "./session-live-presentation.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import { ApiBoundaryError, invalidInput } from "./thread-handler-errors.ts"
@@ -487,10 +487,9 @@ export function createThreadServerHandlers(
           publication.turns.delete(record.item.turnId)
       }
       const pump = (async () => {
-        const streams = new Map<
-          string,
-          ReturnType<typeof createCoalescingDeltaPublisher>
-        >()
+        const presentation = createSessionLivePresentation((event) =>
+          options.eventHub?.publishTransient(event),
+        )
         for (;;) {
           const event = await Promise.race([
             thread.nextEvent(),
@@ -498,7 +497,7 @@ export function createThreadServerHandlers(
           ])
           if (event === undefined) break
           if (event.type === "rollout.appended") {
-            for (const publisher of streams.values()) publisher.flush()
+            presentation.flush()
             try {
               await publishNewRollout(thread.id, event, publication)
             } catch (error) {
@@ -524,109 +523,15 @@ export function createThreadServerHandlers(
             }
             continue
           }
-          if (event.type === "model.stream") {
-            const reasoning = event.kind === "reasoning"
-            const displayItemId = event.itemId
-            const key = displayItemId
-            let publisher = streams.get(key)
-            if (publisher === undefined) {
-              options.eventHub?.publishTransient({
-                type: "item.started",
-                sessionId: event.threadId,
-                turnId: event.turnId,
-                item: {
-                  type: reasoning ? "reasoning" : "agent_message",
-                  itemId: displayItemId,
-                  ...(event.source === undefined
-                    ? {}
-                    : { source: event.source }),
-                  ...(event.purpose === undefined
-                    ? {}
-                    : { purpose: event.purpose }),
-                  ...(event.representation === undefined
-                    ? {}
-                    : { representation: event.representation }),
-                },
-                createdAt: new Date().toISOString(),
-              })
-              if (options.eventHub === undefined) continue
-              publisher = createCoalescingDeltaPublisher(
-                options.eventHub,
-                30,
-                reasoning ? "reasoning.delta" : "assistant.delta",
-              )
-              streams.set(key, publisher)
-            }
-            publisher.publish({
-              sessionId: event.threadId,
-              turnId: event.turnId,
-              itemId: displayItemId,
-              delta: event.delta,
-              ...(event.source === undefined ? {} : { source: event.source }),
-              ...(event.purpose === undefined
-                ? {}
-                : { purpose: event.purpose }),
-              ...(event.representation === undefined
-                ? {}
-                : { representation: event.representation }),
-            })
-            continue
-          }
-          if (event.type === "model.output_discarded") {
-            for (const publisher of streams.values()) publisher.flush()
-            for (const itemId of event.itemIds) {
-              streams.delete(itemId)
-              options.eventHub?.publishTransient({
-                type: "item.discarded",
-                sessionId: event.threadId,
-                turnId: event.turnId,
-                itemId,
-                createdAt: new Date().toISOString(),
-              })
-            }
-            continue
-          }
-          if (event.type === "item.started") {
-            options.eventHub?.publishTransient({
-              type: "item.started",
-              sessionId: event.threadId,
-              turnId: event.turnId,
-              item: event.item,
-              createdAt: new Date().toISOString(),
-            })
-            continue
-          }
+          presentation.publish(event)
           if (event.type === "permission") {
-            options.eventHub?.publishTransient(event.event)
             options.notifySidebarChanged?.(event.threadId)
-            continue
           }
           if (
             event.type === "turn.completed" ||
             event.type === "turn.failed" ||
             event.type === "turn.interrupted"
           ) {
-            for (const publisher of streams.values()) publisher.flush()
-            streams.clear()
-            // Runtime completion remains deliverable when its rollout append
-            // or flush failed. Only persisted records advance durable history.
-            options.eventHub?.publishTransient({
-              type: "turn.finished",
-              sessionId: event.threadId,
-              turnId: event.input.submissionId,
-              outcome:
-                event.type === "turn.failed"
-                  ? { status: "failed", error: event.error }
-                  : event.type === "turn.interrupted"
-                    ? {
-                        status: "interrupted",
-                        ...(event.reason === undefined
-                          ? {}
-                          : { reason: event.reason }),
-                      }
-                    : { status: "completed", ...event.completion },
-              createdAt: new Date().toISOString(),
-            })
             if (event.type === "turn.completed") {
               const snapshot = thread.snapshot()
               const agent = snapshot.metadata.metadata?.agent
@@ -651,52 +556,9 @@ export function createThreadServerHandlers(
                 })
               }
             }
-            continue
-          }
-          if (event.type === "session.error") {
-            options.eventHub?.publishTransient({
-              type: "session.error",
-              sessionId: event.threadId,
-              operation: event.operation,
-              message: event.message,
-              createdAt: new Date().toISOString(),
-            })
-            continue
-          }
-          if (event.type === "runtime.warning") {
-            if (event.code === "model.retry") {
-              // Flush before discard so a coalesced delta cannot revive output
-              // from the failed attempt after the retry starts.
-              for (const publisher of streams.values()) publisher.flush()
-              const itemIds = event.details?.discardedResponseItemIds
-              const discarded = Array.isArray(itemIds)
-                ? itemIds.filter((id): id is string => typeof id === "string")
-                : []
-              for (const itemId of discarded) {
-                streams.delete(itemId)
-                options.eventHub?.publishTransient({
-                  type: "item.discarded",
-                  sessionId: event.threadId,
-                  turnId: event.turnId,
-                  itemId,
-                  createdAt: new Date().toISOString(),
-                })
-              }
-            }
-            options.eventHub?.publishTransient({
-              type: "runtime.warning",
-              sessionId: event.threadId,
-              turnId: event.turnId,
-              message: event.message,
-              ...(event.code === undefined ? {} : { code: event.code }),
-              ...(event.details === undefined
-                ? {}
-                : { details: event.details }),
-              createdAt: new Date().toISOString(),
-            })
           }
         }
-        for (const publisher of streams.values()) publisher.flush()
+        presentation.flush()
       })()
       pump
         .catch((error) => {

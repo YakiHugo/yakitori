@@ -14,11 +14,12 @@ import {
   trimInputDraft,
 } from "../../input-draft.ts"
 import { isUnmodifiedEscape } from "../../lib/escape-key.ts"
-import { selectCurrentThreadId, useAppStore } from "../../store/app-store.ts"
+import { useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { ContextExcerpts } from "../context-excerpts.tsx"
+import { useConversationScope } from "../conversation-scope.tsx"
 import { ImageLightbox } from "../image-lightbox.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "../pdf-attachment.tsx"
 import { parsePrompt } from "../prompt-document.ts"
@@ -79,15 +80,14 @@ export function UserMessageCell({
   queued: boolean
 }>) {
   const busy = useAppStore((state) => state.busy)
-  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const { sessionId, threadId, apiBase, editable } = useConversationScope()
   const goalInputId = useAppStore(
     (state) => state.selectedSession?.goal?.inputId,
   )
-  const sentAsGoal = goalInputId !== undefined && goalInputId === entry.inputId
-  const apiBase = useAppStore((state) => state.apiBase)
+  const sentAsGoal =
+    editable && goalInputId !== undefined && goalInputId === entry.inputId
   const revertSession = useAppStore((state) => state.revertSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
-  const threadId = useAppStore(selectCurrentThreadId)
   const [editing, setEditing] = useThreadScopeState(
     threadId,
     `message:${entry.inputId}:editing`,
@@ -114,7 +114,7 @@ export function UserMessageCell({
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {!editing ? (
+      {!editable || !editing ? (
         <>
           {contextAttachments.length > 0 ? (
             <section
@@ -182,25 +182,27 @@ export function UserMessageCell({
             <div className="message-actions opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
               <MessageTimestamp at={entry.at} />
               <CopyIconButton text={entry.text} label="message" />
-              <button
-                type="button"
-                disabled={busy}
-                aria-label="Edit & resubmit"
-                title="Edit & resubmit"
-                onClick={() => {
-                  setDraft(entry.content)
-                  setEditing(true)
-                }}
-                className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-              >
-                <PencilLine className="size-4" />
-              </button>
+              {editable ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label="Edit & resubmit"
+                  title="Edit & resubmit"
+                  onClick={() => {
+                    setDraft(entry.content)
+                    setEditing(true)
+                  }}
+                  className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                >
+                  <PencilLine className="size-4" />
+                </button>
+              ) : null}
             </div>
           </div>
         </>
       ) : null}
       {openError === undefined ? null : <p role="alert">{openError}</p>}
-      {editing ? (
+      {editable && editing ? (
         <form
           className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
           onSubmit={(event) => {

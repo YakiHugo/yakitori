@@ -6,9 +6,9 @@ import {
 } from "../conversation-activity.ts"
 import { executionEntryKey } from "../execution-view.ts"
 import { cn } from "../lib/utils.ts"
-import { useAppStore } from "../store/app-store.ts"
-import { ToolCell } from "./cells/tool-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
+import { ToolCell } from "./cells/tool-cell.tsx"
+import { useConversationScope } from "./conversation-scope.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
 import { Collapsible, CollapsibleTrigger } from "./ui/collapsible.tsx"
 
@@ -17,7 +17,7 @@ export function ActivityBatch({
 }: Readonly<{
   entries: readonly [ActivityBatchEntry, ...ActivityBatchEntry[]]
 }>) {
-  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
+  const { workspaceRoot, apiBase } = useConversationScope()
   const [expanded, setExpanded] = useState<boolean>()
   const contentId = useId()
   const tools = entries.filter((entry) => entry.kind === "tool")
@@ -87,6 +87,7 @@ export function ActivityBatch({
                 key={executionEntryKey(entry)}
                 entry={entry}
                 workspaceRoot={workspaceRoot}
+                apiBase={apiBase}
                 onExpandedChange={(next) => {
                   if (next) setExpanded(true)
                 }}
@@ -96,6 +97,7 @@ export function ActivityBatch({
                 key={executionEntryKey(entry)}
                 entry={entry}
                 workspaceRoot={workspaceRoot}
+                apiBase={apiBase}
                 onExpandedChange={(next) => {
                   if (next) setExpanded(true)
                 }}

@@ -222,13 +222,18 @@ describe("temporary side conversations", () => {
       )
       expect(expired.expiresAt).toBe(second.expiresAt)
       expect(
-        expired.messages.map((message) =>
-          message.role === "assistant"
-            ? message.text
-            : draftToEditorParts(message.content)
-                .flatMap((part) => (part.type === "text" ? [part.text] : []))
-                .join(""),
-        ),
+        expired.execution.entries
+          .filter(
+            (message) =>
+              message.kind === "assistant" || message.kind === "user_input",
+          )
+          .map((message) =>
+            message.kind === "assistant"
+              ? message.text
+              : draftToEditorParts(message.content)
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .join(""),
+          ),
       ).toEqual(["hello", "reply 1", "follow-up", "reply 2"])
       await expect(
         context.service.importAttachmentPaths(created.id, "owner", []),
@@ -327,18 +332,20 @@ describe("temporary side conversations", () => {
           context.service.read(created.id).activeTurnId === undefined &&
           context.service
             .read(created.id)
-            .messages.filter((message) => message.role === "assistant")
+            .execution.entries.filter((message) => message.kind === "assistant")
             .at(-1)?.text === "finished",
       )
       expect(context.service.read(created.id)).toMatchObject({
         expiresAt: deadline,
-        messages: [
-          {
-            role: "user",
-            content: createUserInput("question"),
-          },
-          { role: "assistant", text: "finished", streaming: false },
-        ],
+        execution: {
+          entries: [
+            {
+              kind: "user_input",
+              content: createUserInput("question"),
+            },
+            { kind: "assistant", text: "finished", status: "completed" },
+          ],
+        },
       })
     } finally {
       finish?.()
@@ -371,9 +378,9 @@ describe("temporary side conversations", () => {
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some(
+          .execution.entries.some(
             (message) =>
-              message.role === "assistant" &&
+              message.kind === "assistant" &&
               message.text === "unfinished answer",
           ),
       )
@@ -382,9 +389,14 @@ describe("temporary side conversations", () => {
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
-      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+      expect(
+        context.service
+          .read(created.id)
+          .execution.entries.filter((message) => message.kind === "assistant")
+          .at(-1),
+      ).toMatchObject({
         text: "unfinished answer",
-        streaming: false,
+        status: "completed",
       })
     } finally {
       await context.close()
@@ -431,8 +443,10 @@ describe("temporary side conversations", () => {
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
-      expect(context.service.read(created.id).messages[0]).toMatchObject({
-        role: "user",
+      expect(
+        context.service.read(created.id).execution.entries[0],
+      ).toMatchObject({
+        kind: "user_input",
         content: inputFixture([], [attachment]),
       })
       expect(JSON.stringify(requests[0]?.messages)).toContain(
@@ -499,33 +513,40 @@ describe("temporary side conversations", () => {
         () =>
           context.service
             .read(created.id)
-            .messages.some(
+            .execution.entries.some(
               (message) =>
-                message.role === "assistant" && message.text === "answer 1",
+                message.kind === "assistant" && message.text === "answer 1",
             ) && context.service.read(created.id).activeTurnId === undefined,
       )
       const first = context.service.read(created.id)
       expect(
-        first.messages.map((message) => ({
-          role: message.role,
-          text:
-            message.role === "assistant"
-              ? message.text
-              : draftToEditorParts(message.content)
-                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
-                  .join(""),
-        })),
+        first.execution.entries
+          .filter(
+            (message) =>
+              message.kind === "assistant" || message.kind === "user_input",
+          )
+          .map((message) => ({
+            kind: message.kind,
+            text:
+              message.kind === "assistant"
+                ? message.text
+                : draftToEditorParts(message.content)
+                    .flatMap((part) =>
+                      part.type === "text" ? [part.text] : [],
+                    )
+                    .join(""),
+          })),
       ).toEqual([
-        { role: "user", text: "Selected excerpt: independent context" },
-        { role: "assistant", text: "answer 1" },
+        { kind: "user_input", text: "Selected excerpt: independent context" },
+        { kind: "assistant", text: "answer 1" },
       ])
       expect(
         context.changes.some((change) =>
-          change.messages.some(
+          change.execution.entries.some(
             (message) =>
-              message.role === "assistant" &&
+              message.kind === "assistant" &&
               message.text === "partial" &&
-              message.streaming,
+              message.status === "streaming",
           ),
         ),
       ).toBe(true)
@@ -546,9 +567,9 @@ describe("temporary side conversations", () => {
         () =>
           context.service
             .read(created.id)
-            .messages.some(
+            .execution.entries.some(
               (message) =>
-                message.role === "assistant" && message.text === "answer 2",
+                message.kind === "assistant" && message.text === "answer 2",
             ) && context.service.read(created.id).activeTurnId === undefined,
       )
       expect(requests[1]?.target).toMatchObject({
@@ -619,6 +640,7 @@ describe("temporary side conversations", () => {
       createModelRequestStream(
         async function* () {
           if (++attempts === 1) {
+            yield { type: "reasoning_delta", text: "discard reasoning" }
             yield { type: "delta", text: "discard this" }
             yield {
               type: "failure",
@@ -632,13 +654,17 @@ describe("temporary side conversations", () => {
             }
             return
           }
+          yield { type: "reasoning_delta", text: "fresh reasoning" }
           yield { type: "delta", text: "fresh answer" }
           await completed
           yield {
             type: "response",
             response: {
               stopReason: ModelStopReason.EndTurn,
-              content: [{ type: "text", text: "fresh answer" }],
+              content: [
+                { type: "reasoning", text: "fresh reasoning" },
+                { type: "text", text: "fresh answer" },
+              ],
             },
           }
         },
@@ -655,25 +681,40 @@ describe("temporary side conversations", () => {
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some(
+          .execution.entries.some(
             (message) =>
-              message.role === "assistant" && message.text === "fresh answer",
+              message.kind === "assistant" && message.text === "fresh answer",
           ),
       )
       expect(
         context.service
           .read(created.id)
-          .messages.filter((message) => message.role === "assistant"),
+          .execution.entries.filter((message) => message.kind === "assistant"),
       ).toEqual([
-        expect.objectContaining({ text: "fresh answer", streaming: true }),
+        expect.objectContaining({ text: "fresh answer", status: "streaming" }),
+      ])
+      expect(
+        context.service
+          .read(created.id)
+          .execution.entries.filter((entry) => entry.kind === "reasoning"),
+      ).toEqual([
+        expect.objectContaining({
+          text: "fresh reasoning",
+          status: "streaming",
+        }),
       ])
       finish()
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
-      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+      expect(
+        context.service
+          .read(created.id)
+          .execution.entries.filter((message) => message.kind === "assistant")
+          .at(-1),
+      ).toMatchObject({
         text: "fresh answer",
-        streaming: false,
+        status: "completed",
       })
     } finally {
       finish()
@@ -707,18 +748,23 @@ describe("temporary side conversations", () => {
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some(
+          .execution.entries.some(
             (message) =>
-              message.role === "assistant" && message.text === "prefix 1",
+              message.kind === "assistant" && message.text === "prefix 1",
           ),
       )
       await context.service.cancel(created.id, "cancel-me")
       await until(
         () => context.service.read(created.id).activeTurnId === undefined,
       )
-      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+      expect(
+        context.service
+          .read(created.id)
+          .execution.entries.filter((message) => message.kind === "assistant")
+          .at(-1),
+      ).toMatchObject({
         text: "prefix 1",
-        streaming: false,
+        status: "completed",
       })
       await context.service.send({
         sideChatId: created.id,
@@ -729,9 +775,14 @@ describe("temporary side conversations", () => {
       expect(context.service.read(created.id)).toMatchObject({
         error: expect.stringContaining("Fixture model failed"),
       })
-      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+      expect(
+        context.service
+          .read(created.id)
+          .execution.entries.filter((message) => message.kind === "assistant")
+          .at(-1),
+      ).toMatchObject({
         text: "prefix 2",
-        streaming: false,
+        status: "completed",
       })
       await context.service.send({
         sideChatId: created.id,
@@ -741,9 +792,9 @@ describe("temporary side conversations", () => {
       await until(() =>
         context.service
           .read(created.id)
-          .messages.some(
+          .execution.entries.some(
             (message) =>
-              message.role === "assistant" && message.text === "prefix 3",
+              message.kind === "assistant" && message.text === "prefix 3",
           ),
       )
       await context.service.remove(created.id)
@@ -978,9 +1029,13 @@ describe("temporary side conversations", () => {
       if (origin === "tool") {
         const recalled = service
           .read(nested.id)
-          .messages.find((message) => message.id === "nested_pdf")
+          .execution.entries.find(
+            (message) =>
+              message.kind === "user_input" &&
+              message.requestId === "nested_pdf",
+          )
         const stored =
-          recalled?.role === "user"
+          recalled?.kind === "user_input"
             ? recalled.content.attachments[0]
             : undefined
         if (stored?.mediaType !== "application/pdf")
@@ -1064,9 +1119,9 @@ describe("temporary side conversations", () => {
         () =>
           application.sideChats
             .read(created.id)
-            .messages.some(
+            .execution.entries.some(
               (message) =>
-                message.role === "assistant" &&
+                message.kind === "assistant" &&
                 message.text === "temporary answer",
             ) &&
           application.sideChats.read(created.id).activeTurnId === undefined,

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "../../src/gui/execution-view.ts"
+import {
   ApiRequestError,
   createAppRpcClient,
   type SessionStreamHandlers,
@@ -212,7 +216,8 @@ describe("app RPC client", () => {
       revision: 0,
       cwd: "/workspace",
       modelSelection: { provider: "faux", model: "scripted" },
-      messages: [],
+      expiresAt: "2099-01-01T00:00:00Z",
+      execution: projectExecutionView(createExecutionViewState()),
     }
     socket.emitMessage({ id: 1, result: sideChat })
     await pending

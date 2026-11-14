@@ -100,16 +100,17 @@ describe("side conversation admission and draft cleanup", () => {
       const repeated = await connection.sendRequest("sideChat/send", request)
       expect(repeated).toHaveProperty("result")
       const result = (repeated as { result: SideChatSnapshot }).result
-      expect(result.messages.map((message) => message.role)).toEqual([
-        "user",
+      expect(result.execution.entries.map((message) => message.kind)).toEqual([
+        "user_input",
         "assistant",
       ])
       expect(result.modelSelection).toEqual(request.modelSelection)
       expect(response).toHaveProperty("result")
       expect(turns).toBe(1)
       expect(errors).toEqual([cleanupError])
-      const admitted = result.messages[0]
-      if (admitted?.role !== "user") throw new Error("Missing admitted input")
+      const admitted = result.execution.entries[0]
+      if (admitted?.kind !== "user_input")
+        throw new Error("Missing admitted input")
       const [attachment] = inputContentAttachments(admitted.content)
       if (attachment === undefined) throw new Error("Missing admitted image")
       expect(attachment.file).toMatchObject({

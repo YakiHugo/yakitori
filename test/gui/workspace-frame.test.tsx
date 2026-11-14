@@ -17,6 +17,10 @@ import { ModelSelector } from "../../src/gui/components/model-selector.tsx"
 import { WorkspaceFrame } from "../../src/gui/components/workspace-frame.tsx"
 import { contextSourceAttributes } from "../../src/gui/conversation-context.ts"
 import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "../../src/gui/execution-view.ts"
+import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
@@ -158,7 +162,7 @@ beforeEach(() => {
           revision: 0,
           cwd: "/project/one",
           modelSelection: { provider: "faux", model: "scripted" },
-          messages: [],
+          execution: projectExecutionView(createExecutionViewState()),
         }
       : { skills: [] },
   )
@@ -819,15 +823,25 @@ it("attaches side excerpts immediately and edits their comments without changing
           revision: 0,
           cwd: "/project/one",
           modelSelection: { provider: "faux", model: "scripted" },
-          messages: [
-            {
-              id: "response",
-              turnId: "turn",
-              role: "assistant",
-              text: "Side explanation",
-              streaming: false,
+          execution: {
+            ...projectExecutionView(createExecutionViewState()),
+            entries: [
+              {
+                kind: "assistant",
+                itemId: "response",
+                turnId: "turn",
+                text: "Side explanation",
+                status: "completed",
+                at: "2026-01-01T00:00:00Z",
+              },
+            ],
+            turnTimings: {
+              turn: {
+                startedAt: "2026-01-01T00:00:00Z",
+                completedAt: "2026-01-01T00:00:01Z",
+              },
             },
-          ],
+          },
         }
       : { skills: [] },
   )
@@ -852,7 +866,7 @@ it("attaches side excerpts immediately and edits their comments without changing
         text: "Side explanation",
         source: {
           kind: "message",
-          label: "Side chat response",
+          label: "Assistant message",
           sessionId: "side-source",
           messageId: "response",
         },

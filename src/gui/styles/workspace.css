@@ -185,40 +185,6 @@
   font-weight: 500;
   color: var(--foreground);
 }
-.side-chat-message {
-  min-width: 0;
-}
-.side-chat-message-actions {
-  margin-top: var(--conversation-detail-gap);
-}
-.side-chat-user > .side-chat-message-actions {
-  margin-top: 0;
-}
-.side-chat-user {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-.side-chat-user-bubble {
-  --prose-color: var(--user-message-foreground);
-  --prose-emphasis: var(--user-message-foreground);
-  padding: 10px 16px;
-}
-.side-chat-user-bubble.markdown :where(:not(pre) > code) {
-  background: color-mix(
-    in srgb,
-    var(--user-message-foreground) 12%,
-    transparent
-  );
-}
-.side-chat-user-bubble.markdown a,
-.side-chat-user-bubble.markdown :where(ul > li, ol > li)::marker {
-  color: inherit;
-}
-.side-chat-user-bubble.markdown :where(pre) {
-  color: var(--foreground);
-}
 .side-chat-composer {
   padding: 8px 16px 16px;
   flex-shrink: 0;

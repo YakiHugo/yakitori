@@ -24,6 +24,50 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("does not discard an admitted input when its RPC acknowledgement is lost", () => {
+    const pending = reduceExecutionView(createExecutionViewState(), {
+      type: "input_pending",
+      requestId: "request_lost_ack",
+      content: inputParts("Keep this admitted message"),
+      at: "2026-11-12T00:00:00.000Z",
+    })
+    expect(
+      reduceExecutionView(pending, {
+        type: "input_pending_discarded",
+        requestId: "request_lost_ack",
+      }).entries,
+    ).toEqual([])
+    const admitted = reduceExecutionView(pending, {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 1,
+        createdAt: "2026-11-12T00:00:00.000Z",
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request_lost_ack",
+            inputId: "input_admitted",
+            role: InputRole.User,
+            content: inputFixture(inputParts("Keep this admitted message")),
+          },
+        },
+      }),
+    })
+    const discarded = reduceExecutionView(admitted, {
+      type: "input_pending_discarded",
+      requestId: "request_lost_ack",
+    })
+    expect(discarded).toBe(admitted)
+    expect(discarded.entries).toMatchObject([
+      {
+        kind: "user_input",
+        inputId: "input_admitted",
+        requestId: "request_lost_ack",
+      },
+    ])
+  })
+
   it.each([
     { role: InputRole.User, provenance: undefined },
     {
