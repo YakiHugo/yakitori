@@ -7,6 +7,7 @@ import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import {
   inputContent,
   inputContentAttachments,
+  inputContentText,
 } from "../../protocol/user-input.ts"
 import {
   attachmentUrl,
@@ -40,6 +41,7 @@ import { MarkdownView } from "./markdown.tsx"
 import { ModelSelector } from "./model-selector.tsx"
 import { openPdfAttachment, PdfAttachmentCard } from "./pdf-attachment.tsx"
 import { PromptEditor } from "./prompt-editor.tsx"
+import { CopyIconButton } from "./response-actions.tsx"
 
 export function SideChatPanel({
   tab,
@@ -581,6 +583,22 @@ export function SideChatPanel({
                   workspaceRoot={chat.cwd}
                 />
               )}
+              {!message.streaming &&
+              (message.role === "user"
+                ? inputContentText(message.content)
+                : message.text
+              ).trim() ? (
+                <div className="message-actions side-chat-message-actions">
+                  <CopyIconButton
+                    text={
+                      message.role === "user"
+                        ? inputContentText(message.content)
+                        : message.text
+                    }
+                    label={message.role === "user" ? "message" : "response"}
+                  />
+                </div>
+              ) : null}
             </article>
           ))
         ) : (

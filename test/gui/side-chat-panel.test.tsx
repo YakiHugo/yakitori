@@ -167,6 +167,56 @@ afterEach(() => {
 })
 
 describe("side chat panel", () => {
+  it("copies authored user text and completed assistant Markdown, not a partial response", async () => {
+    const writeText = vi.fn(async (_text: string) => {})
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } })
+    const messages: SideChatSnapshot["messages"] = [
+      {
+        id: "user",
+        turnId: "turn",
+        role: "user",
+        content: inputFixture([{ type: "text", text: "Explain **this**" }]),
+        streaming: false,
+      },
+      {
+        id: "answer",
+        turnId: "turn",
+        role: "assistant",
+        text: "A **formatted** answer",
+        streaming: true,
+      },
+    ]
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create" ? snapshot(1, { messages }) : {},
+    )
+    render(<Panel />)
+    fireEvent.click(await screen.findByRole("button", { name: "Copy message" }))
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("Explain **this**"),
+    )
+    expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
+    await act(async () => {
+      for (const listener of listeners)
+        listener(
+          snapshot(2, {
+            messages: messages.map((message) => ({
+              ...message,
+              streaming: false,
+            })),
+          }),
+        )
+    })
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Copy response" }),
+    )
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("A **formatted** answer"),
+    )
+    expect(
+      await screen.findByRole("button", { name: "Copied response" }),
+    ).toBeTruthy()
+  })
+
   it("routes Escape only to the side turn and remains stopping after its acknowledgement", async () => {
     const mainCancel = vi.fn(async () => {})
     useAppStore.setState({ cancelTurn: mainCancel })
