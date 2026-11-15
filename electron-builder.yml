@@ -48,6 +48,8 @@ files:
   - "!node_modules/pdfjs-dist/**/webpack.mjs"
   - "!node_modules/pdfjs-dist/CODE_OF_CONDUCT.md"
 extraResources:
+  - from: dist/build-info.json
+    to: build-info.json
   - from: dist/native
     to: computer
   - from: dist/gui

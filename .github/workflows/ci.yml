@@ -121,3 +121,48 @@ jobs:
           if [[ "$QUALITY_BUILD" != success || "$TESTS" != success || "$DESKTOP" != success ]]; then
             exit 1
           fi
+
+  publish-desktop:
+    name: Publish validated desktop update
+    needs: [required]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: yakitori-macos-arm64
+          path: release
+
+      - name: Publish a unique desktop main prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A partial rerun can reuse an earlier successful desktop artifact.
+          # Keep the tag tied to that build's identity, not the publishing attempt.
+          RELEASE_TAG=$(node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs"
+          const { build } = JSON.parse(readFileSync("release/update-manifest.json", "utf8"))
+          if (build.repository !== "YakiHugo/yakitori" ||
+              build.channel !== "main" || build.dirty !== false ||
+              build.commit !== process.env.GITHUB_SHA ||
+              build.buildNumber !== Number(process.env.GITHUB_RUN_NUMBER) ||
+              !Number.isSafeInteger(build.buildAttempt) || build.buildAttempt < 1 ||
+              build.buildAttempt > Number(process.env.GITHUB_RUN_ATTEMPT)) {
+            throw new Error("Desktop artifact identity does not match this validated CI run.")
+          }
+          console.log(`desktop-main-${build.buildNumber}-${build.buildAttempt}`)
+          NODE
+          )
+          printf 'Desktop main build from commit %s.\n\nValidated by the complete required CI suite.\n' "$GITHUB_SHA" > "$RUNNER_TEMP/desktop-release-body.md"
+          # Each run attempt has its own tag. Creation fails if it already
+          # exists; published assets are never replaced by a rerun.
+          gh release create "$RELEASE_TAG" \
+            release/yakitori-macos-arm64.tar release/update-manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$RELEASE_TAG" \
+            --body-file "$RUNNER_TEMP/desktop-release-body.md"
