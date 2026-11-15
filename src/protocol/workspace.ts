@@ -40,11 +40,21 @@ export type WorkspaceFindFilesResponse = Readonly<{
   truncated: boolean
 }>
 
+export type WorkspaceGitStats = {
+  additions: number
+  deletions: number
+  // Git does not provide line counts for binary diffs; both counts are zero.
+  binary: boolean
+}
+
 export type WorkspaceGitEntry = {
   path: string
   originalPath?: string
   indexStatus: string
   worktreeStatus: string
+  // Only tracked diffs have statistics; untracked files leave these undefined.
+  stagedStats?: WorkspaceGitStats
+  unstagedStats?: WorkspaceGitStats
 }
 
 export type GitStatusResponse = {

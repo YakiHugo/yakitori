@@ -23,12 +23,10 @@ import {
 import { flushSync } from "react-dom"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import { connectBrowserViewRequests } from "../browser-view-requests.ts"
+import { useWorkspaceGitStatus } from "../hooks/use-workspace-git-status.ts"
 import { hasInputDraft, trimInputDraft } from "../input-draft.ts"
 import { isUnmodifiedEscape } from "../lib/escape-key.ts"
-import {
-  selectCurrentThreadId,
-  useAppStore,
-} from "../store/app-store.ts"
+import { selectCurrentThreadId, useAppStore } from "../store/app-store.ts"
 import { useEngineStore } from "../store/engine-store.ts"
 import {
   isSideChatExpired,
@@ -52,6 +50,7 @@ import { SideChatPanel } from "./side-chat-panel.tsx"
 import { SidebarFrame } from "./sidebar-frame.tsx"
 import { SubagentsWorkspace } from "./subagents-workspace.tsx"
 import { WindowChrome } from "./window-chrome.tsx"
+import { WorkspaceChangeSummary } from "./workspace-change-summary.tsx"
 import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
 
@@ -127,8 +126,9 @@ export function WorkspaceFrame({
     if (owner === undefined) return undefined
     if (owner === workspaceSessionId) return sessionId
     return (
-      Object.entries(sessionThreadIds).find(([, threadId]) => threadId === owner)?.[0] ??
-      owner
+      Object.entries(sessionThreadIds).find(
+        ([, threadId]) => threadId === owner,
+      )?.[0] ?? owner
     )
   }
   const activeFile = visibleTabs.find(
@@ -192,6 +192,11 @@ export function WorkspaceFrame({
       ? nativeCwd
       : externalCwd
     : nativeCwd
+  const overviewGit = useWorkspaceGitStatus({
+    cwd,
+    apiBase,
+    active: overviewOpen && !open && !settingsOpen,
+  })
   const addToMain = (excerpt: ContextExcerpt) => {
     useWorkspaceStore.getState().setExpanded(false)
     if (window.innerWidth < 1180) setOpen(false)
@@ -484,6 +489,31 @@ export function WorkspaceFrame({
                   <GitCompareArrows size={18} />
                   <span>Changes</span>
                 </button>
+                {overviewGit.status?.branch ? (
+                  <p className="workspace-project-branch">
+                    {overviewGit.status.branch}
+                  </p>
+                ) : null}
+                {overviewGit.error ? (
+                  <div className="workspace-project-status" role="alert">
+                    <p>{overviewGit.error}</p>
+                    <button type="button" onClick={overviewGit.refresh}>
+                      Retry
+                    </button>
+                  </div>
+                ) : overviewGit.loading && !overviewGit.status ? (
+                  <p className="workspace-project-status" role="status">
+                    Loading changes…
+                  </p>
+                ) : overviewGit.status ? (
+                  <WorkspaceChangeSummary
+                    status={overviewGit.status}
+                    onReview={(path, staged) => {
+                      setOverviewOpen(false)
+                      useWorkspaceStore.getState().openChanges(path, staged)
+                    }}
+                  />
+                ) : null}
               </div>
             </aside>
           )}
@@ -770,9 +800,11 @@ export function WorkspaceFrame({
                   />
                 ) : cwd ? (
                   <>
-                    <div className="workspace-root" title={cwd}>
-                      {cwd}
-                    </div>
+                    {tab.kind === "files" ? (
+                      <div className="workspace-root" title={cwd}>
+                        {cwd}
+                      </div>
+                    ) : null}
                     {tab.kind === "files" ? (
                       <WorkspaceFiles
                         key={workspaceSessionId}
@@ -785,6 +817,8 @@ export function WorkspaceFrame({
                         key={workspaceSessionId}
                         cwd={cwd}
                         apiBase={apiBase}
+                        active={open && activeId === tab.id}
+                        target={tab.kind === "changes" ? tab.target : undefined}
                       />
                     )}
                   </>
