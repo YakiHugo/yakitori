@@ -105,7 +105,7 @@ describe("session goal", () => {
     const user = userEvent.setup()
     render(<GoalBar />)
     // The server's execution time remains authoritative even with an old timestamp.
-    expect(screen.getByText("· 8s")).toBeDefined()
+    expect(screen.getByText("8s active")).toBeDefined()
     await user.click(screen.getByRole("button", { name: "Pause goal" }))
     expect(screen.getByText("Paused goal")).toBeDefined()
     await user.click(screen.getByRole("button", { name: "Resume goal" }))
@@ -136,7 +136,7 @@ describe("session goal", () => {
       },
     })
     render(<GoalBar />)
-    expect(screen.getByText("· 500 / 1,000 tokens")).toBeDefined()
+    expect(screen.getByText("500 / 1,000 tokens")).toBeDefined()
     expect(screen.queryByRole("button", { name: "Resume goal" }) !== null).toBe(
       status === "blocked" || status === "usage_limited",
     )

@@ -287,9 +287,12 @@ export function createThreadServerHandlers(
     isArchived: async (sessionId) =>
       (await options.store.sessionPresentation(sessionId)).archived === true,
     manager: options.manager,
-    ...(options.notifyQueueChanged === undefined
-      ? {}
-      : { notifyChanged: options.notifyQueueChanged }),
+    notifyChanged: (sessionId) => {
+      options.notifyQueueChanged?.(sessionId)
+      // Recovering an accepted queue head or cancelling the last queued input
+      // can restore goal eligibility without another Turn reaching idle.
+      options.goals?.wake(sessionId)
+    },
     onStarting: (item) =>
       startingQueuedInputs.set(
         `${item.sessionId}\0${item.input.submissionId}`,
@@ -915,7 +918,9 @@ export function createThreadServerHandlers(
               throw conflict(
                 "Wait for the active turn to finish before archiving.",
               )
-            return ok(await options.store.updateSessionSidebar(change))
+            const sidebar = await options.store.updateSessionSidebar(change)
+            if (!change.archived) options.goals?.wake(change.sessionId)
+            return ok(sidebar)
           })
         }
         return ok(await options.store.updateSessionSidebar(change))

@@ -28,6 +28,7 @@ export default defineConfig({
         "rendering.spec.ts",
         "account-financials.spec.ts",
         "title-model.spec.ts",
+        "goal-renderer.spec.ts",
       ],
       use: { ...devices["Desktop Chrome"] },
     },

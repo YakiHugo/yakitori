@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadGoal } from "../../src/core/goal.ts"
+import { SqliteGoalStore } from "../../src/core/sqlite-goal-store.ts"
 import type {
   ModelRequest,
   ModelResponse,
@@ -14,6 +15,7 @@ import {
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApplicationResult } from "../../src/server/application-result.ts"
+import { InputQueue } from "../../src/server/input-queue.ts"
 
 import { inputFixture } from "../fixtures/user-input.ts"
 import { deferred } from "./rpc/testkit.ts"
@@ -245,6 +247,77 @@ describe("goal runtime", () => {
     expect(provider.requests).toHaveLength(3)
   })
 
+  it("continues an active goal when an idle loaded conversation is restored from the archive", async () => {
+    const releaseWork = deferred<void>()
+    const first = step(final("Progress before archiving"), releaseWork)
+    const provider = script(first, step(complete), step(final("Done")))
+    const { application } = await app(provider.stream)
+    const sessionId = await createSession(application)
+    body(
+      await application.handlers.setGoal({
+        sessionId,
+        objective: "Keep working after this conversation is restored",
+      }),
+    )
+    await first.entered.promise
+    const thread = application.threadManager.getThread(sessionId)
+    const eligibilityEntered = deferred<void>()
+    const releaseEligibility = deferred<void>()
+    const archivedEligibilityRead = deferred<void>()
+    const readPresentation = application.threadStore.sessionPresentation.bind(
+      application.threadStore,
+    )
+    let delayIdleRead = true
+    vi.spyOn(application.threadStore, "sessionPresentation").mockImplementation(
+      async (id) => {
+        if (id === sessionId && delayIdleRead && thread?.status === "idle") {
+          delayIdleRead = false
+          eligibilityEntered.resolve()
+          await releaseEligibility.promise
+          const presentation = await readPresentation(id)
+          archivedEligibilityRead.resolve()
+          return presentation
+        }
+        return readPresentation(id)
+      },
+    )
+    try {
+      // Archive in the real idle window before the next automatic admission
+      // has finished reading eligibility from storage.
+      releaseWork.resolve()
+      await eligibilityEntered.promise
+      body(
+        await application.handlers.updateSidebar({
+          type: "session",
+          sessionId,
+          archived: true,
+        }),
+      )
+      releaseEligibility.resolve()
+      await archivedEligibilityRead.promise
+      expect((await readGoal(application, sessionId))?.status).toBe("active")
+      expect(thread?.status).toBe("idle")
+      expect(provider.requests).toHaveLength(1)
+      expect(application.threadManager.getThread(sessionId)).toBe(thread)
+
+      body(
+        await application.handlers.updateSidebar({
+          type: "session",
+          sessionId,
+          archived: false,
+        }),
+      )
+      await vi.waitFor(() => {
+        expect(provider.requests).toHaveLength(3)
+      })
+      await idle(application, sessionId)
+      expect((await readGoal(application, sessionId))?.status).toBe("complete")
+      expect(application.threadManager.getThread(sessionId)).toBe(thread)
+    } finally {
+      releaseEligibility.resolve()
+    }
+  })
+
   it("explicit cancellation pauses the goal and interrupts the current turn", async () => {
     const first = step(final("Unreachable result"), deferred<void>())
     const provider = script(first)
@@ -379,6 +452,67 @@ describe("goal runtime", () => {
     await resumedWrap.entered.promise
     await idle(reopened, activeId)
     expect((await readGoal(reopened, activeId))?.status).toBe("complete")
+  })
+
+  it("continues an active goal after recovering an already accepted queued input", async () => {
+    const original = step(final("Original queued task finished"))
+    const provider = script(original)
+    const { application, rootDir } = await app(provider.stream)
+    const sessionId = await createSession(application)
+    const input = {
+      submissionId: "request_recovered_queue",
+      content: inputFixture([{ type: "text", text: "Original queued task" }]),
+    }
+    body(
+      await application.handlers.queueInput({
+        sessionId,
+        requestId: input.submissionId,
+        content: input.content,
+      }),
+    )
+    await original.entered.promise
+    await idle(application, sessionId)
+    const goal = body(
+      await application.handlers.setGoal({
+        sessionId,
+        objective: "Continue once queued user work has been recovered",
+        status: "paused",
+      }),
+    ).goal
+    await close(application)
+
+    // Recreate the durable crash checkpoint: the user Turn has completed with
+    // an active goal, but its accepted queue row has not yet been removed.
+    const goals = new SqliteGoalStore(
+      join(rootDir, "sessions", "thread-goals.sqlite"),
+    )
+    goals.save({ ...goal, status: "active" })
+    goals.close()
+    const queue = new InputQueue(
+      join(rootDir, "sessions", "input-queue.sqlite"),
+    )
+    queue.enqueue(sessionId, input)
+    queue.close()
+
+    const wrap = step(final("Recovered goal completed"))
+    const resumedProvider = script(step(complete), wrap)
+    const { application: reopened } = await app(resumedProvider.stream, rootDir)
+    await reopened.threadManager.resumeThread(sessionId)
+    await vi.waitFor(() => {
+      expect(resumedProvider.requests).toHaveLength(2)
+    })
+    await idle(reopened, sessionId)
+    expect(
+      body(await reopened.handlers.listQueuedInputs({ sessionId })).items,
+    ).toHaveLength(0)
+    expect((await readGoal(reopened, sessionId))?.status).toBe("complete")
+    const stored = await reopened.threadStore.readThread(sessionId)
+    expect(
+      stored?.rollout.filter(
+        ({ item }) =>
+          item.type === "turn_started" && item.turnId === input.submissionId,
+      ),
+    ).toHaveLength(1)
   })
 
   it("rejects a stale model completion after the user replaces the goal", async () => {
