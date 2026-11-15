@@ -9,6 +9,7 @@ import {
 import { type ReactNode, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { AppUpdate } from "./app-update.tsx"
 
 export function WindowChrome({
   sidebarOpen,
@@ -135,16 +136,19 @@ export function WindowChrome({
         >
           <House size={20} />
         </button>
-        <button
-          type="button"
-          className="window-rail-button window-rail-settings"
-          aria-label="Settings"
-          title="Settings"
-          aria-current={settingsOpen ? "page" : undefined}
-          onClick={() => openSettings()}
-        >
-          <Settings size={19} />
-        </button>
+        <div className="window-rail-settings app-update-rail">
+          <AppUpdate />
+          <button
+            type="button"
+            className="window-rail-button"
+            aria-label="Settings"
+            title="Settings"
+            aria-current={settingsOpen ? "page" : undefined}
+            onClick={() => openSettings()}
+          >
+            <Settings size={19} />
+          </button>
+        </div>
       </nav>
     </>
   )

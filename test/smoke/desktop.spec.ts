@@ -109,6 +109,17 @@ const test = base.extend<{ desktop: DesktopSmoke }>({
         env: fixture.env,
         timeout: 30_000,
       })
+      // Product-flow smoke tests keep release discovery deterministic. The
+      // dedicated updater smoke test exercises the real download boundary.
+      await application.evaluate(() => {
+        const request = globalThis.fetch
+        globalThis.fetch = (input, init) =>
+          String(input).startsWith(
+            "https://api.github.com/repos/YakiHugo/yakitori/releases",
+          )
+            ? Promise.resolve(Response.json([]))
+            : request(input, init)
+      })
       application.on("console", (message) => logs.push(message.text()))
       application.process().stderr?.on("data", (chunk: Buffer) => {
         logs.push(chunk.toString())

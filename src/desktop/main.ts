@@ -7,6 +7,7 @@ import {
   type DesktopBrowser,
 } from "../protocol/desktop-browser.ts"
 import { loadLocalEnvFile, resolveYakitoriHome } from "../server/env-file.ts"
+import { registerAppUpdates } from "./app-update-bridge.ts"
 import { registerAttachmentImporter } from "./attachment-importer.ts"
 import { registerClipboardWriter } from "./clipboard-writer.ts"
 import { registerCompletionNotifications } from "./completion-notifications.ts"
@@ -33,6 +34,7 @@ let stopping = false
 let allowQuit = false
 let forcing = false
 let shutdown: Promise<void> | undefined
+let appUpdates: Awaited<ReturnType<typeof registerAppUpdates>> | undefined
 
 // .then(start, failStartup) would miss rejections from start() itself.
 void app.whenReady().then(start).catch(failStartup)
@@ -62,17 +64,18 @@ app.on("will-quit", (event) => {
       })
     return
   }
-  shutdown = (serverProcess?.stop() ?? Promise.resolve()).then(
-    () => {
+  shutdown = (serverProcess?.stop() ?? Promise.resolve())
+    .then(async () => {
+      await appUpdates?.dispose()
+      await appUpdates?.prepareQuit()
       allowQuit = true
       app.quit()
-    },
-    (error: unknown) => {
+    })
+    .catch((error: unknown) => {
       console.error("yakitori: shutdown failed", error)
       allowQuit = true
       app.exit(1)
-    },
-  )
+    })
 })
 
 // Thin shell: the main process only spawns/manages the sidecar server child
@@ -158,7 +161,7 @@ async function start(): Promise<void> {
     app.exit(1)
   })
   console.log(`yakitori: sidecar listening on ${child.url}`)
-  openMainWindow(windowTarget(child.url), workspace, child)
+  await openMainWindow(windowTarget(child.url), workspace, child)
 }
 
 function windowTarget(serverUrl: string): string {
@@ -239,11 +242,11 @@ function workspaceConfigPath(): string {
   return path.join(app.getPath("userData"), "workspace.json")
 }
 
-function openMainWindow(
+async function openMainWindow(
   targetUrl: string,
   workspace: string,
   server: ServerProcess,
-): void {
+): Promise<void> {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -275,6 +278,11 @@ function openMainWindow(
   registerWindowFocus(window)
   registerCompletionNotifications(window)
   registerAttachmentImporter(server, window)
+  appUpdates = await registerAppUpdates(window, () => {
+    // A build finishing during graceful shutdown must not become the second
+    // quit request, which is reserved for the user's force-quit action.
+    if (!stopping) app.quit()
+  })
   browserController = registerWorkspaceBrowser(window)
   window.once("ready-to-show", () => {
     window.show()
@@ -292,6 +300,11 @@ function openMainWindow(
     })
     // Electron's preventDefault here permits the unload the renderer blocked.
     if (choice === 1) event.preventDefault()
+    else {
+      void appUpdates?.cancelQuit().catch((error: unknown) => {
+        console.error("yakitori: could not cancel update restart", error)
+      })
+    }
   })
   // The GUI needs no renderer permissions; deny every request.
   window.webContents.session.setPermissionRequestHandler(
