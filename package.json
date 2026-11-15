@@ -13,7 +13,7 @@
     "dev:web": "pnpm run --parallel \"/^dev:(gui|server)$/\"",
     "build": "pnpm build:gui && pnpm build:desktop",
     "start": "pnpm build && electron .",
-    "package": "pnpm build && node scripts/package-desktop-runtime.ts",
+    "package": "pnpm build && node scripts/build-desktop-info.ts && node scripts/package-desktop-runtime.ts",
     "app:install": "node scripts/install-app.ts workspace",
     "app:update": "node scripts/install-app.ts main",
     "dev:gui": "vite --host 127.0.0.1 --strictPort",
