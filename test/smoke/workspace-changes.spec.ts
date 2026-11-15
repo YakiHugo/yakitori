@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import {
+  type Browser,
   type ElectronApplication,
   expect,
   type Page,
@@ -168,7 +169,6 @@ async function reviewAndStageChanges(page: Page, cwd: string): Promise<void> {
 }
 
 test("Changes selects real Git diffs from the file tree and refreshes staged files", async ({
-  page,
   playwright,
 }, testInfo) => {
   const desktop = testInfo.project.name === "desktop"
@@ -180,7 +180,8 @@ test("Changes selects real Git diffs from the file tree and refreshes staged fil
   const cwd = join(environment.root, "workspace")
   let server: ServerProcess | undefined
   let application: ElectronApplication | undefined
-  let target = page
+  let browser: Browser | undefined
+  let target: Page
   const errors: string[] = []
   try {
     await git(cwd, ["init", "--quiet"])
@@ -210,14 +211,18 @@ test("Changes selects real Git diffs from the file tree and refreshes staged fil
       await target.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/?$/)
       expect(await target.evaluate(() => window.yakitoriDesktop)).toBeDefined()
     } else {
+      browser = await playwright.chromium.launch()
+      target = await browser.newPage()
       server = await spawnServerProcess({
         command: process.execPath,
         args: [resolve("src/server/start.ts")],
         cwd: environment.root,
         env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
       })
-      await page.goto(server.url)
-      expect(await page.evaluate(() => window.yakitoriDesktop)).toBeUndefined()
+      await target.goto(server.url)
+      expect(
+        await target.evaluate(() => window.yakitoriDesktop),
+      ).toBeUndefined()
     }
     target.on("pageerror", (error) => errors.push(error.message))
     await target.setViewportSize({ width: 1100, height: 900 })
@@ -236,7 +241,7 @@ test("Changes selects real Git diffs from the file tree and refreshes staged fil
     })
   } finally {
     try {
-      await application?.close()
+      await Promise.all([application?.close(), browser?.close()])
     } finally {
       try {
         await server?.stop()
