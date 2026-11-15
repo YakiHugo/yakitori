@@ -367,7 +367,9 @@ export async function runBudgetedGoal(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Save", exact: true }).click()
   await expect(page.getByText("Goal limited", { exact: true })).toBeVisible()
   await expect(
-    page.getByText("· 1,282 / 1 tokens", { exact: true }),
+    page
+      .getByRole("region", { name: "Session goal" })
+      .getByText("1,282 / 1 tokens", { exact: true }),
   ).toBeVisible()
   await expect(
     page.getByRole("button", { name: "Interrupt", exact: true }),

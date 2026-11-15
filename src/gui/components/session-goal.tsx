@@ -20,48 +20,56 @@ export function GoalBar() {
   const status = goal.status
   const nextStatus = goalToggleStatus(status)
   return (
-    <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 rounded-xl border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
-      <Target className="size-3.5 shrink-0" />
-      <span className="shrink-0 text-foreground">
-        {goalStatusLabel(status)}
-      </span>
-      <span className="min-w-0 truncate">{goal.objective}</span>
-      <span className="shrink-0">
-        ·{" "}
-        {goal.tokenBudget === undefined
-          ? formatGoalElapsed(goal.timeUsedSeconds)
-          : `${goal.tokensUsed.toLocaleString()} / ${goal.tokenBudget.toLocaleString()} tokens`}
-      </span>
-      <div className="ml-auto flex shrink-0 items-center">
-        <GoalIconButton
-          label="Clear goal"
-          disabled={saving}
-          onClick={() => void clearGoal(session.id)}
-        >
-          <Trash2 className="size-3.5" />
-        </GoalIconButton>
-        {nextStatus === undefined ? null : (
-          <GoalIconButton
-            disabled={saving}
-            label={
-              nextStatus === GoalStatus.Paused ? "Pause goal" : "Resume goal"
-            }
-            onClick={() =>
-              void setGoal({ sessionId: session.id, status: nextStatus })
-            }
-          >
-            {nextStatus === GoalStatus.Paused ? (
-              <Pause className="size-3.5" />
-            ) : (
-              <Play className="size-3.5" />
+    <section
+      aria-label="Session goal"
+      className="conversation-goal mx-auto w-full max-w-3xl px-4"
+    >
+      <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-muted px-3 py-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Target className="size-3.5 shrink-0" />
+          <span className="text-foreground">{goalStatusLabel(status)}</span>
+          <span title="Goal execution usage">
+            {goal.tokenBudget === undefined
+              ? `${formatGoalElapsed(goal.timeUsedSeconds)} active`
+              : `${goal.tokensUsed.toLocaleString()} / ${goal.tokenBudget.toLocaleString()} tokens`}
+          </span>
+          <div className="ml-auto flex shrink-0 items-center">
+            <GoalIconButton
+              label="Clear goal"
+              disabled={saving}
+              onClick={() => void clearGoal(session.id)}
+            >
+              <Trash2 className="size-3.5" />
+            </GoalIconButton>
+            {nextStatus === undefined ? null : (
+              <GoalIconButton
+                disabled={saving}
+                label={
+                  nextStatus === GoalStatus.Paused
+                    ? "Pause goal"
+                    : "Resume goal"
+                }
+                onClick={() =>
+                  void setGoal({ sessionId: session.id, status: nextStatus })
+                }
+              >
+                {nextStatus === GoalStatus.Paused ? (
+                  <Pause className="size-3.5" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+              </GoalIconButton>
             )}
-          </GoalIconButton>
-        )}
-        <GoalIconButton label="Edit goal" onClick={openGoalEditor}>
-          <PanelRight className="size-3.5" />
-        </GoalIconButton>
+            <GoalIconButton label="Edit goal" onClick={openGoalEditor}>
+              <PanelRight className="size-3.5" />
+            </GoalIconButton>
+          </div>
+        </div>
+        <p className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words leading-relaxed text-foreground">
+          {goal.objective}
+        </p>
       </div>
-    </div>
+    </section>
   )
 }
 

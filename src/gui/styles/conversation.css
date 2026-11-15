@@ -124,6 +124,12 @@
 .conversation-dock > * {
   pointer-events: auto;
 }
+/* Goal controls share the overlay dock with the composer. Back the entire
+   dock so scrolling output cannot show through the card or their gap. */
+.conversation-dock:has(> .conversation-goal) {
+  padding-top: 8px;
+  background: var(--background);
+}
 .conversation-composer-footer {
   background: linear-gradient(
     to bottom,
@@ -131,6 +137,9 @@
     color-mix(in oklab, var(--background) 92%, transparent) 16px,
     var(--background) 34px
   );
+}
+.conversation-goal + .conversation-composer-footer {
+  padding-top: 8px;
 }
 .conversation-navigation {
   position: absolute;
