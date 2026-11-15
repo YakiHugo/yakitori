@@ -33,7 +33,7 @@ export default defineConfig(({ mode }) => {
           formats: ["es"],
         },
         outDir: "dist/desktop",
-        rollupOptions: {
+        rolldownOptions: {
           // Native addons and executable packages resolve real files at runtime.
           external: [
             "electron",
@@ -45,8 +45,22 @@ export default defineConfig(({ mode }) => {
             /^@napi-rs\/canvas(?:\/|$)/,
             /^node:/,
           ],
+          output: {
+            // Keep unchanged dependencies out of app edits. Entry awareness
+            // preserves separate main/sidecar/worker dependency sets.
+            codeSplitting: {
+              groups: [
+                {
+                  name: "vendor",
+                  test: /[/\\]node_modules[/\\]/,
+                  tags: ["$initial"],
+                  entriesAware: true,
+                },
+              ],
+            },
+          },
         },
-        sourcemap: true,
+        sourcemap: "hidden",
       },
       ssr: {
         // SSR builds externalize dependencies by default; the desktop bundle
@@ -69,7 +83,22 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       outDir: "dist/gui",
-      sourcemap: true,
+      sourcemap: "hidden",
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: "vendor",
+                test: /[/\\]node_modules[/\\]/,
+                // Leave diagrams, PDF and other dynamic dependencies lazy.
+                tags: ["$initial"],
+                entriesAware: true,
+              },
+            ],
+          },
+        },
+      },
     },
     // No dev-server proxy: the renderer always talks to the API origin
     // directly (the Electron shell appends ?api=<sidecar-url>), so a new

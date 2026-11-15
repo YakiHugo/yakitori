@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process"
-import { access, readFile } from "node:fs/promises"
+import { access, readdir, readFile } from "node:fs/promises"
 import { arch, platform } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -13,6 +13,18 @@ const applicationDirectory = resolve(
   "Yakitori.app",
 )
 const executable = join(applicationDirectory, "Contents", "MacOS", "Yakitori")
+const resourcesDirectory = join(applicationDirectory, "Contents", "Resources")
+const packagedFiles = await readdir(resourcesDirectory, {
+  recursive: true,
+  withFileTypes: true,
+})
+const sourceMap = packagedFiles.find(
+  (file) => file.isFile() && file.name.endsWith(".map"),
+)
+if (sourceMap !== undefined)
+  throw new Error(
+    `Debug source maps must stay outside the app: ${join(sourceMap.parentPath, sourceMap.name)}`,
+  )
 const runtimeDirectory = join(
   applicationDirectory,
   "Contents",
