@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
             server: "src/server/desktop-entry.ts",
             "read-pdf-worker": "src/runtime/tools/read-pdf-worker.ts",
             "script-worker": "src/runtime/script/worker.ts",
+            "update-installer": "src/desktop/update-installer.ts",
           },
           fileName: (_format, entryName) => `${entryName}.js`,
           formats: ["es"],
