@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { promisify } from "node:util"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, expect, test, vi } from "vitest"
 import {
   checkLocalDesktopUpdate,
   runLocalPackage,
@@ -24,6 +24,7 @@ vi.mock("../../src/desktop/update-preparation.ts", () => ({
 }))
 
 const exec = promisify(execFile)
+const it = test.skipIf(process.platform !== "darwin")
 const roots: string[] = []
 const processes = new Set<number>()
 

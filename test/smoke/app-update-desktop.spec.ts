@@ -244,6 +244,7 @@ async function updateFixture(completeArchive: boolean) {
     requests: () => archiveRequests,
     transferred: () => transferredBytes,
     archiveSize,
+    manifestBytes: manifest.byteLength,
     async cleanup() {
       server.closeAllConnections()
       await new Promise<void>((done, reject) =>
@@ -392,6 +393,7 @@ test("desktop restores the local signer and installs a prepared release after gr
     console.log("Incremental archive transfer:", {
       archiveBytes: fixture.archiveSize,
       downloadedArchiveBytes: fixture.transferred(),
+      manifestBytes: fixture.manifestBytes,
       requests: fixture.requests(),
     })
     expect(app.process().exitCode).toBeNull()
