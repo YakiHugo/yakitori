@@ -736,7 +736,7 @@ export function ComposerSurface({
         mod && (sendShortcut === "enter" ? !event.shiftKey : event.shiftKey)
       if (queue) {
         event.preventDefault()
-        submit("queue")
+        submit(activeTurnId === undefined ? undefined : "queue")
         return true
       }
       if (!event.shiftKey && (sendShortcut === "enter" || mod)) {

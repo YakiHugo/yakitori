@@ -847,7 +847,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.resumeTurn(params),
   ),
-  handlerEntry<ApiAdmitInputResponse>(
+  handlerEntry<ApiAdmitInputResponse | ApiSteerInputResponse>(
     "session/input",
     sessionScope,
     (handlers, params) => handlers.admitInput(params),

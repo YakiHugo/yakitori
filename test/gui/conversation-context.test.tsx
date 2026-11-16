@@ -101,7 +101,7 @@ function holdAdmission() {
   }
 }
 
-it("sends excerpt text, comments, and source metadata, clearing the original draft only after acknowledgement", async () => {
+it("captures excerpt text, comments, and source metadata and clears the draft before acknowledgement", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
   const user = userEvent.setup()
@@ -120,10 +120,9 @@ it("sends excerpt text, comments, and source metadata, clearing the original dra
       ),
     },
   )
-  expect(useAppStore.getState().promptDraft).toEqual(
-    inputParts("Please review"),
-  )
-  expect(screen.getByRole("button", { name: "1 annotation" })).toBeDefined()
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(screen.queryByRole("button", { name: "1 annotation" })).toBeNull()
   await act(async () => held.acknowledge())
   await waitFor(() =>
     expect(useAppStore.getState().promptDraft).toBeUndefined(),
@@ -147,7 +146,7 @@ it("retains the draft and annotations when admission fails", async () => {
   expect(useAppStore.getState().promptExcerpts).toEqual([excerpt])
 })
 
-it("preserves annotations edited or added while the submitted snapshot is pending", async () => {
+it("preserves annotations added while the submitted snapshot is pending", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
   const sending = useAppStore.getState().admitInput(inputParts("Please review"))
@@ -156,7 +155,7 @@ it("preserves annotations edited or added while the submitted snapshot is pendin
   )
   useAppStore
     .getState()
-    .updatePromptExcerpt({ ...excerpt, comment: "A revised comment" })
+    .addPromptExcerpt({ ...excerpt, comment: "A revised comment" })
   const later = { ...excerpt, id: "excerpt-later", text: "Additional context" }
   useAppStore.getState().addPromptExcerpt(later)
   held.acknowledge()
@@ -167,7 +166,7 @@ it("preserves annotations edited or added while the submitted snapshot is pendin
   ])
 })
 
-it("preserves a comment being typed in the annotation editor while its earlier snapshot is acknowledged", async () => {
+it("preserves a comment being typed on a new annotation while the submitted snapshot is acknowledged", async () => {
   const held = holdAdmission()
   useAppStore.getState().addPromptExcerpt(excerpt)
   const user = userEvent.setup()
@@ -176,6 +175,7 @@ it("preserves a comment being typed in the annotation editor while its earlier s
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
+  act(() => useAppStore.getState().addPromptExcerpt(excerpt))
   await user.click(screen.getByRole("button", { name: "1 annotation" }))
   await user.click(
     screen.getByRole("button", { name: "Edit excerpt 1: main.ts" }),
@@ -211,7 +211,7 @@ it("keeps annotations with their session when another session is selected during
   await sending
   expect(useAppStore.getState().promptExcerpts).toEqual([second])
   await useAppStore.getState().selectSession("session_1")
-  expect(useAppStore.getState().promptExcerpts).toEqual([excerpt])
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
 })
 
 it("lets the composer preview and remove annotations without expanding an inline inspector", async () => {
@@ -289,7 +289,7 @@ it("keeps new-conversation excerpts separate and carries them through the first 
       content: inputFixture([], { references: [newExcerpt] }.references),
     },
   )
-  expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
   held.acknowledge()
   await sending
   expect(useAppStore.getState().promptExcerpts).toEqual([])

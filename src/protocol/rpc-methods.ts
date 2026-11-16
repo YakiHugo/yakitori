@@ -325,7 +325,7 @@ export type RpcMethodResponses = Readonly<
       "session/close": ApiDeleteSessionResponse
       "session/revert": ApiRevertSessionResponse
       "session/compact": ApiCompactSessionResponse
-      "session/input": ApiAdmitInputResponse
+      "session/input": ApiAdmitInputResponse | ApiSteerInputResponse
       "session/input/queue": ApiAdmitInputResponse
       "session/queue/list": Readonly<{ items: readonly QueuedInput[] }>
       "session/queue/update": Readonly<{ item: QueuedInput }>

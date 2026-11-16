@@ -1,7 +1,6 @@
 import { useMemo } from "react"
 import { create } from "zustand"
 import type {
-  ApiAdmitInputResponse,
   ApiProject,
   ApiProviderSummary,
   ApiReadUsageResponse,
@@ -471,11 +470,21 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   >()
   const inFlightAdmissions = new Set<string>()
   const rejectedAdmissions = new Set<string>()
-  const inFlightSteerRequests = new Set<string>()
-  const committedSteerRequests = new Set<string>()
+  const admissionRequests = new Map<
+    string,
+    { confirmed: boolean; release(): void }
+  >()
+  const confirmAdmissionRequest = (requestId: string): void => {
+    const request = admissionRequests.get(requestId)
+    if (request === undefined) return
+    request.confirmed = true
+    request.release()
+  }
+  const admissionLockOwners = new Map<string, symbol>()
   // Set only after a complete replay or a durable terminal event. A live
   // snapshot alone may still have subsequent history to deliver.
   const authoritativeTurns = new Map<string, string | undefined>()
+  const authoritativeTurnRevisions = new Map<string, number>()
   const pendingCancellations = new Map<
     string,
     { sessionId: string; finish(): void }
@@ -871,6 +880,22 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         ),
       }
       const selected = state.selection.sessionId === sessionId
+      if (!selected) {
+        const key = executionViewKey(state.apiBase, sessionId)
+        const cached = executionViews.get(key)
+        if (cached !== undefined)
+          executionViews.set(key, {
+            ...cached,
+            execution: restoring.reduce(
+              (execution, steer) =>
+                reduceExecutionView(execution, {
+                  type: "input_pending_discarded",
+                  requestId: steer.requestId,
+                }),
+              cached.execution,
+            ),
+          })
+      }
       const draft: SessionDraft = selected
         ? {
             content: state.promptDraft,
@@ -880,21 +905,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             content: undefined,
             excerpts: [],
           })
-      // A reply can arrive after replay has already restored its pending
-      // submission; the original composer may still contain that same text.
-      const last = restoring.at(-1)
-      const alreadyInDraft =
-        last !== undefined &&
-        sameResolvedDraft(
-          trimInputDraft(draft.content ?? textInputDraft("")),
-          last.content,
-        )
-      const toPrepend = alreadyInDraft ? restoring.slice(0, -1) : restoring
       const restored: SessionDraft = {
         content: inputAttachmentOwnership.resolveDraft(
           state.apiBase,
           joinInputDrafts([
-            ...toPrepend.map((steer) => steer.content),
+            ...restoring.map((steer) => steer.content),
             draft.content,
           ]),
         ),
@@ -925,6 +940,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             restoredSteerRequestIds,
             promptDraft: restored.content,
             promptExcerpts: restored.excerpts,
+            execution: restoring.reduce(
+              (execution, steer) =>
+                reduceExecutionView(execution, {
+                  type: "input_pending_discarded",
+                  requestId: steer.requestId,
+                }),
+              state.execution,
+            ),
           }
         : {
             pendingSteers,
@@ -1059,6 +1082,18 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     inputRecoveryMemory.markAdmissionRestored(admission)
     set((state) => {
       const selected = state.selection.sessionId === sessionId
+      if (!selected) {
+        const key = executionViewKey(state.apiBase, sessionId)
+        const cached = executionViews.get(key)
+        if (cached !== undefined)
+          executionViews.set(key, {
+            ...cached,
+            execution: reduceExecutionView(cached.execution, {
+              type: "input_pending_discarded",
+              requestId,
+            }),
+          })
+      }
       const draft: SessionDraft = selected
         ? {
             content: state.promptDraft,
@@ -1068,17 +1103,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             content: undefined,
             excerpts: [],
           })
-      const alreadyInDraft = sameResolvedDraft(
-        trimInputDraft(draft.content ?? textInputDraft("")),
-        admission.content,
-      )
       const restored: SessionDraft = {
-        content: alreadyInDraft
-          ? draft.content
-          : inputAttachmentOwnership.resolveDraft(
-              state.apiBase,
-              joinInputDrafts([admission.content, draft.content]),
-            ),
+        content: inputAttachmentOwnership.resolveDraft(
+          state.apiBase,
+          joinInputDrafts([admission.content, draft.content]),
+        ),
         excerpts: [
           ...(admission.content.references ?? []).filter(
             (excerpt) =>
@@ -1113,17 +1142,17 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   }
 
   const syncInputRecoveryNotice = (sessionId: string): void => {
-    if (get().selection.sessionId !== sessionId) return
+    const selected = get().selection.sessionId === sessionId
     const restored = [
       ...inputRecoveryMemory.listAdmissionsForSession(get().apiBase, sessionId),
       ...inputRecoveryMemory.readSteers(get().apiBase, sessionId),
     ].filter((input) => input.restored)
-    if (restored.some((input) => !input.noticeDismissed))
-      set({ message: UNCONFIRMED_INPUT_NOTICE })
-    else {
+    if (restored.some((input) => !input.noticeDismissed)) {
+      if (selected) set({ message: UNCONFIRMED_INPUT_NOTICE })
+    } else {
       if (restored.length === 0)
         recoveredDrafts.delete(`${get().apiBase}\0${sessionId}`)
-      if (get().message === UNCONFIRMED_INPUT_NOTICE)
+      if (selected && get().message === UNCONFIRMED_INPUT_NOTICE)
         set({ message: undefined })
     }
   }
@@ -1149,6 +1178,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     invalidateSessionListReads()
     usageReadRevision += 1
     authoritativeTurns.delete(sessionId)
+    authoritativeTurnRevisions.delete(sessionId)
     if (!preserveRecovery) {
       recoveryRollouts.delete(cacheKey)
       recoveredDrafts.delete(cacheKey)
@@ -1168,8 +1198,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     for (const requestId of retiredRequests) {
       inFlightAdmissions.delete(requestId)
       rejectedAdmissions.delete(requestId)
-      inFlightSteerRequests.delete(requestId)
-      committedSteerRequests.delete(requestId)
+      admissionRequests.get(requestId)?.release()
+      admissionRequests.delete(requestId)
     }
     const threadId = get().sessionThreadIds[sessionId] ?? sessionId
     removeThreadScope(threadId)
@@ -1447,6 +1477,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               selection.sessionId,
               get().execution.activeTurnId,
             )
+            authoritativeTurnRevisions.set(
+              selection.sessionId,
+              (authoritativeTurnRevisions.get(selection.sessionId) ?? 0) + 1,
+            )
             for (const [turnId, pending] of pendingCancellations) {
               if (
                 pending.sessionId === selection.sessionId &&
@@ -1545,6 +1579,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   execution.admittedRequestIds[admission.requestId] ||
                   queuedRequestIds.has(admission.requestId)
                 ) {
+                  confirmAdmissionRequest(admission.requestId)
                   if (admission.restored)
                     reconcileRecoveredInput(
                       selection.sessionId,
@@ -1575,11 +1610,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             if (replaySnapshot !== undefined) replayEvents.set(event.seq, event)
             if (isInputAdmittedEvent(event)) {
               releaseUnsentSession(event.sessionId)
-              if (
-                event.type === "input.admitted" &&
-                inFlightSteerRequests.has(event.data.requestId)
-              )
-                committedSteerRequests.add(event.data.requestId)
+              confirmAdmissionRequest(event.data.requestId)
               const admission = inputRecoveryMemory.readAdmissionByRequestId(
                 get().apiBase,
                 selection.sessionId,
@@ -1647,6 +1678,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               authoritativeTurns.set(
                 selection.sessionId,
                 get().execution.activeTurnId,
+              )
+              authoritativeTurnRevisions.set(
+                selection.sessionId,
+                (authoritativeTurnRevisions.get(selection.sessionId) ?? 0) + 1,
               )
               restoreUncommittedSteers(selection.sessionId, event.data.turnId)
               restoreUncommittedAdmission(
@@ -3238,6 +3273,12 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
 
     admitInput: async (parts, mode = "auto") => {
       const excerpts = get().promptExcerpts
+      const submittedDraft = get().promptDraft
+      const clearsSubmittedDraft =
+        submittedDraft !== undefined &&
+        sameResolvedDraft(trimInputDraft(submittedDraft), parts)
+      const queueAdmission =
+        mode === "queue" && get().execution.activeTurnId !== undefined
       const content: InputContent = inputContent(
         parts,
         { ...(excerpts.length ? { references: excerpts } : {}) }.references,
@@ -3283,7 +3324,6 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           })
           if (state.recoveredAdmission?.sessionId === firstInputDraftSessionId)
             inputRecoveryMemory.acknowledgeAdmission(state.recoveredAdmission)
-          if (state.promptDraft === undefined) set({ promptDraft: parts })
           sessionId = await get().createSession()
         } finally {
           set((current) => {
@@ -3305,263 +3345,25 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       const key = `admit:${selection.sessionId}`
       if (get().inFlightActions.has(key)) return
       const questionsAtSubmission = get().execution.pendingQuestionIds
+      const lockOwner = Symbol(key)
+      admissionLockOwners.set(key, lockOwner)
+      const release = () => {
+        if (admissionLockOwners.get(key) !== lockOwner) return
+        admissionLockOwners.delete(key)
+        set((state) => {
+          const inFlightActions = new Set(state.inFlightActions)
+          inFlightActions.delete(key)
+          return { inFlightActions }
+        })
+      }
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
 
-      // An active Turn takes follow-up input as steering (Codex turn/steer);
-      // the input is recorded when the Turn next samples. If the Turn ended
-      // or stopped accepting between our view and the server, fall through to
-      // a queued admission — it dispatches as the next Turn (or starts at
-      // once when the Session is already idle), so the message is never lost.
-      const activeTurnId = get().execution.activeTurnId
-      let queueAdmission = mode === "queue"
-      if (
-        activeTurnId !== undefined &&
-        text !== COMPACT_DIRECTIVE &&
-        !queueAdmission
-      ) {
-        let rejected = false
-        const requestId = createRequestId()
-        inFlightSteerRequests.add(requestId)
-        await runTask(
-          async () => {
-            let reserved = false
-            let promotedContent: InputContent | undefined
-            try {
-              inputRecoveryMemory.reserveSteer(
-                get().apiBase,
-                selection.sessionId,
-                {
-                  requestId,
-                  turnId: activeTurnId,
-                  content,
-                  restored: false,
-                },
-              )
-              reserved = true
-              set((state) => ({
-                pendingSteers: {
-                  ...state.pendingSteers,
-                  [selection.sessionId]: inputRecoveryMemory
-                    .readSteers(state.apiBase, selection.sessionId)
-                    .filter((steer) => !steer.restored),
-                },
-              }))
-              const response = await getAppRpcClient(get().apiBase).request(
-                "session/input/steer",
-                {
-                  sessionId: selection.sessionId,
-                  requestId,
-                  expectedTurnId: activeTurnId,
-                  content,
-                },
-              )
-              if (
-                response.turnId !== activeTurnId ||
-                response.requestId !== requestId
-              ) {
-                throw new Error("Steer response did not match the request.")
-              }
-              promotedContent = response.content
-              if (isCurrentHistory(selection))
-                dismissSessionQuestions(
-                  selection.sessionId,
-                  questionsAtSubmission,
-                )
-            } catch (error) {
-              if (!isCurrentHistory(selection)) return
-              const confirmed =
-                committedSteerRequests.has(requestId) ||
-                (isCurrentSelection(selection) &&
-                  get().execution.admittedRequestIds[requestId] === true)
-              inFlightSteerRequests.delete(requestId)
-              committedSteerRequests.delete(requestId)
-              if (confirmed) {
-                if (isCurrentSelection(selection)) {
-                  set((state) => ({
-                    promptDraft: sameResolvedDraft(
-                      trimInputDraft(state.promptDraft ?? textInputDraft("")),
-                      parts,
-                    )
-                      ? undefined
-                      : state.promptDraft,
-                    promptExcerpts: state.promptExcerpts.filter(
-                      (excerpt) => !excerpts.includes(excerpt),
-                    ),
-                  }))
-                }
-                return
-              }
-              if (
-                error instanceof ApiRequestError &&
-                error.code !== undefined &&
-                error.code !== "internal_error"
-              ) {
-                inputRecoveryMemory.updateSteers(
-                  get().apiBase,
-                  selection.sessionId,
-                  (steers) =>
-                    steers.filter((steer) => steer.requestId !== requestId),
-                )
-                set((state) => ({
-                  pendingSteers: {
-                    ...state.pendingSteers,
-                    [selection.sessionId]: (
-                      state.pendingSteers[selection.sessionId] ?? []
-                    ).filter((steer) => steer.requestId !== requestId),
-                  },
-                }))
-                if (error.code === "conflict") {
-                  rejected = true
-                  queueAdmission = true
-                  return
-                }
-                throw error
-              }
-              if (reserved)
-                restoreUncommittedSteers(selection.sessionId, activeTurnId)
-              throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
-            }
-            // Acceptance is ephemeral until input.admitted commits. Keep ownership
-            // across navigation and reconnect so an interrupted Turn can restore it.
-            if (!isCurrentHistory(selection)) return
-            const committed =
-              committedSteerRequests.has(requestId) ||
-              (isCurrentSelection(selection) &&
-                get().execution.admittedRequestIds[requestId] === true)
-            inFlightSteerRequests.delete(requestId)
-            committedSteerRequests.delete(requestId)
-            const acceptedContent = promotedContent
-            if (acceptedContent !== undefined) {
-              recordPromotedContent(content, acceptedContent)
-              inputRecoveryMemory.updateSteers(
-                get().apiBase,
-                selection.sessionId,
-                (steers) =>
-                  steers.map((steer) =>
-                    steer.requestId === requestId
-                      ? { ...steer, content: acceptedContent }
-                      : steer,
-                  ),
-              )
-              set((state) => ({
-                pendingSteers: {
-                  ...state.pendingSteers,
-                  [selection.sessionId]: (
-                    state.pendingSteers[selection.sessionId] ?? []
-                  ).map((steer) =>
-                    steer.requestId === requestId
-                      ? { ...steer, content: acceptedContent }
-                      : steer,
-                  ),
-                },
-              }))
-            }
-            const alreadyRestored =
-              get().restoredSteerRequestIds[requestId] === true
-            if (
-              !committed &&
-              !alreadyRestored &&
-              !(get().pendingSteers[selection.sessionId] ?? []).some(
-                (steer) => steer.requestId === requestId,
-              )
-            ) {
-              set((state) => ({
-                pendingSteers: {
-                  ...state.pendingSteers,
-                  [selection.sessionId]: [
-                    ...(state.pendingSteers[selection.sessionId] ?? []),
-                    {
-                      requestId,
-                      turnId: activeTurnId,
-                      content: acceptedContent ?? content,
-                      restored: false,
-                    },
-                  ],
-                },
-              }))
-            }
-            if (alreadyRestored) return
-
-            if (!isCurrentSelection(selection)) {
-              set((state) => {
-                if (state.selection.sessionId === selection.sessionId) {
-                  const clear = sameResolvedDraft(
-                    trimInputDraft(state.promptDraft ?? textInputDraft("")),
-                    parts,
-                  )
-                  return {
-                    promptDraft: clear ? undefined : state.promptDraft,
-                    promptExcerpts: state.promptExcerpts.filter(
-                      (excerpt) => !excerpts.includes(excerpt),
-                    ),
-                  }
-                }
-                const draft = state.sessionDrafts[selection.sessionId]
-                if (draft === undefined) return state
-                const clear = sameResolvedDraft(
-                  trimInputDraft(draft.content ?? textInputDraft("")),
-                  parts,
-                )
-                return {
-                  sessionDrafts: {
-                    ...state.sessionDrafts,
-                    [selection.sessionId]: {
-                      ...draft,
-                      content: clear ? undefined : draft.content,
-                      excerpts: draft.excerpts.filter(
-                        (excerpt) => !excerpts.includes(excerpt),
-                      ),
-                    },
-                  },
-                }
-              })
-              if (
-                authoritativeTurns.has(selection.sessionId) &&
-                authoritativeTurns.get(selection.sessionId) !== activeTurnId
-              )
-                restoreUncommittedSteers(selection.sessionId, activeTurnId)
-              return
-            }
-            set((state) => ({
-              promptExcerpts: state.promptExcerpts.filter(
-                (excerpt) => !excerpts.includes(excerpt),
-              ),
-            }))
-            if (
-              sameResolvedDraft(
-                trimInputDraft(get().promptDraft ?? textInputDraft("")),
-                parts,
-              )
-            ) {
-              set({ promptDraft: undefined })
-            }
-            if (
-              get().execution.turnTimings[activeTurnId]?.completedAt !==
-                undefined ||
-              (authoritativeTurns.has(selection.sessionId) &&
-                authoritativeTurns.get(selection.sessionId) !== activeTurnId)
-            ) {
-              restoreUncommittedSteers(selection.sessionId, activeTurnId)
-            }
-          },
-          () => isCurrentSelection(selection),
-          true,
-          false,
-        )
-        if (!rejected) {
-          set((state) => {
-            if (!isCurrentHistory(selection)) return state
-            const inFlightActions = new Set(state.inFlightActions)
-            inFlightActions.delete(key)
-            return { inFlightActions }
-          })
-          return
-        }
+      if (!isCurrentHistory(selection)) {
+        release()
+        return
       }
-
-      if (!isCurrentHistory(selection)) return
       // The compact directive takes a dedicated lane: no input recovery,
       // no model selection — the server admits it as a runtime-role Input.
       // A per-invocation requestId keeps a retried call from admitting a
@@ -3581,12 +3383,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               throw new Error("Compact response did not match the request.")
             }
             if (!isCurrentSelection(selection)) return
-            if (
-              sameResolvedDraft(
-                trimInputDraft(get().promptDraft ?? textInputDraft("")),
-                parts,
-              )
-            ) {
+            if (clearsSubmittedDraft && get().promptDraft === submittedDraft) {
               set({ promptDraft: undefined })
             }
           },
@@ -3594,18 +3391,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           true,
           false,
         )
-        set((state) => {
-          if (!isCurrentHistory(selection)) return state
-          const inFlightActions = new Set(state.inFlightActions)
-          inFlightActions.delete(key)
-          return { inFlightActions }
-        })
+        release()
         return
       }
 
       await runTask(
         async () => {
           const state = get()
+          const observedActiveTurnId = state.execution.activeTurnId
           const modelSelection = resolveEffectiveModel({
             sessionCurrent: state.modelSelections[selection.sessionId],
             userPreference: state.userPreference,
@@ -3631,132 +3424,163 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 }),
           })
           inFlightAdmissions.add(pendingAdmission.requestId)
-          if (!queueAdmission) {
-            set((current) => ({
-              execution: reduceExecutionView(current.execution, {
-                type: "input_pending",
-                requestId: pendingAdmission.requestId,
-                content: pendingAdmission.content,
-                at: new Date().toISOString(),
-              }),
-            }))
-          }
-          let response: ApiAdmitInputResponse
+          const request = { confirmed: false, release }
+          const authoritativeRevision = authoritativeTurnRevisions.get(
+            selection.sessionId,
+          )
+          admissionRequests.set(pendingAdmission.requestId, request)
           try {
             if (firstInputAdmission !== undefined) {
               inputRecoveryMemory.acknowledgeAdmission(firstInputAdmission)
-              set({ recoveredAdmission: undefined })
             }
-            if (!isCurrentSelection(selection)) return
-            // Every explicit send is a new input; old IDs remain for history checks.
-            response = await getAppRpcClient(get().apiBase).request(
-              queueAdmission ? "session/input/queue" : "session/input",
-              {
-                sessionId: selection.sessionId,
-                requestId: pendingAdmission.requestId,
-                content: pendingAdmission.content,
-                ...(pendingAdmission.modelSelection === undefined
-                  ? {}
-                  : { modelSelection: pendingAdmission.modelSelection }),
-              },
-            )
-          } catch (error) {
-            if (!isCurrentHistory(selection)) return
-            if (!queueAdmission && isCurrentSelection(selection)) {
-              set((current) => ({
-                execution: reduceExecutionView(current.execution, {
-                  type: "input_pending_discarded",
-                  requestId: pendingAdmission.requestId,
-                }),
-              }))
-            }
-            if (
-              isCurrentSelection(selection) &&
-              get().execution.admittedRequestIds[pendingAdmission.requestId]
-            ) {
-              inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
-              set((state) => ({
-                promptDraft: sameResolvedDraft(
-                  trimInputDraft(state.promptDraft ?? textInputDraft("")),
-                  parts,
-                )
+            // Recovery owns this snapshot before editor cleanup can release
+            // its staged files. A later identical draft is a separate input.
+            set((current) => ({
+              recoveredAdmission: undefined,
+              promptDraft:
+                clearsSubmittedDraft && current.promptDraft === submittedDraft
                   ? undefined
-                  : state.promptDraft,
-                promptExcerpts: state.promptExcerpts.filter(
-                  (excerpt) => !excerpts.includes(excerpt),
-                ),
-              }))
-              return
-            }
-            if (
-              !(error instanceof ApiRequestError) ||
-              error.code === undefined ||
-              error.code === "internal_error"
-            ) {
+                  : current.promptDraft,
+              promptExcerpts: current.promptExcerpts.filter(
+                (excerpt) => !excerpts.includes(excerpt),
+              ),
+              ...(!queueAdmission
+                ? {
+                    execution: reduceExecutionView(current.execution, {
+                      type: "input_pending",
+                      requestId: pendingAdmission.requestId,
+                      content: pendingAdmission.content,
+                      at: new Date().toISOString(),
+                    }),
+                  }
+                : {}),
+            }))
+            let response: RpcMethodResponses["session/input"]
+            try {
+              // Every explicit send is a new input; old IDs remain for history checks.
+              response = await getAppRpcClient(selection.apiBase).request(
+                queueAdmission ? "session/input/queue" : "session/input",
+                {
+                  sessionId: selection.sessionId,
+                  requestId: pendingAdmission.requestId,
+                  content: pendingAdmission.content,
+                  ...(pendingAdmission.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: pendingAdmission.modelSelection }),
+                },
+              )
+              if (response.requestId !== pendingAdmission.requestId) {
+                throw new Error("Admission response did not match the request.")
+              }
+            } catch (error) {
+              // The rollout event can arrive before the RPC fails and before
+              // navigation. It remains authoritative after the view changes.
+              if (request.confirmed) return
+              if (!isCurrentHistory(selection)) return
               restoreUncommittedAdmission(
                 selection.sessionId,
                 pendingAdmission.requestId,
               )
-              throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
+              if (
+                !(error instanceof ApiRequestError) ||
+                error.code === undefined ||
+                error.code === "internal_error"
+              ) {
+                throw new Error(UNCONFIRMED_INPUT_NOTICE, { cause: error })
+              }
+              inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
+              rejectedAdmissions.delete(pendingAdmission.requestId)
+              syncInputRecoveryNotice(selection.sessionId)
+              throw error
             }
-            inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
-            throw error
+            if (!isCurrentHistory(selection)) return
+            dismissSessionQuestions(selection.sessionId, questionsAtSubmission)
+            recordPromotedContent(pendingAdmission.content, response.content)
+            releaseUnsentSession(selection.sessionId)
+            if (request.confirmed) return
+            if ("inputId" in response) {
+              // A direct start still waits for input.admitted. The explicit
+              // queue response acknowledges its durable queue write.
+              if (queueAdmission)
+                inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
+              if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
+            } else {
+              // The server chose steering and supplies the authoritative Turn.
+              // Keep the existing steering recovery lifecycle from here on.
+              const admission = inputRecoveryMemory.readAdmissionByRequestId(
+                selection.apiBase,
+                selection.sessionId,
+                pendingAdmission.requestId,
+              )
+              const steer: StoredSteer = {
+                requestId: pendingAdmission.requestId,
+                turnId: response.turnId,
+                content: response.content,
+                restored: admission?.restored ?? false,
+                ...(admission?.noticeDismissed === undefined
+                  ? {}
+                  : { noticeDismissed: admission.noticeDismissed }),
+              }
+              inputRecoveryMemory.reserveSteer(
+                selection.apiBase,
+                selection.sessionId,
+                steer,
+              )
+              inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
+              rejectedAdmissions.delete(pendingAdmission.requestId)
+              set((current) => ({
+                pendingSteers: {
+                  ...current.pendingSteers,
+                  [selection.sessionId]: [
+                    ...(current.pendingSteers[selection.sessionId] ?? []),
+                    ...(!steer.restored ? [steer] : []),
+                  ],
+                },
+                ...(steer.restored
+                  ? {
+                      restoredSteerRequestIds: {
+                        ...current.restoredSteerRequestIds,
+                        [steer.requestId]: true,
+                      },
+                    }
+                  : {}),
+              }))
+              const execution =
+                get().selection.sessionId === selection.sessionId
+                  ? get().execution
+                  : executionViews.get(
+                      executionViewKey(selection.apiBase, selection.sessionId),
+                    )?.execution
+              // Evidence about the preceding Turn cannot reject a new Turn
+              // selected by the server. A matching live Turn stays consumed.
+              if (
+                execution?.activeTurnId !== response.turnId &&
+                (execution?.turnTimings[response.turnId]?.completedAt !==
+                  undefined ||
+                  (response.turnId === observedActiveTurnId &&
+                    authoritativeTurns.has(selection.sessionId) &&
+                    authoritativeTurnRevisions.get(selection.sessionId) !==
+                      authoritativeRevision &&
+                    authoritativeTurns.get(selection.sessionId) !==
+                      response.turnId))
+              )
+                restoreUncommittedSteers(selection.sessionId, response.turnId)
+            }
+            if (!isCurrentSelection(selection)) return
+            if (queueAdmission) void get().refreshQueuedInputs()
+            void get().refreshSidebar()
           } finally {
             inFlightAdmissions.delete(pendingAdmission.requestId)
+            rejectedAdmissions.delete(pendingAdmission.requestId)
+            admissionRequests.delete(pendingAdmission.requestId)
+            release()
           }
-          if (!isCurrentHistory(selection)) return
-          if (response.requestId !== pendingAdmission.requestId) {
-            throw new Error("Admission response did not match the request.")
-          }
-          dismissSessionQuestions(selection.sessionId, questionsAtSubmission)
-          recordPromotedContent(pendingAdmission.content, response.content)
-          releaseUnsentSession(selection.sessionId)
-          if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
-          // Queue storage has committed before its response. Direct starts
-          // still wait for input.admitted from the rollout stream.
-          if (
-            queueAdmission ||
-            get().execution.admittedRequestIds[pendingAdmission.requestId]
-          ) {
-            inputRecoveryMemory.acknowledgeAdmission(pendingAdmission)
-          }
-          if (!isCurrentSelection(selection)) return
-          set((state) => ({
-            // A new or edited excerpt queued during admission belongs to the
-            // next input. Immutable snapshots identify only what was sent.
-            promptExcerpts: state.promptExcerpts.filter(
-              (excerpt) => !excerpts.includes(excerpt),
-            ),
-          }))
-          if (
-            sameResolvedDraft(
-              trimInputDraft(get().promptDraft ?? textInputDraft("")),
-              parts,
-            )
-          ) {
-            set({
-              promptDraft: undefined,
-            })
-          }
-          set((state) => {
-            const inFlightActions = new Set(state.inFlightActions)
-            inFlightActions.delete(key)
-            return { inFlightActions }
-          })
-          if (!isCurrentSelection(selection)) return
-          if (queueAdmission) void get().refreshQueuedInputs()
-          void get().refreshSidebar()
         },
         () => isCurrentSelection(selection),
         true,
         false,
       )
-      set((state) => {
-        if (!isCurrentHistory(selection)) return state
-        const inFlightActions = new Set(state.inFlightActions)
-        inFlightActions.delete(key)
-        return { inFlightActions }
-      })
+      release()
     },
 
     resumeTurn: async (turnId, modelSelection) => {
@@ -3870,6 +3694,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           return
         projectQueuedInputs(items)
         for (const item of items) {
+          confirmAdmissionRequest(item.input.submissionId)
           const admission = inputRecoveryMemory.readAdmissionByRequestId(
             get().apiBase,
             selection.sessionId,

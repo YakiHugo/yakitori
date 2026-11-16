@@ -1912,7 +1912,7 @@ describe("revert session", () => {
     const nextAcknowledgement = deferredResponse()
     let sends = 0
     fakeRef.current.respond = (method) => {
-      if (method === "session/input" || method === "session/input/steer") {
+      if (method === "session/input") {
         sends += 1
         return sends === 1
           ? acknowledgement.promise
@@ -1941,12 +1941,13 @@ describe("revert session", () => {
       .getState()
       .admitInput(inputParts("same human draft"))
     expect(sends).toBe(2)
-    const request = fakeRef.current.requestsFor(
-      kind === "steer" ? "session/input/steer" : "session/input",
-    )[0]?.params as { requestId: string }
+    const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+    }
     acknowledgement.resolve({
       requestId: request.requestId,
       turnId: "turn_old",
+      ...(kind === "admission" ? { inputId: "input_old" } : {}),
       content: inputFixture(inputParts("same human draft")),
     })
     await send
@@ -3192,36 +3193,40 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
-  it("steers follow-up input into the active turn", async () => {
+  it("uses session/input and the server-selected turn for follow-up recovery", async () => {
     globalThis.localStorage.clear()
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
         return {
           content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          turnId: body.expectedTurnId,
+          turnId: "turn_1",
         }
       }
       if (method === "session/list") return { sessions: [] }
       return notFound()
     }
-    useAppStore.setState({
-      selection: { sessionId: "session_1" },
-      promptDraft: inputParts("follow up"),
-      execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
-    })
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_stale" })
+    stream?.emitReplayComplete()
+    useAppStore.setState({ promptDraft: inputParts("follow up") })
 
     await useAppStore.getState().admitInput(inputParts("follow up"))
 
-    const steers = fakeRef.current.requestsFor("session/input/steer")
+    const steers = fakeRef.current.requestsFor("session/input")
     expect(steers).toHaveLength(1)
     expect(steers[0]?.params).toMatchObject({
       sessionId: "session_1",
-      expectedTurnId: "turn_1",
       content: inputFixture(inputParts("follow up")),
     })
-    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(steers[0]?.params).not.toHaveProperty("expectedTurnId")
+    expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(0)
+    expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(0)
+    expect(
+      inputRecoveryMemory.readSteers("http://api.test", "session_1"),
+    ).toEqual([expect.objectContaining({ turnId: "turn_1" })])
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     // Steering is ephemeral acceptance: no admission outbox entry.
     expect(
@@ -3229,16 +3234,95 @@ describe("model selection", () => {
         useAppStore.getState().apiBase,
       ),
     ).toEqual([])
+    for (const [seq, turnId] of [
+      [2, "turn_stale"],
+      [3, "turn_1"],
+    ] as const) {
+      stream?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq,
+          event: {
+            type: EventType.TurnCompleted,
+            data: {
+              turnId,
+              outcome: { status: "interrupted", reason: "stop" },
+            },
+          },
+        }),
+      )
+      expect(useAppStore.getState().promptDraft).toEqual(
+        turnId === "turn_1" ? inputParts("follow up") : undefined,
+      )
+    }
+  })
+
+  it("keeps a server-selected steer pending after an old completion and a newer live turn start", async () => {
+    const response = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input") return response.promise
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_old" })
+    stream?.emitReplayComplete()
+    useAppStore.getState().setPromptDraft(inputParts("follow new turn"))
+    const sending = useAppStore
+      .getState()
+      .admitInput(inputParts("follow new turn"))
+    const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+      content: InputContent
+    }
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: "turn_old", outcome: { status: "completed" } },
+        },
+      }),
+    )
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 3,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_new", inputId: "input_new" },
+        },
+      }),
+    )
+    response.resolve({ ...request, turnId: "turn_new" })
+    await sending
+    expect(useAppStore.getState().execution.activeTurnId).toBe("turn_new")
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().pendingSteers.session_1).toEqual([
+      expect.objectContaining({
+        requestId: request.requestId,
+        turnId: "turn_new",
+      }),
+    ])
+    expect(
+      inputRecoveryMemory.readSteers("http://api.test", "session_1"),
+    ).toEqual([
+      expect.objectContaining({
+        requestId: request.requestId,
+        restored: false,
+      }),
+    ])
   })
 
   it("restores only uncommitted steers when their turn is interrupted", async () => {
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
         return {
           content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          turnId: body.expectedTurnId,
+          turnId: "turn_1",
         }
       }
       return notFound()
@@ -3251,7 +3335,7 @@ describe("model selection", () => {
     await useAppStore.getState().admitInput(inputParts("first"))
     useAppStore.setState({ promptDraft: inputParts("second") })
     await useAppStore.getState().admitInput(inputParts("second"))
-    const steers = fakeRef.current.requestsFor("session/input/steer")
+    const steers = fakeRef.current.requestsFor("session/input")
     expect(steers).toHaveLength(2)
     const first = steers[0]?.params as { requestId: string }
     stream?.emitEvent(
@@ -3297,12 +3381,12 @@ describe("model selection", () => {
 
   it("reconciles pending steers after navigation and replay", async () => {
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
         return {
           content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          turnId: body.expectedTurnId,
+          turnId: "turn_1",
         }
       }
       return notFound()
@@ -3321,7 +3405,7 @@ describe("model selection", () => {
     await useAppStore.getState().selectSession("session_1")
     const replay = fakeRef.current.streams.at(-1)
     emitSnapshot(replay, { ...sessionDetail, seq: 4 })
-    const steers = fakeRef.current.requestsFor("session/input/steer")
+    const steers = fakeRef.current.requestsFor("session/input")
     replay?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
@@ -3347,12 +3431,12 @@ describe("model selection", () => {
 
   it("keeps a pending steer across stream failure until reconnect replay resolves it", async () => {
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
         return {
           content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          turnId: body.expectedTurnId,
+          turnId: "turn_1",
         }
       }
       return notFound()
@@ -3376,12 +3460,12 @@ describe("model selection", () => {
 
   it("recovers a steer after store reset and restores it once across navigation", async () => {
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
         return {
           content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          turnId: body.expectedTurnId,
+          turnId: "turn_1",
         }
       }
       return notFound()
@@ -3445,7 +3529,7 @@ describe("model selection", () => {
     ).toHaveLength(1)
   })
 
-  it("restores promoted image refs after store reset and requeues them on retry", async () => {
+  it("restores promoted image refs after store reset and resubmits them when idle", async () => {
     const original = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -3463,20 +3547,15 @@ describe("model selection", () => {
       },
     }
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        const body = params as { requestId: string; expectedTurnId: string }
-        return {
-          requestId: body.requestId,
-          turnId: body.expectedTurnId,
-          content: inputFixture(inputParts("inspect image", [promoted])),
-        }
-      }
-      if (method === "session/input/queue") {
+      if (method === "session/input") {
         const body = params as { requestId: string }
         return {
-          content: requestedInputContent(body.requestId),
           requestId: body.requestId,
-          inputId: "input_2",
+          turnId: "turn_1",
+          content: inputFixture(inputParts("inspect image", [promoted])),
+          ...(fakeRef.current.requestsFor("session/input").length > 1
+            ? { inputId: "input_retry" }
+            : {}),
         }
       }
       return notFound()
@@ -3512,17 +3591,18 @@ describe("model selection", () => {
       .getState()
       .admitInput(inputParts("inspect image", [promoted]), "queue")
     expect(
-      fakeRef.current.requestsFor("session/input/queue")[0]?.params,
+      fakeRef.current.requestsFor("session/input")[1]?.params,
     ).toMatchObject({
       content: inputFixture(inputParts("inspect image", [promoted])),
     })
+    expect(fakeRef.current.requestsFor("session/input/queue")).toEqual([])
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
   it("restores a steer whose acceptance arrives after replay found an idle session", async () => {
     const response = deferredResponse()
     fakeRef.current.respond = (method) => {
-      if (method === "session/input/steer") return response.promise
+      if (method === "session/input") return response.promise
       return notFound()
     }
     await useAppStore.getState().selectSession("session_1")
@@ -3540,8 +3620,9 @@ describe("model selection", () => {
     const replay = fakeRef.current.streams.at(-1)
     emitSnapshot(replay, { ...sessionDetail, seq: 3 })
     replay?.emitReplayComplete()
-    const steer = fakeRef.current.requestsFor("session/input/steer")[0]
-      ?.params as { requestId: string }
+    const steer = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+    }
     response.resolve({
       content: requestedInputContent(steer.requestId),
       requestId: steer.requestId,
@@ -3587,7 +3668,7 @@ describe("model selection", () => {
     }
     const response = deferredResponse()
     fakeRef.current.respond = (method) => {
-      if (method === "session/input/steer") return response.promise
+      if (method === "session/input") return response.promise
       return notFound()
     }
     await useAppStore.getState().selectSession("session_1")
@@ -3607,13 +3688,16 @@ describe("model selection", () => {
     const replay = fakeRef.current.streams.at(-1)
     emitSnapshot(replay, { ...sessionDetail, seq: 3 })
     replay?.emitReplayComplete()
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(
-      (useAppStore.getState().promptDraft?.attachments ?? []).filter(
-        (attachment) => attachment.mediaType !== "application/pdf",
-      ),
+      inputRecoveryMemory.listAdmissionsForSession(
+        useAppStore.getState().apiBase,
+        "session_1",
+      )[0]?.content.attachments,
     ).toEqual(inputParts("", [original]).attachments)
-    const steer = fakeRef.current.requestsFor("session/input/steer")[0]
-      ?.params as { requestId: string }
+    const steer = fakeRef.current.requestsFor("session/input")[0]?.params as {
+      requestId: string
+    }
     response.resolve({
       requestId: steer.requestId,
       turnId: "turn_1",
@@ -3656,7 +3740,7 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
-  it("falls back to a queued admission when the active turn ended before steering", async () => {
+  it("accepts a new turn through session/input when the renderer still shows an ended turn", async () => {
     globalThis.localStorage.clear()
     const original = {
       name: "screen.png",
@@ -3665,13 +3749,7 @@ describe("model selection", () => {
       file: { rolloutId: "draft_1", path: "attachments/staging/1.png" },
     }
     fakeRef.current.respond = (method, params) => {
-      if (method === "session/input/steer") {
-        throw new ApiRequestError(
-          "Input was not submitted: no_active_turn.",
-          "conflict",
-        )
-      }
-      if (method === "session/input/queue") {
+      if (method === "session/input") {
         const body = params as { requestId: string }
         return {
           content: inputFixture(
@@ -3724,14 +3802,14 @@ describe("model selection", () => {
 
     await useAppStore.getState().admitInput(inputParts("follow up", [original]))
 
-    expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(1)
-    expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(0)
+    expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(0)
     expect(
-      fakeRef.current.requestsFor("session/input/queue")[0]?.params,
+      fakeRef.current.requestsFor("session/input")[0]?.params,
     ).toMatchObject({
       content: inputFixture(inputParts("follow up", [original])),
     })
-    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().message).toBeUndefined()
   })
@@ -3816,7 +3894,10 @@ describe("model selection", () => {
       return notFound()
     }
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(fakeRef.current.streams[0])
+    emitSnapshot(fakeRef.current.streams[0], {
+      ...sessionDetail,
+      activeTurnId: "turn_1",
+    })
     fakeRef.current.streams[0]?.emitReplayComplete()
     useAppStore.setState({ promptDraft: inputParts("run later") })
     await useAppStore.getState().admitInput(inputParts("run later"), "queue")
@@ -5128,6 +5209,7 @@ describe("new session drafts", () => {
     fakeRef.current.respond = (method, params) =>
       method === "session/create" ? create.promise : respond(method, params)
     useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptDraft(inputParts("try again"))
     const first = useAppStore.getState().admitInput(inputParts("try again"))
     const duplicate = useAppStore.getState().admitInput(inputParts("try again"))
     create.reject(new ApiRequestError("Creation failed", "not_found"))
@@ -5335,7 +5417,10 @@ describe("new session drafts", () => {
   })
 })
 
-it("preserves draft edits made while the first session is being created", async () => {
+it.each([
+  "hello",
+  "hello with another thought",
+])("preserves a newer %s draft while the first session is being created", async (newerDraft) => {
   globalThis.localStorage.clear()
   let release: () => void = () => {
     throw new Error("Creation has not started")
@@ -5364,14 +5449,10 @@ it("preserves draft edits made while the first session is being created", async 
   await vi.waitFor(() =>
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1),
   )
-  useAppStore
-    .getState()
-    .setPromptDraft(inputParts("hello with another thought"))
+  useAppStore.getState().setPromptDraft(inputParts(newerDraft))
   release()
   await sending
-  expect(useAppStore.getState().promptDraft).toEqual(
-    inputParts("hello with another thought"),
-  )
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts(newerDraft))
   expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
     { content: inputFixture(inputParts("hello")) },
   )
@@ -6131,14 +6212,14 @@ it("keeps the sidebar order when an already listed search result is selected", a
 
 it.each(
   [
-    { draft: "hi", expected: undefined, order: "queue-first" },
+    { draft: "hi", expected: "hi", order: "queue-first" },
     { draft: "Next question", expected: "Next question", order: "queue-first" },
-    { draft: "hi", expected: undefined, order: "rpc-first" },
+    { draft: "hi", expected: "hi", order: "rpc-first" },
     { draft: "Next question", expected: "Next question", order: "rpc-first" },
   ].flatMap((scenario) =>
     ["before-replay", "during-replay"].map((start) => ({ ...scenario, start })),
   ),
-)("settles the first admitted draft after overlapping initial replay: $draft / $order / $start", async ({
+)("preserves a newer draft after overlapping first admission and initial replay: $draft / $order / $start", async ({
   draft,
   expected,
   order,
@@ -6762,9 +6843,280 @@ it("releases input submission before an unrelated sidebar refresh completes", as
 })
 
 it.each([
-  "session/input",
-  "session/input/steer",
-] as const)("keeps an explicit %s rejection out of unknown-delivery recovery", async (method) => {
+  "started",
+  "steered",
+  "error",
+] as const)("durable admission releases send A and its late %s reply preserves send B ownership", async (reply) => {
+  const first = deferredResponse()
+  const second = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "session/input")
+      return fakeRef.current.requestsFor(method).length === 1
+        ? first.promise
+        : second.promise
+    if (method === "session/skills") return { skills: [] }
+    return notFound()
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+  stream?.emitReplayComplete()
+  useAppStore.getState().setPromptDraft(inputParts("first"))
+  const sendA = useAppStore.getState().admitInput(inputParts("first"))
+  const requestA = fakeRef.current.requestsFor("session/input")[0]?.params as {
+    requestId: string
+    content: InputContent
+  }
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(useAppStore.getState().execution.activeTurnId).toBe("turn_1")
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    true,
+  )
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: requestA.requestId,
+          inputId: "input_a",
+          role: InputRole.User,
+          content: requestA.content,
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    false,
+  )
+
+  useAppStore.getState().setPromptDraft(inputParts("second"))
+  const sendB = useAppStore.getState().admitInput(inputParts("second"))
+  expect(fakeRef.current.requestsFor("session/input")).toHaveLength(2)
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  // Identical text is a new draft once A's captured snapshot has been cleared.
+  useAppStore.getState().setPromptDraft(inputParts("first"))
+  if (reply === "error")
+    first.reject(new ApiRequestError("Late rejection", "invalid_input"))
+  else
+    first.resolve({
+      ...requestA,
+      turnId: "turn_1",
+      ...(reply === "started" ? { inputId: "input_a" } : {}),
+    })
+  await sendA
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("first"))
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    true,
+  )
+  await useAppStore.getState().admitInput(inputParts("blocked duplicate"))
+  expect(fakeRef.current.requestsFor("session/input")).toHaveLength(2)
+  const requestB = fakeRef.current.requestsFor("session/input")[1]?.params as {
+    requestId: string
+    content: InputContent
+  }
+  second.resolve({ ...requestB, turnId: "turn_1" })
+  await sendB
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    false,
+  )
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("first"))
+  expect(fakeRef.current.requestsFor("session/input/steer")).toEqual([])
+  expect(fakeRef.current.requestsFor("session/input/queue")).toEqual([])
+})
+
+it.each([
+  "explicit",
+  "unknown",
+] as const)("restores an %s failed active-turn snapshot beside a newer parked draft and keeps attachments", async (failure) => {
+  const response = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "session/input") return response.promise
+    return notFound()
+  }
+  const attachment = {
+    name: "keep.png",
+    mediaType: "image/png" as const,
+    sizeBytes: 9,
+    file: { rolloutId: "draft_failure", path: "attachments/staging/keep.png" },
+  }
+  const excerpt = {
+    id: "submitted_excerpt",
+    text: "captured source",
+    source: { kind: "file" as const, label: "main.ts", path: "/repo/main.ts" },
+  }
+  useAppStore.setState({
+    selection: { sessionId: "session_1" },
+    promptDraft: inputParts("submitted", [attachment]),
+    promptExcerpts: [excerpt],
+    execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+  })
+  const sending = useAppStore
+    .getState()
+    .admitInput(inputParts("submitted", [attachment]))
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(useAppStore.getState().execution.activeTurnId).toBe("turn_1")
+  useAppStore.getState().setPromptDraft(inputParts("newer parked"))
+  await useAppStore.getState().selectSession("session_2")
+  useAppStore.getState().setPromptDraft(inputParts("other session"))
+  response.reject(
+    new ApiRequestError(
+      "Submission failed",
+      failure === "explicit" ? "invalid_input" : "internal_error",
+    ),
+  )
+  await sending
+  expect(useAppStore.getState().promptDraft).toEqual(
+    inputParts("other session"),
+  )
+  const restored = useAppStore.getState().sessionDrafts.session_1
+  expect(restored?.content?.text).toBe("submitted[Image 1]\nnewer parked")
+  expect(restored?.content?.attachments).toEqual(
+    inputParts("", [attachment]).attachments,
+  )
+  expect(restored?.excerpts).toEqual([excerpt])
+  const recovery = inputRecoveryMemory.listAdmissionsForSession(
+    "http://api.test",
+    "session_1",
+  )
+  expect(recovery).toHaveLength(failure === "explicit" ? 0 : 1)
+  if (failure === "unknown") expect(recovery[0]?.restored).toBe(true)
+  await useAppStore.getState().selectSession("session_1")
+  expect(useAppStore.getState().execution.entries).toEqual([])
+})
+
+it.each([
+  "unknown admission",
+  "uncommitted steer",
+] as const)("late durable confirmation of an %s preserves an identical newer draft", async (route) => {
+  const response = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "session/input") return response.promise
+    return notFound()
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+  stream?.emitReplayComplete()
+  useAppStore.getState().setPromptDraft(inputParts("same"))
+  const sending = useAppStore.getState().admitInput(inputParts("same"))
+  const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+    requestId: string
+    content: InputContent
+  }
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
+  useAppStore.getState().setPromptDraft(inputParts("same"))
+  if (route === "unknown admission") {
+    response.reject(new ApiRequestError("Connection lost"))
+    await sending
+  } else {
+    response.resolve({ ...request, turnId: "turn_1" })
+    await sending
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_1",
+            outcome: { status: "interrupted", reason: "stop" },
+          },
+        },
+      }),
+    )
+  }
+  expect(useAppStore.getState().promptDraft?.text).toBe("same\nsame")
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 3,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: request.requestId,
+          inputId: "input_confirmed",
+          role: InputRole.User,
+          content: request.content,
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("same"))
+  expect(
+    useAppStore
+      .getState()
+      .execution.entries.filter((entry) => entry.kind === "user_input"),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "user_input",
+      inputId: "input_confirmed",
+      text: "same",
+    }),
+  ])
+})
+
+it("replay queue publication releases a pending queue send before its late failure", async () => {
+  const reply = deferredResponse()
+  const queued: Array<{
+    id: string
+    sessionId: string
+    input: { submissionId: string; content: InputContent }
+    createdAt: string
+  }> = []
+  fakeRef.current.respond = (method) => {
+    if (method === "session/input/queue") return reply.promise
+    if (method === "session/queue/list") return { items: [...queued] }
+    return notFound()
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+  stream?.emitReplayComplete()
+  useAppStore.getState().setPromptDraft(inputParts("run next"))
+  const sending = useAppStore
+    .getState()
+    .admitInput(inputParts("run next"), "queue")
+  const request = fakeRef.current.requestsFor("session/input/queue")[0]
+    ?.params as {
+    requestId: string
+    content: InputContent
+  }
+  queued.push({
+    id: "input_queued",
+    sessionId: "session_1",
+    input: { submissionId: request.requestId, content: request.content },
+    createdAt: sessionDetail.createdAt,
+  })
+  stream?.disconnect(new Error("The connection to the server was lost."))
+  emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1", seq: 2 })
+  stream?.emitReplayComplete()
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().queuedItems).toHaveLength(1),
+  )
+  expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
+    false,
+  )
+  useAppStore.getState().setPromptDraft(inputParts("newer"))
+  reply.reject(new ApiRequestError("Late rejection", "invalid_input"))
+  await sending
+  expect(useAppStore.getState().promptDraft).toEqual(inputParts("newer"))
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(
+    inputRecoveryMemory.listAdmissionsForSession(
+      "http://api.test",
+      "session_1",
+    ),
+  ).toEqual([])
+})
+
+it.each([
+  "idle",
+  "working",
+] as const)("keeps an explicit rejection while %s out of unknown-delivery recovery", async (state) => {
   fakeRef.current.respond = () => {
     throw new ApiRequestError("Invalid model selection", "invalid_input")
   }
@@ -6773,7 +7125,7 @@ it.each([
     promptDraft: inputParts("hello"),
     execution: {
       ...createExecutionViewState(),
-      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+      ...(state === "working" ? { activeTurnId: "turn_1" } : {}),
     },
   })
   await useAppStore.getState().admitInput(inputParts("hello"))
@@ -6850,9 +7202,9 @@ it("dismisses an old reminder without resending or losing late acknowledgement r
 })
 
 it.each([
-  "session/input",
-  "session/input/steer",
-] as const)("retains unknown delivery after %s returns an internal commit error", async (method) => {
+  "idle",
+  "working",
+] as const)("retains unknown delivery while %s after an internal commit error", async (state) => {
   fakeRef.current.respond = () => {
     throw new ApiRequestError("Durability fence failed", "internal_error")
   }
@@ -6861,31 +7213,26 @@ it.each([
     promptDraft: inputParts("hello"),
     execution: {
       ...createExecutionViewState(),
-      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+      ...(state === "working" ? { activeTurnId: "turn_1" } : {}),
     },
   })
   await useAppStore.getState().admitInput(inputParts("hello"))
   expect(useAppStore.getState().message).toContain("unconfirmed")
-  const records = method.endsWith("steer")
-    ? inputRecoveryMemory.readSteers(
-        useAppStore.getState().apiBase,
-        "session_1",
-      )
-    : inputRecoveryMemory.listAdmissionsForSession(
-        useAppStore.getState().apiBase,
-        "session_1",
-      )
+  const records = inputRecoveryMemory.listAdmissionsForSession(
+    useAppStore.getState().apiBase,
+    "session_1",
+  )
   expect(records).toHaveLength(1)
   expect(records[0]?.restored).toBe(true)
 })
 
 it.each([
-  "session/input",
-  "session/input/steer",
-] as const)("trusts durable confirmation when the %s acknowledgement later fails", async (method) => {
+  "idle",
+  "working",
+] as const)("trusts durable confirmation while %s when acknowledgement later fails", async (state) => {
   const reply = deferredResponse()
   fakeRef.current.respond = (name) =>
-    name === method
+    name === "session/input"
       ? reply.promise
       : name === "session/queue/list"
         ? { items: [] }
@@ -6900,16 +7247,16 @@ it.each([
     promptDraft: inputParts("change direction"),
     execution: {
       ...createExecutionViewState(),
-      ...(method.endsWith("steer") ? { activeTurnId: "turn_1" } : {}),
+      ...(state === "working" ? { activeTurnId: "turn_1" } : {}),
     },
   })
   const sending = useAppStore
     .getState()
     .admitInput(inputParts("change direction"))
   await vi.waitFor(() =>
-    expect(fakeRef.current.requestsFor(method)).toHaveLength(1),
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
   )
-  const params = fakeRef.current.requestsFor(method)[0]?.params as {
+  const params = fakeRef.current.requestsFor("session/input")[0]?.params as {
     requestId: string
     content: InputContent
   }

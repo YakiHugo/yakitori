@@ -13,6 +13,10 @@ if (typeof window !== "undefined") {
   let realActions: Partial<AppStore> | undefined
 
   beforeEach(async () => {
+    const { inputRecoveryMemory } = await import(
+      "../../src/gui/input-recovery-memory.ts"
+    )
+    inputRecoveryMemory.clear()
     const { createInitialAppState, useAppStore } = await import(
       "../../src/gui/store/app-store.ts"
     )

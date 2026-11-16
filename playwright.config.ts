@@ -18,6 +18,7 @@ export default defineConfig({
       name: "browser",
       testMatch: [
         "browser.spec.ts",
+        "input-submission.spec.ts",
         "browser-select.spec.ts",
         "browser-files.spec.ts",
         "browser-directory.spec.ts",

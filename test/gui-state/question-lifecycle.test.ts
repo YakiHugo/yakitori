@@ -251,6 +251,7 @@ it("clears questions when an ordinary queued message is accepted", async () => {
       return {
         sessionId: session.id,
         turnId: "queued_turn",
+        inputId: "queued_input",
         requestId: input.requestId,
         content: inputContent(textInputDraft("Continue")),
       }
@@ -274,7 +275,7 @@ it("keeps questions asked after an ordinary input when its RPC response arrives 
   const response = Promise.withResolvers<unknown>()
   let requestId = ""
   fakeRef.current.respond = (method, params) => {
-    if (method === "session/input/steer") {
+    if (method === "session/input") {
       requestId = (params as { requestId: string }).requestId
       return response.promise
     }

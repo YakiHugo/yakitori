@@ -380,6 +380,39 @@ describe("composer", () => {
     expect(admitInput).toHaveBeenCalledWith(inputParts("hello mate"), undefined)
   })
 
+  it.each([
+    ["enter", "{Control>}{Enter}{/Control}"],
+    ["mod-enter", "{Shift>}{Control>}{Enter}{/Control}{/Shift}"],
+  ] as const)("uses the %s queue shortcut only while working", async (sendShortcut, shortcut) => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async (_parts: InputDraft) => {})
+    usePreferencesStore.setState({ sendShortcut })
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptDraft: inputParts("next task"),
+    })
+    render(<Composer />)
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard(shortcut)
+    expect(admitInput).toHaveBeenLastCalledWith(
+      inputParts("next task"),
+      undefined,
+    )
+
+    act(() =>
+      useAppStore.setState({
+        execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+      }),
+    )
+    await user.keyboard(shortcut)
+    expect(admitInput).toHaveBeenLastCalledWith(
+      inputParts("next task"),
+      "queue",
+    )
+    expect(admitInput).toHaveBeenCalledTimes(2)
+  })
+
   it("resumes latest-output following when the reader sends", async () => {
     const user = userEvent.setup()
     const jumpToBottom = vi.fn()
@@ -489,7 +522,7 @@ describe("composer", () => {
     expect(screen.queryByRole("status")).toBeNull()
   })
 
-  it("keeps a queued first prompt's image until creation settles", async () => {
+  it("keeps a first prompt's image until creation settles", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
@@ -2997,8 +3030,12 @@ describe("PDF attachment composer", () => {
       path: "attachments/staging/draft_pdf/manual.pdf",
     },
   }
-  it("sends a PDF-only draft and preserves its promoted document identity", async () => {
+  it("clears a PDF-only draft before its reply and retains its bytes until promotion", async () => {
     const user = userEvent.setup()
+    let resolveAdmission!: (response: unknown) => void
+    const admission = new Promise((resolve) => {
+      resolveAdmission = resolve
+    })
     const original: InputContent = inputFixture([{ ...pdf, type: "document" }])
     const accepted: InputContent = inputFixture([
       {
@@ -3014,13 +3051,8 @@ describe("PDF attachment composer", () => {
       selection: { sessionId: "session_1" },
       promptDraft: original,
     })
-    fakeRef.current.respond = (method, params) => {
-      if (method === "session/input")
-        return {
-          requestId: (params as { requestId: string }).requestId,
-          inputId: "input_pdf",
-          content: accepted,
-        }
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input") return admission
       if (method === "session/list") return { sessions: [] }
       throw new ApiRequestError("not found", "not_found")
     }
@@ -3049,6 +3081,25 @@ describe("PDF attachment composer", () => {
     expect(
       screen.queryByRole("button", { name: "Remove manual.pdf" }),
     ).toBeNull()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
+    await act(async () =>
+      resolveAdmission({
+        requestId: (
+          fakeRef.current.requestsFor("session/input")[0]?.params as {
+            requestId: string
+          }
+        ).requestId,
+        inputId: "input_pdf",
+        turnId: "turn_pdf",
+        content: accepted,
+      }),
+    )
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(
+      window.yakitoriDesktop?.discardDraftAttachments,
+    ).not.toHaveBeenCalled()
   })
   it("keeps a removed PDF for Undo without deleting its bytes", async () => {
     const user = userEvent.setup()
