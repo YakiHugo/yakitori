@@ -1,5 +1,4 @@
 import { execFile, spawn } from "node:child_process"
-import { once } from "node:events"
 import {
   chmod,
   mkdir,
@@ -185,28 +184,72 @@ test("a killed build process releases its checkout lock for the next build", asy
         "-e",
         `const { withBuildCacheLock } = await import(process.argv[1]);
        await withBuildCacheLock(process.argv[2], async () => {
-         process.stdout.write("locked");
-         await new Promise(() => setInterval(() => {}, 1000));
+         await new Promise((_resolve, reject) => {
+           process.on("message", () => {});
+           process.send({ type: "build-cache-lock-held" }, (error) => {
+             if (error) reject(error);
+           });
+         });
        });`,
         new URL("../../scripts/lib/build-cache.ts", import.meta.url).href,
         root,
       ],
-      { stdio: ["ignore", "pipe", "pipe"] },
+      { stdio: ["ignore", "ignore", "pipe", "ipc"] },
     )
+    let stderr = ""
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk
+    })
+    const closed = new Promise<void>((resolve) => {
+      child.once("close", () => resolve())
+    })
     try {
-      await once(child.stdout, "data")
+      const ready = await new Promise<unknown>((resolve, reject) => {
+        const cleanup = () => {
+          child.off("message", onMessage)
+          child.off("error", onError)
+          child.off("close", onClose)
+        }
+        const onMessage = (message: unknown) => {
+          cleanup()
+          resolve(message)
+        }
+        const onError = (error: Error) => {
+          cleanup()
+          reject(error)
+        }
+        const onClose = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          cleanup()
+          reject(
+            new Error(
+              `Lock holder exited before readiness (${signal ?? code}): ${stderr}`,
+            ),
+          )
+        }
+        child.once("message", onMessage)
+        child.once("error", onError)
+        child.once("close", onClose)
+      })
+      expect(ready).toEqual({ type: "build-cache-lock-held" })
+      expect(child.exitCode, stderr).toBeNull()
+      expect(child.signalCode, stderr).toBeNull()
+      expect(child.connected, stderr).toBe(true)
       await expect(withBuildCacheLock(root, async () => {})).rejects.toThrow(
         "Another desktop build",
       )
-      const exited = once(child, "exit")
-      child.kill("SIGKILL")
-      await exited
+      expect(child.kill("SIGKILL")).toBe(true)
+      await closed
+      expect(child.signalCode, stderr).toBe("SIGKILL")
       expect(await withBuildCacheLock(root, async () => "available")).toBe(
         "available",
       )
     } finally {
       if (child.exitCode === null && child.signalCode === null)
         child.kill("SIGKILL")
+      await closed
     }
   })
 })
