@@ -1,4 +1,4 @@
-import { readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import {
   app,
@@ -35,6 +35,15 @@ export async function registerAppUpdates(
   let updater: AppUpdater | undefined
   let installer: UpdateInstallerHandle | undefined
   let lastCheck = 0
+  let changingSource = false
+  let disposed = false
+  const requireStableSource = () => {
+    if (disposed) throw new Error("The application is closing.")
+    if (changingSource)
+      throw new Error(
+        "The update source is changing. Try again when it finishes.",
+      )
+  }
   let chooseLocalSource: (() => Promise<void>) | undefined
   let chooseReleaseSource: (() => Promise<void>) | undefined
   const unavailable: DesktopUpdateState = {
@@ -126,32 +135,53 @@ export async function registerAppUpdates(
     updater = createUpdater()
     if (sourceError !== undefined) lastCheck = Date.now()
     const changeSource = async (selected: string | undefined) => {
-      const phase = updater?.getState().phase
-      if (
-        phase === "installing" ||
-        phase === "preparing" ||
-        phase === "downloading"
-      )
-        throw new Error(
-          "Finish or cancel the current update before changing its source.",
+      requireStableSource()
+      changingSource = true
+      try {
+        const phase = updater?.getState().phase
+        if (
+          phase === "installing" ||
+          phase === "preparing" ||
+          phase === "downloading"
         )
-      if (selected !== undefined)
-        await checkLocalDesktopUpdate({
-          workspace: selected,
-          installedAppPath: applicationPath,
-          logPath: path.join(userDataPath, "local-build.log"),
-        })
-      await updater?.dispose()
-      workspace = selected
-      sourceError = undefined
-      if (workspace === undefined) await rm(sourcePath, { force: true })
-      else
-        await writeFile(sourcePath, JSON.stringify({ workspace }), {
-          mode: 0o600,
-        })
-      updater = createUpdater()
-      lastCheck = Date.now()
-      await updater.check()
+          throw new Error(
+            "Finish or cancel the current update before changing its source.",
+          )
+        if (selected !== undefined)
+          await checkLocalDesktopUpdate({
+            workspace: selected,
+            installedAppPath: applicationPath,
+            logPath: path.join(userDataPath, "local-build.log"),
+          })
+        if (disposed) throw new Error("The application is closing.")
+        // Failed persistence must leave the current, usable updater in place.
+        if (selected === undefined) await rm(sourcePath, { force: true })
+        else {
+          const temporary = `${sourcePath}.${process.pid}.tmp`
+          try {
+            await writeFile(
+              temporary,
+              JSON.stringify({ workspace: selected }),
+              {
+                mode: 0o600,
+              },
+            )
+            await rename(temporary, sourcePath)
+          } finally {
+            await rm(temporary, { force: true })
+          }
+        }
+        if (disposed) throw new Error("The application is closing.")
+        const previous = updater
+        workspace = selected
+        sourceError = undefined
+        updater = createUpdater()
+        await previous?.dispose()
+        lastCheck = Date.now()
+        if (!disposed) await updater.check()
+      } finally {
+        changingSource = false
+      }
     }
     chooseLocalSource = async () => {
       const result = await dialog.showOpenDialog(window, {
@@ -180,20 +210,24 @@ export async function registerAppUpdates(
   })
   ipcMain.handle(channels[1], async (event) => {
     trusted(event)
+    requireStableSource()
     await updater?.check()
   })
   ipcMain.handle(channels[2], async (event) => {
     trusted(event)
+    requireStableSource()
     if (updater === undefined) throw new Error(unavailable.reason)
     await updater.download()
   })
   ipcMain.handle(channels[3], async (event) => {
     trusted(event)
+    requireStableSource()
     if (updater === undefined) throw new Error(unavailable.reason)
     await updater.install()
   })
 
   const maybeCheck = () => {
+    if (disposed || changingSource) return
     if (Date.now() - lastCheck < backgroundCheckIntervalMs) return
     lastCheck = Date.now()
     void updater?.check()
@@ -222,6 +256,7 @@ export async function registerAppUpdates(
       label: "Check for Updates…",
       click: () => {
         void (async () => {
+          requireStableSource()
           lastCheck = Date.now()
           await updater?.check()
           const state = getState()
@@ -290,6 +325,7 @@ export async function registerAppUpdates(
       updater?.cancelInstallation()
     },
     async dispose() {
+      disposed = true
       if (!window.isDestroyed()) {
         window.webContents.off("did-finish-load", maybeCheck)
         window.off("focus", maybeCheck)
