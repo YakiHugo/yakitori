@@ -5,6 +5,7 @@ import type {
   WorkspaceFindFilesResponse,
   WorkspaceGitEntry,
   WorkspaceGitInfo,
+  WorkspaceGitStats,
   WorkspaceListResponse,
   WorkspacePullRequest,
   WorkspaceReadForEditResponse,
@@ -20,6 +21,7 @@ export type {
   WorkspaceFindFilesResponse,
   WorkspaceGitEntry,
   WorkspaceGitInfo,
+  WorkspaceGitStats,
   WorkspaceListResponse,
   WorkspacePullRequest,
   WorkspaceReadForEditResponse,
@@ -512,24 +514,46 @@ export async function readWorkspaceGitStatus(input: {
     "status",
     "--porcelain=v1",
     "-z",
+    "--renames",
     "--untracked-files=all",
     "--",
     ".",
   ])
   const records = status.text.split("\0")
   const entries: WorkspaceGitEntry[] = []
+  // Match porcelain's repository-relative paths even with a nested cwd or
+  // diff.relative enabled in the repository configuration.
+  const diffArgs = [
+    "diff",
+    "--numstat",
+    "-z",
+    "--no-relative",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--find-renames",
+  ]
+  const [staged, unstaged] = await Promise.all([
+    git(cwd, [...diffArgs, "--cached", "--", "."]),
+    git(cwd, [...diffArgs, "--", "."]),
+  ])
+  const stagedStats = parseGitNumstat(staged.text)
+  const unstagedStats = parseGitNumstat(unstaged.text)
   for (let index = 0; index < records.length; index++) {
     const record = records[index]
     if (!record) continue
     const indexStatus = record[0] ?? " "
     const worktreeStatus = record[1] ?? " "
-    const path = displayPath(cwd, resolve(root, record.slice(3)))
+    const repositoryPath = record.slice(3)
+    const path = displayPath(cwd, resolve(root, repositoryPath))
     const renamed =
       indexStatus === "R" ||
       indexStatus === "C" ||
       worktreeStatus === "R" ||
       worktreeStatus === "C"
     const originalPath = renamed ? records[++index] : undefined
+    const stagedEntryStats = stagedStats.get(repositoryPath)
+    const unstagedEntryStats = unstagedStats.get(repositoryPath)
     entries.push({
       path,
       ...(originalPath === undefined
@@ -537,6 +561,12 @@ export async function readWorkspaceGitStatus(input: {
         : { originalPath: displayPath(cwd, resolve(root, originalPath)) }),
       indexStatus,
       worktreeStatus,
+      ...(stagedEntryStats === undefined
+        ? {}
+        : { stagedStats: stagedEntryStats }),
+      ...(unstagedEntryStats === undefined
+        ? {}
+        : { unstagedStats: unstagedEntryStats }),
     })
   }
   return {
@@ -546,6 +576,33 @@ export async function readWorkspaceGitStatus(input: {
       branchResult.code === 0 ? branchResult.text.trimEnd() : "Detached HEAD",
     entries,
   }
+}
+
+function parseGitNumstat(text: string): Map<string, WorkspaceGitStats> {
+  const records = text.split("\0")
+  const stats = new Map<string, WorkspaceGitStats>()
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]
+    if (!record) continue
+    const firstTab = record.indexOf("\t")
+    const secondTab = record.indexOf("\t", firstTab + 1)
+    const additions = record.slice(0, firstTab)
+    const deletions = record.slice(firstTab + 1, secondTab)
+    let path = record.slice(secondTab + 1)
+    // With -z, renames have an empty path followed by separate old/new records.
+    // Split only the count columns: filenames can contain tabs and newlines.
+    if (path === "") {
+      index += 2
+      path = records[index] ?? ""
+    }
+    const binary = additions === "-" || deletions === "-"
+    stats.set(path, {
+      additions: binary ? 0 : Number(additions),
+      deletions: binary ? 0 : Number(deletions),
+      binary,
+    })
+  }
+  return stats
 }
 
 export async function readWorkspaceGitInfo(input: {
