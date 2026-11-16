@@ -6,7 +6,7 @@ import {
   PanelRight,
   Settings,
 } from "lucide-react"
-import { type ReactNode, useEffect } from "react"
+import { type ReactNode, type RefObject, useEffect } from "react"
 import { useNavigationHistory } from "../hooks/use-navigation-history.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { AppUpdate } from "./app-update.tsx"
@@ -17,6 +17,7 @@ export function WindowChrome({
   heading,
   workspaceOpen,
   onToggleWorkspace,
+  workspaceToggleRef,
   actions,
 }: Readonly<{
   sidebarOpen: boolean
@@ -24,6 +25,7 @@ export function WindowChrome({
   heading?: ReactNode
   workspaceOpen: boolean
   onToggleWorkspace(): void
+  workspaceToggleRef?: RefObject<HTMLButtonElement | null>
   actions?: ReactNode
 }>) {
   const settingsOpen = useAppStore(
@@ -111,8 +113,9 @@ export function WindowChrome({
         <div className="window-heading">{heading}</div>
         <div className="window-titlebar-actions">
           {actions}
-          {!settingsOpen && (
+          {!settingsOpen && !workspaceOpen && (
             <button
+              ref={workspaceToggleRef}
               type="button"
               className="sidebar-icon"
               aria-label={workspaceOpen ? "Hide workspace" : "Show workspace"}

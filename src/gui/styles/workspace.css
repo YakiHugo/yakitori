@@ -1,5 +1,7 @@
 .workspace-shell {
   position: relative;
+  --workspace-surface: color-mix(in oklab, var(--muted) 75%, var(--background));
+  --workspace-content-radius: 14px;
 }
 .workspace-frame {
   position: relative;
@@ -9,17 +11,39 @@
   width: var(--workspace-width);
   min-width: 0;
   border-left: 1px solid var(--border);
-  background: var(--background);
+  background: var(--workspace-surface);
 }
 .workspace-header {
-  height: 48px;
+  height: 52px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 8px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+.workspace-header-divider {
+  width: 1px;
+  height: 20px;
+  flex-shrink: 0;
+  background: var(--border);
+}
+.workspace-tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.workspace-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.workspace-collapse {
+  background: color-mix(in oklab, var(--foreground) 6%, transparent);
+  color: var(--foreground);
 }
 .workspace-frame[data-open="false"] {
   display: none;
@@ -42,9 +66,9 @@
 .workspace-tabs {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -52,20 +76,26 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  border-radius: 7px;
-  max-width: 170px;
+  flex-basis: 168px;
+  min-width: 0;
+  max-width: min(200px, 100%);
+  border: 1px solid transparent;
+  border-radius: 10px;
 }
 .workspace-tab[data-active="true"] {
-  background: var(--muted);
+  background: var(--background);
+  border-color: color-mix(in oklab, var(--foreground) 6%, transparent);
+  box-shadow: 0 1px 2px #00000005;
 }
 .workspace-tab > [role="tab"] {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 8px;
+  flex: 1;
+  padding: 8px 9px;
   font-size: 12px;
   color: var(--muted-foreground);
-  border-radius: 6px;
+  border-radius: 9px;
   min-width: 0;
   white-space: nowrap;
 }
@@ -78,7 +108,6 @@
 }
 .workspace-tab > [aria-selected="true"] {
   color: var(--foreground);
-  background: var(--muted);
   font-weight: 500;
 }
 .workspace-tab button:hover {
@@ -99,6 +128,7 @@
 }
 .workspace-add {
   position: relative;
+  flex-shrink: 0;
 }
 .workspace-add-menu {
   position: absolute;
@@ -136,6 +166,11 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  margin: 0 8px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--workspace-content-radius);
+  background: var(--background);
+  overflow: hidden;
   container-type: inline-size;
 }
 .workspace-file-explorer {
@@ -160,6 +195,10 @@
 }
 .workspace-content[hidden] {
   display: none;
+}
+/* Native browser views are rectangular and sit above renderer clipping. */
+.workspace-content[data-kind="browser"] {
+  padding-bottom: var(--workspace-content-radius);
 }
 .side-chat-panel {
   display: flex;
@@ -315,30 +354,41 @@
 .workspace-overview {
   position: absolute;
   top: 0;
-  right: 10px;
+  right: 8px;
   z-index: 30;
   width: min(374px, calc(100% - 24px));
   min-width: 0;
-  padding: 8px 12px 0 0;
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--workspace-surface);
+  box-shadow: 0 8px 32px #00000012;
   outline: none;
 }
 .workspace-project-card {
-  padding: 14px 16px;
+  min-width: 0;
+  padding: 0 8px 8px;
+}
+.workspace-project-body {
+  padding: 10px 14px;
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: var(--workspace-content-radius);
   background: var(--background);
-  box-shadow: 0 2px 14px #00000008;
 }
 .workspace-project-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 6px;
-  color: var(--muted-foreground);
-  font-size: 14px;
+  min-height: 48px;
+  padding-inline: 8px 2px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
 }
 .workspace-project-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -358,7 +408,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 100%;
+  width: calc(100% + 16px);
   padding: 8px;
   margin-left: -8px;
   border-radius: 8px;
