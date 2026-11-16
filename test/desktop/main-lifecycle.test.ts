@@ -54,6 +54,13 @@ vi.mock("../../src/desktop/completion-notifications.ts", () => ({
 vi.mock("../../src/desktop/project-picker.ts", () => ({
   registerProjectPicker: vi.fn(),
 }))
+vi.mock("../../src/desktop/app-update-bridge.ts", () => ({
+  registerAppUpdates: () => ({
+    prepareQuit: vi.fn(),
+    cancelQuit: vi.fn(),
+    dispose: vi.fn(),
+  }),
+}))
 vi.mock("../../src/desktop/resource-opener.ts", () => ({
   registerResourceOpener: vi.fn(),
 }))

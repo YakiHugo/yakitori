@@ -2,6 +2,17 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron")
 
 contextBridge.exposeInMainWorld("yakitoriDesktop", {
   platform: process.platform,
+  updates: {
+    getState: () => ipcRenderer.invoke("yakitori:update-state-get"),
+    check: () => ipcRenderer.invoke("yakitori:update-check"),
+    download: () => ipcRenderer.invoke("yakitori:update-download"),
+    install: () => ipcRenderer.invoke("yakitori:update-install"),
+    onState(listener) {
+      const handler = (_event, state) => listener(state)
+      ipcRenderer.on("yakitori:update-state", handler)
+      return () => ipcRenderer.removeListener("yakitori:update-state", handler)
+    },
+  },
   focusWindow() {
     return ipcRenderer.invoke("yakitori:focus-window")
   },

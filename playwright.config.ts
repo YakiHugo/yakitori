@@ -28,6 +28,7 @@ export default defineConfig({
         "rendering.spec.ts",
         "account-financials.spec.ts",
         "title-model.spec.ts",
+        "app-update-renderer.spec.ts",
         "goal-renderer.spec.ts",
         "workspace-changes.spec.ts",
       ],
@@ -38,6 +39,7 @@ export default defineConfig({
       testMatch: [
         "desktop.spec.ts",
         "browser-native.spec.ts",
+        "app-update-desktop.spec.ts",
         "workspace-changes.spec.ts",
       ],
     },
