@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { RolloutItem } from "../../src/core/rollout.ts"
@@ -36,7 +37,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
-function prompt(turnId: string, questionId?: string): RolloutItem {
+function prompt(turnId: string): RolloutItem {
   return {
     type: "response_item",
     item: {
@@ -44,9 +45,6 @@ function prompt(turnId: string, questionId?: string): RolloutItem {
       turnId,
       createdAt,
       item: { role: "user", content: [{ type: "text", text: "Continue" }] },
-      ...(questionId === undefined
-        ? {}
-        : { submissionMetadata: { metadata: { userQuestionId: questionId } } }),
     },
   }
 }
@@ -87,7 +85,11 @@ async function rootDirectory() {
 
 async function persistedHandlers(
   items: readonly RolloutItem[],
-  options: { projectId?: string; projectStore?: ProjectStore } = {},
+  options: {
+    projectId?: string
+    projectStore?: ProjectStore
+    beforeReopen?: (root: string) => void
+  } = {},
 ) {
   const root = await rootDirectory()
   const writer = new JsonlThreadStore({ root })
@@ -103,6 +105,7 @@ async function persistedHandlers(
   await writer.persistThread(sessionId, "turn_start")
   await writer.appendItems(sessionId, items)
   await writer.shutdownThread(sessionId)
+  options.beforeReopen?.(root)
   const store = new JsonlThreadStore({ root })
   await store.initialize()
   const manager = new ThreadManager({
@@ -280,46 +283,66 @@ describe("authoritative session sidebar status", () => {
     })
   })
 
-  it("keeps old unanswered questions waiting outside the display page until their correlated answers persist", async () => {
+  it("rebuilds the disposable cache when older question lifecycle semantics were materialized", async () => {
+    const { handlers, store } = await persistedHandlers(
+      [
+        start("turn_question"),
+        question("ask_expired"),
+        {
+          type: "turn_completed",
+          turnId: "turn_question",
+          outcome: "completed",
+        },
+      ],
+      {
+        beforeReopen(root) {
+          const cache = new DatabaseSync(join(root, "thread-search.sqlite"))
+          try {
+            cache
+              .prepare(
+                "UPDATE search_threads SET status_json = ? WHERE thread_id = ?",
+              )
+              .run(
+                JSON.stringify({
+                  latestTurnOutcome: "completed",
+                  latestCompletionSeq: 4,
+                  unansweredQuestionIds: ["ask_expired"],
+                }),
+                sessionId,
+              )
+            cache.exec("PRAGMA user_version = 6")
+          } finally {
+            cache.close()
+          }
+        },
+      },
+    )
+    expect(await handlers.readSessionSummary({ sessionId })).toMatchObject({
+      ok: true,
+      value: { status: "idle", latestCompletionSeq: 4 },
+    })
+    expect(await store.readThreadSummary(sessionId)).not.toHaveProperty(
+      "unansweredQuestionIds",
+    )
+  })
+
+  it("reports incomplete question history as idle after a cold restart", async () => {
     const { handlers, store } = await persistedHandlers([
       start("turn_question"),
       prompt("turn_question"),
       question("ask_first"),
-      question("ask_second"),
-      { type: "turn_completed", turnId: "turn_question", outcome: "completed" },
-      start("turn_latest"),
-      prompt("turn_latest"),
-      { type: "turn_completed", turnId: "turn_latest", outcome: "failed" },
     ])
     expect(await handlers.readDisplayWindow({ sessionId })).toMatchObject({
       ok: true,
-      value: { session: { status: "waiting", latestCompletionSeq: 6 } },
+      value: { session: { status: "idle" } },
     })
-    await store.resumeThread(sessionId)
-    await store.appendItems(sessionId, [prompt("unrelated")])
-    await store.appendItems(sessionId, [prompt("answer_one", "ask_first")])
     expect(await handlers.listSessions()).toMatchObject({
       ok: true,
-      value: { sessions: [{ status: "waiting", latestCompletionSeq: 6 }] },
+      value: { sessions: [{ status: "idle" }] },
     })
-    await store.appendItems(sessionId, [prompt("answer_two", "ask_second")])
-    expect(await handlers.listSessions()).toMatchObject({
-      ok: true,
-      value: { sessions: [{ status: "failed", latestCompletionSeq: 6 }] },
-    })
-    await store.appendItems(sessionId, [
-      start("turn_interrupted"),
-      {
-        type: "turn_completed",
-        turnId: "turn_interrupted",
-        outcome: "interrupted",
-      },
-    ])
-    expect(await handlers.listSessions()).toMatchObject({
-      ok: true,
-      value: { sessions: [{ status: "idle", latestCompletionSeq: 6 }] },
-    })
-    await store.shutdownThread(sessionId)
+    expect(await store.readThreadSummary(sessionId)).not.toHaveProperty(
+      "latestCompletionSeq",
+    )
   })
 
   it("returns idle without a completion watermark for an empty persisted session", async () => {
@@ -330,7 +353,7 @@ describe("authoritative session sidebar status", () => {
     expect(result.value.sessions[0]).not.toHaveProperty("latestCompletionSeq")
   })
 
-  it("reports active work, permission waits, unanswered questions and answers through live transitions", async () => {
+  it("reports working during async questions and waiting only during permission requests", async () => {
     const root = await rootDirectory()
     const entered = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
@@ -430,12 +453,6 @@ describe("authoritative session sidebar status", () => {
     })
     await permission
     expect(await status()).toBe("working")
-    changed.mockClear()
-    release.resolve()
-    await expect.poll(status).toBe("waiting")
-    await expect.poll(() => changed.mock.calls.length).toBeGreaterThan(0)
-    const beforeAnswer = await store.readThreadSummary(liveId)
-    expect(beforeAnswer?.latestCompletionSeq).toBeGreaterThan(0)
     const broker = createElicitationBroker()
     const interactions = createSessionInteractions(store, handlers, broker)
     changed.mockClear()
@@ -445,12 +462,11 @@ describe("authoritative session sidebar status", () => {
       answers: ["Workspace"],
     })
     if (!answer.ok) throw new Error(answer.error.message)
+    release.resolve()
     await expect.poll(status).toBe("idle")
     await expect.poll(() => changed.mock.calls.length).toBeGreaterThan(0)
     const afterAnswer = await store.readThreadSummary(liveId)
-    expect(afterAnswer?.latestCompletionSeq).toBeGreaterThan(
-      beforeAnswer?.latestCompletionSeq ?? 0,
-    )
+    expect(afterAnswer?.latestCompletionSeq).toBeGreaterThan(0)
     broker.close()
   })
 })

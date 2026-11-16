@@ -156,6 +156,7 @@ export type ExecutionView = Readonly<{
   mateRevisionId?: string
   workingDirectory?: string
   queuedInputIds: readonly string[]
+  pendingQuestionIds: readonly string[]
   lastModel?: { readonly provider: string; readonly model: string }
   lastTurnUsage?: TokenUsage
   lastTurnMetrics?: TurnMetrics

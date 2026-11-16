@@ -35,7 +35,9 @@ function containsMessageSource(
   return entries.some((entry) =>
     entry.kind === "user_input" || entry.kind === "agent_input"
       ? entry.inputId === messageId
-      : entry.kind === "assistant" && entry.itemId === messageId,
+      : entry.kind === "tool"
+        ? entry.execution.itemId === messageId
+        : entry.kind === "assistant" && entry.itemId === messageId,
   )
 }
 

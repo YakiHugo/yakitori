@@ -251,5 +251,4 @@ export type ThreadStatusProjection = Readonly<{
   latestTurnOutcome?: "completed" | "failed" | "interrupted"
   // Uses the public event sequence (rollout seq + 1), for a local read watermark.
   latestCompletionSeq?: number
-  unansweredQuestionIds?: readonly string[]
 }>

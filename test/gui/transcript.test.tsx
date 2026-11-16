@@ -314,6 +314,7 @@ it("waits for upward intent before loading history above a short latest reply", 
 it.each([
   "assistant",
   "user",
+  "question",
 ] as const)("loads an earlier %s message before revealing its saved excerpt source", async (kind) => {
   const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView")
   const earlier: ExecutionEntry =
@@ -326,13 +327,29 @@ it.each([
           status: "completed",
           at,
         }
-      : {
-          kind: "user_input",
-          inputId: "earlier_progress",
-          text: "Earlier commentary",
-          content: inputParts("Earlier commentary"),
-          at,
-        }
+      : kind === "question"
+        ? {
+            kind: "tool",
+            toolCallId: "question_earlier",
+            turnId: "turn_earlier",
+            execution: {
+              type: "dynamic_tool_call",
+              itemId: "earlier_progress",
+              toolCallId: "question_earlier",
+              name: "request_user_input_async",
+              input: {},
+              requiresPermission: false,
+            },
+            state: "completed",
+            output: { questions: [{ title: "Which environment?" }] },
+          }
+        : {
+            kind: "user_input",
+            inputId: "earlier_progress",
+            text: "Earlier commentary",
+            content: inputParts("Earlier commentary"),
+            at,
+          }
   const loadHistoryThrough = vi.fn(async () => {
     useAppStore.setState((state) => ({
       historyBefore: undefined,
@@ -361,10 +378,10 @@ it.each([
   useAppStore.setState({ historyBefore: 10, loadHistoryThrough })
   const excerpt: ContextExcerpt = {
     id: "excerpt_earlier",
-    text: "Earlier commentary",
+    text: kind === "question" ? "Which environment?" : "Earlier commentary",
     source: {
       kind: "message",
-      label: "Assistant message",
+      label: kind === "question" ? "Question" : "Assistant message",
       sessionId: "session_1",
       messageId: "earlier_progress",
     },
@@ -383,11 +400,18 @@ it.each([
   })
   expect(loadHistoryThrough).toHaveBeenCalledWith("earlier_progress")
   frame(16)
-  const source = document.querySelector(
-    '[data-context-message-id="earlier_progress"]',
-  )
+  const source =
+    kind === "question"
+      ? screen.getByRole("form", { name: "Questions from your Mate" })
+      : document.querySelector('[data-context-message-id="earlier_progress"]')
   expect(source).not.toBeNull()
-  expect(scrollIntoView.mock.contexts).toContain(source)
+  expect(
+    scrollIntoView.mock.contexts.some(
+      (target) =>
+        target instanceof HTMLElement &&
+        target.dataset.contextMessageId === "earlier_progress",
+    ),
+  ).toBe(true)
 })
 
 it("reveals collapsed commentary when following a saved excerpt source", () => {
@@ -1514,7 +1538,7 @@ it("keeps pending approvals visible alongside intent updates", () => {
   ).toBeNull()
 })
 
-it("keeps question cards visible outside completed history before and after answering", () => {
+it("keeps closed question history visible and accepts a later correlated answer", () => {
   const question: Extract<ExecutionEntry, { kind: "tool" }> = {
     kind: "tool",
     toolCallId: "question_1",
@@ -1547,7 +1571,9 @@ it("keeps question cards visible outside completed history before and after answ
   render(<Transcript />)
   const card = screen.getByRole("form", { name: "Questions from your Mate" })
   expect(card.closest("[hidden]")).toBeNull()
-  expect(within(card).getByLabelText("Which environment?")).toBeDefined()
+  expect(within(card).getByText("Question closed")).toBeDefined()
+  expect(within(card).getByText("Which environment?")).toBeDefined()
+  expect(within(card).queryByRole("combobox")).toBeNull()
   expect(screen.queryByText("Checking the implementation")).toBeNull()
   const history = screen.getByRole("button", { name: "Worked for 1m 49s" })
   fireEvent.click(history)

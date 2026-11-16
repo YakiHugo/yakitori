@@ -70,7 +70,7 @@ type OccurrenceCursor = Readonly<{
 }>
 
 // Status summaries are disposable alongside the text projection.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.

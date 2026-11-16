@@ -31,6 +31,7 @@ import type { RpcMethodResponses } from "../../protocol/rpc-methods.ts"
 import type { SessionSidebar, SidebarChange } from "../../protocol/sidebar.ts"
 import type { InputContent, InputDraft } from "../../protocol/user-input.ts"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
+import { parseUserQuestions } from "../../protocol/user-interaction.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -60,6 +61,7 @@ import {
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
+import { questionAnswerMemory } from "../question-answer-memory.ts"
 import {
   readThreadScopeValue,
   removeThreadScope,
@@ -313,6 +315,8 @@ export type AppStoreActions = {
     mode?: "auto" | "queue",
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
+  dismissQuestions(toolCallId: string): void
+  restoreQuestionDraft(sessionId: string, toolCallId: string): void
   resumeTurn(turnId: string, modelSelection?: ModelSelection): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   refreshQueuedInputs(): Promise<void>
@@ -930,6 +934,113 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     })
   }
 
+  const restoreQuestionDrafts = (
+    sessionId: string,
+    execution: ExecutionViewState,
+  ): void => {
+    const state = get()
+    const threadId = state.sessionThreadIds[sessionId] ?? sessionId
+    const excerpts: ContextExcerpt[] = execution.pendingQuestionIds.flatMap(
+      (toolCallId) => {
+        // Submitted answers retain their delivery identity in the outbox. Turning
+        // them into ordinary input here could deliver the same answer twice.
+        if (
+          questionAnswerMemory.read(state.apiBase, sessionId, toolCallId) !==
+          undefined
+        )
+          return []
+        const entry = execution.entries.find(
+          (entry) => entry.kind === "tool" && entry.toolCallId === toolCallId,
+        )
+        if (entry?.kind !== "tool") return []
+        const request = parseUserQuestions(entry.output)
+        if (request === undefined) return []
+        const key = `questions:${toolCallId}:answers`
+        const answers = readThreadScopeValue<readonly string[]>(
+          threadId,
+          key,
+          [],
+        )
+        writeThreadScopeValue(threadId, key, [])
+        return request.questions.flatMap((question, index) => {
+          const answer = answers[index]?.trim()
+          return answer
+            ? [
+                {
+                  id: `question_${entry.execution.itemId}_${index}`,
+                  text: question.title,
+                  comment: answer,
+                  source: {
+                    kind: "message" as const,
+                    label: "Question",
+                    sessionId,
+                    messageId: entry.execution.itemId,
+                  },
+                },
+              ]
+            : []
+        })
+      },
+    )
+    if (excerpts.length === 0) return
+    set((current) => {
+      const selected = current.selection.sessionId === sessionId
+      const draft = selected
+        ? { content: current.promptDraft, excerpts: current.promptExcerpts }
+        : (current.sessionDrafts[sessionId] ?? {
+            content: undefined,
+            excerpts: [],
+          })
+      const restored = [
+        ...draft.excerpts,
+        ...excerpts.filter(
+          (excerpt) =>
+            !draft.excerpts.some((current) => current.id === excerpt.id),
+        ),
+      ]
+      const key = `${current.apiBase}\0${sessionId}`
+      const recovered = recoveredDrafts.get(key)
+      if (
+        recovered?.content === draft.content &&
+        recovered?.excerpts === draft.excerpts
+      )
+        recoveredDrafts.set(key, { ...recovered, excerpts: restored })
+      return selected
+        ? { promptExcerpts: restored }
+        : {
+            sessionDrafts: {
+              ...current.sessionDrafts,
+              [sessionId]: { ...draft, excerpts: restored },
+            },
+          }
+    })
+  }
+
+  const dismissSessionQuestions = (
+    sessionId: string,
+    questionIds?: readonly string[],
+  ): void => {
+    const state = get()
+    const selected = state.selection.sessionId === sessionId
+    const key = executionViewKey(state.apiBase, sessionId)
+    const cached = executionViews.get(key)
+    const execution = selected ? state.execution : cached?.execution
+    if (execution === undefined) return
+    const ids = questionIds ?? execution.pendingQuestionIds
+    if (ids.length === 0) return
+    const threadId = state.sessionThreadIds[sessionId] ?? sessionId
+    for (const id of ids)
+      if (questionAnswerMemory.read(state.apiBase, sessionId, id) === undefined)
+        writeThreadScopeValue(threadId, `questions:${id}:answers`, [])
+    const next = reduceExecutionView(execution, {
+      type: "questions_dismissed",
+      questionIds: ids,
+    })
+    if (selected) set({ execution: next })
+    else if (cached !== undefined)
+      executionViews.set(key, { ...cached, execution: next })
+  }
+
   const restoreUncommittedAdmission = (
     sessionId: string,
     requestId: string,
@@ -1301,26 +1412,37 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             replaySnapshot = undefined
             const events = [...replayEvents.values()]
             replayEvents.clear()
-            set((state) => ({
-              hydratingSessionId: undefined,
-              ...(state.message === "The connection to the server was lost."
-                ? { message: undefined }
-                : {}),
-              execution:
-                snapshot === undefined
-                  ? state.execution
-                  : reduceExecutionView(
-                      events.reduce(
-                        (execution, event) =>
-                          reduceExecutionView(execution, {
-                            type: "durable",
-                            event,
-                          }),
-                        state.execution,
-                      ),
-                      { type: "replay_completed", session: snapshot },
-                    ),
-            }))
+            const closingQuestions: ExecutionViewState[] = []
+            set((state) => {
+              let execution = state.execution
+              if (snapshot !== undefined) {
+                for (const event of events) {
+                  if (
+                    event.seq > execution.lastSeq &&
+                    isTurnCompletedEvent(event)
+                  )
+                    closingQuestions.push(execution)
+                  execution = reduceExecutionView(execution, {
+                    type: "durable",
+                    event,
+                    replay: true,
+                  })
+                }
+                if (snapshot.activeTurnId === undefined)
+                  closingQuestions.push(execution)
+                execution = reduceExecutionView(execution, {
+                  type: "replay_completed",
+                  session: snapshot,
+                })
+              }
+              return {
+                hydratingSessionId: undefined,
+                ...(state.message === "The connection to the server was lost."
+                  ? { message: undefined }
+                  : {}),
+                execution,
+              }
+            })
             authoritativeTurns.set(
               selection.sessionId,
               get().execution.activeTurnId,
@@ -1344,6 +1466,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             } else {
               restoreUncommittedSteers(selection.sessionId)
             }
+            for (const execution of closingQuestions)
+              restoreQuestionDrafts(selection.sessionId, execution)
             const confirmedSteers = inputRecoveryMemory
               .readSteers(get().apiBase, selection.sessionId)
               .filter(
@@ -1498,6 +1622,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 ),
               }))
             }
+            const questionsBeforeEvent = get().execution
             set((state) => {
               const selectedSession = applyDurableSessionDetail(
                 state.selectedSession,
@@ -1528,6 +1653,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 selection.sessionId,
                 event.data.turnId,
               )
+              if (event.seq > questionsBeforeEvent.lastSeq)
+                restoreQuestionDrafts(selection.sessionId, questionsBeforeEvent)
             }
           },
           onTransient: (event) => {
@@ -1535,6 +1662,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               return
             }
             if (event.sessionId !== selection.sessionId) return
+            const questionsBeforeEvent = get().execution
             set((state) => ({
               selectedSession: applyTransientSessionDetail(
                 state.selectedSession,
@@ -1551,6 +1679,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 ? { message: event.message }
                 : {}),
             }))
+            if (event.type === "turn.finished")
+              restoreQuestionDrafts(selection.sessionId, questionsBeforeEvent)
           },
           onError: (error) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
@@ -2624,6 +2754,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 reduceExecutionView(execution, {
                   type: "durable",
                   event,
+                  replay: true,
                 }),
               createExecutionViewState(session),
             ),
@@ -2951,8 +3082,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           get().execution.entries.some((entry) =>
             entry.kind === "user_input" || entry.kind === "agent_input"
               ? entry.inputId === itemId
-              : (entry.kind === "assistant" || entry.kind === "reasoning") &&
-                (entry.itemId === itemId || entry.source?.itemId === itemId),
+              : entry.kind === "tool"
+                ? entry.execution.itemId === itemId
+                : (entry.kind === "assistant" || entry.kind === "reasoning") &&
+                  (entry.itemId === itemId || entry.source?.itemId === itemId),
           )
         )
           return true
@@ -3069,6 +3202,40 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       loadSessionSkills(sessionId)
     },
 
+    dismissQuestions: (toolCallId) => {
+      const state = get()
+      const sessionId = state.selection.sessionId
+      if (
+        sessionId === undefined ||
+        questionAnswerMemory.read(state.apiBase, sessionId, toolCallId) !==
+          undefined
+      )
+        return
+      dismissSessionQuestions(sessionId, [toolCallId])
+    },
+
+    restoreQuestionDraft: (sessionId, toolCallId) => {
+      const state = get()
+      const execution =
+        state.selection.sessionId === sessionId
+          ? state.execution
+          : executionViews.get(executionViewKey(state.apiBase, sessionId))
+              ?.execution
+      if (
+        execution === undefined ||
+        execution.pendingQuestionIds.includes(toolCallId) ||
+        execution.entries.some(
+          (entry) =>
+            entry.kind === "user_input" && entry.questionId === toolCallId,
+        )
+      )
+        return
+      restoreQuestionDrafts(sessionId, {
+        ...execution,
+        pendingQuestionIds: [toolCallId],
+      })
+    },
+
     admitInput: async (parts, mode = "auto") => {
       const excerpts = get().promptExcerpts
       const content: InputContent = inputContent(
@@ -3137,6 +3304,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         return
       const key = `admit:${selection.sessionId}`
       if (get().inFlightActions.has(key)) return
+      const questionsAtSubmission = get().execution.pendingQuestionIds
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
@@ -3196,6 +3364,11 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 throw new Error("Steer response did not match the request.")
               }
               promotedContent = response.content
+              if (isCurrentHistory(selection))
+                dismissSessionQuestions(
+                  selection.sessionId,
+                  questionsAtSubmission,
+                )
             } catch (error) {
               if (!isCurrentHistory(selection)) return
               const confirmed =
@@ -3535,6 +3708,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
+          dismissSessionQuestions(selection.sessionId, questionsAtSubmission)
           recordPromotedContent(pendingAdmission.content, response.content)
           releaseUnsentSession(selection.sessionId)
           if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
