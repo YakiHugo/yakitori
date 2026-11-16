@@ -5,6 +5,7 @@ import type {
   DesktopUpdateState,
 } from "../protocol/desktop-update.ts"
 import { removeUpdateDirectory } from "./update-filesystem.ts"
+import type { LocalDesktopUpdate } from "./update-local.ts"
 import { prepareDesktopUpdate } from "./update-preparation.ts"
 import {
   findDesktopUpdate,
@@ -18,7 +19,7 @@ const progressNotificationIntervalMs = 100
 
 export class AppUpdater {
   private state: DesktopUpdateState
-  private available: ResolvedDesktopUpdate | undefined
+  private available: ResolvedDesktopUpdate | LocalDesktopUpdate | undefined
   private prepared: { directory: string; appPath: string } | undefined
   private operation: Promise<void> | undefined
   private activeAbort: AbortController | undefined
@@ -34,6 +35,7 @@ export class AppUpdater {
       install(prepared: { directory: string; appPath: string }): Promise<void>
       fetch?: typeof fetch
       previousInstallationError?: string
+      localSource?: () => Promise<LocalDesktopUpdate>
     }>,
   ) {
     this.state =
@@ -91,9 +93,9 @@ export class AppUpdater {
               ? controller.signal
               : AbortSignal.any([controller.signal, init.signal]),
         })
-      this.available = await findDesktopUpdate(this.options.current, {
-        fetch: fetchRelease,
-      })
+      this.available = this.options.localSource
+        ? await this.options.localSource()
+        : await findDesktopUpdate(this.options.current, { fetch: fetchRelease })
       this.publish(
         this.available === undefined
           ? { phase: "idle", current: this.options.current }
@@ -125,7 +127,7 @@ export class AppUpdater {
   }
 
   private async downloadAvailable(
-    available: ResolvedDesktopUpdate,
+    available: ResolvedDesktopUpdate | LocalDesktopUpdate,
   ): Promise<void> {
     let directory: string | undefined
     const controller = new AbortController()
@@ -152,49 +154,59 @@ export class AppUpdater {
       directory = await realpath(
         await mkdtemp(path.join(this.options.updatesDirectory, "download-")),
       )
-      const archivePath = path.join(directory, "update.tar")
-      let lastNotification = 0
-      progress({
-        downloadedBytes: 0,
-        reusedBytes: 0,
-        totalBytes: available.archive.size,
-      })
-      await downloadDesktopUpdate({
-        archive: available.archive,
-        destination: archivePath,
-        cacheDirectory: path.join(this.options.updatesDirectory, "cache"),
-        installedAppPath: this.options.applicationPath,
-        ...(this.options.fetch === undefined
-          ? {}
-          : { fetch: this.options.fetch }),
-        signal: controller.signal,
-        onProgress(value) {
-          const now = Date.now()
-          // Reset the stall timer even when UI notifications are throttled.
-          clearTimeout(idle)
-          idle = setTimeout(stall, downloadIdleTimeoutMs)
-          if (
-            now - lastNotification >= progressNotificationIntervalMs ||
-            value.downloadedBytes + value.reusedBytes === value.totalBytes
-          ) {
-            progress(value)
-            lastNotification = now
-          }
-        },
-      })
-      clearTimeout(idle)
-      this.publish({
-        phase: "preparing",
-        current: this.options.current,
-        release: available.release,
-      })
-      const prepared = await prepareDesktopUpdate({
-        archivePath,
-        stageDirectory: path.join(directory, "prepared"),
-        installedAppPath: this.options.applicationPath,
-        expectedBuild: available.build,
-      })
-      await rm(archivePath)
+      let prepared: { appPath: string }
+      if ("prepare" in available) {
+        this.publish({
+          phase: "preparing",
+          current: this.options.current,
+          release: available.release,
+        })
+        prepared = await available.prepare(directory, controller.signal)
+      } else {
+        const archivePath = path.join(directory, "update.tar")
+        let lastNotification = 0
+        progress({
+          downloadedBytes: 0,
+          reusedBytes: 0,
+          totalBytes: available.archive.size,
+        })
+        await downloadDesktopUpdate({
+          archive: available.archive,
+          destination: archivePath,
+          cacheDirectory: path.join(this.options.updatesDirectory, "cache"),
+          installedAppPath: this.options.applicationPath,
+          ...(this.options.fetch === undefined
+            ? {}
+            : { fetch: this.options.fetch }),
+          signal: controller.signal,
+          onProgress(value) {
+            const now = Date.now()
+            // Reset the stall timer even when UI notifications are throttled.
+            clearTimeout(idle)
+            idle = setTimeout(stall, downloadIdleTimeoutMs)
+            if (
+              now - lastNotification >= progressNotificationIntervalMs ||
+              value.downloadedBytes + value.reusedBytes === value.totalBytes
+            ) {
+              progress(value)
+              lastNotification = now
+            }
+          },
+        })
+        clearTimeout(idle)
+        this.publish({
+          phase: "preparing",
+          current: this.options.current,
+          release: available.release,
+        })
+        prepared = await prepareDesktopUpdate({
+          archivePath,
+          stageDirectory: path.join(directory, "prepared"),
+          installedAppPath: this.options.applicationPath,
+          expectedBuild: available.build,
+        })
+        await rm(archivePath)
+      }
       if (this.disposed) {
         await removeUpdateDirectory(directory)
         return

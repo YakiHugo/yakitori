@@ -58,9 +58,17 @@ app.on("will-quit", (event) => {
       .catch((error: unknown) => {
         console.error("yakitori: forced sidecar stop failed", error)
       })
-      .finally(() => {
-        allowQuit = true
-        app.exit(1)
+      .finally(async () => {
+        try {
+          // Forced shutdown must cancel an unarmed update, never authorize it.
+          await appUpdates?.cancelQuit()
+          await appUpdates?.dispose()
+        } catch (error) {
+          console.error("yakitori: forced update cleanup failed", error)
+        } finally {
+          allowQuit = true
+          app.exit(1)
+        }
       })
     return
   }

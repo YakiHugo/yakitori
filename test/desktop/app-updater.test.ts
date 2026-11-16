@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { AppUpdater } from "../../src/desktop/app-updater.ts"
+import type { LocalDesktopUpdate } from "../../src/desktop/update-local.ts"
 import { prepareDesktopUpdate } from "../../src/desktop/update-preparation.ts"
 import {
   findDesktopUpdate,
@@ -74,7 +75,7 @@ function response(bytes = archive, headers?: HeadersInit) {
   )
 }
 
-async function fixture() {
+async function fixture(localSource?: () => Promise<LocalDesktopUpdate>) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-app-updater-"))
   const applicationPath = join(root, "Yakitori.app")
   const updatesDirectory = join(root, "updates")
@@ -92,6 +93,7 @@ async function fixture() {
     fetch: fetchUpdate,
     onState: (state) => states.push(state),
     install,
+    ...(localSource === undefined ? {} : { localSource }),
   })
   fixtures.push({ root, updater })
   return {
@@ -437,4 +439,156 @@ it("publishes actionable discovery and HTTP transport failures", async () => {
     retry: "download",
     message: "Could not download the update (HTTP 503).",
   })
+})
+
+const localRelease: LocalDesktopUpdate["release"] = {
+  source: "local",
+  version: "2.3.4",
+  commit: "c".repeat(40),
+  buildNumber: 0,
+  buildAttempt: 0,
+  publishedAt: "2026-11-16T00:00:00Z",
+  releaseUrl: "",
+}
+
+it("checks and prepares a local source without remote requests and installs only on an explicit action", async () => {
+  const entered = Promise.withResolvers<void>()
+  const finish = Promise.withResolvers<void>()
+  const prepare = vi.fn<LocalDesktopUpdate["prepare"]>(
+    async (directory, signal) => {
+      expect(signal.aborted).toBe(false)
+      const appPath = join(directory, "local-prepared.app")
+      await mkdir(appPath)
+      await writeFile(join(appPath, "prepared"), "local application")
+      entered.resolve()
+      await finish.promise
+      return { appPath }
+    },
+  )
+  const checkLocal = vi.fn(async () => ({ release: localRelease, prepare }))
+  const { updater, states, install, fetchUpdate } = await fixture(checkLocal)
+  await updater.check()
+  expect(checkLocal).toHaveBeenCalledOnce()
+  expect(updater.getState()).toEqual({
+    phase: "available",
+    current,
+    release: localRelease,
+  })
+  expect(prepare).not.toHaveBeenCalled()
+  await expect(updater.install()).rejects.toThrow(/not ready/)
+  const building = updater.download()
+  expect(updater.download()).toBe(building)
+  await entered.promise
+  expect(updater.getState()).toEqual({
+    phase: "preparing",
+    current,
+    release: localRelease,
+  })
+  expect(install).not.toHaveBeenCalled()
+  finish.resolve()
+  await building
+  expect(states.map((state) => state.phase)).toEqual([
+    "checking",
+    "available",
+    "preparing",
+    "ready",
+  ])
+  expect(install).not.toHaveBeenCalled()
+  expect(findDesktopUpdate).not.toHaveBeenCalled()
+  expect(fetchUpdate).not.toHaveBeenCalled()
+  expect(prepareDesktopUpdate).not.toHaveBeenCalled()
+  await updater.install()
+  expect(install).toHaveBeenCalledOnce()
+  expect(updater.getState()).toMatchObject({
+    phase: "installing",
+    release: localRelease,
+  })
+})
+
+it("cleans a failed local build and retries preparation without downloading an archive", async () => {
+  const prepare = vi
+    .fn<LocalDesktopUpdate["prepare"]>()
+    .mockImplementationOnce(async (directory) => {
+      await writeFile(join(directory, "partial-build"), "unfinished")
+      throw new Error("Local package failed. See build.log")
+    })
+    .mockImplementationOnce(async (directory) => {
+      const appPath = join(directory, "local-prepared.app")
+      await mkdir(appPath)
+      return { appPath }
+    })
+  const { updater, updatesDirectory, fetchUpdate, install } = await fixture(
+    async () => ({
+      release: localRelease,
+      prepare,
+    }),
+  )
+  await updater.check()
+  await updater.download()
+  expect(updater.getState()).toMatchObject({
+    phase: "error",
+    retry: "download",
+    release: localRelease,
+    message: "Local package failed. See build.log",
+  })
+  expect(await readdir(updatesDirectory)).toEqual([])
+  await updater.download()
+  expect(updater.getState()).toMatchObject({
+    phase: "ready",
+    release: localRelease,
+  })
+  expect(prepare).toHaveBeenCalledTimes(2)
+  expect(fetchUpdate).not.toHaveBeenCalled()
+  expect(findDesktopUpdate).not.toHaveBeenCalled()
+  expect(install).not.toHaveBeenCalled()
+})
+
+it("aborts local preparation and cleans its stage on disposal without publishing an error or ready state", async () => {
+  const entered = Promise.withResolvers<AbortSignal>()
+  const prepare = vi.fn<LocalDesktopUpdate["prepare"]>(
+    async (directory, signal) => {
+      await writeFile(join(directory, "partial-build"), "unfinished")
+      entered.resolve(signal)
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        })
+      })
+    },
+  )
+  const { updater, updatesDirectory, states, fetchUpdate, install } =
+    await fixture(async () => ({
+      release: localRelease,
+      prepare,
+    }))
+  await updater.check()
+  const building = updater.download()
+  const signal = await entered.promise
+  await updater.dispose()
+  await building
+  expect(signal.aborted).toBe(true)
+  expect(await readdir(updatesDirectory)).toEqual([])
+  expect(states.map((state) => state.phase)).toEqual([
+    "checking",
+    "available",
+    "preparing",
+  ])
+  expect(fetchUpdate).not.toHaveBeenCalled()
+  expect(findDesktopUpdate).not.toHaveBeenCalled()
+  expect(install).not.toHaveBeenCalled()
+})
+
+it("reports local source discovery failures without falling back to remote release discovery", async () => {
+  const { updater, states, fetchUpdate } = await fixture(async () => {
+    throw new Error("Choose the root of the local Yakitori repository.")
+  })
+  await updater.check()
+  expect(states.map((state) => state.phase)).toEqual(["checking", "error"])
+  expect(updater.getState()).toMatchObject({
+    phase: "error",
+    retry: "check",
+    message: "Choose the root of the local Yakitori repository.",
+  })
+  expect(findDesktopUpdate).not.toHaveBeenCalled()
+  expect(fetchUpdate).not.toHaveBeenCalled()
 })

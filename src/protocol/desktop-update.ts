@@ -12,6 +12,7 @@ export type DesktopBuildInfo = Readonly<{
 }>
 
 export type DesktopUpdateRelease = Readonly<{
+  source?: "local"
   version: string
   commit: string
   buildNumber: number

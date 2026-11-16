@@ -120,7 +120,7 @@ test("desktop update rail guides download, retry, and explicit restart in the br
       exact: true,
     })
     await expect(popover).toBeFocused()
-    await expect(popover).toContainText("abcdef0 · Build 41")
+    await expect(popover).toContainText("abcdef0 · Local build")
     await expect(popover).toContainText("1234567 · Build 42")
     await expect(popover).toContainText("Updating replaces this local build.")
     const availableScreenshot = testInfo.outputPath("app-update-available.png")

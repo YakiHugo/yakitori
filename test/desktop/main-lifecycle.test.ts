@@ -1,9 +1,13 @@
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 
 const shell = vi.hoisted(() => ({
   load: vi.fn(),
   exit: vi.fn(),
   stop: vi.fn(),
+  forceStop: vi.fn(),
+  cancelUpdate: vi.fn(),
+  disposeUpdate: vi.fn(),
+  armUpdate: vi.fn(),
 }))
 vi.mock("electron", async () => {
   const { EventEmitter } = await import("node:events")
@@ -36,6 +40,7 @@ vi.mock("../../src/desktop/server-process.ts", async () => {
       child: new EventEmitter(),
       url: "http://127.0.0.1:4142",
       stop: shell.stop,
+      forceStop: shell.forceStop,
     }),
   }
 })
@@ -56,9 +61,9 @@ vi.mock("../../src/desktop/project-picker.ts", () => ({
 }))
 vi.mock("../../src/desktop/app-update-bridge.ts", () => ({
   registerAppUpdates: () => ({
-    prepareQuit: vi.fn(),
-    cancelQuit: vi.fn(),
-    dispose: vi.fn(),
+    prepareQuit: shell.armUpdate,
+    cancelQuit: shell.cancelUpdate,
+    dispose: shell.disposeUpdate,
   }),
 }))
 vi.mock("../../src/desktop/resource-opener.ts", () => ({
@@ -68,9 +73,39 @@ vi.mock("../../src/desktop/workspace-browser.ts", () => ({
   registerWorkspaceBrowser: vi.fn(),
 }))
 
+beforeEach(async () => {
+  vi.resetModules()
+  vi.resetAllMocks()
+  const { app } = await import("electron")
+  app.removeAllListeners()
+})
+
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllEnvs()
+})
+
+it("cancels an unarmed update before a forced shutdown exits", async () => {
+  vi.stubEnv("YAKITORI_WORKSPACE", "/tmp")
+  vi.spyOn(console, "log").mockImplementation(() => {})
+  shell.load.mockResolvedValue(undefined)
+  shell.stop.mockReturnValue(new Promise<void>(() => {}))
+  shell.forceStop.mockResolvedValue(undefined)
+  const cancellation = Promise.withResolvers<void>()
+  shell.cancelUpdate.mockReturnValue(cancellation.promise)
+  shell.disposeUpdate.mockResolvedValue(undefined)
+  const { app } = await import("electron")
+  await import("../../src/desktop/main.ts")
+  await vi.waitFor(() => expect(shell.load).toHaveBeenCalled())
+  app.emit("will-quit", { preventDefault: vi.fn() })
+  app.emit("will-quit", { preventDefault: vi.fn() })
+  await vi.waitFor(() => expect(shell.cancelUpdate).toHaveBeenCalledOnce())
+  expect(shell.exit).not.toHaveBeenCalled()
+  expect(shell.armUpdate).not.toHaveBeenCalled()
+  cancellation.resolve()
+  await vi.waitFor(() => expect(shell.exit).toHaveBeenCalledWith(1))
+  expect(shell.forceStop).toHaveBeenCalledOnce()
+  expect(shell.disposeUpdate).toHaveBeenCalledOnce()
 })
 
 it("waits for sidecar shutdown before exiting after renderer load retries fail", async () => {
