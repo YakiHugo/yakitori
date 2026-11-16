@@ -1,4 +1,5 @@
 import {
+  assetSourceKey,
   isImageAttachment,
   isPdfAttachment,
   type UserAttachment,
@@ -8,6 +9,7 @@ import {
   attachmentUploadPath,
   uploadIdFromAttachment,
 } from "../protocol/attachment-upload.ts"
+import { inputRecoveryMemory } from "./input-recovery-memory.ts"
 import { rolloutAssetUrl } from "./rollout-asset-url.ts"
 
 export async function appendPickedAttachments(
@@ -179,16 +181,31 @@ export async function discardDraftAttachments(
   attachments: readonly UserAttachment[],
   apiBase = window.location.origin,
 ): Promise<void> {
+  // A submitted draft leaves the editor before admission settles. Recovery
+  // owns those staging files until the server confirms or rejects delivery.
+  const pendingFiles = new Set(
+    inputRecoveryMemory
+      .listAdmissionsForApiBase(apiBase)
+      .flatMap((admission) =>
+        admission.content.attachments.map((attachment) =>
+          assetSourceKey(attachment.file),
+        ),
+      ),
+  )
+  const discarded = attachments.filter(
+    (attachment) => !pendingFiles.has(assetSourceKey(attachment.file)),
+  )
+  if (discarded.length === 0) return
   const client = createAttachmentUploadClient(apiBase)
   const uploadIds = [
     ...new Set(
-      attachments.flatMap((attachment) => {
+      discarded.flatMap((attachment) => {
         const id = uploadIdFromAttachment(attachment)
         return id === undefined ? [] : [id]
       }),
     ),
   ]
-  const native = attachments.filter(
+  const native = discarded.filter(
     (attachment) => uploadIdFromAttachment(attachment) === undefined,
   )
   const failures: unknown[] = []

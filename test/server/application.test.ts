@@ -2206,6 +2206,8 @@ describe("application composition", () => {
           ]),
         })
         expectOk(admitted)
+        if (!("inputId" in admitted.value))
+          throw new Error("Expected idle input to start a Turn.")
         await waitForThreadIdle(application, sessionId)
 
         const events = await application.handlers.readSessionEvents({
@@ -4775,6 +4777,8 @@ describe("application composition", () => {
           ]),
         })
         expectOk(second)
+        if (!("inputId" in second.value))
+          throw new Error("Expected idle input to start a Turn.")
         await waitForThreadIdle(application, created.value.session.id)
 
         const forked = await application.handlers.revertSession({

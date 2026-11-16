@@ -86,6 +86,8 @@ async function admit(
     ),
   })
   if (!result.ok) throw new Error(result.error.message)
+  if (!("inputId" in result.value))
+    throw new Error("Expected idle input to start a Turn.")
   await until(() => app.threadManager.getThread(sessionId)?.status === "idle")
   return result.value.inputId
 }
@@ -146,6 +148,8 @@ describe("structured context and ephemeral forks", () => {
       content,
     })
     if (!admitted.ok) throw new Error(admitted.error.message)
+    if (!("inputId" in admitted.value))
+      throw new Error("Expected idle input to start a Turn.")
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -703,6 +707,9 @@ describe("structured context and ephemeral forks", () => {
       ]),
     })
     if (!initial.ok) throw new Error(initial.error.message)
+    if (!("inputId" in initial.value))
+      throw new Error("Expected idle input to start a Turn.")
+    const initialInputId = initial.value.inputId
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -714,7 +721,7 @@ describe("structured context and ephemeral forks", () => {
       (entry) =>
         isKernelEvent(entry) &&
         entry.type === "input.admitted" &&
-        entry.data.inputId === initial.value.inputId,
+        entry.data.inputId === initialInputId,
     )
     if (!isKernelEvent(source) || source.type !== "input.admitted")
       throw new Error("Missing source input")
@@ -950,6 +957,9 @@ describe("structured context and ephemeral forks", () => {
       ]),
     })
     if (!admitted.ok) throw new Error(admitted.error.message)
+    if (!("inputId" in admitted.value))
+      throw new Error("Expected idle input to start a Turn.")
+    const admittedInputId = admitted.value.inputId
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )
@@ -1005,7 +1015,7 @@ describe("structured context and ephemeral forks", () => {
       events.value.events.find(
         (entry) =>
           entry.type === "input.admitted" &&
-          entry.data.inputId === admitted.value.inputId,
+          entry.data.inputId === admittedInputId,
       ),
     ).toMatchObject({
       data: {

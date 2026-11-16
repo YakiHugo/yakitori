@@ -27,6 +27,7 @@ import {
   runProviderFlow,
   smokePdfBytes,
 } from "./fixtures.ts"
+import { runInputSubmissionFlow } from "./input-submission-flow.ts"
 
 const execFileAsync = promisify(execFile)
 
@@ -197,6 +198,25 @@ const test = base.extend<{ desktop: DesktopSmoke }>({
       }
     }
   },
+})
+
+test("input confirmation releases the native composer before RPC acknowledgement", async ({
+  desktop,
+}) => {
+  const { application, page } = desktop
+  const workspace = await application.evaluate(
+    () => process.env.YAKITORI_WORKSPACE,
+  )
+  if (!workspace) throw new Error("Missing isolated workspace")
+  const file = join(workspace, "smoke.png")
+  await application.evaluate(({ dialog }, file) => {
+    dialog.showOpenDialog = async () => ({
+      canceled: false,
+      filePaths: [file],
+    })
+  }, file)
+  await runInputSubmissionFlow(page, file)
+  expect(desktop.rendererErrors).toEqual([])
 })
 
 test("conversation history opens at the latest prompt and loads older search targets", async ({

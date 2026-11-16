@@ -119,6 +119,8 @@ const DEFAULT_MAX_INPUT_BYTES = 256 * 1024
 // Every Unicode scalar occupies at most four UTF-8 bytes. This allocation
 // boundary lets the Codex queue character limit be the effective text limit.
 const MAX_QUEUED_INPUT_TEXT_BYTES = MAX_QUEUED_INPUT_TEXT_CHARS * 4
+// RPC retention safety boundary while completion owns the persistence barrier.
+const INPUT_HANDOFF_WAIT_MS = 5_000
 
 export type SessionCreateDefaults = {
   readonly workingDirectory: string
@@ -214,7 +216,9 @@ export type ServerHandlers = {
   revertSession(
     input: unknown,
   ): Promise<ApplicationResult<ApiRevertSessionResponse>>
-  admitInput(input: unknown): Promise<ApplicationResult<ApiAdmitInputResponse>>
+  admitInput(
+    input: unknown,
+  ): Promise<ApplicationResult<ApiAdmitInputResponse | ApiSteerInputResponse>>
   admitQuestionAnswer(
     input: unknown,
   ): Promise<ApplicationResult<ApiAdmitInputResponse | ApiSteerInputResponse>>
@@ -734,6 +738,68 @@ export function createThreadServerHandlers(
     }
   }
 
+  async function startOrSteerInput(
+    sessionId: string,
+    input: TurnInput,
+  ): Promise<TurnInputSubmission> {
+    // Completion briefly owns the Session after steering closes. This safety
+    // boundary prevents a stuck persistence barrier from retaining an RPC;
+    // it does not wait for an active model or tool to finish.
+    const handoffDeadline = Date.now() + INPUT_HANDOFF_WAIT_MS
+    for (;;) {
+      // Attachment promotion or a previous handoff can outlive an actor.
+      const current = await resumeRequired(sessionId)
+      const submitted = await current.startOrSteer(input)
+      if (
+        submitted.type !== "not_submitted" ||
+        submitted.reason !== "turn_finishing"
+      )
+        return submitted
+      const remaining = handoffDeadline - Date.now()
+      if (remaining <= 0) return submitted
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timeout)
+          unsubscribe()
+          resolve()
+        }
+        const unsubscribe = current.subscribeStatus((status) => {
+          if (status !== "active") finish()
+        })
+        const timeout = setTimeout(finish, remaining)
+        if (current.status !== "active") finish()
+      })
+    }
+  }
+
+  async function trackSteeredDraft(
+    sessionId: string,
+    requestId: string,
+    content: InputContent,
+  ): Promise<void> {
+    if (inputContentAttachments(content).length === 0) return
+    const key = `${sessionId}\0${requestId}`
+    pendingSteerDrafts.set(key, [
+      ...(pendingSteerDrafts.get(key) ?? []),
+      content,
+    ])
+    // The Turn may record the input before draft tracking is installed.
+    const stored = await options.store.readThread(sessionId)
+    const recorded = stored?.rollout.some(
+      ({ item }) =>
+        item.type === "response_item" &&
+        item.item.turnId === requestId &&
+        item.item.item.role === "user" &&
+        item.item.item.context === undefined,
+    )
+    if (recorded) {
+      const drafts = pendingSteerDrafts.get(key) ?? []
+      pendingSteerDrafts.delete(key)
+      for (const draft of drafts)
+        await discardAdmittedDraftAttachments(sessionId, requestId, draft)
+    }
+  }
+
   // Direct input enters the rollout only when the Turn accepts it.
   const admitTurnInput = async (
     request: ReturnType<typeof requireAdmitInputRequest>,
@@ -773,6 +839,11 @@ export function createThreadServerHandlers(
           })
         }
         if (submitted.type === "steered") {
+          await trackSteeredDraft(
+            request.sessionId,
+            request.requestId,
+            request.content,
+          )
           return ok({
             requestId: request.requestId,
             turnId: submitted.turnId,
@@ -1507,34 +1578,21 @@ export function createThreadServerHandlers(
             },
           )
         }
-        const result = await admitTurnInput(
-          request,
-          async (thread, content) => {
-            // Attachment promotion can outlive a closed actor. Route through
-            // the manager again before submitting to the current Session.
-            const current = await resumeRequired(thread.id)
-            return current.startIfIdle({
-              submissionId: request.requestId,
-              content,
-              ...(request.modelSelection === undefined
-                ? {}
-                : { modelSelection: request.modelSelection }),
-              ...(request.metadata === undefined
-                ? {}
-                : { metadata: request.metadata }),
-              ...(request.parentInputId === undefined
-                ? {}
-                : { parentInputId: request.parentInputId }),
-            })
-          },
+        return await admitTurnInput(request, (thread, content) =>
+          startOrSteerInput(thread.id, {
+            submissionId: request.requestId,
+            content,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
+            ...(request.metadata === undefined
+              ? {}
+              : { metadata: request.metadata }),
+            ...(request.parentInputId === undefined
+              ? {}
+              : { parentInputId: request.parentInputId }),
+          }),
         )
-        if (!result.ok) return result
-        if (
-          !("inputId" in result.value) ||
-          typeof result.value.inputId !== "string"
-        )
-          throw internalError("Admission unexpectedly returned steering.")
-        return ok({ ...result.value, inputId: result.value.inputId })
       } catch (error) {
         return fail(error, reporter, "admit-input")
       }
@@ -1546,41 +1604,19 @@ export function createThreadServerHandlers(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
-        return await admitTurnInput(request, async (thread, content) => {
-          const current = await resumeRequired(thread.id)
-          const answer: TurnInput = {
+        return await admitTurnInput(request, (thread, content) =>
+          startOrSteerInput(thread.id, {
             submissionId: request.requestId,
             purpose: "question_answer",
             content,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
             ...(request.metadata === undefined
               ? {}
               : { metadata: request.metadata }),
-          }
-          const submitted = await current.startOrSteer(answer)
-          if (
-            submitted.type !== "not_submitted" ||
-            submitted.reason !== "turn_finishing"
-          )
-            return submitted
-          // Completion owns the Session briefly after closing steering. Wait for
-          // that handoff, not for a running model or tool. Bound this wait so a
-          // stuck persistence barrier cannot retain an RPC indefinitely; retries
-          // keep the same question identity and remain safe.
-          const QUESTION_HANDOFF_WAIT_MS = 5_000
-          await new Promise<void>((resolve) => {
-            const finish = () => {
-              clearTimeout(timeout)
-              unsubscribe()
-              resolve()
-            }
-            const unsubscribe = current.subscribeStatus((status) => {
-              if (status !== "active") finish()
-            })
-            const timeout = setTimeout(finish, QUESTION_HANDOFF_WAIT_MS)
-            if (current.status !== "active") finish()
-          })
-          return (await resumeRequired(thread.id)).startOrSteer(answer)
-        })
+          }),
+        )
       } catch (error) {
         return fail(error, reporter, "admit-question-answer")
       }
@@ -1950,30 +1986,11 @@ export function createThreadServerHandlers(
                 reason: submitted.reason,
               })
             }
-            if (inputContentAttachments(request.content).length !== 0) {
-              pendingSteerDrafts.set(steerKey, [
-                ...(pendingSteerDrafts.get(steerKey) ?? []),
-                request.content,
-              ])
-              const stored = await options.store.readThread(request.sessionId)
-              const recorded = stored?.rollout.some(
-                ({ item }) =>
-                  item.type === "response_item" &&
-                  item.item.turnId === request.requestId &&
-                  item.item.item.role === "user" &&
-                  item.item.item.context === undefined,
-              )
-              if (recorded) {
-                const drafts = pendingSteerDrafts.get(steerKey) ?? []
-                pendingSteerDrafts.delete(steerKey)
-                for (const draft of drafts)
-                  await discardAdmittedDraftAttachments(
-                    request.sessionId,
-                    request.requestId,
-                    draft,
-                  )
-              }
-            }
+            await trackSteeredDraft(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
             // Steering acceptance is ephemeral. Preserve draft assets until the
             // model records this input, so a lost response or an interrupted Turn
             // leaves the client's draft retryable.

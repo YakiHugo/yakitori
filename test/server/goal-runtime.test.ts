@@ -567,6 +567,8 @@ describe("goal runtime", () => {
         ]),
       }),
     )
+    if (!("inputId" in admitted))
+      throw new Error("Expected idle input to start a Turn.")
     await first.entered.promise
     await idle(application, sessionId)
     body(
@@ -836,6 +838,8 @@ describe("goal runtime", () => {
         ]),
       }),
     )
+    if (!("inputId" in admitted))
+      throw new Error("Expected idle input to start a Turn.")
     await first.entered.promise
     await idle(application, sessionId)
     body(

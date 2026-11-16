@@ -100,7 +100,12 @@ it.each([
     if (method === "session/input") {
       await pendingInput
       const { requestId, content } = params as ApiAdmitInputRequest
-      return { requestId, content, turnId: "turn_first" }
+      return {
+        requestId,
+        content,
+        turnId: "turn_first",
+        inputId: "input_first",
+      }
     }
     if (method === "session/queue/list") return { items: [] }
     throw new ApiRequestError("not found", "not_found")
@@ -148,8 +153,11 @@ it.each([
   expect(fake.current.requestsFor("session/create")).toHaveLength(1)
   expect(fake.current.requestsFor("session/input")).toHaveLength(0)
   expect(screen.getByRole("textbox", { name: "Message the Mate" })).toBe(editor)
+  expect(editor.textContent).toBe("Check the CI smoke flow.")
   await act(async () => release())
   expect(fake.current.requestsFor("session/input")).toHaveLength(1)
+  expect(editor.textContent).toBe("")
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
   expect(fake.current.requestsFor("session/input")[0]?.params).toMatchObject({
     sessionId: session.id,
     content: { text: "Check the CI smoke flow." },
@@ -215,7 +223,12 @@ it("keeps the welcome layout for a local draft until its first send creates the 
     if (method === "session/input") {
       await pendingInput
       const { requestId, content } = params as ApiAdmitInputRequest
-      return { requestId, content, turnId: "turn_first" }
+      return {
+        requestId,
+        content,
+        turnId: "turn_first",
+        inputId: "input_first",
+      }
     }
     throw new ApiRequestError("not found", "not_found")
   }
@@ -273,9 +286,12 @@ it("keeps the welcome layout for a local draft until its first send creates the 
     workingDirectory: "/default",
   })
   expect(fake.current.requestsFor("session/input")).toHaveLength(0)
+  expect(editor.textContent).toBe("Begin")
   expectWelcomeLayout("What would you like to build in Default project?")
   await act(async () => release())
   expect(fake.current.requestsFor("session/input")).toHaveLength(1)
+  expect(editor.textContent).toBe("")
+  expect(useAppStore.getState().promptDraft).toBeUndefined()
   expect(surface?.hasAttribute("data-empty")).toBe(false)
   expect(
     screen.getByRole("heading", { name: "Untitled session" }),

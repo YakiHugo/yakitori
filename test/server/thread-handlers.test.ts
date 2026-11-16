@@ -130,6 +130,9 @@ describe("thread server handlers", () => {
       content: createUserInput("keep this"),
     })
     if (!first.ok) throw new Error(first.error.message)
+    if (!("inputId" in first.value))
+      throw new Error("Expected idle input to start a Turn.")
+    const firstInputId = first.value.inputId
     await expect
       .poll(async () =>
         (await store.readThread(sessionId))?.rollout.some(
@@ -148,6 +151,8 @@ describe("thread server handlers", () => {
       content: createUserInput("remove this"),
     })
     if (!second.ok) throw new Error(second.error.message)
+    if (!("inputId" in second.value))
+      throw new Error("Expected idle input to start a Turn.")
     await sampling.promise
     const queued = await handlers.queueInput({
       sessionId,
@@ -204,7 +209,7 @@ describe("thread server handlers", () => {
         (event) =>
           isKernelEvent(event) &&
           event.type === "input.admitted" &&
-          event.data.inputId === first.value.inputId,
+          event.data.inputId === firstInputId,
       ),
     ).toBe(true)
     const replay = await handlers.readSessionEvents({ sessionId })
@@ -1712,6 +1717,8 @@ describe("thread server handlers", () => {
       ]),
     })
     if (!admitted.ok) throw new Error(admitted.error.message)
+    if (!("inputId" in admitted.value))
+      throw new Error("Expected idle input to start a Turn.")
     await waitForValue(() =>
       manager.getThread(sessionId)?.status === "idle" ? true : undefined,
     )
@@ -2419,6 +2426,8 @@ describe("thread server handlers", () => {
     releasePromotion.resolve()
     const admitted = await admission
     if (!admitted.ok) throw new Error(admitted.error.message)
+    if (!("inputId" in admitted.value))
+      throw new Error("Expected idle input to start a Turn.")
     expect(manager.getThread(sessionId)).toBeDefined()
     expect(manager.getThread(sessionId)).not.toBe(original)
     await expect
