@@ -149,6 +149,14 @@ export async function runLocalPackage(
             error.code === "ESRCH"
           )
             return false
+          // Darwin can report EPERM for a killed group awaiting zombie
+          // reaping. Keep polling; it does not establish disappearance.
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "EPERM"
+          )
+            return true
           throw error
         }
       }

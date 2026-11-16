@@ -298,7 +298,10 @@ async function waitForFile(path: string) {
   throw new Error(`Timed out waiting for ${path}`)
 }
 
-it("kills a TERM-resistant grandchild before cancellation rejects after its leader exits", async () => {
+it.each([
+  false,
+  true,
+])("kills a TERM-resistant grandchild before cancellation rejects after its leader exits (transient probe EPERM: %s)", async (denyProbe) => {
   const value = await setup(`
 const { spawn } = require("node:child_process")
 const { writeFileSync } = require("node:fs")
@@ -309,36 +312,55 @@ setInterval(() => {}, 1000)
 `)
   const ready = join(value.root, "grandchild.pid")
   const controller = new AbortController()
-  const running = runLocalPackage(
-    value.workspace,
-    value.logPath,
-    controller.signal,
-    {
-      ...value.environment,
-      YAKITORI_TEST_CHILD_READY: ready,
-    },
-  )
-  // Attach the rejection handler before requesting cancellation.
-  const rejected = expect(running).rejects.toMatchObject({ name: "AbortError" })
-  const pid = Number(await waitForFile(ready))
-  processes.add(pid)
-  controller.abort()
-  await rejected
-  let alive = true
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      process.kill(pid, 0)
-    } catch (error) {
-      if (
-        !(error instanceof Error && "code" in error && error.code === "ESRCH")
-      )
-        throw error
-      alive = false
-      break
+  const kill = process.kill.bind(process)
+  let killedGroup: number | undefined
+  let denied = false
+  const probe = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (denyProbe && pid === killedGroup && signal === 0 && !denied) {
+      denied = true
+      throw Object.assign(new Error("kill EPERM"), { code: "EPERM" })
     }
-    // A dead orphan may briefly await reaping by launchd.
-    await delay(10)
+    const result = kill(pid, signal)
+    if (pid < 0 && signal === "SIGKILL") killedGroup = pid
+    return result
+  })
+  try {
+    const running = runLocalPackage(
+      value.workspace,
+      value.logPath,
+      controller.signal,
+      {
+        ...value.environment,
+        YAKITORI_TEST_CHILD_READY: ready,
+      },
+    )
+    // Attach the rejection handler before requesting cancellation.
+    const rejected = expect(running).rejects.toMatchObject({
+      name: "AbortError",
+    })
+    const pid = Number(await waitForFile(ready))
+    processes.add(pid)
+    controller.abort()
+    await rejected
+    let alive = true
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        process.kill(pid, 0)
+      } catch (error) {
+        if (
+          !(error instanceof Error && "code" in error && error.code === "ESRCH")
+        )
+          throw error
+        alive = false
+        break
+      }
+      // A dead orphan may briefly await reaping by launchd.
+      await delay(10)
+    }
+    expect(alive).toBe(false)
+    expect(denied).toBe(denyProbe)
+    processes.delete(pid)
+  } finally {
+    probe.mockRestore()
   }
-  expect(alive).toBe(false)
-  processes.delete(pid)
 }, 15_000)
