@@ -215,25 +215,33 @@ export function AppUpdate() {
                 <div>
                   <dt>Current</dt>
                   <dd>
-                    {current.commit.slice(0, 7)} · Build {current.buildNumber}
+                    {current.commit.slice(0, 7)} ·{" "}
+                    {current.channel === "local"
+                      ? "Local build"
+                      : `Build ${current.buildNumber}`}
                   </dd>
                 </div>
                 {release && (
                   <div>
                     <dt>New</dt>
                     <dd>
-                      {release.commit.slice(0, 7)} · Build {release.buildNumber}
+                      {release.commit.slice(0, 7)} ·{" "}
+                      {release.source === "local"
+                        ? "Local source"
+                        : `Build ${release.buildNumber}`}
                     </dd>
                   </div>
                 )}
               </dl>
             )}
-            {current?.channel === "local" && current.dirty && (
-              <p className="app-update-warning">
-                This local build has uncommitted changes. Updating replaces this
-                local build.
-              </p>
-            )}
+            {current?.channel === "local" &&
+              current.dirty &&
+              release?.source !== "local" && (
+                <p className="app-update-warning">
+                  This local build has uncommitted changes. Updating replaces
+                  this local build.
+                </p>
+              )}
             {failed ? (
               <>
                 <p role="alert" className="app-update-warning">
@@ -271,7 +279,9 @@ export function AppUpdate() {
                     ? `Downloading update${percent === undefined ? "…" : ` · ${percent}%`}`
                     : state?.phase === "installing"
                       ? "Restarting Yakitori…"
-                      : "Preparing update…"}
+                      : release?.source === "local"
+                        ? "Building local update…"
+                        : "Preparing update…"}
                 </p>
                 {state?.phase === "downloading" &&
                   (state.reusedBytes ?? 0) > 0 && (
@@ -288,7 +298,9 @@ export function AppUpdate() {
                 className="app-update-action"
                 onClick={() => void run("download")}
               >
-                Download update
+                {release?.source === "local"
+                  ? "Build local update"
+                  : "Download update"}
               </button>
             )}
           </div>,

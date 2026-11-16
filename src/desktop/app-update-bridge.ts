@@ -1,4 +1,4 @@
-import { readFile, realpath, rm } from "node:fs/promises"
+import { readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import {
   app,
@@ -11,6 +11,7 @@ import {
 import type { DesktopUpdateState } from "../protocol/desktop-update.ts"
 import { AppUpdater } from "./app-updater.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
+import { checkLocalDesktopUpdate } from "./update-local.ts"
 import { parseDesktopBuildInfo } from "./update-release.ts"
 import {
   startUpdateInstaller,
@@ -34,6 +35,18 @@ export async function registerAppUpdates(
   let updater: AppUpdater | undefined
   let installer: UpdateInstallerHandle | undefined
   let lastCheck = 0
+  let changingSource = false
+  let disposed = false
+  let sourceChangeAbort: AbortController | undefined
+  const requireStableSource = () => {
+    if (disposed) throw new Error("The application is closing.")
+    if (changingSource)
+      throw new Error(
+        "The update source is changing. Try again when it finishes.",
+      )
+  }
+  let chooseLocalSource: (() => Promise<void>) | undefined
+  let chooseReleaseSource: (() => Promise<void>) | undefined
   const unavailable: DesktopUpdateState = {
     phase: "unavailable",
     reason: "Updates are available in the installed macOS app.",
@@ -63,25 +76,129 @@ export async function registerAppUpdates(
       path.join(userDataPath, "update-result.json"),
     )
     if (previousInstallationError !== undefined) lastCheck = Date.now()
-    updater = new AppUpdater({
-      current,
-      applicationPath,
-      updatesDirectory: path.join(userDataPath, "updates"),
-      onState: publish,
-      ...(previousInstallationError === undefined
-        ? {}
-        : { previousInstallationError }),
-      async install(prepared) {
-        installer = await startUpdateInstaller({
-          applicationPath,
-          preparedAppPath: prepared.appPath,
-          directory: prepared.directory,
-          userDataPath,
-          logPath: path.join(userDataPath, "update.log"),
-        })
-        requestQuit()
-      },
-    })
+    const sourcePath = path.join(userDataPath, "update-source.json")
+    let workspace: string | undefined
+    let sourceError: string | undefined
+    try {
+      const value: unknown = JSON.parse(await readFile(sourcePath, "utf8"))
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "workspace" in value &&
+        typeof value.workspace === "string" &&
+        path.isAbsolute(value.workspace)
+      )
+        workspace = value.workspace
+      else
+        throw new Error(
+          "Choose a local workspace or CI releases in the app menu.",
+        )
+    } catch (error) {
+      if (
+        !(error instanceof Error && "code" in error && error.code === "ENOENT")
+      )
+        sourceError =
+          "The update source could not be read. Choose an update source in the app menu."
+    }
+    const createUpdater = () => {
+      const chosenWorkspace = workspace
+      const initialError = previousInstallationError ?? sourceError
+      return new AppUpdater({
+        current,
+        applicationPath,
+        updatesDirectory: path.join(userDataPath, "updates"),
+        onState: publish,
+        ...(initialError === undefined
+          ? {}
+          : { previousInstallationError: initialError }),
+        ...(chosenWorkspace === undefined
+          ? {}
+          : {
+              localSource: (signal) =>
+                checkLocalDesktopUpdate({
+                  workspace: chosenWorkspace,
+                  installedAppPath: applicationPath,
+                  logPath: path.join(userDataPath, "local-build.log"),
+                  signal,
+                }),
+            }),
+        async install(prepared) {
+          installer = await startUpdateInstaller({
+            applicationPath,
+            preparedAppPath: prepared.appPath,
+            directory: prepared.directory,
+            userDataPath,
+            logPath: path.join(userDataPath, "update.log"),
+          })
+          requestQuit()
+        },
+      })
+    }
+    updater = createUpdater()
+    if (sourceError !== undefined) lastCheck = Date.now()
+    const changeSource = async (selected: string | undefined) => {
+      requireStableSource()
+      changingSource = true
+      sourceChangeAbort = new AbortController()
+      try {
+        const phase = updater?.getState().phase
+        if (
+          phase === "installing" ||
+          phase === "preparing" ||
+          phase === "downloading"
+        )
+          throw new Error(
+            "Finish or cancel the current update before changing its source.",
+          )
+        if (selected !== undefined)
+          await checkLocalDesktopUpdate({
+            workspace: selected,
+            installedAppPath: applicationPath,
+            logPath: path.join(userDataPath, "local-build.log"),
+            signal: sourceChangeAbort.signal,
+          })
+        if (disposed) throw new Error("The application is closing.")
+        // Failed persistence must leave the current, usable updater in place.
+        if (selected === undefined) await rm(sourcePath, { force: true })
+        else {
+          const temporary = `${sourcePath}.${process.pid}.tmp`
+          try {
+            await writeFile(
+              temporary,
+              JSON.stringify({ workspace: selected }),
+              {
+                mode: 0o600,
+              },
+            )
+            await rename(temporary, sourcePath)
+          } finally {
+            await rm(temporary, { force: true })
+          }
+        }
+        if (disposed) throw new Error("The application is closing.")
+        const previous = updater
+        workspace = selected
+        sourceError = undefined
+        updater = createUpdater()
+        await previous?.dispose()
+        lastCheck = Date.now()
+        if (!disposed) await updater.check()
+      } finally {
+        changingSource = false
+        sourceChangeAbort = undefined
+      }
+    }
+    chooseLocalSource = async () => {
+      const result = await dialog.showOpenDialog(window, {
+        title: "Choose the local Yakitori source",
+        buttonLabel: "Use local workspace",
+        properties: ["openDirectory"],
+        ...(workspace === undefined ? {} : { defaultPath: workspace }),
+      })
+      if (!result.canceled && result.filePaths[0])
+        await changeSource(await realpath(result.filePaths[0]))
+    }
+    chooseReleaseSource = () => changeSource(undefined)
   }
   const getState = () => updater?.getState() ?? unavailable
   const trusted = (event: Electron.IpcMainInvokeEvent) =>
@@ -98,20 +215,24 @@ export async function registerAppUpdates(
   })
   ipcMain.handle(channels[1], async (event) => {
     trusted(event)
+    requireStableSource()
     await updater?.check()
   })
   ipcMain.handle(channels[2], async (event) => {
     trusted(event)
+    requireStableSource()
     if (updater === undefined) throw new Error(unavailable.reason)
     await updater.download()
   })
   ipcMain.handle(channels[3], async (event) => {
     trusted(event)
+    requireStableSource()
     if (updater === undefined) throw new Error(unavailable.reason)
     await updater.install()
   })
 
   const maybeCheck = () => {
+    if (disposed || changingSource) return
     if (Date.now() - lastCheck < backgroundCheckIntervalMs) return
     lastCheck = Date.now()
     void updater?.check()
@@ -140,6 +261,7 @@ export async function registerAppUpdates(
       label: "Check for Updates…",
       click: () => {
         void (async () => {
+          requireStableSource()
           lastCheck = Date.now()
           await updater?.check()
           const state = getState()
@@ -158,6 +280,43 @@ export async function registerAppUpdates(
       },
     }),
   )
+  for (const [id, label, action] of [
+    [
+      "update-source-local",
+      "Use Local Workspace for Updates…",
+      chooseLocalSource,
+    ],
+    [
+      "update-source-release",
+      "Use CI Releases for Updates",
+      chooseReleaseSource,
+    ],
+  ] as const) {
+    applicationMenu.insert(
+      applicationMenu.items.findIndex(
+        (item) => item.id === "check-for-updates",
+      ),
+      new MenuItem({
+        id,
+        label,
+        enabled: action !== undefined,
+        click: () => {
+          void action?.().catch((error: unknown) => {
+            console.error("yakitori: could not change update source", error)
+            if (!window.isDestroyed())
+              void dialog
+                .showMessageBox(window, {
+                  type: "error",
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                  buttons: ["OK"],
+                })
+                .catch((reportError: unknown) => console.error(reportError))
+          })
+        },
+      }),
+    )
+  }
   Menu.setApplicationMenu(menu)
   return {
     async prepareQuit() {
@@ -171,6 +330,8 @@ export async function registerAppUpdates(
       updater?.cancelInstallation()
     },
     async dispose() {
+      disposed = true
+      sourceChangeAbort?.abort()
       if (!window.isDestroyed()) {
         window.webContents.off("did-finish-load", maybeCheck)
         window.off("focus", maybeCheck)

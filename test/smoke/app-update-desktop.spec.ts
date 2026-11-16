@@ -244,6 +244,7 @@ async function updateFixture(completeArchive: boolean) {
     requests: () => archiveRequests,
     transferred: () => transferredBytes,
     archiveSize,
+    manifestBytes: manifest.byteLength,
     async cleanup() {
       server.closeAllConnections()
       await new Promise<void>((done, reject) =>
@@ -392,6 +393,7 @@ test("desktop restores the local signer and installs a prepared release after gr
     console.log("Incremental archive transfer:", {
       archiveBytes: fixture.archiveSize,
       downloadedArchiveBytes: fixture.transferred(),
+      manifestBytes: fixture.manifestBytes,
       requests: fixture.requests(),
     })
     expect(app.process().exitCode).toBeNull()
@@ -550,6 +552,121 @@ test("desktop restores the local signer and installs a prepared release after gr
         })
         await app.close()
       }
+    } finally {
+      await stopOwnedProcesses(fixture.root)
+      await fixture.cleanup()
+    }
+  }
+})
+
+test("desktop builds a selected local workspace with cached outputs before offering restart", async ({
+  playwright,
+}) => {
+  test.setTimeout(120_000)
+  test.skip(process.platform !== "darwin")
+  const signer = await execute("/usr/bin/codesign", [
+    "-d",
+    "-r-",
+    resolve("release/mac-arm64/Yakitori.app", helperPath),
+  ])
+  test.skip(
+    !`${signer.stdout}\n${signer.stderr}`.includes("certificate leaf"),
+    "Local preparation requires an existing local signing identity.",
+  )
+  const fixture = await updateFixture(false)
+  let app: ElectronApplication | undefined
+  try {
+    app = await playwright._electron.launch({
+      executablePath: join(fixture.target, "Contents/MacOS/Yakitori"),
+      args: [`--user-data-dir=${fixture.userData}`],
+      env: {
+        ...fixture.environment.env,
+        HOME: process.env.HOME ?? fixture.environment.env.HOME ?? "",
+      },
+      cwd: fixture.root,
+    })
+    await routeReleaseRequests(app, fixture.releaseServer)
+    const page = await app.firstWindow()
+    await runFauxTurn(page)
+    const workspace = await realpath(process.cwd())
+    await app.evaluate(({ dialog, Menu }, selectedWorkspace) => {
+      dialog.showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [selectedWorkspace],
+      })
+      const item = Menu.getApplicationMenu()?.getMenuItemById(
+        "update-source-local",
+      )
+      if (!item) throw new Error("Missing local update source action")
+      Reflect.apply(item.click, item, [])
+    }, workspace)
+    await expect
+      .poll(async () => {
+        const state = await page.evaluate(() =>
+          window.yakitoriDesktop?.updates.getState(),
+        )
+        return state?.phase === "available" && state.release.source === "local"
+      })
+      .toBe(true)
+    await page
+      .getByRole("button", { name: "Update available", exact: true })
+      .click()
+    await expect(
+      page.getByRole("button", { name: "Build local update" }),
+    ).toBeVisible()
+    expect(
+      JSON.parse(
+        await readFile(join(fixture.userData, "update-source.json"), "utf8"),
+      ),
+    ).toEqual({ workspace })
+    await page.getByRole("button", { name: "Build local update" }).click()
+    await expect(
+      page.getByRole("button", { name: "Restart and update" }),
+    ).toBeVisible({ timeout: 90_000 })
+    expect(app.process().exitCode).toBeNull()
+    expect(fixture.requests()).toBe(0)
+    expect(
+      sha256(
+        await readFile(join(fixture.target, "Contents/Resources/app.asar")),
+      ),
+    ).toBe(fixture.installedHash)
+    // A Finder-launched shell can select a different Node/pnpm toolchain than
+    // this test runner. Warm once in that actual environment, then require
+    // reuse on the next explicit local build from the same app.
+    await app.evaluate(({ Menu }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById(
+        "update-source-local",
+      )
+      if (!item) throw new Error("Missing local update source action")
+      Reflect.apply(item.click, item, [])
+    })
+    await expect
+      .poll(async () => {
+        const state = await page.evaluate(() =>
+          window.yakitoriDesktop?.updates.getState(),
+        )
+        return state?.phase === "available" && state.release.source === "local"
+      })
+      .toBe(true)
+    await page
+      .getByRole("button", { name: "Update available", exact: true })
+      .click()
+    await page.getByRole("button", { name: "Build local update" }).click()
+    await expect(
+      page.getByRole("button", { name: "Restart and update" }),
+    ).toBeVisible({ timeout: 90_000 })
+    const log = await readFile(
+      join(fixture.userData, "local-build.log"),
+      "utf8",
+    )
+    for (const stage of ["gui", "computer", "desktop", "electron-addons"])
+      expect(log).toContain(`[build-cache] ${stage}: hit`)
+    await page.screenshot({
+      path: test.info().outputPath("desktop-local-update-ready.png"),
+    })
+  } finally {
+    try {
+      if (app && app.process().exitCode === null) await app.close()
     } finally {
       await stopOwnedProcesses(fixture.root)
       await fixture.cleanup()

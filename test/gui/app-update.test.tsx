@@ -122,12 +122,46 @@ it("shows build details and warns before replacing a dirty local build", async (
   await user.click(
     await screen.findByRole("button", { name: "Update available" }),
   )
-  expect(screen.getByRole("dialog").textContent).toContain("abcdef0 · Build 41")
+  expect(screen.getByRole("dialog").textContent).toContain("abcdef0 · Local build")
   expect(screen.getByRole("dialog").textContent).toContain("1234567 · Build 42")
   expect(screen.getByText(/Updating replaces this local build/)).toBeTruthy()
   await user.click(screen.getByRole("button", { name: "Download update" }))
   expect(bridge.download).toHaveBeenCalledOnce()
   expect(bridge.install).not.toHaveBeenCalled()
+})
+
+it("offers a local build action without describing it as a download", async () => {
+  const user = userEvent.setup()
+  const { bridge, emit } = desktop({
+    phase: "available",
+    current: { ...current, channel: "local", dirty: true },
+    release: { ...release, source: "local" },
+  })
+  render(<AppUpdate />)
+  await user.click(await screen.findByRole("button", { name: "Update available" }))
+  expect(screen.queryByRole("button", { name: "Download update" })).toBeNull()
+  expect(screen.queryByText(/Updating replaces this local build/)).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Build local update" }))
+  expect(bridge.download).toHaveBeenCalledOnce()
+  expect(bridge.install).not.toHaveBeenCalled()
+  emit({ phase: "preparing", current, release: { ...release, source: "local" } })
+  expect(screen.getByRole("status").textContent).toBe("Building local update…")
+})
+
+it("includes verified reused content in progress and reports local reuse", async () => {
+  const user = userEvent.setup()
+  desktop({
+    phase: "downloading",
+    current,
+    release,
+    downloadedBytes: 25 * 1024 * 1024,
+    reusedBytes: 50 * 1024 * 1024,
+    totalBytes: 100 * 1024 * 1024,
+  })
+  render(<AppUpdate />)
+  await user.click(await screen.findByRole("button", { name: "Downloading update" }))
+  expect(screen.getByRole("progressbar").getAttribute("value")).toBe("75")
+  expect(screen.getByText("50 MiB reused from this device")).toBeTruthy()
 })
 
 it("reports download percentages and indeterminate preparation", async () => {
@@ -247,22 +281,4 @@ it("focuses the popover, restores focus on Escape, and dismisses outside", async
   await user.click(trigger)
   await user.click(screen.getByRole("button", { name: "Outside" }))
   expect(screen.queryByRole("dialog")).toBeNull()
-})
-
-it("includes verified reused content in progress and reports local reuse", async () => {
-  const user = userEvent.setup()
-  desktop({
-    phase: "downloading",
-    current,
-    release,
-    downloadedBytes: 25 * 1024 * 1024,
-    reusedBytes: 50 * 1024 * 1024,
-    totalBytes: 100 * 1024 * 1024,
-  })
-  render(<AppUpdate />)
-  await user.click(
-    await screen.findByRole("button", { name: "Downloading update" }),
-  )
-  expect(screen.getByRole("progressbar").getAttribute("value")).toBe("75")
-  expect(screen.getByText("50 MiB reused from this device")).toBeTruthy()
 })
