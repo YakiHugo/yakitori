@@ -12,9 +12,14 @@ import "./diff-view.css"
 export const DiffView = memo(function DiffView({
   diff,
   path: fallbackPath,
-}: Readonly<{ diff: ToolDiff; path?: string | undefined }>) {
+  embedded = false,
+}: Readonly<{
+  diff: ToolDiff
+  path?: string | undefined
+  embedded?: boolean
+}>) {
   const model = useMemo(() => parseDiff(diff.text), [diff.text])
-  const [wrap, setWrap] = useState(false)
+  const [wrap, setWrap] = useState(embedded)
   const [raw, setRaw] = useState(false)
   const showRaw = raw || model.kind === "raw"
   return (
@@ -63,28 +68,30 @@ export const DiffView = memo(function DiffView({
           const renamed = !added && !deleted && file.oldPath !== file.newPath
           return (
             <div key={file.index} className="review-diff-file">
-              <header className="review-diff-file-header">
-                <FileCode2 size={14} />
-                <span
-                  className="review-diff-path"
-                  title={renamed ? `${file.oldPath} → ${path}` : path}
-                >
-                  {renamed ? `${file.oldPath} → ${path}` : path}
-                </span>
-                {added || deleted ? (
-                  <span className="review-diff-file-status">
-                    {added ? "Added" : "Deleted"}
+              {embedded && model.files.length === 1 ? null : (
+                <header className="review-diff-file-header">
+                  <FileCode2 size={14} />
+                  <span
+                    className="review-diff-path"
+                    title={renamed ? `${file.oldPath} → ${path}` : path}
+                  >
+                    {renamed ? `${file.oldPath} → ${path}` : path}
                   </span>
-                ) : null}
-                <span
-                  className="review-diff-stats"
-                  role="img"
-                  aria-label={`${file.additions} additions, ${file.deletions} deletions${diff.truncated ? " shown" : ""}`}
-                >
-                  <span data-kind="addition">+{file.additions}</span>
-                  <span data-kind="deletion">−{file.deletions}</span>
-                </span>
-              </header>
+                  {added || deleted ? (
+                    <span className="review-diff-file-status">
+                      {added ? "Added" : "Deleted"}
+                    </span>
+                  ) : null}
+                  <span
+                    className="review-diff-stats"
+                    role="img"
+                    aria-label={`${file.additions} additions, ${file.deletions} deletions${diff.truncated ? " shown" : ""}`}
+                  >
+                    <span data-kind="addition">+{file.additions}</span>
+                    <span data-kind="deletion">−{file.deletions}</span>
+                  </span>
+                </header>
+              )}
               <section
                 className="review-diff-scroll"
                 // biome-ignore lint/a11y/noNoninteractiveTabindex: The bounded code viewport needs keyboard scrolling.

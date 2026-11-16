@@ -1,0 +1,85 @@
+.change-tree {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+  font-size: 12px;
+}
+
+.change-tree-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.change-tree-children {
+  margin-left: 12px;
+}
+
+.change-tree-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 29px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  text-align: left;
+}
+
+.change-tree-row:hover {
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+
+.change-tree-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.change-tree-file[aria-current="true"] {
+  color: var(--accent-foreground);
+  background: var(--accent);
+}
+
+.change-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-tree-directory,
+.change-tree-file-icon,
+.change-tree-scope {
+  color: var(--muted-foreground);
+}
+
+.change-tree-file-icon,
+.change-tree-chevron,
+.change-tree-scope {
+  flex-shrink: 0;
+}
+
+.change-tree-directory {
+  font-size: 11px;
+}
+
+.change-tree-scope {
+  font-size: 10px;
+}
+
+.change-tree-chevron {
+  transition: transform 100ms ease;
+}
+
+.change-tree-directory[aria-expanded="true"] .change-tree-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .change-tree-chevron {
+    transition: none;
+  }
+}

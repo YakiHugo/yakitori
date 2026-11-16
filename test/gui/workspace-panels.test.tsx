@@ -350,11 +350,17 @@ it("switches workbook sheets and presentation slides within file previews", asyn
 
 it("stages untracked files and renders renamed staged entries", async () => {
   let staged = false
-  request.mockImplementation(async (method) => {
+  request.mockImplementation(async (method, params) => {
     if (method === "git/stage") {
       staged = true
       return {}
     }
+    if (method === "git/diff")
+      return {
+        path: params.path,
+        text: "+current content",
+        truncated: false,
+      }
     return {
       repository: true,
       branch: "main",
@@ -376,12 +382,19 @@ it("stages untracked files and renders renamed staged entries", async () => {
   const user = userEvent.setup()
   render(<WorkspaceChanges cwd="/repo" apiBase="http://localhost" />)
   await user.click(await screen.findByRole("button", { name: "Stage new.ts" }))
-  await screen.findByText("No unstaged changes")
-  await user.click(screen.getByRole("button", { name: "Staged 2" }))
-  expect(screen.getByRole("button", { name: "new.ts, Added" })).toBeDefined()
+  await screen.findByRole("button", { name: "Unstage new.ts" })
+  expect(screen.queryByRole("button", { name: "new.ts, unstaged" })).toBeNull()
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Change scope" }),
+    "staged",
+  )
+  expect(screen.getByRole("button", { name: "new.ts, staged" })).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "renamed.ts, staged" }))
   expect(
-    screen.getByRole("button", { name: "renamed.ts, Renamed" }).textContent,
-  ).toContain("before.ts →")
+    within(
+      screen.getByRole("region", { name: "Staged changes in renamed.ts" }),
+    ).getByText("Staged · before.ts → renamed.ts"),
+  ).toBeDefined()
   expect(request).toHaveBeenCalledWith("git/stage", {
     cwd: "/repo",
     path: "new.ts",
@@ -392,15 +405,21 @@ it("reloads changes when the active agent turn completes", async () => {
   useAppStore.setState((state) => ({
     execution: { ...state.execution, activeTurnId: "turn-editing" },
   }))
-  request
-    .mockResolvedValueOnce({ repository: true, entries: [] })
-    .mockResolvedValue({
-      repository: true,
-      entries: [{ path: "edited.ts", indexStatus: " ", worktreeStatus: "M" }],
-    })
+  let edited = false
+  request.mockImplementation(async (method) =>
+    method === "git/status"
+      ? {
+          repository: true,
+          entries: edited
+            ? [{ path: "edited.ts", indexStatus: " ", worktreeStatus: "M" }]
+            : [],
+        }
+      : { path: "edited.ts", text: "+edited content", truncated: false },
+  )
   render(<WorkspaceChanges cwd="/repo" apiBase="http://localhost" />)
   await screen.findByText("Working tree clean")
 
+  edited = true
   act(() => {
     useAppStore.setState((state) => ({
       execution: { ...state.execution, activeTurnId: undefined },
@@ -408,10 +427,15 @@ it("reloads changes when the active agent turn completes", async () => {
   })
 
   expect(
-    await screen.findByRole("button", { name: "edited.ts, Modified" }),
+    await screen.findByRole("button", { name: "edited.ts, unstaged" }),
   ).toBeDefined()
   expect(screen.queryByText("Working tree clean")).toBeNull()
-  expect(screen.getByRole("button", { name: "Unstaged 1" })).toBeDefined()
+  expect(screen.getByText("1 changed file")).toBeDefined()
+  expect(
+    await within(
+      screen.getByRole("region", { name: "Unstaged changes in edited.ts" }),
+    ).findByText("+edited content"),
+  ).toBeDefined()
 })
 
 it("discards a diff from the previous scope and refreshes on focus", async () => {
@@ -427,11 +451,11 @@ it("discards a diff from the previous scope and refreshes on focus", async () =>
   })
   const user = userEvent.setup()
   render(<WorkspaceChanges cwd="/repo" apiBase="http://localhost" />)
-  await user.click(
-    await screen.findByRole("button", { name: "both.ts, Modified" }),
+  await screen.findByText("Loading diff…")
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Change scope" }),
+    "staged",
   )
-  await user.click(screen.getByRole("button", { name: "Staged 1" }))
-  await user.click(screen.getByRole("button", { name: "both.ts, Modified" }))
   await screen.findByText("+staged content")
   await act(async () =>
     unstagedDiff.resolve({
@@ -441,6 +465,11 @@ it("discards a diff from the previous scope and refreshes on focus", async () =>
     }),
   )
   expect(screen.queryByText("+stale unstaged")).toBeNull()
+  expect(
+    within(
+      screen.getByRole("region", { name: "Staged changes in both.ts" }),
+    ).getByText("+staged content"),
+  ).toBeDefined()
   request.mockImplementation(async (method) =>
     method === "git/status"
       ? { repository: true, entries: [] }

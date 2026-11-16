@@ -136,6 +136,13 @@
   font-size: 11px;
 }
 
+.session-summary-change-scopes {
+  margin: -3px 0 6px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 .session-summary-pull-requests {
   display: flex;
   flex-direction: column;

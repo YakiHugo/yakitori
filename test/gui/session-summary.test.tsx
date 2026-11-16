@@ -100,9 +100,20 @@ it("loads real status on demand and opens the changes workspace", async () => {
           repository: true,
           branch: "feat/context",
           entries: [
-            { path: "both.ts", indexStatus: "M", worktreeStatus: "M" },
+            {
+              path: "src/both.ts",
+              indexStatus: "M",
+              worktreeStatus: "M",
+              stagedStats: { additions: 7, deletions: 2, binary: false },
+              unstagedStats: { additions: 3, deletions: 4, binary: false },
+            },
             { path: "new.ts", indexStatus: "?", worktreeStatus: "?" },
-            { path: "removed.ts", indexStatus: "D", worktreeStatus: " " },
+            {
+              path: "src/renamed.ts",
+              originalPath: "src/original.ts",
+              indexStatus: "R",
+              worktreeStatus: " ",
+            },
           ],
         },
   )
@@ -117,8 +128,23 @@ it("loads real status on demand and opens the changes workspace", async () => {
   expect(
     within(dialog).getByText("2 staged · 1 unstaged · 1 untracked"),
   ).toBeDefined()
+  const modified = within(dialog).getByRole("button", {
+    name: /both.ts src Modified/,
+  })
+  expect(within(modified).getByText("+10")).toBeDefined()
+  expect(within(modified).getByText("−6")).toBeDefined()
+  const totals = within(dialog).getByText("3 changed files").parentElement
+  expect(totals?.textContent).toContain("+10")
+  expect(totals?.textContent).toContain("−6")
+  expect(
+    within(dialog).getByText("Renamed · src/original.ts → src/renamed.ts"),
+  ).toBeDefined()
+  const untracked = within(dialog).getByRole("button", {
+    name: "new.ts Untracked",
+  })
+  expect(within(untracked).queryByText("+0")).toBeNull()
   await user.click(
-    within(dialog).getByRole("button", { name: /3 changed files/ }),
+    within(dialog).getByRole("button", { name: "Review all 3 files" }),
   )
   expect(request).toHaveBeenCalledWith("git/status", { cwd: "/repo" })
   expect(selectWorkspacePresentation(useWorkspaceStore.getState()).open).toBe(
@@ -126,6 +152,95 @@ it("loads real status on demand and opens the changes workspace", async () => {
   )
   expect(useWorkspaceStore.getState().tabs[0]?.kind).toBe("changes")
   expect(screen.queryByRole("dialog")).toBeNull()
+})
+
+it("caps the preview and opens a file in its staged or unstaged scope", async () => {
+  request.mockImplementation(async (method) =>
+    method === "git/pullRequests"
+      ? { available: true, pullRequests: [] }
+      : {
+          repository: true,
+          branch: "main",
+          entries: [
+            { path: "src/ready.ts", indexStatus: "A", worktreeStatus: " " },
+            { path: "src/working.ts", indexStatus: "M", worktreeStatus: "M" },
+            ...["three", "four", "five", "six"].map((name) => ({
+              path: `src/${name}.ts`,
+              indexStatus: "?",
+              worktreeStatus: "?",
+            })),
+          ],
+        },
+  )
+  const user = userEvent.setup()
+  render(<SessionSummary />)
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+  await screen.findByRole("button", { name: "Review all 6 files" })
+  expect(screen.getByText("five.ts")).toBeDefined()
+  expect(screen.queryByText("six.ts")).toBeNull()
+  await user.click(screen.getByRole("button", { name: /ready.ts src Added/ }))
+  expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
+    kind: "changes",
+    target: { path: "src/ready.ts", staged: true },
+  })
+  expect(screen.queryByRole("dialog")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+  await user.click(
+    await screen.findByRole("button", { name: /working.ts src Modified/ }),
+  )
+  expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
+    kind: "changes",
+    target: { path: "src/working.ts", staged: false },
+  })
+})
+
+it("keeps loaded files during refresh and ignores superseded reads and inactive events", async () => {
+  const pending: ((status: GitStatusResponse) => void)[] = []
+  let reads = 0
+  request.mockImplementation(async (method) => {
+    if (method === "git/status") {
+      reads += 1
+      if (reads > 1)
+        return new Promise<GitStatusResponse>((resolve) => {
+          pending.push(resolve)
+        })
+      return {
+        repository: true,
+        branch: "main",
+        entries: [{ path: "first.ts", indexStatus: " ", worktreeStatus: "M" }],
+      }
+    }
+    if (method === "session/read") return { session: session() }
+    return { available: true, pullRequests: [] }
+  })
+  const user = userEvent.setup()
+  render(<SessionSummary />)
+  fireEvent(window, new Event("yakitori:workspace-git-changed"))
+  expect(reads).toBe(0)
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+  await screen.findByText("first.ts")
+  fireEvent(window, new Event("yakitori:workspace-file-saved"))
+  expect(screen.getByText("first.ts")).toBeDefined()
+  expect(screen.queryByText("Loading changes…")).toBeNull()
+  fireEvent(window, new Event("yakitori:workspace-git-changed"))
+  expect(reads).toBe(3)
+  await act(async () =>
+    pending[1]?.({
+      repository: true,
+      branch: "main",
+      entries: [{ path: "latest.ts", indexStatus: " ", worktreeStatus: "M" }],
+    }),
+  )
+  await screen.findByText("latest.ts")
+  await act(async () =>
+    pending[0]?.({ repository: true, branch: "stale", entries: [] }),
+  )
+  expect(screen.getByText("latest.ts")).toBeDefined()
+  expect(screen.queryByText("stale")).toBeNull()
+  await user.keyboard("{Escape}")
+  fireEvent(window, new Event("yakitori:workspace-file-saved"))
+  fireEvent.focus(window)
+  expect(reads).toBe(3)
 })
 
 it("keeps the session branch stable and shows current and historical PRs", async () => {
