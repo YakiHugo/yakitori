@@ -29,12 +29,17 @@ export default defineConfig({
         "account-financials.spec.ts",
         "title-model.spec.ts",
         "goal-renderer.spec.ts",
+        "workspace-changes.spec.ts",
       ],
       use: { ...devices["Desktop Chrome"] },
     },
     {
       name: "desktop",
-      testMatch: ["desktop.spec.ts", "browser-native.spec.ts"],
+      testMatch: [
+        "desktop.spec.ts",
+        "browser-native.spec.ts",
+        "workspace-changes.spec.ts",
+      ],
     },
   ],
 })

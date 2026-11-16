@@ -304,7 +304,7 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
     await writeFile(join(cwd, path), "base\n")
     await git(cwd, ["add", "."])
     await git(cwd, ["commit", "--quiet", "-m", "initial"])
-    await writeFile(join(cwd, path), "staged\n")
+    await writeFile(join(cwd, path), "staged\nadded\n")
     await writeFile(join(cwd, "unrelated.txt"), "unrelated\n")
     await rpc(connection, "git/stage", { cwd, path })
     await writeFile(join(cwd, path), "working\n")
@@ -315,6 +315,8 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
       path,
       indexStatus: "M",
       worktreeStatus: "M",
+      stagedStats: { additions: 2, deletions: 1, binary: false },
+      unstagedStats: { additions: 1, deletions: 2, binary: false },
     })
     const staged = await rpc<GitDiffResponse>(connection, "git/diff", {
       cwd,
@@ -327,7 +329,7 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
       path,
       staged: false,
     })
-    expect(working.text).toContain("-staged\n+working")
+    expect(working.text).toContain("-staged\n-added\n+working")
     const untracked = await rpc<GitDiffResponse>(connection, "git/diff", {
       cwd,
       path: "unrelated.txt",
@@ -344,6 +346,17 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
     await writeFile(join(cwd, "new.txt"), "first\n")
     await rpc(connection, "git/stage", { cwd, path: "new.txt" })
     await writeFile(join(cwd, "new.txt"), "second\n")
+    expect(
+      (await rpc<GitStatusResponse>(connection, "git/status", { cwd })).entries,
+    ).toEqual([
+      {
+        path: "new.txt",
+        indexStatus: "A",
+        worktreeStatus: "M",
+        stagedStats: { additions: 1, deletions: 0, binary: false },
+        unstagedStats: { additions: 1, deletions: 1, binary: false },
+      },
+    ])
     await rpc(connection, "git/unstage", { cwd, path: "new.txt" })
     expect(await readFile(join(cwd, "new.txt"), "utf8")).toBe("second\n")
     expect(
@@ -378,7 +391,13 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
       cwd,
     })
     expect(status.entries).toEqual([
-      { path, originalPath, indexStatus: "R", worktreeStatus: " " },
+      {
+        path,
+        originalPath,
+        indexStatus: "R",
+        worktreeStatus: " ",
+        stagedStats: { additions: 0, deletions: 0, binary: false },
+      },
     ])
     await rpc(connection, "git/unstage", { cwd, path })
     expect(await git(cwd, ["diff", "--cached", "--name-only"])).toBe("")
@@ -400,7 +419,12 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
       cwd: nestedCwd,
     })
     expect(status.entries).toEqual([
-      { path: "inside.txt", indexStatus: " ", worktreeStatus: "M" },
+      {
+        path: "inside.txt",
+        indexStatus: " ",
+        worktreeStatus: "M",
+        unstagedStats: { additions: 1, deletions: 1, binary: false },
+      },
     ])
     expect(
       (
@@ -421,5 +445,91 @@ printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false
     expect(await git(cwd, ["diff", "--cached", "--name-only"])).toBe(
       "nested/inside.txt\n",
     )
+  })
+
+  it("counts both diff sides of renamed files from a nested workspace with NUL-delimited paths", async () => {
+    const { cwd, connection } = await setup(true)
+    const nestedCwd = join(cwd, "nested")
+    await mkdir(nestedCwd)
+    const originalPath = "old\nname.txt"
+    const path = "new\tname.txt"
+    const base = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n"
+    await writeFile(join(nestedCwd, originalPath), base)
+    await writeFile(join(cwd, "outside.txt"), "outside\n")
+    await git(cwd, ["add", "."])
+    await git(cwd, ["commit", "--quiet", "-m", "initial"])
+    await git(nestedCwd, ["mv", originalPath, path])
+    await writeFile(join(nestedCwd, path), `${base}staged\n`)
+    await git(nestedCwd, ["add", "--", path])
+    await writeFile(join(nestedCwd, path), `${base}staged\nworking\nextra\n`)
+    await writeFile(join(cwd, "outside.txt"), "changed outside\n")
+    // Local output preferences must not change how numstat paths are joined.
+    await git(cwd, ["config", "diff.relative", "true"])
+    const status = await rpc<GitStatusResponse>(connection, "git/status", {
+      cwd: nestedCwd,
+    })
+    expect(status.entries).toEqual([
+      {
+        path,
+        originalPath,
+        indexStatus: "R",
+        worktreeStatus: "M",
+        stagedStats: { additions: 1, deletions: 0, binary: false },
+        unstagedStats: { additions: 2, deletions: 0, binary: false },
+      },
+    ])
+  })
+
+  it("reports tracked binary diffs and leaves untracked text and binary counts undefined", async () => {
+    const { cwd, connection } = await setup(true)
+    await writeFile(join(cwd, "tracked.bin"), Buffer.from([0, 1, 2]))
+    await git(cwd, ["add", "."])
+    await git(cwd, ["commit", "--quiet", "-m", "initial"])
+    await writeFile(join(cwd, "tracked.bin"), Buffer.from([0, 3, 4]))
+    await git(cwd, ["add", "."])
+    await writeFile(join(cwd, "tracked.bin"), Buffer.from([0, 5, 6]))
+    await writeFile(join(cwd, "untracked.txt"), "one\ntwo\n")
+    await writeFile(join(cwd, "untracked.bin"), Buffer.from([0, 7]))
+    const status = await rpc<GitStatusResponse>(connection, "git/status", {
+      cwd,
+    })
+    expect(status.entries).toEqual([
+      {
+        path: "tracked.bin",
+        indexStatus: "M",
+        worktreeStatus: "M",
+        stagedStats: { additions: 0, deletions: 0, binary: true },
+        unstagedStats: { additions: 0, deletions: 0, binary: true },
+      },
+      { path: "untracked.bin", indexStatus: "?", worktreeStatus: "?" },
+      { path: "untracked.txt", indexStatus: "?", worktreeStatus: "?" },
+    ])
+  })
+
+  it("counts staged and unstaged deletions on their respective diff sides", async () => {
+    const { cwd, connection } = await setup(true)
+    await writeFile(join(cwd, "staged.txt"), "one\ntwo\n")
+    await writeFile(join(cwd, "unstaged.txt"), "three\nfour\nfive\n")
+    await git(cwd, ["add", "."])
+    await git(cwd, ["commit", "--quiet", "-m", "initial"])
+    await git(cwd, ["rm", "--quiet", "staged.txt"])
+    await rm(join(cwd, "unstaged.txt"))
+    const status = await rpc<GitStatusResponse>(connection, "git/status", {
+      cwd,
+    })
+    expect(status.entries).toEqual([
+      {
+        path: "staged.txt",
+        indexStatus: "D",
+        worktreeStatus: " ",
+        stagedStats: { additions: 0, deletions: 2, binary: false },
+      },
+      {
+        path: "unstaged.txt",
+        indexStatus: " ",
+        worktreeStatus: "D",
+        unstagedStats: { additions: 0, deletions: 3, binary: false },
+      },
+    ])
   })
 })
