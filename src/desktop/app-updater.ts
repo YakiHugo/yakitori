@@ -1,10 +1,5 @@
-import { createHash } from "node:crypto"
-import { createWriteStream } from "node:fs"
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import path from "node:path"
-import { Readable, Transform } from "node:stream"
-import { pipeline } from "node:stream/promises"
-import type { ReadableStream } from "node:stream/web"
 import type {
   DesktopBuildInfo,
   DesktopUpdateState,
@@ -15,6 +10,7 @@ import {
   findDesktopUpdate,
   type ResolvedDesktopUpdate,
 } from "./update-release.ts"
+import { downloadDesktopUpdate } from "./update-transfer.ts"
 
 // Abort a stalled transfer, without imposing a total download-time limit.
 const downloadIdleTimeoutMs = 60_000
@@ -136,76 +132,57 @@ export class AppUpdater {
     this.activeAbort = controller
     const stall = () =>
       controller.abort(new Error("The update download stalled. Try again."))
-    let idle = setTimeout(stall, downloadIdleTimeoutMs)
-    const progress = (downloadedBytes: number) => {
+    let idle: ReturnType<typeof setTimeout> | undefined
+    const progress = (value: {
+      downloadedBytes: number
+      reusedBytes: number
+      totalBytes: number
+    }) => {
+      clearTimeout(idle)
+      idle = setTimeout(stall, downloadIdleTimeoutMs)
       this.publish({
         phase: "downloading",
         current: this.options.current,
         release: available.release,
-        downloadedBytes,
-        totalBytes: available.archive.size,
+        ...value,
       })
     }
-    progress(0)
     try {
       await mkdir(this.options.updatesDirectory, { recursive: true })
       directory = await realpath(
         await mkdtemp(path.join(this.options.updatesDirectory, "download-")),
       )
       const archivePath = path.join(directory, "update.tar")
-      const response = await (this.options.fetch ?? fetch)(
-        available.archive.url,
-        {
-          signal: controller.signal,
-          headers: {
-            "User-Agent": "Yakitori desktop updater",
-            Accept: "application/octet-stream",
-            "Accept-Encoding": "identity",
-          },
-        },
-      )
-      if (!response.ok || response.body === null)
-        throw new Error(
-          `Could not download the update (HTTP ${response.status}).`,
-        )
-      const advertised = response.headers.get("content-length")
-      if (advertised !== null && Number(advertised) !== available.archive.size)
-        throw new Error("The update download size does not match its release.")
-      let downloaded = 0
       let lastNotification = 0
-      const hash = createHash("sha256")
-      await pipeline(
-        Readable.fromWeb(response.body as ReadableStream<Uint8Array>),
-        new Transform({
-          transform: (chunk: Buffer, _encoding, done) => {
-            downloaded += chunk.byteLength
-            if (downloaded > available.archive.size) {
-              done(new Error("The update exceeds its published size."))
-              return
-            }
-            clearTimeout(idle)
-            idle = setTimeout(stall, downloadIdleTimeoutMs)
-            hash.update(chunk)
-            const now = Date.now()
-            if (now - lastNotification >= progressNotificationIntervalMs) {
-              progress(downloaded)
-              lastNotification = now
-            }
-            done(null, chunk)
-          },
-        }),
-        createWriteStream(archivePath, { flags: "wx" }),
-        { signal: controller.signal },
-      )
+      progress({
+        downloadedBytes: 0,
+        reusedBytes: 0,
+        totalBytes: available.archive.size,
+      })
+      await downloadDesktopUpdate({
+        archive: available.archive,
+        destination: archivePath,
+        cacheDirectory: path.join(this.options.updatesDirectory, "cache"),
+        installedAppPath: this.options.applicationPath,
+        ...(this.options.fetch === undefined
+          ? {}
+          : { fetch: this.options.fetch }),
+        signal: controller.signal,
+        onProgress(value) {
+          const now = Date.now()
+          // Reset the stall timer even when UI notifications are throttled.
+          clearTimeout(idle)
+          idle = setTimeout(stall, downloadIdleTimeoutMs)
+          if (
+            now - lastNotification >= progressNotificationIntervalMs ||
+            value.downloadedBytes + value.reusedBytes === value.totalBytes
+          ) {
+            progress(value)
+            lastNotification = now
+          }
+        },
+      })
       clearTimeout(idle)
-      if (
-        downloaded !== available.archive.size ||
-        hash.digest("hex") !== available.archive.sha256
-      )
-        throw new Error(
-          "The downloaded update failed its integrity check. Try again.",
-        )
-      progress(downloaded)
       this.publish({
         phase: "preparing",
         current: this.options.current,
@@ -217,11 +194,11 @@ export class AppUpdater {
         installedAppPath: this.options.applicationPath,
         expectedBuild: available.build,
       })
+      await rm(archivePath)
       if (this.disposed) {
         await removeUpdateDirectory(directory)
         return
       }
-      await rm(archivePath)
       this.prepared = { directory, appPath: prepared.appPath }
       this.publish({
         phase: "ready",

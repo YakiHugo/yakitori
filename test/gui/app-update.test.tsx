@@ -248,3 +248,21 @@ it("focuses the popover, restores focus on Escape, and dismisses outside", async
   await user.click(screen.getByRole("button", { name: "Outside" }))
   expect(screen.queryByRole("dialog")).toBeNull()
 })
+
+it("includes verified reused content in progress and reports local reuse", async () => {
+  const user = userEvent.setup()
+  desktop({
+    phase: "downloading",
+    current,
+    release,
+    downloadedBytes: 25 * 1024 * 1024,
+    reusedBytes: 50 * 1024 * 1024,
+    totalBytes: 100 * 1024 * 1024,
+  })
+  render(<AppUpdate />)
+  await user.click(
+    await screen.findByRole("button", { name: "Downloading update" }),
+  )
+  expect(screen.getByRole("progressbar").getAttribute("value")).toBe("75")
+  expect(screen.getByText("50 MiB reused from this device")).toBeTruthy()
+})

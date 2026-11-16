@@ -33,6 +33,7 @@ export type DesktopUpdateState =
       current: DesktopBuildInfo
       release: DesktopUpdateRelease
       downloadedBytes: number
+      reusedBytes?: number
       totalBytes: number
     }>
   | Readonly<{

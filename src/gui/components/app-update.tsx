@@ -154,7 +154,11 @@ export function AppUpdate() {
           100,
           Math.max(
             0,
-            Math.round((state.downloadedBytes / state.totalBytes) * 100),
+            Math.round(
+              ((state.downloadedBytes + (state.reusedBytes ?? 0)) /
+                state.totalBytes) *
+                100,
+            ),
           ),
         )
       : undefined
@@ -269,6 +273,13 @@ export function AppUpdate() {
                       ? "Restarting Yakitori…"
                       : "Preparing update…"}
                 </p>
+                {state?.phase === "downloading" &&
+                  (state.reusedBytes ?? 0) > 0 && (
+                    <p>
+                      {Math.round((state.reusedBytes ?? 0) / 1024 / 1024)} MiB
+                      reused from this device
+                    </p>
+                  )}
                 <progress aria-label={title} max={100} value={percent} />
               </div>
             ) : (

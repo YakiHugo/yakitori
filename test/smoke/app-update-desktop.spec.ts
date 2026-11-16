@@ -7,6 +7,7 @@ import { join, resolve } from "node:path"
 import { promisify } from "node:util"
 import { type ElectronApplication, expect, test } from "@playwright/test"
 import { signDesktopApplication } from "../../src/desktop/app-signing.ts"
+import { indexDesktopUpdateTar } from "../../src/desktop/update-tar-index.ts"
 import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import type { DesktopBuildInfo } from "../../src/protocol/desktop-update.ts"
 import { McpClient } from "../../src/runtime/mcp-client.ts"
@@ -157,10 +158,16 @@ async function updateFixture(completeArchive: boolean) {
         name: "yakitori-macos-arm64.tar",
         sha256: archiveHash,
         size: archiveSize,
+        ...(archivePath === undefined
+          ? {}
+          : {
+              chunks: await indexDesktopUpdateTar(archivePath),
+            }),
       },
     }),
   )
   let archiveRequests = 0
+  let transferredBytes = 0
   const server = createServer((request, response) => {
     if (request.url === "/releases") {
       response.setHeader("Content-Type", "application/json")
@@ -197,9 +204,28 @@ async function updateFixture(completeArchive: boolean) {
       response.end(manifest)
     } else if (request.url === "/yakitori-macos-arm64.tar") {
       archiveRequests += 1
-      response.setHeader("Content-Length", archiveSize)
-      if (archivePath) createReadStream(archivePath).pipe(response)
-      else response.end(payload)
+      const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? "")
+      if (archivePath && range) {
+        const start = Number(range[1])
+        const end = Number(range[2])
+        if (start > end || end >= archiveSize) {
+          response.writeHead(416).end()
+          return
+        }
+        transferredBytes += end - start + 1
+        response.statusCode = 206
+        response.setHeader(
+          "Content-Range",
+          `bytes ${start}-${end}/${archiveSize}`,
+        )
+        response.setHeader("Content-Length", end - start + 1)
+        createReadStream(archivePath, { start, end }).pipe(response)
+      } else {
+        transferredBytes += archiveSize
+        response.setHeader("Content-Length", archiveSize)
+        if (archivePath) createReadStream(archivePath).pipe(response)
+        else response.end(payload)
+      }
     } else {
       response.writeHead(404).end()
     }
@@ -216,6 +242,8 @@ async function updateFixture(completeArchive: boolean) {
     userData: join(root, "user-data"),
     releaseServer: `http://127.0.0.1:${address.port}`,
     requests: () => archiveRequests,
+    transferred: () => transferredBytes,
+    archiveSize,
     async cleanup() {
       server.closeAllConnections()
       await new Promise<void>((done, reject) =>
@@ -359,6 +387,13 @@ test("desktop restores the local signer and installs a prepared release after gr
     await expect(
       page.getByRole("button", { name: "Restart and update", exact: true }),
     ).toBeVisible({ timeout: 45_000 })
+    expect(fixture.transferred()).toBeLessThan(fixture.archiveSize / 4)
+    expect(fixture.requests()).toBeLessThan(100)
+    console.log("Incremental archive transfer:", {
+      archiveBytes: fixture.archiveSize,
+      downloadedArchiveBytes: fixture.transferred(),
+      requests: fixture.requests(),
+    })
     expect(app.process().exitCode).toBeNull()
     await app.evaluate(({ dialog }) => {
       dialog.showMessageBoxSync = () => {
