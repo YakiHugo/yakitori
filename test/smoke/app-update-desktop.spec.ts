@@ -592,25 +592,46 @@ test("desktop builds a selected local workspace with cached outputs before offer
         canceled: false,
         filePaths: [selectedWorkspace],
       })
-      const item = Menu.getApplicationMenu()?.getMenuItemById("update-source-local")
+      const item = Menu.getApplicationMenu()?.getMenuItemById(
+        "update-source-local",
+      )
       if (!item) throw new Error("Missing local update source action")
       Reflect.apply(item.click, item, [])
     }, workspace)
-    await page.getByRole("button", { name: "Update available", exact: true }).click()
-    await expect(page.getByRole("button", { name: "Build local update" }))
-      .toBeVisible()
-    expect(JSON.parse(await readFile(
-      join(fixture.userData, "update-source.json"), "utf8",
-    ))).toEqual({ workspace })
+    await expect
+      .poll(async () => {
+        const state = await page.evaluate(() =>
+          window.yakitoriDesktop?.updates.getState(),
+        )
+        return state?.phase === "available" && state.release.source === "local"
+      })
+      .toBe(true)
+    await page
+      .getByRole("button", { name: "Update available", exact: true })
+      .click()
+    await expect(
+      page.getByRole("button", { name: "Build local update" }),
+    ).toBeVisible()
+    expect(
+      JSON.parse(
+        await readFile(join(fixture.userData, "update-source.json"), "utf8"),
+      ),
+    ).toEqual({ workspace })
     await page.getByRole("button", { name: "Build local update" }).click()
-    await expect(page.getByRole("button", { name: "Restart and update" }))
-      .toBeVisible({ timeout: 90_000 })
+    await expect(
+      page.getByRole("button", { name: "Restart and update" }),
+    ).toBeVisible({ timeout: 90_000 })
     expect(app.process().exitCode).toBeNull()
     expect(fixture.requests()).toBe(0)
-    expect(sha256(await readFile(
-      join(fixture.target, "Contents/Resources/app.asar"),
-    ))).toBe(fixture.installedHash)
-    const log = await readFile(join(fixture.userData, "local-build.log"), "utf8")
+    expect(
+      sha256(
+        await readFile(join(fixture.target, "Contents/Resources/app.asar")),
+      ),
+    ).toBe(fixture.installedHash)
+    const log = await readFile(
+      join(fixture.userData, "local-build.log"),
+      "utf8",
+    )
     for (const stage of ["gui", "computer", "desktop", "electron-addons"])
       expect(log).toContain(`[build-cache] ${stage}: hit`)
     await page.screenshot({
