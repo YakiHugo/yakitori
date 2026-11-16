@@ -2258,11 +2258,9 @@ function mapSessionStatus(
       ? "waiting"
       : active
         ? "working"
-        : (thread.unansweredQuestionIds?.length ?? 0) > 0
-          ? "waiting"
-          : thread.latestTurnOutcome === "failed"
-            ? "failed"
-            : "idle",
+        : thread.latestTurnOutcome === "failed"
+          ? "failed"
+          : "idle",
     ...(active ? { active: true } : {}),
     ...(thread.latestCompletionSeq === undefined
       ? {}

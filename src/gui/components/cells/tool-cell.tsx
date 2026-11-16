@@ -126,6 +126,7 @@ export function ToolCell({
             key={entry.toolCallId}
             request={request}
             toolCallId={entry.toolCallId}
+            itemId={entry.execution.itemId}
           />
         )
     }

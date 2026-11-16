@@ -24,6 +24,302 @@ import { inputParts } from "../gui/input-fixtures.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  describe("pending async questions", () => {
+    const question = (
+      toolCallId: string,
+      seq: number,
+      options: { output?: JsonValue; error?: KernelError } = {},
+    ) =>
+      createExecutionEnvelope({
+        sessionId,
+        seq,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_questions",
+            item: {
+              type: "dynamic_tool_call",
+              name: "request_user_input_async",
+              itemId: `item_${toolCallId}`,
+              toolCallId,
+              input: { questions: [{ title: "Which option?" }] },
+              requiresPermission: false,
+              resultItemId: `result_${toolCallId}`,
+              output: options.output ?? {
+                kind: "user_questions",
+                questions: [{ title: "Which option?", options: ["First"] }],
+              },
+              ...(options.error === undefined ? {} : { error: options.error }),
+              content: { kind: "text", text: "Questions presented." },
+            },
+          },
+        },
+      })
+    const twoPendingQuestions = () =>
+      ["question_one", "question_two"].reduce(
+        (state, id, index) =>
+          reduceExecutionView(state, {
+            type: "durable",
+            event: question(id, index + 1),
+          }),
+        createExecutionViewState(),
+      )
+    const session: ApiSessionDetail = {
+      id: sessionId,
+      rolloutId: "rollout_questions",
+      conversationId: "conversation_questions",
+      seq: 2,
+      createdAt: "2026-11-16T00:00:00.000Z",
+      updatedAt: "2026-11-16T00:00:00.000Z",
+      activeTurnId: "turn_questions",
+      pendingInputs: [],
+      pendingPermissions: [],
+      counts: {
+        inputs: 0,
+        pendingInputs: 0,
+        turns: 1,
+        items: 2,
+        permissions: 0,
+        tools: 2,
+      },
+    }
+
+    it("keeps successful live requests pending separately from question history", () => {
+      const state = twoPendingQuestions()
+      expect(state.pendingQuestionIds).toEqual(["question_one", "question_two"])
+      expect(projectExecutionView(state).pendingQuestionIds).toEqual([
+        "question_one",
+        "question_two",
+      ])
+      expect(state.entries).toHaveLength(2)
+      expect(
+        reduceExecutionView(state, {
+          type: "durable",
+          event: question("question_two", 2),
+        }).pendingQuestionIds,
+      ).toEqual(["question_one", "question_two"])
+    })
+
+    it.each([
+      { output: { questions: [] } },
+      { error: { code: "invalid_tool_input", message: "Invalid questions" } },
+    ])("keeps unsuccessful question requests in history without activating them (%j)", (options) => {
+      const state = reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event: question("question_invalid", 1, options),
+      })
+      expect(state.pendingQuestionIds).toEqual([])
+      expect(state.entries).toHaveLength(1)
+    })
+
+    it("removes only the answered request and does not reactivate repeated completions", () => {
+      const state = reduceExecutionView(twoPendingQuestions(), {
+        type: "durable",
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_answer",
+              inputId: "input_answer",
+              role: InputRole.User,
+              content: inputFixture(inputParts("First")),
+              metadata: { userQuestionId: "question_one" },
+            },
+          },
+        }),
+      })
+      expect(state.pendingQuestionIds).toEqual(["question_two"])
+      expect(state.entries).toHaveLength(3)
+      expect(state.entries[2]).toMatchObject({
+        kind: "user_input",
+        questionId: "question_one",
+      })
+      expect(
+        reduceExecutionView(state, {
+          type: "durable",
+          event: question("question_one", 1),
+        }).pendingQuestionIds,
+      ).toEqual(["question_two"])
+    })
+
+    it("clears pending questions on ordinary human input while retaining their history", () => {
+      const state = reduceExecutionView(twoPendingQuestions(), {
+        type: "durable",
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_message",
+              inputId: "input_message",
+              role: InputRole.User,
+              content: inputFixture(inputParts("Continue another way")),
+            },
+          },
+        }),
+      })
+      expect(state.pendingQuestionIds).toEqual([])
+      expect(state.entries).toHaveLength(3)
+    })
+
+    it.each([
+      { role: InputRole.User, source: "agent" },
+      { role: InputRole.User, source: "runtime" },
+      {
+        role: InputRole.User,
+        source: "runtime",
+        metadata: { userQuestionId: "question_one" },
+      },
+      { role: InputRole.Runtime, source: "runtime" },
+    ] as const)("preserves pending questions when nonhuman input is admitted (%j)", (input) => {
+      const state = reduceExecutionView(twoPendingQuestions(), {
+        type: "durable",
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_agent",
+              inputId: "input_agent",
+              ...input,
+              content: inputFixture(inputParts("Independent task finished")),
+            },
+          },
+        }),
+      })
+      expect(state.pendingQuestionIds).toEqual(["question_one", "question_two"])
+    })
+
+    it("dismisses selected questions without removing durable history", () => {
+      const state = twoPendingQuestions()
+      const next = reduceExecutionView(state, {
+        type: "questions_dismissed",
+        questionIds: ["question_one"],
+      })
+      expect(next.pendingQuestionIds).toEqual(["question_two"])
+      expect(next.entries).toEqual(state.entries)
+      expect(
+        reduceExecutionView(next, {
+          type: "durable",
+          event: question("question_one", 1),
+        }).pendingQuestionIds,
+      ).toEqual(["question_two"])
+    })
+
+    it.each([
+      { status: "completed" },
+      { status: "failed", error: { code: "failure", message: "Failed" } },
+      { status: "interrupted" },
+      { status: "cancelled" },
+    ] as const)("clears pending questions on durable and live $status completion", (outcome) => {
+      const state = twoPendingQuestions()
+      const durable = reduceExecutionView(state, {
+        type: "durable",
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.TurnCompleted,
+            data: { turnId: "turn_questions", outcome },
+          },
+        }),
+      })
+      const live = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "turn.finished",
+          sessionId,
+          turnId: "turn_questions",
+          createdAt: "2026-11-16T00:00:01.000Z",
+          outcome,
+        },
+      })
+      for (const next of [durable, live]) {
+        expect(next.pendingQuestionIds).toEqual([])
+        expect(next.entries.filter((entry) => entry.kind === "tool")).toEqual(
+          state.entries,
+        )
+      }
+    })
+
+    it("never activates questions from replay or prepended history", () => {
+      const history = question("question_history", 1)
+      const replayed = reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event: history,
+        replay: true,
+      })
+      expect(replayed.pendingQuestionIds).toEqual([])
+      expect(replayed.entries).toHaveLength(1)
+      const state = twoPendingQuestions()
+      const prepended = prependExecutionHistory(state, [history])
+      expect(prepended.pendingQuestionIds).toEqual([
+        "question_one",
+        "question_two",
+      ])
+      expect(prepended.entries).toHaveLength(3)
+    })
+
+    it("settles live pending questions when their correlated answer arrives in replay", () => {
+      const state = reduceExecutionView(twoPendingQuestions(), {
+        type: "durable",
+        replay: true,
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_answer",
+              inputId: "input_answer",
+              role: InputRole.User,
+              content: inputFixture(inputParts("First")),
+              metadata: { userQuestionId: "question_one" },
+            },
+          },
+        }),
+      })
+      expect(state.pendingQuestionIds).toEqual(["question_two"])
+    })
+
+    it("retains live pending questions across reconnect replay and clears them at an idle boundary", () => {
+      const disconnected = reduceExecutionView(twoPendingQuestions(), {
+        type: "stream_unavailable",
+      })
+      const replayed = reduceExecutionView(disconnected, {
+        type: "durable",
+        event: question("question_one", 1),
+        replay: true,
+      })
+      const resident = reduceExecutionView(replayed, {
+        type: "replay_completed",
+        session,
+      })
+      expect(resident.pendingQuestionIds).toEqual([
+        "question_one",
+        "question_two",
+      ])
+      const { activeTurnId: _, ...idleSession } = session
+      const snapshot = reduceExecutionView(resident, {
+        type: "snapshot",
+        session: idleSession,
+      })
+      expect(snapshot.pendingQuestionIds).toEqual([
+        "question_one",
+        "question_two",
+      ])
+      const idle = reduceExecutionView(snapshot, {
+        type: "replay_completed",
+        session: idleSession,
+      })
+      expect(idle.pendingQuestionIds).toEqual([])
+    })
+  })
+
   it("does not discard an admitted input when its RPC acknowledgement is lost", () => {
     const pending = reduceExecutionView(createExecutionViewState(), {
       type: "input_pending",

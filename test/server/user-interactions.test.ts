@@ -13,7 +13,7 @@ import { inputFixture } from "../fixtures/user-input.ts"
 import { initializeConnection, openTestConnection } from "./rpc/testkit.ts"
 
 describe("session user interactions", () => {
-  it("persists a question, correlates answers, and deduplicates answers after restart", async () => {
+  it("admits late correlated answers after turn completion and deduplicates them after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-questions-"))
     let calls = 0
     const stream: StreamFn = async function* () {
@@ -76,6 +76,12 @@ describe("session user interactions", () => {
       )
       await app.close()
       app = await createYakitoriApplication(options)
+      expect(
+        await app.handlers.readSessionSummary({ sessionId }),
+      ).toMatchObject({
+        ok: true,
+        value: { status: "idle" },
+      })
       processor = new MessageProcessor({
         handlers: app.handlers,
         interactions: createSessionInteractions(
@@ -159,6 +165,15 @@ describe("session user interactions", () => {
       expect(retried.ok).toBe(true)
       if (retried.ok && "result" in first)
         expect(retried.value).toEqual(first.result)
+      const afterRetry = await app.threadStore.readThread(sessionId)
+      expect(
+        afterRetry?.rollout.filter(
+          ({ item }) =>
+            item.type === "response_item" &&
+            item.item.submissionMetadata?.metadata?.userQuestionId ===
+              "ask_destination",
+        ),
+      ).toHaveLength(1)
     } finally {
       broker.close()
       await app.close()

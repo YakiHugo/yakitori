@@ -10,12 +10,10 @@ import type {
   SessionPlan,
   UserQuestions,
 } from "../../../protocol/user-interaction.ts"
+import { contextSourceAttributes } from "../../conversation-context.ts"
 import { ApiRequestError, getAppRpcClient } from "../../lib/rpc-client.ts"
 import { questionAnswerMemory } from "../../question-answer-memory.ts"
-import {
-  selectCurrentThreadId,
-  useAppStore,
-} from "../../store/app-store.ts"
+import { selectCurrentThreadId, useAppStore } from "../../store/app-store.ts"
 import { useThreadScopeState } from "../../store/thread-scope-store.ts"
 import { TranscriptDisclosureContent } from "../transcript-disclosure.tsx"
 import { Button } from "../ui/button.tsx"
@@ -25,9 +23,11 @@ import { Field, FieldGroup, FieldLabel, Input } from "../ui/field.tsx"
 export function UserQuestionsCell({
   request,
   toolCallId,
+  itemId,
 }: Readonly<{
   request: UserQuestions
   toolCallId: string
+  itemId: string
 }>) {
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const apiBase = useAppStore((state) => state.apiBase)
@@ -35,6 +35,9 @@ export function UserQuestionsCell({
     state.execution.entries.some(
       (entry) => entry.kind === "user_input" && entry.questionId === toolCallId,
     ),
+  )
+  const open = useAppStore((state) =>
+    state.execution.pendingQuestionIds.includes(toolCallId),
   )
   const recovered =
     sessionId === undefined
@@ -59,18 +62,29 @@ export function UserQuestionsCell({
     undefined,
   )
   const id = useId()
-  const done = answered
+  const done = answered || !open
+  const canSubmit = !answered && (open || pending)
   useEffect(() => {
     if (answered && sessionId !== undefined)
       questionAnswerMemory.acknowledge(apiBase, sessionId, toolCallId)
   }, [answered, apiBase, sessionId, toolCallId])
   return (
     <form
+      {...contextSourceAttributes(
+        sessionId === undefined
+          ? undefined
+          : {
+              kind: "message",
+              sessionId,
+              messageId: itemId,
+              label: "Question",
+            },
+      )}
       aria-label="Questions from your Mate"
       className="flex flex-col gap-4 rounded-lg border p-4"
       onSubmit={(event) => {
         event.preventDefault()
-        if (!sessionId || submitting || done) return
+        if (!sessionId || submitting || !canSubmit) return
         setSubmitting(true)
         setError(undefined)
         questionAnswerMemory.reserve(apiBase, sessionId, toolCallId, answers)
@@ -90,6 +104,7 @@ export function UserQuestionsCell({
             ) {
               questionAnswerMemory.acknowledge(apiBase, sessionId, toolCallId)
               setPending(false)
+              useAppStore.getState().restoreQuestionDraft(sessionId, toolCallId)
             }
             setError(
               reason instanceof Error
@@ -101,16 +116,24 @@ export function UserQuestionsCell({
       }}
     >
       <p className="text-body font-medium">
-        {done ? "Questions answered" : "Your input"}
+        {answered
+          ? "Questions answered"
+          : done
+            ? request.questions.length === 1
+              ? "Question closed"
+              : "Questions closed"
+            : "Your input"}
       </p>
       <FieldGroup>
         {request.questions.map((question, index) => (
           <Field
             // biome-ignore lint/suspicious/noArrayIndexKey: Questions are immutable within the tool call that keys this component.
             key={`${index}:${question.title}`}
-            data-disabled={done || submitting}
+            data-disabled={done || submitting || pending}
           >
-            <FieldLabel htmlFor={`${id}-${index}`}>{question.title}</FieldLabel>
+            <FieldLabel htmlFor={done ? undefined : `${id}-${index}`}>
+              {question.title}
+            </FieldLabel>
             {!done ? (
               <>
                 <Input
@@ -141,24 +164,37 @@ export function UserQuestionsCell({
                   </datalist>
                 ) : null}
               </>
-            ) : null}
+            ) : (
+              <>
+                {!answered && pending ? (
+                  <p className="text-body">{answers[index]}</p>
+                ) : null}
+                {question.options ? (
+                  <ul className="list-inside list-disc text-detail text-muted-foreground">
+                    {[...new Set(question.options)].map((option) => (
+                      <li key={option}>{option}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            )}
           </Field>
         ))}
       </FieldGroup>
-      {!done && pending ? (
+      {!answered && pending ? (
         <p role="status" className="text-detail text-muted-foreground">
           {received
             ? "Answers received; waiting for confirmation."
             : "Answer delivery is unconfirmed. Retry sends the same answers, not a new submission."}
         </p>
       ) : null}
-      {!done && error ? (
+      {!answered && error ? (
         <p role="alert" className="text-detail text-destructive">
           {error}
         </p>
       ) : null}
-      {!done ? (
-        <div>
+      {canSubmit ? (
+        <div className="flex gap-2">
           <Button
             type="submit"
             size="sm"
@@ -174,6 +210,19 @@ export function UserQuestionsCell({
                 ? "Retry same answers"
                 : "Send answers"}
           </Button>
+          {!done ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={submitting || pending || !sessionId}
+              onClick={() =>
+                useAppStore.getState().dismissQuestions(toolCallId)
+              }
+            >
+              Skip questions
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </form>

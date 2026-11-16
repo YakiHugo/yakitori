@@ -22,6 +22,7 @@ import type {
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
 import type { InputContent } from "../protocol/user-input.ts"
 import { inputContentText } from "../protocol/user-input.ts"
+import { parseUserQuestions } from "../protocol/user-interaction.ts"
 import { citationSources } from "./citation-sources.ts"
 
 export type {
@@ -57,6 +58,8 @@ export type ExecutionViewState = Readonly<{
   // A queued or admitted event confirms that the server owns the request;
   // pending admission recovery acknowledges against this set after replay too.
   admittedRequestIds: Readonly<Record<string, true>>
+  // Live answerability is separate from durable question transcript entries.
+  pendingQuestionIds: readonly string[]
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number
 }>
@@ -72,7 +75,15 @@ export type ExecutionViewAction =
       readonly at: string
     }
   | { readonly type: "input_pending_discarded"; readonly requestId: string }
-  | { readonly type: "durable"; readonly event: AppSessionEventEnvelope }
+  | {
+      readonly type: "durable"
+      readonly event: AppSessionEventEnvelope
+      readonly replay?: boolean
+    }
+  | {
+      readonly type: "questions_dismissed"
+      readonly questionIds: readonly string[]
+    }
   | { readonly type: "transient"; readonly event: LiveSessionEvent }
   | {
       readonly type: "permission_resolving"
@@ -136,6 +147,7 @@ export function createExecutionViewState(
     openCompactionItems: {},
     queuedInputs: {},
     admittedRequestIds: {},
+    pendingQuestionIds: [],
     timeToFirstTokenWeightedMs: 0,
     timeToFirstTokenSamples: 0,
   }
@@ -177,6 +189,14 @@ export function reduceExecutionView(
       ? state
       : { ...state, entries, ...indexEntries(entries) }
   }
+  if (action.type === "questions_dismissed") {
+    return {
+      ...state,
+      pendingQuestionIds: state.pendingQuestionIds.filter(
+        (questionId) => !action.questionIds.includes(questionId),
+      ),
+    }
+  }
   if (action.type === "snapshot") return applySnapshot(state, action.session)
   if (action.type === "replay_completed") {
     // History describes past execution. At the replay boundary, the resident
@@ -186,7 +206,12 @@ export function reduceExecutionView(
       state.lastSeq > action.session.seq
         ? state
         : applySnapshot(state, action.session)
-    return reconcileExecution(next, true)
+    return reconcileExecution(
+      next.activeTurnId === undefined
+        ? { ...next, pendingQuestionIds: [] }
+        : next,
+      true,
+    )
   }
   if (action.type === "stream_unavailable") {
     return reconcileExecution(
@@ -223,7 +248,7 @@ export function reduceExecutionView(
   if (action.type === "transient") return applyTransient(state, action.event)
   if (action.event.type === "session.cursor")
     return { ...state, lastSeq: action.event.seq }
-  return applyDurable(state, action.event)
+  return applyDurable(state, action.event, action.replay === true)
 }
 
 export function prependExecutionHistory(
@@ -232,7 +257,11 @@ export function prependExecutionHistory(
 ): ExecutionViewState {
   let prefix = createExecutionViewState()
   for (const event of events) {
-    prefix = reduceExecutionView(prefix, { type: "durable", event })
+    prefix = reduceExecutionView(prefix, {
+      type: "durable",
+      event,
+      replay: true,
+    })
   }
   const samples = prefix.timeToFirstTokenSamples + state.timeToFirstTokenSamples
   const weighted =
@@ -296,6 +325,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       ? {}
       : { workingDirectory: state.workingDirectory }),
     queuedInputIds: Object.keys(state.queuedInputs),
+    pendingQuestionIds: state.pendingQuestionIds,
     ...(state.lastModel === undefined ? {} : { lastModel: state.lastModel }),
     ...(state.lastTurnUsage === undefined
       ? {}
@@ -693,6 +723,7 @@ function applyTransient(
 function applyDurable(
   state: ExecutionViewState,
   event: EventEnvelope,
+  replay: boolean,
 ): ExecutionViewState {
   let next: ExecutionViewState = { ...state, lastSeq: event.seq }
   switch (event.type) {
@@ -752,6 +783,15 @@ function applyDurable(
       }
       return {
         ...next,
+        pendingQuestionIds:
+          event.data.role !== "user" || event.data.source === "runtime"
+            ? next.pendingQuestionIds
+            : typeof event.data.metadata?.userQuestionId === "string"
+              ? next.pendingQuestionIds.filter(
+                  (questionId) =>
+                    questionId !== event.data.metadata?.userQuestionId,
+                )
+              : [],
         admittedRequestIds: {
           ...next.admittedRequestIds,
           [event.data.requestId]: true,
@@ -919,6 +959,24 @@ function applyDurable(
               }
         return replaceItemEntry(next, item.itemId, entry)
       }
+      const previousIndex = state.itemEntryIndexes[item.itemId]
+      const previous =
+        previousIndex === undefined ? undefined : state.entries[previousIndex]
+      if (
+        !replay &&
+        item.name === "request_user_input_async" &&
+        item.error === undefined &&
+        parseUserQuestions(item.output) !== undefined &&
+        (previous?.kind !== "tool" ||
+          (previous.state !== "completed" && previous.state !== "failed")) &&
+        next.turnTimings[event.data.turnId]?.completedAt === undefined &&
+        !next.pendingQuestionIds.includes(item.toolCallId)
+      ) {
+        next = {
+          ...next,
+          pendingQuestionIds: [...next.pendingQuestionIds, item.toolCallId],
+        }
+      }
       return replaceItemEntry(next, item.itemId, {
         kind: "tool",
         toolCallId: item.toolCallId,
@@ -1009,6 +1067,7 @@ function finishTurn(
   }
   return {
     ...clearActiveRetry(settled, turnId),
+    pendingQuestionIds: [],
     entries,
     ...indexEntries(entries),
     turnTimings: {
