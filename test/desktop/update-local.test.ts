@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -145,6 +146,35 @@ writeFileSync(path.join(resources, "build-info.json"), JSON.stringify(metadata))
 if (process.env.YAKITORI_TEST_MUTATE_SOURCE) appendFileSync("untracked.txt", "changed during package\\n")
 console.log("fake package completed")
 `
+
+it.each([
+  "direct",
+  "app-alias",
+  "output-alias",
+])("rejects a running app inside the local build output through %s paths", async (variant) => {
+  const value = await repository(packageApplication)
+  const output =
+    variant === "output-alias"
+      ? join(value.root, "linked-build-output")
+      : join(value.workspace, "release")
+  const running = join(output, "mac-arm64", "Running.app")
+  await mkdir(running, { recursive: true })
+  if (variant === "output-alias")
+    await symlink(output, join(value.workspace, "release"), "dir")
+  const installedAppPath =
+    variant === "app-alias" ? join(value.root, "running-alias.app") : running
+  if (variant === "app-alias") await symlink(running, installedAppPath, "dir")
+  await expect(
+    checkLocalDesktopUpdate({
+      ...value,
+      installedAppPath,
+    }),
+  ).rejects.toThrow(/outside the workspace build output/)
+  expect(prepareDesktopUpdate).not.toHaveBeenCalled()
+  await expect(readFile(value.logPath)).rejects.toMatchObject({
+    code: "ENOENT",
+  })
+})
 
 it.each([
   "tracked",

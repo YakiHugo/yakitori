@@ -214,7 +214,24 @@ export async function checkLocalDesktopUpdate(
     signal?: AbortSignal
   }>,
 ): Promise<LocalDesktopUpdate> {
+  options.signal?.throwIfAborted()
   const workspace = await realpath(options.workspace)
+  const outputDirectory = await realpath(path.join(workspace, "release")).catch(
+    (error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT")
+        return undefined
+      throw error
+    },
+  )
+  const installedApp = await realpath(options.installedAppPath)
+  if (
+    outputDirectory !== undefined &&
+    (installedApp === outputDirectory ||
+      installedApp.startsWith(`${outputDirectory}${path.sep}`))
+  )
+    throw new Error(
+      "Run Yakitori from outside the workspace build output before building a local update. Install a copy in Applications first.",
+    )
   const before = await snapshot(workspace, options.signal)
   const pkg: unknown = JSON.parse(
     await readFile(path.join(workspace, "package.json"), "utf8"),
