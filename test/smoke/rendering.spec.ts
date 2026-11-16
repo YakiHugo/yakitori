@@ -503,6 +503,114 @@ test("conversation scrolls at the page edge while the project overview stays on 
   })
 })
 
+test("workspace tabs and actions stay reachable at the minimum width", async ({
+  page,
+  renderingApp,
+}, testInfo) => {
+  const filename = "workspace-header-with-a-deliberately-long-filename.txt"
+  await writeFile(join(renderingApp.workspace, filename), "Header layout")
+  await page.setViewportSize({ width: 1480, height: 960 })
+  await page
+    .getByRole("button", { name: "Show workspace", exact: true })
+    .click()
+  const workspace = page.getByRole("complementary", {
+    name: "Workspace",
+    exact: true,
+  })
+  const header = workspace.locator(".workspace-header")
+  const add = header.getByRole("button", { name: "Add workspace tab" })
+  const hide = header.getByRole("button", {
+    name: "Hide workspace",
+    exact: true,
+  })
+  await expect(hide).toBeFocused()
+  await page.keyboard.press("Enter")
+  const show = page.getByRole("button", { name: "Show workspace", exact: true })
+  await expect(show).toBeFocused()
+  await page.keyboard.press("Enter")
+  await expect(hide).toBeFocused()
+  await add.click()
+  await page.getByRole("menuitem", { name: /^Files/ }).click()
+  await workspace
+    .getByRole("region", { name: "Project files", exact: true })
+    .getByRole("button", { name: filename, exact: true })
+    .click()
+  await add.click()
+  await page.getByRole("menuitem", { name: /^Browser/ }).click()
+  const separator = workspace.getByRole("separator", {
+    name: "Workspace width",
+  })
+  await separator.focus()
+  for (let index = 0; index < 30; index++)
+    await page.keyboard.press("ArrowRight")
+  await expect(separator).toHaveAttribute("aria-valuenow", "320")
+  const tabs = header.getByRole("tablist", { name: "Workspace views" })
+  await header.getByRole("tab", { name: "Browser", exact: true }).focus()
+  await page.keyboard.press("Home")
+  await expect(
+    header.getByRole("tab", { name: "Changes", exact: true }),
+  ).toBeFocused()
+  await page.keyboard.press("End")
+  await expect(
+    header.getByRole("tab", { name: "Browser", exact: true }),
+  ).toBeFocused()
+  await page.keyboard.press("ArrowLeft")
+  const selected = header.getByRole("tab", { name: filename, exact: true })
+  const close = header.getByRole("button", {
+    name: `Close ${filename}`,
+    exact: true,
+  })
+  await expect(selected).toBeFocused()
+  await expect(selected).toHaveAttribute("aria-selected", "true")
+  await expect
+    .poll(() =>
+      selected
+        .locator("span")
+        .evaluate(
+          (node) =>
+            node.scrollWidth > node.clientWidth &&
+            getComputedStyle(node).textOverflow === "ellipsis",
+        ),
+    )
+    .toBe(true)
+  await expect
+    .poll(async () => {
+      const [strip, tab, button] = await Promise.all([
+        tabs.boundingBox(),
+        selected.boundingBox(),
+        close.boundingBox(),
+      ])
+      return Boolean(
+        strip &&
+          tab &&
+          button &&
+          tab.x >= strip.x - 1 &&
+          button.x + button.width <= strip.x + strip.width + 1,
+      )
+    })
+    .toBe(true)
+  const strip = await tabs.boundingBox()
+  const bounds = await header.boundingBox()
+  if (!strip || !bounds) throw new Error("Workspace header is missing.")
+  let previousRight = strip.x + strip.width
+  for (const control of [
+    add,
+    header.getByRole("button", { name: "Expand workspace", exact: true }),
+    header.getByRole("button", { name: "Hide workspace", exact: true }),
+  ]) {
+    const box = await control.boundingBox()
+    if (!box) throw new Error("Workspace action is missing.")
+    expect(box.x).toBeGreaterThanOrEqual(previousRight - 1)
+    expect(box.x + box.width).toBeLessThanOrEqual(bounds.x + bounds.width)
+    previousRight = box.x + box.width
+  }
+  await workspace.screenshot({
+    path: testInfo.outputPath("workspace-minimum-width.png"),
+  })
+  await close.click()
+  await expect(selected).toHaveCount(0)
+})
+
 test("new session composer stays centered in its draft and docks after the first input", async ({
   page,
   renderingApp,
