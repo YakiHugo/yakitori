@@ -2,7 +2,11 @@ import { createHash } from "node:crypto"
 import { createReadStream } from "node:fs"
 import { readFile, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { parseDesktopBuildInfo } from "../src/desktop/update-release.ts"
+import {
+  desktopUpdateManifestSizeLimit,
+  parseDesktopBuildInfo,
+} from "../src/desktop/update-release.ts"
+import { indexDesktopUpdateTar } from "../src/desktop/update-tar-index.ts"
 
 const archiveName = "yakitori-macos-arm64.tar"
 const archivePath = resolve("release", archiveName)
@@ -18,8 +22,12 @@ const manifest = {
     name: archiveName,
     sha256: hash.digest("hex"),
     size: (await stat(archivePath)).size,
+    chunks: await indexDesktopUpdateTar(archivePath),
   },
 }
 const destination = resolve("release/update-manifest.json")
-await writeFile(destination, `${JSON.stringify(manifest, null, 2)}\n`)
+const bytes = `${JSON.stringify(manifest)}\n`
+if (Buffer.byteLength(bytes) > desktopUpdateManifestSizeLimit)
+  throw new Error("Update manifest exceeds its metadata safety boundary.")
+await writeFile(destination, bytes)
 console.log(`Wrote ${destination}`)

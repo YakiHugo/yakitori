@@ -7,6 +7,7 @@ import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 import { prepareDesktopBuildInfo } from "../../scripts/build-desktop-info.ts"
 import {
+  desktopUpdateManifestSizeLimit,
   findDesktopUpdate,
   parseDesktopBuildInfo,
 } from "../../src/desktop/update-release.ts"
@@ -232,6 +233,145 @@ describe("trusted GitHub desktop release discovery", () => {
     ).toBe(archiveHash)
   })
 
+  it("authenticates chunk metadata larger than the old identity-only manifest bound", async () => {
+    const chunks = Array.from({ length: 1234 }, (_, offset) => ({
+      offset,
+      size: 1,
+      sha256: archiveHash,
+    }))
+    const value = { ...manifest(), archive: { ...manifest().archive, chunks } }
+    expect(Buffer.byteLength(JSON.stringify(value))).toBeGreaterThan(16 * 1024)
+    const result = await findDesktopUpdate(
+      build({ buildAttempt: 1 }),
+      fixture({ manifest: value }),
+    )
+    expect(result?.archive.chunks).toEqual(chunks)
+  })
+
+  it("preserves authenticated canonical inline metadata for transfer", async () => {
+    const bytes = Buffer.alloc(1234, 0)
+    const chunks = [
+      {
+        offset: 0,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        data: bytes.toString("base64"),
+      },
+    ]
+    const value = { ...manifest(), archive: { ...manifest().archive, chunks } }
+    const result = await findDesktopUpdate(
+      build({ buildAttempt: 1 }),
+      fixture({ manifest: value }),
+    )
+    expect(result?.archive.chunks).toEqual(chunks)
+  })
+
+  it.each([
+    [{ offset: 1, size: 1233, sha256: archiveHash }],
+    [{ offset: 0, size: 1233, sha256: archiveHash }],
+    [{ offset: 0, size: 1235, sha256: archiveHash }],
+    [{ offset: 0, size: 0, sha256: archiveHash }],
+    [{ offset: 0, size: 1234, sha256: "bad" }],
+    [{ offset: 0, size: 1234, sha256: archiveHash, data: 123 }],
+    [{ offset: 0, size: 1234, sha256: archiveHash, data: "a".repeat(1648) }],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        data: Buffer.alloc(1234).toString("base64"),
+        sourcePath: "Contents/file",
+        sourceOffset: 0,
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "../escape",
+        sourceOffset: 0,
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "/absolute",
+        sourceOffset: 0,
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "Contents\\file",
+        sourceOffset: 0,
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "Contents/file",
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "Contents/file",
+        sourceOffset: -1,
+      },
+    ],
+    [
+      {
+        offset: 0,
+        size: 1234,
+        sha256: archiveHash,
+        sourcePath: "Contents/file",
+        sourceOffset: Number.MAX_SAFE_INTEGER,
+      },
+    ],
+  ])("rejects unsafe or incomplete archive chunk metadata %#", async (chunk) => {
+    const value = {
+      ...manifest(),
+      archive: { ...manifest().archive, chunks: [chunk] },
+    }
+    await expect(
+      findDesktopUpdate(
+        build({ buildAttempt: 1 }),
+        fixture({ manifest: value }),
+      ),
+    ).rejects.toThrow(/chunk/)
+  })
+
+  it("requires a GitHub manifest digest before using chunk instructions", async () => {
+    const value = {
+      ...manifest(),
+      archive: {
+        ...manifest().archive,
+        chunks: [{ offset: 0, size: 1234, sha256: archiveHash }],
+      },
+    }
+    await expect(
+      findDesktopUpdate(
+        build({ buildAttempt: 1 }),
+        fixture({
+          manifest: value,
+          editRelease: (release) => {
+            const asset = release.assets[0]
+            if (asset) asset.digest = null
+          },
+        }),
+      ),
+    ).rejects.toThrow(/require.*GitHub SHA256/)
+  })
+
   it.each([
     [
       "foreign repository",
@@ -393,7 +533,9 @@ describe("trusted GitHub desktop release discovery", () => {
     await expect(
       findDesktopUpdate(
         build(),
-        fixture({ manifestText: "x".repeat(16 * 1024 + 1) }),
+        fixture({
+          manifestText: "x".repeat(desktopUpdateManifestSizeLimit + 1),
+        }),
       ),
     ).rejects.toThrow(/metadata safety bound/)
   })

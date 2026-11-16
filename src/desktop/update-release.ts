@@ -7,16 +7,40 @@ import type {
 export type ResolvedDesktopUpdate = {
   release: DesktopUpdateRelease
   build: DesktopBuildInfo
-  archive: { url: string; sha256: string; size: number }
+  archive: DesktopUpdateArchive
 }
+
+export type DesktopUpdateChunk = {
+  offset: number
+  size: number
+  sha256: string
+  /** Regular file path relative to the installed .app, never an archive path. */
+  sourcePath?: string
+  sourceOffset?: number
+  /** Authenticated tar metadata bytes; regular file payloads use source mapping. */
+  data?: string
+}
+
+export type DesktopUpdateArchive = {
+  url: string
+  sha256: string
+  size: number
+  chunks?: DesktopUpdateChunk[]
+}
+
+// Implementation safety boundaries: bound per-chunk RAM, metadata parsing, and
+// filesystem work while allowing substantially more files than a packaged app.
+export const desktopUpdateChunkSizeLimit = 4 * 1024 * 1024
+export const desktopUpdateChunkCountLimit = 100_000
+export const desktopUpdateManifestSizeLimit = 32 * 1024 * 1024
 
 const repository = "YakiHugo/yakitori"
 const archiveName = "yakitori-macos-arm64.tar"
 const manifestName = "update-manifest.json"
 // Implementation safety boundaries: discovery needs only 20 release records and
-// a small identity/hash manifest. Bound streamed bytes even without Content-Length.
+// an identity/hash/chunk manifest. Bound bytes even without Content-Length.
 const releasePayloadLimit = 2 * 1024 * 1024
-const manifestPayloadLimit = 16 * 1024
+const manifestPayloadLimit = desktopUpdateManifestSizeLimit
 const metadataTimeoutMs = 20_000
 
 type ReleaseAsset = {
@@ -148,6 +172,13 @@ export async function findDesktopUpdate(
       "Desktop update archive differs from its GitHub SHA256 digest.",
     )
   }
+  const chunks =
+    archive.chunks === undefined
+      ? undefined
+      : parseDesktopUpdateChunks(archive.chunks, archiveAsset.size)
+  if (chunks && !manifestAsset.digest) {
+    throw new Error("Chunk manifests require their GitHub SHA256 asset digest.")
+  }
   const newer =
     current.channel === "main"
       ? buildNumber > current.buildNumber ||
@@ -171,8 +202,102 @@ export async function findDesktopUpdate(
       url: archiveAsset.url,
       sha256: archive.sha256,
       size: archiveAsset.size,
+      ...(chunks ? { chunks } : {}),
     },
   }
+}
+
+export function parseDesktopUpdateChunks(
+  value: unknown,
+  archiveSize: number,
+): DesktopUpdateChunk[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > desktopUpdateChunkCountLimit
+  ) {
+    throw new Error("Desktop update chunk count exceeds its safety boundary.")
+  }
+  let offset = 0
+  const chunks = value.map((entry: unknown): DesktopUpdateChunk => {
+    const chunk = record(entry, "Desktop update chunk")
+    const size = positiveInteger(chunk.size, "Desktop update chunk size")
+    if (
+      chunk.offset !== offset ||
+      size > desktopUpdateChunkSizeLimit ||
+      offset + size > archiveSize ||
+      typeof chunk.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(chunk.sha256)
+    ) {
+      throw new Error("Desktop update chunks must safely cover the archive.")
+    }
+    offset += size
+    if (chunk.data !== undefined) {
+      if (chunk.sourcePath !== undefined || chunk.sourceOffset !== undefined)
+        throw new Error("Inline chunk source path and offset must be absent.")
+      if (
+        typeof chunk.data !== "string" ||
+        chunk.data.length !== 4 * Math.ceil(size / 3)
+      )
+        throw new Error("Inline chunk data size or base64 encoding is invalid.")
+      const bytes = Buffer.from(chunk.data, "base64")
+      if (
+        bytes.length !== size ||
+        bytes.toString("base64") !== chunk.data ||
+        createHash("sha256").update(bytes).digest("hex") !== chunk.sha256
+      )
+        throw new Error(
+          "Inline chunk data failed canonical base64 or SHA256 verification.",
+        )
+      return {
+        offset: chunk.offset as number,
+        size,
+        sha256: chunk.sha256,
+        data: chunk.data,
+      }
+    }
+    if (chunk.sourcePath === undefined && chunk.sourceOffset === undefined) {
+      return { offset: chunk.offset as number, size, sha256: chunk.sha256 }
+    }
+    if (
+      typeof chunk.sourcePath !== "string" ||
+      !safeDesktopUpdateSourcePath(chunk.sourcePath) ||
+      typeof chunk.sourceOffset !== "number" ||
+      !Number.isSafeInteger(chunk.sourceOffset) ||
+      chunk.sourceOffset < 0 ||
+      !Number.isSafeInteger(chunk.sourceOffset + size)
+    ) {
+      throw new Error("Desktop update chunk source path or offset is unsafe.")
+    }
+    return {
+      offset: chunk.offset as number,
+      size,
+      sha256: chunk.sha256,
+      sourcePath: chunk.sourcePath,
+      sourceOffset: chunk.sourceOffset,
+    }
+  })
+  if (offset !== archiveSize) {
+    throw new Error("Desktop update chunks must cover the complete archive.")
+  }
+  return chunks
+}
+
+export function safeDesktopUpdateSourcePath(value: string): boolean {
+  // 4 KiB bounds metadata/path work; paths use portable POSIX separators.
+  return (
+    value.length > 0 &&
+    Buffer.byteLength(value) <= 4096 &&
+    ![...value].some(
+      (character) =>
+        character === "\\" ||
+        character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) === 127,
+    ) &&
+    value
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..")
+  )
 }
 
 function readAsset(
