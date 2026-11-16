@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process"
+import { resolve } from "node:path"
+import { signDesktopApplication } from "../src/desktop/app-signing.ts"
 
 let packagingError: unknown
 try {
@@ -13,6 +15,13 @@ try {
     "fs-ext,node-pty",
   ])
   await run("pnpm", ["exec", "electron-builder"])
+  await signDesktopApplication(
+    resolve(
+      "release",
+      process.arch === "arm64" ? "mac-arm64" : "mac",
+      "Yakitori.app",
+    ),
+  )
   await run(process.execPath, ["scripts/verify-packaged-runtime.ts"])
 } catch (error) {
   packagingError = error
