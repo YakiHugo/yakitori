@@ -628,6 +628,31 @@ test("desktop builds a selected local workspace with cached outputs before offer
         await readFile(join(fixture.target, "Contents/Resources/app.asar")),
       ),
     ).toBe(fixture.installedHash)
+    // A Finder-launched shell can select a different Node/pnpm toolchain than
+    // this test runner. Warm once in that actual environment, then require
+    // reuse on the next explicit local build from the same app.
+    await app.evaluate(({ Menu }) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById(
+        "update-source-local",
+      )
+      if (!item) throw new Error("Missing local update source action")
+      Reflect.apply(item.click, item, [])
+    })
+    await expect
+      .poll(async () => {
+        const state = await page.evaluate(() =>
+          window.yakitoriDesktop?.updates.getState(),
+        )
+        return state?.phase === "available" && state.release.source === "local"
+      })
+      .toBe(true)
+    await page
+      .getByRole("button", { name: "Update available", exact: true })
+      .click()
+    await page.getByRole("button", { name: "Build local update" }).click()
+    await expect(
+      page.getByRole("button", { name: "Restart and update" }),
+    ).toBeVisible({ timeout: 90_000 })
     const log = await readFile(
       join(fixture.userData, "local-build.log"),
       "utf8",
