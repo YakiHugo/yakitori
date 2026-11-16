@@ -18,20 +18,28 @@ export type LocalDesktopUpdate = Readonly<{
   prepare(directory: string, signal: AbortSignal): Promise<{ appPath: string }>
 }>
 
-async function snapshot(workspace: string) {
+async function snapshot(workspace: string, signal?: AbortSignal) {
+  signal?.throwIfAborted()
+  const cancellation = signal === undefined ? {} : { signal }
   const [
     { stdout: repository },
     { stdout: commit },
     { stdout: status },
     listing,
   ] = await Promise.all([
-    execute("git", ["rev-parse", "--show-toplevel"], { cwd: workspace }),
-    execute("git", ["rev-parse", "HEAD"], { cwd: workspace }),
-    execute("git", ["status", "--porcelain"], { cwd: workspace }),
+    execute("git", ["rev-parse", "--show-toplevel"], {
+      cwd: workspace,
+      ...cancellation,
+    }),
+    execute("git", ["rev-parse", "HEAD"], { cwd: workspace, ...cancellation }),
+    execute("git", ["status", "--porcelain"], {
+      cwd: workspace,
+      ...cancellation,
+    }),
     execute(
       "git",
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      { cwd: workspace, maxBuffer: gitListingMaxBytes },
+      { cwd: workspace, maxBuffer: gitListingMaxBytes, ...cancellation },
     ),
   ])
   if ((await realpath(repository.trim())) !== workspace)
@@ -40,6 +48,7 @@ async function snapshot(workspace: string) {
   for (const name of [
     ...new Set(listing.stdout.split("\0").filter(Boolean)),
   ].sort()) {
+    signal?.throwIfAborted()
     hash.update(`\0${name}\0`)
     const file = path.join(workspace, name)
     let stat: Stats
@@ -56,10 +65,17 @@ async function snapshot(workspace: string) {
       }
       throw error
     }
-    hash.update(String(stat.mode & 0o777))
+    hash.update(
+      JSON.stringify([
+        stat.mode & 0o777,
+        stat.isSymbolicLink() ? "link" : "file",
+        stat.size,
+      ]),
+    )
     if (stat.isSymbolicLink()) hash.update(await readlink(file))
     else if (stat.isFile())
-      for await (const chunk of createReadStream(file)) hash.update(chunk)
+      for await (const chunk of createReadStream(file, cancellation))
+        hash.update(chunk)
   }
   return {
     commit: commit.trim(),
@@ -195,10 +211,11 @@ export async function checkLocalDesktopUpdate(
     workspace: string
     installedAppPath: string
     logPath: string
+    signal?: AbortSignal
   }>,
 ): Promise<LocalDesktopUpdate> {
   const workspace = await realpath(options.workspace)
-  const before = await snapshot(workspace)
+  const before = await snapshot(workspace, options.signal)
   const pkg: unknown = JSON.parse(
     await readFile(path.join(workspace, "package.json"), "utf8"),
   )
@@ -224,7 +241,7 @@ export async function checkLocalDesktopUpdate(
     async prepare(directory, signal) {
       await runLocalPackage(workspace, options.logPath, signal)
       signal.throwIfAborted()
-      const after = await snapshot(workspace)
+      const after = await snapshot(workspace, signal)
       if (before.fingerprint !== after.fingerprint)
         throw new Error(
           "Local source changed while building. Check again and rebuild the update.",

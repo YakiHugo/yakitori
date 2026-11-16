@@ -35,7 +35,7 @@ export class AppUpdater {
       install(prepared: { directory: string; appPath: string }): Promise<void>
       fetch?: typeof fetch
       previousInstallationError?: string
-      localSource?: () => Promise<LocalDesktopUpdate>
+      localSource?: (signal: AbortSignal) => Promise<LocalDesktopUpdate>
     }>,
   ) {
     this.state =
@@ -94,7 +94,7 @@ export class AppUpdater {
               : AbortSignal.any([controller.signal, init.signal]),
         })
       this.available = this.options.localSource
-        ? await this.options.localSource()
+        ? await this.options.localSource(controller.signal)
         : await findDesktopUpdate(this.options.current, { fetch: fetchRelease })
       this.publish(
         this.available === undefined

@@ -37,6 +37,7 @@ export async function registerAppUpdates(
   let lastCheck = 0
   let changingSource = false
   let disposed = false
+  let sourceChangeAbort: AbortController | undefined
   const requireStableSource = () => {
     if (disposed) throw new Error("The application is closing.")
     if (changingSource)
@@ -113,11 +114,12 @@ export async function registerAppUpdates(
         ...(chosenWorkspace === undefined
           ? {}
           : {
-              localSource: () =>
+              localSource: (signal) =>
                 checkLocalDesktopUpdate({
                   workspace: chosenWorkspace,
                   installedAppPath: applicationPath,
                   logPath: path.join(userDataPath, "local-build.log"),
+                  signal,
                 }),
             }),
         async install(prepared) {
@@ -137,6 +139,7 @@ export async function registerAppUpdates(
     const changeSource = async (selected: string | undefined) => {
       requireStableSource()
       changingSource = true
+      sourceChangeAbort = new AbortController()
       try {
         const phase = updater?.getState().phase
         if (
@@ -152,6 +155,7 @@ export async function registerAppUpdates(
             workspace: selected,
             installedAppPath: applicationPath,
             logPath: path.join(userDataPath, "local-build.log"),
+            signal: sourceChangeAbort.signal,
           })
         if (disposed) throw new Error("The application is closing.")
         // Failed persistence must leave the current, usable updater in place.
@@ -181,6 +185,7 @@ export async function registerAppUpdates(
         if (!disposed) await updater.check()
       } finally {
         changingSource = false
+        sourceChangeAbort = undefined
       }
     }
     chooseLocalSource = async () => {
@@ -326,6 +331,7 @@ export async function registerAppUpdates(
     },
     async dispose() {
       disposed = true
+      sourceChangeAbort?.abort()
       if (!window.isDestroyed()) {
         window.webContents.off("did-finish-load", maybeCheck)
         window.off("focus", maybeCheck)

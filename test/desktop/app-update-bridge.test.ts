@@ -272,7 +272,7 @@ test("a failed source save preserves the configured source and keeps the old upd
     await invoke("yakitori:update-download")
     expect(old?.check).toHaveBeenCalledOnce()
     expect(old?.download).toHaveBeenCalledOnce()
-    await old?.options.localSource?.()
+    await old?.options.localSource?.(new AbortController().signal)
     expect(mock.checkLocal).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspace: oldWorkspace }),
     )
@@ -333,7 +333,7 @@ test("pending source validation blocks update actions and swaps the updater only
     await invoke("yakitori:update-download")
     expect(next?.download).toHaveBeenCalledOnce()
     expect(old?.download).not.toHaveBeenCalled()
-    await next?.options.localSource?.()
+    await next?.options.localSource?.(new AbortController().signal)
     expect(mock.checkLocal).toHaveBeenLastCalledWith(
       expect.objectContaining({ workspace: newWorkspace }),
     )

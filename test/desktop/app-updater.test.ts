@@ -75,7 +75,9 @@ function response(bytes = archive, headers?: HeadersInit) {
   )
 }
 
-async function fixture(localSource?: () => Promise<LocalDesktopUpdate>) {
+async function fixture(
+  localSource?: (signal: AbortSignal) => Promise<LocalDesktopUpdate>,
+) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-app-updater-"))
   const applicationPath = join(root, "Yakitori.app")
   const updatesDirectory = join(root, "updates")
@@ -590,5 +592,24 @@ it("reports local source discovery failures without falling back to remote relea
     message: "Choose the root of the local Yakitori repository.",
   })
   expect(findDesktopUpdate).not.toHaveBeenCalled()
+  expect(fetchUpdate).not.toHaveBeenCalled()
+})
+
+it("cancels local source inspection before disposal completes", async () => {
+  const entered = Promise.withResolvers<AbortSignal>()
+  const { updater, states, fetchUpdate } = await fixture(async (signal) => {
+    entered.resolve(signal)
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), {
+        once: true,
+      })
+    })
+  })
+  const checking = updater.check()
+  const signal = await entered.promise
+  await updater.dispose()
+  await checking
+  expect(signal.aborted).toBe(true)
+  expect(states.map((state) => state.phase)).toEqual(["checking"])
   expect(fetchUpdate).not.toHaveBeenCalled()
 })
