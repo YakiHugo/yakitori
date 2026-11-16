@@ -165,4 +165,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "$RELEASE_TAG" \
-            --body-file "$RUNNER_TEMP/desktop-release-body.md"
+            --notes-file "$RUNNER_TEMP/desktop-release-body.md"
