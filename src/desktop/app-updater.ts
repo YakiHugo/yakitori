@@ -156,6 +156,12 @@ export class AppUpdater {
       )
       let prepared: { appPath: string }
       if ("prepare" in available) {
+        // A local workspace can change after discovery. Build the source as it
+        // exists on this explicit click; preparation still rejects mid-build edits.
+        if (this.options.localSource === undefined)
+          throw new Error("The local update source is unavailable.")
+        available = await this.options.localSource(controller.signal)
+        this.available = available
         this.publish({
           phase: "preparing",
           current: this.options.current,

@@ -453,6 +453,41 @@ const localRelease: LocalDesktopUpdate["release"] = {
   releaseUrl: "",
 }
 
+it("refreshes local source and build details on each explicit build", async () => {
+  const oldPrepare = vi.fn<LocalDesktopUpdate["prepare"]>()
+  const nextRelease = { ...localRelease, commit: "d".repeat(40) }
+  let selected: LocalDesktopUpdate = {
+    release: localRelease,
+    prepare: oldPrepare,
+  }
+  const localSource = vi.fn(async () => selected)
+  const { updater, states, install } = await fixture(localSource)
+  await updater.check()
+  const nextPrepare = vi.fn<LocalDesktopUpdate["prepare"]>(
+    async (directory) => {
+      const appPath = join(directory, "current-local.app")
+      await mkdir(appPath)
+      return { appPath }
+    },
+  )
+  selected = { release: nextRelease, prepare: nextPrepare }
+  await updater.download()
+  expect(localSource).toHaveBeenCalledTimes(2)
+  expect(oldPrepare).not.toHaveBeenCalled()
+  expect(nextPrepare).toHaveBeenCalledOnce()
+  expect(states).toContainEqual({
+    phase: "preparing",
+    current,
+    release: nextRelease,
+  })
+  expect(updater.getState()).toEqual({
+    phase: "ready",
+    current,
+    release: nextRelease,
+  })
+  expect(install).not.toHaveBeenCalled()
+})
+
 it("checks and prepares a local source without remote requests and installs only on an explicit action", async () => {
   const entered = Promise.withResolvers<void>()
   const finish = Promise.withResolvers<void>()
