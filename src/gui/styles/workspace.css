@@ -317,7 +317,7 @@
   top: 0;
   right: 10px;
   z-index: 30;
-  width: min(306px, calc(100% - 24px));
+  width: min(374px, calc(100% - 24px));
   min-width: 0;
   padding: 8px 12px 0 0;
   outline: none;
@@ -342,6 +342,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.workspace-project-branch,
+.workspace-project-status {
+  margin: 3px 0 10px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.workspace-project-status button {
+  margin-top: 6px;
+  text-decoration: underline;
 }
 .workspace-project-changes {
   display: flex;
