@@ -503,7 +503,7 @@ export async function runProviderFlow(
             ).toHaveLength(1)
             expect(commandResult.content).toContain("smoke-approved-command")
             response.end(
-              `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: { role: "assistant", content: "Mock provider reply" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+              `data: ${JSON.stringify({ ...completion, choices: [{ index: 0, delta: { role: "assistant", content: "Resumed provider reply" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
             )
             return
           }
@@ -585,7 +585,11 @@ export async function runProviderFlow(
               index: 0,
               delta: {
                 role: "assistant",
-                content: "Mock provider reply",
+                content:
+                  latestUser?.content ===
+                  "Verify a new turn after interruption."
+                    ? "New turn provider reply"
+                    : "Mock provider reply",
                 annotations: [
                   {
                     type: "url_citation",
@@ -1195,9 +1199,6 @@ async function runApprovalAndInterruption(
   page: Page,
   testInfo: TestInfo,
 ): Promise<void> {
-  const replies = page
-    .getByRole("region", { name: "Response", exact: true })
-    .getByText("Mock provider reply", { exact: true })
   const composer = page.getByRole("textbox", {
     name: "Message the Mate",
     exact: true,
@@ -1238,10 +1239,12 @@ async function runApprovalAndInterruption(
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath("resume-ready.png") })
-  // Reload restores the latest prompt; older replies remain outside the window.
-  const previousReplyCount = await replies.count()
   await page.getByRole("button", { name: "Resume", exact: true }).click()
-  await expect(replies).toHaveCount(previousReplyCount + 1)
+  await expect(
+    page
+      .getByRole("region", { name: "Response", exact: true })
+      .getByText("Resumed provider reply", { exact: true }),
+  ).toHaveCount(1)
   await expect(
     page.getByRole("button", { name: "Resume", exact: true }),
   ).toHaveCount(0)
@@ -1255,7 +1258,11 @@ async function runApprovalAndInterruption(
   // An ordinary new input still starts another Turn after the continuation.
   await composer.fill("Verify a new turn after interruption.")
   await page.getByRole("button", { name: "Send", exact: true }).click()
-  await expect(replies).toHaveCount(previousReplyCount + 2)
+  await expect(
+    page
+      .getByRole("region", { name: "Response", exact: true })
+      .getByText("New turn provider reply", { exact: true }),
+  ).toHaveCount(1)
   await expect(interrupt).toHaveCount(0)
 }
 

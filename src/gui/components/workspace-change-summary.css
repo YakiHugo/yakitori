@@ -1,0 +1,121 @@
+.workspace-change-summary {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.workspace-change-summary-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-change-summary-totals {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 6px 7px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.workspace-change-summary-file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 6px;
+  border-radius: 5px;
+  text-align: left;
+}
+
+.workspace-change-summary-file:hover,
+.workspace-change-summary-review:hover {
+  background: var(--accent);
+}
+
+.workspace-change-file-label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  grid-template-columns: minmax(0, auto) 1fr;
+  column-gap: 7px;
+  row-gap: 3px;
+  align-items: baseline;
+}
+
+.workspace-change-filename,
+.workspace-change-directory {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-change-filename {
+  font-weight: 500;
+}
+
+.workspace-change-directory,
+.workspace-change-status,
+.workspace-change-binary {
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.workspace-change-status {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+.workspace-change-stats {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.workspace-change-additions {
+  color: var(--color-emerald-600);
+}
+
+.workspace-change-deletions {
+  color: var(--color-red-600);
+}
+
+.dark .workspace-change-additions {
+  color: var(--color-emerald-400);
+}
+
+.dark .workspace-change-deletions {
+  color: var(--color-red-400);
+}
+
+.workspace-change-summary-review {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 6px;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-align: left;
+}
+
+.workspace-change-summary-file:focus-visible,
+.workspace-change-summary-review:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.workspace-change-summary-empty {
+  margin: 0;
+  padding: 4px 6px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+}

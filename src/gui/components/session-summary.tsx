@@ -2,7 +2,6 @@ import {
   ChevronDown,
   FileText,
   GitBranch,
-  GitCompareArrows,
   GitPullRequest,
   Image,
   Monitor,
@@ -11,23 +10,22 @@ import {
 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { UserAttachment } from "../../protocol/asset-types.ts"
 import { assetSourceKey } from "../../protocol/asset-types.ts"
 import type { ContextExcerpt } from "../../protocol/input-context.ts"
 import type { SessionCacheExpiry } from "../../protocol/session-cache-expiry.ts"
-import type {
-  GitPullRequestsResponse,
-  GitStatusResponse,
-} from "../../protocol/workspace.ts"
+import type { GitPullRequestsResponse } from "../../protocol/workspace.ts"
 import { attachmentUrl } from "../composer-attachments.ts"
 import { useSessionAgents } from "../hooks/use-session-agents.ts"
+import { useWorkspaceGitStatus } from "../hooks/use-workspace-git-status.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { PdfAttachmentCard } from "./pdf-attachment.tsx"
 import { TelemetryRail } from "./telemetry-rail.tsx"
+import { WorkspaceChangeSummary } from "./workspace-change-summary.tsx"
 import "./session-summary.css"
 
 export function SessionSummary() {
@@ -68,19 +66,19 @@ function SummaryPopover({
   const trigger = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const [anchor, setAnchor] = useState<{ top: number; right: number }>()
-  const [status, setStatus] = useState<GitStatusResponse>()
   const [pullRequests, setPullRequests] = useState<GitPullRequestsResponse>()
   const [pullRequestsLoading, setPullRequestsLoading] = useState(false)
-  const [error, setError] = useState<string>()
-  const [loading, setLoading] = useState(false)
-  const [revision, setRevision] = useState(0)
   const [now, setNow] = useState(() => Date.now())
   const [latestCacheExpiry, setLatestCacheExpiry] = useState(cacheExpiry)
   const [cacheReadFailed, setCacheReadFailed] = useState(false)
-  const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
   const completedTurns = useAppStore((state) => state.execution.telemetry.turns)
   const entries = useAppStore((state) => state.execution.entries)
   const open = anchor !== undefined
+  const { status, loading, error, refresh, revision } = useWorkspaceGitStatus({
+    cwd,
+    apiBase,
+    active: open,
+  })
   const sessionId = useAppStore((state) => state.selectedSession?.id)
   const agents = useSessionAgents(apiBase, sessionId, open)
   const completedAgents = agents.agents.filter(
@@ -174,21 +172,18 @@ function SummaryPopover({
     }
   }, [open])
 
-  // A turn boundary and window focus invalidate the current working-tree snapshot.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: revision and activeTurnId invalidate Git status.
+  const pullRequestBranch =
+    gitInfo?.branch ?? (loading ? undefined : status?.branch)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshed Git snapshots invalidate pull-request status.
   useEffect(() => {
     if (!open || !cwd) return
     let current = true
-    setLoading(true)
-    setStatus(undefined)
     setPullRequests(undefined)
     setPullRequestsLoading(false)
-    setError(undefined)
-    const client = getAppRpcClient(apiBase)
-    const loadPullRequests = (branch: string) => {
+    if (pullRequestBranch) {
       setPullRequestsLoading(true)
-      void client
-        .request("git/pullRequests", { cwd, branch })
+      void getAppRpcClient(apiBase)
+        .request("git/pullRequests", { cwd, branch: pullRequestBranch })
         .then(
           (result) => {
             if (current) setPullRequests(result)
@@ -202,30 +197,10 @@ function SummaryPopover({
           if (current) setPullRequestsLoading(false)
         })
     }
-    if (gitInfo?.branch) loadPullRequests(gitInfo.branch)
-    void client.request("git/status", { cwd }).then(
-      (result) => {
-        if (!current) return
-        setStatus(result)
-        setLoading(false)
-        if (gitInfo?.branch === undefined && result.branch)
-          loadPullRequests(result.branch)
-      },
-      (cause: unknown) => {
-        if (!current) return
-        setError(
-          cause instanceof Error ? cause.message : "Could not load changes.",
-        )
-        setLoading(false)
-      },
-    )
-    const refresh = () => setRevision((value) => value + 1)
-    window.addEventListener("focus", refresh)
     return () => {
       current = false
-      window.removeEventListener("focus", refresh)
     }
-  }, [apiBase, cwd, gitInfo?.branch, open, activeTurnId, revision])
+  }, [apiBase, cwd, open, pullRequestBranch, revision])
 
   const staged = status?.entries.filter(
     (entry) => ![" ", "?", ""].includes(entry.indexStatus),
@@ -346,12 +321,12 @@ function SummaryPopover({
                   <GitBranch size={13} aria-hidden="true" />
                   <span>
                     {gitInfo?.branch ??
-                      (loading
-                        ? "Loading branch…"
-                        : status?.repository
-                          ? (status.branch ?? "Branch unavailable")
-                          : status
-                            ? "Not a Git repository"
+                      (status?.repository
+                        ? (status.branch ?? "Branch unavailable")
+                        : status
+                          ? "Not a Git repository"
+                          : loading
+                            ? "Loading branch…"
                             : "Branch unavailable")}
                   </span>
                 </div>
@@ -413,44 +388,34 @@ function SummaryPopover({
               </section>
               <section className="session-summary-section">
                 <h3>Changes</h3>
-                {loading ? (
+                {loading && !status ? (
                   <p role="status" className="session-summary-empty">
                     Loading changes…
                   </p>
                 ) : error ? (
                   <div className="session-summary-error">
                     <p role="alert">{error}</p>
-                    <button
-                      type="button"
-                      onClick={() => setRevision((value) => value + 1)}
-                    >
+                    <button type="button" onClick={refresh}>
                       Retry
                     </button>
                   </div>
                 ) : status?.repository ? (
-                  <button
-                    type="button"
-                    className="session-summary-changes"
-                    onClick={() => {
-                      useWorkspaceStore.getState().addTab("changes")
-                      setAnchor(undefined)
-                      trigger.current?.focus()
-                    }}
-                  >
-                    <GitCompareArrows size={15} aria-hidden="true" />
-                    <span>
-                      {status.entries.length === 0
-                        ? "Working tree clean"
-                        : `${status.entries.length} changed ${status.entries.length === 1 ? "file" : "files"}`}
-                      {status.entries.length > 0 ? (
-                        <small>
-                          {staged} staged · {unstaged} unstaged · {untracked}{" "}
-                          untracked
-                        </small>
-                      ) : null}
-                    </span>
-                    <span className="session-summary-view">View</span>
-                  </button>
+                  <>
+                    {status.entries.length > 0 ? (
+                      <p className="session-summary-change-scopes">
+                        {staged} staged · {unstaged} unstaged · {untracked}{" "}
+                        untracked
+                      </p>
+                    ) : null}
+                    <WorkspaceChangeSummary
+                      status={status}
+                      onReview={(path, staged) => {
+                        useWorkspaceStore.getState().openChanges(path, staged)
+                        setAnchor(undefined)
+                        trigger.current?.focus()
+                      }}
+                    />
+                  </>
                 ) : (
                   <p className="session-summary-empty">
                     {status

@@ -11,7 +11,12 @@ export type WorkspaceView =
   | "computer"
   | "agents"
 export type WorkspaceTab = (
-  | { id: string; kind: "changes" | "files" | "computer" }
+  | { id: string; kind: "files" | "computer" }
+  | {
+      id: string
+      kind: "changes"
+      target?: { path?: string; staged: boolean; requestId: string }
+    }
   | { id: string; kind: "browser"; initialUrl?: string; title?: string }
   | { id: string; kind: "file"; path: string; cwd: string; dirty?: boolean }
   | {
@@ -70,6 +75,7 @@ type WorkspaceStore = {
   addTab(kind: WorkspaceView, sourceSessionId?: string): string
   closeTab(id: string): void
   openFile(path: string, cwd: string): void
+  openChanges(path?: string, staged?: boolean): void
   openSkill(path: string, name: string, projectId?: string): void
   setFileDirty(id: string, dirty: boolean): void
   openBrowser(url: string): void
@@ -273,16 +279,34 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
             presentation.activeId === id
               ? {
                   ...presentation,
-                  activeId: remaining.filter(
-                    (tab) =>
-                      tab.workspaceSessionId ===
-                      (session === "" ? undefined : session),
-                  ).at(-1)?.id,
+                  activeId: remaining
+                    .filter(
+                      (tab) =>
+                        tab.workspaceSessionId ===
+                        (session === "" ? undefined : session),
+                    )
+                    .at(-1)?.id,
                 }
               : presentation,
           ],
         ),
       ),
+    })
+  },
+  openChanges(path, staged = false) {
+    const id = get().addTab("changes")
+    set({
+      tabs: get().tabs.map((tab) => {
+        if (tab.id !== id || tab.kind !== "changes") return tab
+        return {
+          ...tab,
+          target: {
+            ...(path === undefined ? {} : { path }),
+            staged,
+            requestId: crypto.randomUUID(),
+          },
+        }
+      }),
     })
   },
   openFile(path, cwd) {

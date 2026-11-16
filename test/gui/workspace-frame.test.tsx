@@ -164,7 +164,9 @@ beforeEach(() => {
           modelSelection: { provider: "faux", model: "scripted" },
           execution: projectExecutionView(createExecutionViewState()),
         }
-      : { skills: [] },
+      : method === "git/status"
+        ? { repository: true, branch: "main", entries: [] }
+        : { skills: [] },
   )
   useWorkspaceStore.setState({
     tabs: [{ id: "changes", kind: "changes" }],
