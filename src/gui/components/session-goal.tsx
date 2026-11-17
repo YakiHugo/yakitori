@@ -15,7 +15,11 @@ export function GoalBar() {
   const saving = useAppStore((state) =>
     state.inFlightActions.has(`goal:${session?.id}`),
   )
-  if (session?.goal === undefined) return null
+  if (
+    session?.goal === undefined ||
+    session.goal.status === GoalStatus.Complete
+  )
+    return null
   const goal = session.goal
   const status = goal.status
   const nextStatus = goalToggleStatus(status)
