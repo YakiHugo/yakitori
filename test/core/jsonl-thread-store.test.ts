@@ -2790,24 +2790,21 @@ describe("JsonlThreadStore", () => {
     })
   })
 
-  it("waits for storage coordination during startup instead of rejecting readiness", async () => {
+  it("lists local sessions while startup collection waits for storage coordination", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_coordinated"))
     await store.shutdownThread("thread_coordinated")
     const heldLock = await holdStorageLock(root)
     const competing = new JsonlThreadStore({ root })
-    let settled = false
-    const listing = competing.listThreads().finally(() => {
-      settled = true
-    })
-
-    await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(settled).toBe(false)
-    heldLock.release()
-    await expect(listing).resolves.toMatchObject({
-      threads: [{ id: "thread_coordinated" }],
-    })
-    await heldLock.exited
+    try {
+      await expect(competing.listThreads()).resolves.toMatchObject({
+        threads: [{ id: "thread_coordinated" }],
+      })
+    } finally {
+      heldLock.release()
+      await heldLock.exited
+      await competing.initialize()
+    }
   })
 
   it("does not delete an existing target when fork creation collides", async () => {

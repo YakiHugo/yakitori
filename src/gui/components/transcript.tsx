@@ -59,6 +59,9 @@ export function Transcript({
   )
   const historyBefore = useAppStore((state) => state.historyBefore)
   const loadEarlierHistory = useAppStore((state) => state.loadEarlierHistory)
+  const prefetchEarlierHistory = useAppStore(
+    (state) => state.prefetchEarlierHistory,
+  )
   const loadHistoryThrough = useAppStore((state) => state.loadHistoryThrough)
   const historyLoading = useAppStore((state) =>
     state.inFlightActions.has(`history:${state.selection.sessionId}`),
@@ -94,6 +97,7 @@ export function Transcript({
         before: number
         node: Element
         top: number
+        height: number
       }>
     | undefined
   >(undefined)
@@ -219,54 +223,94 @@ export function Transcript({
         : next,
     )
   }, [inputIds, scroll.viewportRef])
-  const requestEarlierHistory = () => {
+  const prefetchNearEarlierHistory = useCallback(() => {
     const viewport = scroll.viewportRef.current
     if (
-      !viewport ||
       sessionId === undefined ||
       hydrating ||
       historyBefore === undefined ||
-      loadingEarlier.current ||
-      viewport.scrollTop > 48
-    ) {
+      !viewport ||
+      viewport.clientHeight <= 0
+    )
       return
-    }
-    const request = { sessionId, selectionRevision, historyRevision }
-    loadingEarlier.current = request
-    void loadEarlierHistory({
-      beforePrepend: () => {
-        const state = useAppStore.getState()
-        if (
-          loadingEarlier.current !== request ||
-          state.selection.sessionId !== sessionId ||
-          state.sessionSelectionIntentRevision !== selectionRevision ||
-          (state.sessionHistoryRevisions[sessionId] ?? 0) !== historyRevision
-        )
-          return
-        const node = scroll.contentRef.current?.firstElementChild
-        if (!node) return
-        scroll.pauseFollowing()
-        // Capture immediately before the store commits the prepend. Streaming
-        // and user scrolling while the request was pending belong to this view.
-        earlierAnchor.current = {
-          request,
-          sessionId,
-          selectionRevision,
-          historyRevision,
-          before: historyBefore,
-          node,
-          top: node.getBoundingClientRect().top,
-        }
-      },
-    }).then((loaded) => {
-      if (!loaded && earlierAnchor.current?.request === request)
-        earlierAnchor.current = undefined
-      if (loadingEarlier.current === request) loadingEarlier.current = undefined
-    })
-  }
+    // One viewport of lead time hides a page read during ordinary scrolling.
+    // This implementation boundary caches one page and never expands the DOM.
+    if (
+      viewport.scrollHeight <= viewport.clientHeight ||
+      viewport.scrollTop <= viewport.clientHeight
+    )
+      void prefetchEarlierHistory()
+  }, [
+    sessionId,
+    hydrating,
+    historyBefore,
+    prefetchEarlierHistory,
+    scroll.viewportRef,
+  ])
+  const requestEarlierHistory = useCallback(
+    (fillViewport = false) => {
+      const viewport = scroll.viewportRef.current
+      if (
+        !viewport ||
+        sessionId === undefined ||
+        hydrating ||
+        historyBefore === undefined ||
+        loadingEarlier.current ||
+        (!fillViewport && viewport.scrollTop > 48)
+      ) {
+        return
+      }
+      const request = { sessionId, selectionRevision, historyRevision }
+      loadingEarlier.current = request
+      void loadEarlierHistory({
+        beforePrepend: () => {
+          const state = useAppStore.getState()
+          if (
+            loadingEarlier.current !== request ||
+            state.selection.sessionId !== sessionId ||
+            state.sessionSelectionIntentRevision !== selectionRevision ||
+            (state.sessionHistoryRevisions[sessionId] ?? 0) !== historyRevision
+          )
+            return
+          const node = scroll.contentRef.current?.firstElementChild
+          if (!node) return
+          scroll.pauseFollowing()
+          // Capture immediately before the store commits the prepend. Streaming
+          // and user scrolling while the request was pending belong to this view.
+          earlierAnchor.current = {
+            request,
+            sessionId,
+            selectionRevision,
+            historyRevision,
+            before: historyBefore,
+            node,
+            top: node.getBoundingClientRect().top,
+            height: viewport.scrollHeight,
+          }
+        },
+      }).then((loaded) => {
+        if (!loaded && earlierAnchor.current?.request === request)
+          earlierAnchor.current = undefined
+        if (loadingEarlier.current === request)
+          loadingEarlier.current = undefined
+      })
+    },
+    [
+      sessionId,
+      selectionRevision,
+      historyRevision,
+      hydrating,
+      historyBefore,
+      loadEarlierHistory,
+      scroll.viewportRef,
+      scroll.contentRef,
+      scroll.pauseFollowing,
+    ],
+  )
   const updateScroll = () => {
     scroll.onScroll()
     updateVisibleInputs()
+    prefetchNearEarlierHistory()
     const viewport = scroll.viewportRef.current
     if (!viewport) return
     const upward = viewport.scrollTop < previousScrollTop.current
@@ -287,8 +331,11 @@ export function Transcript({
     }
     if (historyBefore === saved.before) return
     earlierAnchor.current = undefined
-    if (!scroll.contentRef.current?.contains(saved.node)) return
-    viewport.scrollTop += saved.node.getBoundingClientRect().top - saved.top
+    // Extending a turn across the page boundary can replace its first block.
+    // The height captured at commit also preserves position in that case.
+    viewport.scrollTop += scroll.contentRef.current?.contains(saved.node)
+      ? saved.node.getBoundingClientRect().top - saved.top
+      : viewport.scrollHeight - saved.height
     previousScrollTop.current = viewport.scrollTop
     scroll.onScroll()
   }, [
@@ -317,11 +364,29 @@ export function Transcript({
   useLayoutEffect(updateVisibleInputs, [updateVisibleInputs])
   useLayoutEffect(() => {
     const content = scroll.contentRef.current
-    if (!content) return
-    const observer = new ResizeObserver(updateVisibleInputs)
+    const viewport = scroll.viewportRef.current
+    if (!content || !viewport) return
+    const updateLayout = () => {
+      updateVisibleInputs()
+      prefetchNearEarlierHistory()
+      if (
+        viewport.clientHeight > 0 &&
+        viewport.scrollHeight <= viewport.clientHeight
+      )
+        requestEarlierHistory(true)
+    }
+    updateLayout()
+    const observer = new ResizeObserver(updateLayout)
     observer.observe(content)
+    observer.observe(viewport)
     return () => observer.disconnect()
-  }, [scroll.contentRef, updateVisibleInputs])
+  }, [
+    scroll.contentRef,
+    scroll.viewportRef,
+    updateVisibleInputs,
+    prefetchNearEarlierHistory,
+    requestEarlierHistory,
+  ])
   useLayoutEffect(() => {
     const surface = surfaceRef.current
     const dock = dockRef.current

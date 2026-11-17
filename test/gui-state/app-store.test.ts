@@ -125,6 +125,392 @@ describe("partial conversation history", () => {
     expect(fakeRef.current.streams[0]?.options?.recent).toBe(true)
   })
 
+  it("publishes a complete snapshot window before replay completion and applies the live tail", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    const admitted = (seq: number, text: string) =>
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: `request_${seq}`,
+            inputId: `input_${seq}`,
+            role: InputRole.User,
+            content: inputFixture(inputParts(text)),
+          },
+        },
+      })
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [admitted(90, "Latest window")],
+      historyBefore: 90,
+    })
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().execution.lastSeq).toBe(100)
+    expect(useAppStore.getState().execution.entries).toMatchObject([
+      { text: "Latest window" },
+    ])
+    stream?.emitEvent(admitted(101, "Live tail"))
+    expect(useAppStore.getState().execution.entries).toMatchObject([
+      { text: "Latest window" },
+      { text: "Live tail" },
+    ])
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().execution.entries).toHaveLength(2)
+    expect(useAppStore.getState().historyBefore).toBe(90)
+  })
+
+  it("deduplicates a prefetched page without rendering it until demand and merges it once", async () => {
+    const page = deferredResponse()
+    fakeRef.current.respond = () => page.promise
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: sessionDetail,
+      historyBefore: 10,
+      execution: { ...createExecutionViewState(), lastSeq: 100 },
+    })
+    const execution = useAppStore.getState().execution
+    const first = useAppStore.getState().prefetchEarlierHistory()
+    const second = useAppStore.getState().prefetchEarlierHistory()
+    expect(useAppStore.getState().inFlightActions.size).toBe(0)
+    page.resolve({
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_old",
+              inputId: "input_old",
+              role: InputRole.User,
+              content: inputFixture(inputParts("Earlier request")),
+            },
+          },
+        }),
+      ],
+      historyBefore: 2,
+    })
+    expect(await first).toBe(true)
+    expect(await second).toBe(true)
+    expect(useAppStore.getState().execution).toBe(execution)
+    expect(useAppStore.getState().historyBefore).toBe(10)
+    const beforePrepend = vi.fn()
+    const demand = useAppStore.getState().loadEarlierHistory({ beforePrepend })
+    const duplicate = useAppStore.getState().loadEarlierHistory()
+    expect(await demand).toBe(true)
+    expect(await duplicate).toBe(false)
+    expect(beforePrepend).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().execution.entries).toMatchObject([
+      { text: "Earlier request" },
+    ])
+    expect(useAppStore.getState().execution.lastSeq).toBe(100)
+    expect(useAppStore.getState().historyBefore).toBe(2)
+    expect(fakeRef.current.requestsFor("session/history")).toHaveLength(1)
+  })
+
+  it("displays a pending snapshot window while waiting for authoritative model and recovery state", async () => {
+    inputRecoveryMemory.reserveAdmission({
+      apiBase: useAppStore.getState().apiBase,
+      sessionId: "session_1",
+      content: inputFixture(inputParts("Unconfirmed input")),
+    })
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      statePending: true,
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 95,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_active", inputId: "input_active" },
+          },
+        }),
+      ],
+      historyBefore: 90,
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().execution.activeTurnId).toBe("turn_active")
+    expect(useAppStore.getState().restoringModelSelectionFor).toBe("session_1")
+    expect(fakeRef.current.requestsFor("session/input/status")).toEqual([])
+    const currentModel = { provider: "faux", model: "authoritative-model" }
+    stream?.emitSnapshot({
+      session: {
+        ...sessionDetail,
+        seq: 100,
+        activeTurnId: "turn_active",
+        currentModel,
+      },
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 20,
+          event: {
+            type: EventType.ContextTokens,
+            data: {
+              turnId: "turn_active",
+              activeContextTokens: 40_000,
+              capacityTokens: 200_000,
+            },
+          },
+        }),
+      ],
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().modelSelections.session_1).toEqual(
+      currentModel,
+    )
+    expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
+    expect(useAppStore.getState().historyBefore).toBe(90)
+    expect(useAppStore.getState().execution.lastSeq).toBe(100)
+    expect(useAppStore.getState().execution.contextTokens).toMatchObject({
+      activeContextTokens: 40_000,
+    })
+    expect(fakeRef.current.requestsFor("session/input/status")).toHaveLength(1)
+  })
+
+  it("keeps newer live state when a pending snapshot finishes at an older watermark", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      statePending: true,
+      events: [],
+      historyBefore: 90,
+    })
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 101,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_new", inputId: "input_new" },
+        },
+      }),
+    )
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [],
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().selectedSession).toMatchObject({
+      seq: 101,
+      activeTurnId: "turn_new",
+      active: true,
+    })
+    expect(useAppStore.getState().execution.activeTurnId).toBe("turn_new")
+    expect(useAppStore.getState().execution.lastSeq).toBe(101)
+    expect(useAppStore.getState().historyBefore).toBe(90)
+  })
+
+  it.each([
+    false,
+    true,
+  ])("restores supplemental turn timing from a fresh snapshot without changing newer completion state (completed: %s)", async (completed) => {
+    const startedAt = "2026-07-24T00:01:00.000Z"
+    const completedAt = "2026-07-24T00:02:00.000Z"
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    const session = {
+      ...sessionDetail,
+      seq: 100,
+      activeTurnId: "turn_large",
+    }
+    stream?.emitSnapshot({
+      session,
+      statePending: true,
+      events: [],
+      historyBefore: 90,
+    })
+    if (completed)
+      stream?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 101,
+          createdAt: completedAt,
+          event: {
+            type: EventType.TurnCompleted,
+            data: {
+              turnId: "turn_large",
+              outcome: { status: "completed" },
+            },
+          },
+        }),
+      )
+    stream?.emitSnapshot({
+      session,
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 20,
+          createdAt: startedAt,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_large", inputId: "input_large" },
+          },
+        }),
+      ],
+    })
+    stream?.emitReplayComplete()
+    const state = useAppStore.getState()
+    expect(state.execution.turnTimings.turn_large).toEqual({
+      startedAt,
+      inputId: "input_large",
+      ...(completed ? { completedAt, outcome: { status: "completed" } } : {}),
+    })
+    expect(state.execution.activeTurnId).toBe(
+      completed ? undefined : "turn_large",
+    )
+    expect(state.execution.activeTurnStartedAt).toBe(
+      completed ? undefined : startedAt,
+    )
+    expect(state.selectedSession?.activeTurnId).toBe(
+      completed ? undefined : "turn_large",
+    )
+    expect(state.execution.lastSeq).toBe(completed ? 101 : 100)
+    expect(state.selectedSession?.seq).toBe(completed ? 101 : 100)
+    expect(state.historyBefore).toBe(90)
+  })
+
+  it("fills an empty pending window from a fresh snapshot while retaining newer live items once", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      statePending: true,
+      events: [],
+    })
+    const answer = (seq: number, text: string) =>
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_latest",
+            item: {
+              type: "agent_message",
+              itemId: "item_live",
+              content: [{ type: "text", text }],
+            },
+          },
+        },
+      })
+    stream?.emitEvent(answer(101, "Newer live answer"))
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 90,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request_latest",
+              inputId: "input_latest",
+              role: InputRole.User,
+              content: inputFixture(inputParts("Latest request")),
+            },
+          },
+        }),
+        answer(99, "Older indexed answer"),
+      ],
+      historyBefore: 90,
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().execution.entries).toMatchObject([
+      { text: "Latest request" },
+      { text: "Newer live answer" },
+    ])
+    expect(useAppStore.getState().execution.entries).toHaveLength(2)
+    expect(useAppStore.getState().execution.lastSeq).toBe(101)
+    expect(useAppStore.getState().historyBefore).toBe(90)
+  })
+
+  it.each([
+    false,
+    true,
+  ])("keeps pages loaded before a pending snapshot refresh in order without retreating its cursor (root: %s)", async (rootLoaded) => {
+    const input = (seq: number, text: string) =>
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: `request_${seq}`,
+            inputId: `input_${seq}`,
+            role: InputRole.User,
+            content: inputFixture(inputParts(text)),
+          },
+        },
+      })
+    const older = input(5, "Older request")
+    const latest = input(90, "Latest request")
+    fakeRef.current.respond = (method) =>
+      method === "session/history"
+        ? {
+            events: [older, latest],
+            ...(rootLoaded ? {} : { historyBefore: 5 }),
+          }
+        : notFound()
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      statePending: true,
+      events: [],
+      historyBefore: 100,
+    })
+    expect(await useAppStore.getState().loadEarlierHistory()).toBe(true)
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [latest],
+      historyBefore: 90,
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().execution.entries).toMatchObject([
+      { text: "Older request" },
+      { text: "Latest request" },
+    ])
+    expect(useAppStore.getState().historyBefore).toBe(
+      rootLoaded ? undefined : 5,
+    )
+  })
+
+  it.each([
+    "selection",
+    "rollout",
+    "reset",
+  ] as const)("discards a pending prefetch after %s changes", async (change) => {
+    const page = deferredResponse()
+    fakeRef.current.respond = () => page.promise
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: sessionDetail,
+      historyBefore: 10,
+    })
+    const prefetch = useAppStore.getState().prefetchEarlierHistory()
+    if (change === "selection")
+      useAppStore.setState({ sessionSelectionIntentRevision: 2 })
+    else if (change === "rollout")
+      useAppStore.setState({
+        selectedSession: { ...sessionDetail, rolloutId: "rollout_new" },
+      })
+    else useAppStore.getState().resetSessionHistory()
+    page.resolve({ events: [], historyBefore: 5 })
+    expect(await prefetch).toBe(false)
+    expect(useAppStore.getState().execution.entries).toEqual([])
+    if (change !== "reset")
+      expect(useAppStore.getState().historyBefore).toBe(10)
+  })
+
   it("preserves unloaded history across an incremental reconnect snapshot", async () => {
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]
@@ -139,7 +525,7 @@ describe("partial conversation history", () => {
     expect(useAppStore.getState().historyBefore).toBe(10)
   })
 
-  it("checks complete history before restoring an unconfirmed input", async () => {
+  it("confirms an old admission through a targeted lookup without displaying its message", async () => {
     const content = inputFixture(inputParts("already accepted"))
     const pending = inputRecoveryMemory.reserveAdmission({
       apiBase: useAppStore.getState().apiBase,
@@ -148,23 +534,29 @@ describe("partial conversation history", () => {
     })
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]
-    expect(stream?.options?.recent).toBe(false)
-    emitSnapshot(stream, { ...sessionDetail, seq: 100 })
-    stream?.emitEvent(
-      createEventEnvelope({
-        sessionId: "session_1",
-        seq: 2,
-        event: {
-          type: EventType.InputAdmitted,
-          data: {
-            requestId: pending.requestId,
-            inputId: "input_old",
-            role: InputRole.User,
-            content,
-          },
+    expect(stream?.options?.recent).toBe(true)
+    const event = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: pending.requestId,
+          inputId: "input_old",
+          role: InputRole.User,
+          content,
         },
-      }),
-    )
+      },
+    })
+    fakeRef.current.respond = (method) =>
+      method === "session/input/status"
+        ? { rolloutId: sessionDetail.rolloutId, seq: 100, events: [event] }
+        : notFound()
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [],
+      historyBefore: 90,
+    })
     stream?.emitReplayComplete()
     await vi.waitFor(() =>
       expect(
@@ -175,6 +567,82 @@ describe("partial conversation history", () => {
       ).toEqual([]),
     )
     expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().execution.entries).toEqual([])
+    expect(useAppStore.getState().historyBefore).toBe(90)
+    expect(fakeRef.current.requestsFor("session/input/status")).toEqual([
+      {
+        method: "session/input/status",
+        params: { sessionId: "session_1", requestIds: [pending.requestId] },
+      },
+    ])
+  })
+
+  it.each([
+    "absent",
+    "failure",
+    "switch",
+    "reset",
+    "rollout",
+  ] as const)("resolves pending input recovery only after a successful current lookup (%s)", async (outcome) => {
+    const pending = inputRecoveryMemory.reserveAdmission({
+      apiBase: useAppStore.getState().apiBase,
+      sessionId: "session_1",
+      content: inputFixture(inputParts("Unconfirmed input")),
+    })
+    const lookup = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/input/status" ? lookup.promise : notFound()
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 100 },
+      events: [],
+      historyBefore: 90,
+    })
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    if (outcome === "switch")
+      await useAppStore.getState().selectSession("session_2")
+    if (outcome === "reset") useAppStore.getState().resetSessionHistory()
+    if (outcome === "rollout")
+      useAppStore.setState({
+        selectedSession: { ...sessionDetail, rolloutId: "rollout_new" },
+      })
+    if (outcome === "failure")
+      lookup.reject(new ApiRequestError("Lookup unavailable"))
+    else
+      lookup.resolve({
+        rolloutId: sessionDetail.rolloutId,
+        seq: 100,
+        events: [],
+      })
+    // Let the request continuation and recovery task both settle before
+    // asserting that a stale or failed answer produced no composer write.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await vi.waitFor(() =>
+      expect(
+        outcome === "absent"
+          ? useAppStore.getState().promptDraft?.text
+          : useAppStore.getState().message,
+      ).toBe(
+        outcome === "absent"
+          ? "Unconfirmed input"
+          : outcome === "failure"
+            ? "Lookup unavailable"
+            : undefined,
+      ),
+    )
+    if (outcome !== "absent")
+      expect(useAppStore.getState().promptDraft).toBeUndefined()
+    if (outcome === "failure")
+      expect(
+        inputRecoveryMemory.readAdmissionByRequestId(
+          useAppStore.getState().apiBase,
+          "session_1",
+          pending.requestId,
+        )?.restored,
+      ).not.toBe(true)
   })
 
   it.each([
@@ -251,6 +719,34 @@ describe("partial conversation history", () => {
     expect(await loading).toBe(false)
     expect(beforePrepend).not.toHaveBeenCalled()
     expect(useAppStore.getState().historyBefore).toBe(10)
+  })
+
+  it("allows a fresh page read after returning while the old read is still pending", async () => {
+    const oldPage = deferredResponse()
+    const currentPage = deferredResponse()
+    fakeRef.current.respond = () =>
+      fakeRef.current.requestsFor("session/history").length === 1
+        ? oldPage.promise
+        : currentPage.promise
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSelectionIntentRevision: 1,
+      historyBefore: 10,
+    })
+    const oldLoad = useAppStore.getState().loadEarlierHistory()
+    useAppStore.setState({ sessionSelectionIntentRevision: 3 })
+    const currentLoad = useAppStore.getState().loadEarlierHistory()
+    oldPage.resolve({ events: [], historyBefore: 5 })
+    expect(await oldLoad).toBe(false)
+    expect(
+      useAppStore.getState().inFlightActions.has("history:session_1"),
+    ).toBe(true)
+    currentPage.resolve({ events: [], historyBefore: 5 })
+    expect(await currentLoad).toBe(true)
+    expect(
+      useAppStore.getState().inFlightActions.has("history:session_1"),
+    ).toBe(false)
+    expect(useAppStore.getState().historyBefore).toBe(5)
   })
 
   it("stops targeted history loading when the server repeats its cursor", async () => {
@@ -2096,7 +2592,7 @@ describe("revert session", () => {
     ).toHaveLength(1)
     const reconnect = fakeRef.current.streams.at(-1)
     expect(reconnect?.after).toBe(0)
-    expect(reconnect?.options?.recent).toBe(false)
+    expect(reconnect?.options?.recent).toBe(true)
     emitSnapshot(reconnect, {
       ...sessionDetail,
       rolloutId: changed ? "rollout_reverted" : sessionDetail.rolloutId,
@@ -3423,7 +3919,9 @@ describe("model selection", () => {
       }),
     )
     replay?.emitReplayComplete()
-    expect(useAppStore.getState().promptDraft).toEqual(inputParts("second"))
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual(inputParts("second")),
+    )
     expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
     replay?.emitReplayComplete()
     expect(useAppStore.getState().promptDraft).toEqual(inputParts("second"))
@@ -3454,7 +3952,11 @@ describe("model selection", () => {
     expect(resumed).not.toBe(first)
     emitSnapshot(resumed, { ...sessionDetail, seq: 2 })
     resumed?.emitReplayComplete()
-    expect(useAppStore.getState().promptDraft).toEqual(inputParts("reconnect"))
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual(
+        inputParts("reconnect"),
+      ),
+    )
     expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
   })
 
@@ -3494,8 +3996,10 @@ describe("model selection", () => {
     const replay = fakeRef.current.streams.at(-1)
     emitSnapshot(replay, { ...sessionDetail, seq: 3 })
     replay?.emitReplayComplete()
-    expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("survive reload"),
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual(
+        inputParts("survive reload"),
+      ),
     )
 
     await useAppStore.getState().selectSession("session_2")
@@ -3516,8 +4020,10 @@ describe("model selection", () => {
     const secondReload = fakeRef.current.streams.at(-1)
     emitSnapshot(secondReload, { ...sessionDetail, seq: 3 })
     secondReload?.emitReplayComplete()
-    expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("survive reload"),
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual(
+        inputParts("survive reload"),
+      ),
     )
     fakeRef.current.respond = admissionResponder()
     await useAppStore.getState().admitInput(inputParts("survive reload"))
@@ -3583,8 +4089,10 @@ describe("model selection", () => {
     const replay = fakeRef.current.streams.at(-1)
     emitSnapshot(replay, { ...sessionDetail, seq: 3 })
     replay?.emitReplayComplete()
-    expect(useAppStore.getState().promptDraft).toEqual(
-      inputParts("inspect image", [promoted]),
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toEqual(
+        inputParts("inspect image", [promoted]),
+      ),
     )
 
     await useAppStore
@@ -3716,6 +4224,11 @@ describe("model selection", () => {
       await useAppStore.getState().selectSession("session_1")
       emitSnapshot(fakeRef.current.streams.at(-1), { ...sessionDetail, seq: 3 })
       fakeRef.current.streams.at(-1)?.emitReplayComplete()
+      await vi.waitFor(() =>
+        expect(useAppStore.getState().promptDraft).toEqual(
+          inputParts("inspect image", [promoted]),
+        ),
+      )
     }
     expect(
       (useAppStore.getState().promptDraft?.attachments ?? []).filter(
@@ -6843,10 +7356,13 @@ it("releases input submission before an unrelated sidebar refresh completes", as
 })
 
 it.each([
-  "started",
-  "steered",
-  "error",
-] as const)("durable admission releases send A and its late %s reply preserves send B ownership", async (reply) => {
+  ["started", "live"],
+  ["steered", "live"],
+  ["error", "live"],
+  ["started", "snapshot"],
+  ["steered", "snapshot"],
+  ["error", "snapshot"],
+] as const)("durable admission releases send A and its late %s reply preserves send B ownership (%s receipt)", async (reply, receipt) => {
   const first = deferredResponse()
   const second = deferredResponse()
   fakeRef.current.respond = (method) => {
@@ -6872,21 +7388,25 @@ it.each([
   expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
     true,
   )
-  stream?.emitEvent(
-    createEventEnvelope({
-      sessionId: "session_1",
-      seq: 2,
-      event: {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: requestA.requestId,
-          inputId: "input_a",
-          role: InputRole.User,
-          content: requestA.content,
-        },
+  const admitted = createEventEnvelope({
+    sessionId: "session_1",
+    seq: 2,
+    event: {
+      type: EventType.InputAdmitted,
+      data: {
+        requestId: requestA.requestId,
+        inputId: "input_a",
+        role: InputRole.User,
+        content: requestA.content,
       },
-    }),
-  )
+    },
+  })
+  if (receipt === "live") stream?.emitEvent(admitted)
+  else
+    stream?.emitSnapshot({
+      session: { ...sessionDetail, seq: 2, activeTurnId: "turn_1" },
+      events: [admitted],
+    })
   expect(useAppStore.getState().inFlightActions.has("admit:session_1")).toBe(
     false,
   )

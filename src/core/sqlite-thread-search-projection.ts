@@ -1,7 +1,8 @@
-import { answerTextParts } from "../protocol/model-output.ts"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { answerTextParts } from "../protocol/model-output.ts"
+import type { DisplayWindow } from "./display-window.ts"
 import type {
   StoredRolloutItem,
   StoredThread,
@@ -10,6 +11,17 @@ import type {
   ThreadSummary,
 } from "./rollout.ts"
 import {
+  applyDisplayEntries,
+  createDisplayTables,
+  type RolloutCheckpoint,
+  readCheckpoint,
+  readDisplayEvents,
+  readDisplayPage,
+  readInputAdmissions,
+  requireProjectionAppend,
+  writeCheckpoint,
+} from "./sqlite-thread-display-projection.ts"
+import {
   literalMatches,
   markdownVisibleText,
   parseThreadCursor,
@@ -17,13 +29,13 @@ import {
   type ThreadSearchOccurrence,
   threadCursor,
 } from "./thread-search.ts"
+import { advanceThreadStatus } from "./thread-status.ts"
 import type {
   ThreadStoreOccurrenceSearchInput,
   ThreadStoreOccurrenceSearchResult,
   ThreadStoreSearchInput,
   ThreadStoreSearchResult,
 } from "./thread-store.ts"
-import { advanceThreadStatus } from "./thread-status.ts"
 
 export type ThreadSearchProjectionStamp = Readonly<{
   metadataSize: number
@@ -69,8 +81,9 @@ type OccurrenceCursor = Readonly<{
   occurrenceIndex: number
 }>
 
-// Status summaries are disposable alongside the text projection.
-const schemaVersion = 7
+// Status, compact display history and checkpoints share a disposable projection,
+// so a schema reset rebuilds them consistently from authoritative JSONL.
+const schemaVersion = 8
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -130,6 +143,54 @@ export class SqliteThreadSearchProjection {
     return row === undefined ? undefined : summaryFromRow(row)
   }
 
+  checkpoint(
+    threadId: string,
+    rolloutId: string,
+  ): RolloutCheckpoint | undefined {
+    return readCheckpoint(this.#database, threadId, rolloutId)
+  }
+
+  readDisplayWindow(
+    threadId: string,
+    before = Number.MAX_SAFE_INTEGER,
+  ): DisplayWindow {
+    return readDisplayPage(this.#database, threadId, before)
+  }
+
+  readThreadEvents(
+    threadId: string,
+    input: { after: number; through: number; limit: number },
+  ) {
+    return readDisplayEvents(
+      this.#database,
+      threadId,
+      input.after,
+      input.through,
+      input.limit,
+    )
+  }
+
+  readInputAdmissions(
+    threadId: string,
+    requestIds: readonly string[],
+  ): StoredRolloutItem[] {
+    return readInputAdmissions(this.#database, threadId, requestIds)
+  }
+
+  begin(metadata: ThreadMetadata): void {
+    this.#transaction(() => {
+      this.#database
+        .prepare("DELETE FROM search_threads WHERE thread_id = ?")
+        .run(metadata.id)
+      insertThread(this.#database, metadata, 0, {
+        metadataSize: -1,
+        metadataMtimeMs: -1,
+        rolloutSize: -1,
+        rolloutMtimeMs: -1,
+      })
+    })
+  }
+
   rebuild(stored: StoredThread, stamp: ThreadSearchProjectionStamp): void {
     this.#transaction(() => {
       this.#database
@@ -143,6 +204,11 @@ export class SqliteThreadSearchProjection {
         stamp,
       )
       applyEntries(this.#database, stored.metadata.id, stored.rollout)
+      writeCheckpoint(this.#database, stored.metadata.id, {
+        rolloutId: stored.metadata.rolloutId,
+        endByteOffset: stamp.rolloutSize,
+        nextSeq: (stored.rollout.at(-1)?.seq ?? 0) + 1,
+      })
     })
   }
 
@@ -150,8 +216,10 @@ export class SqliteThreadSearchProjection {
     metadata: ThreadMetadata,
     entries: readonly StoredRolloutItem[],
     stamp: ThreadSearchProjectionStamp,
+    checkpoint?: RolloutCheckpoint,
   ): void {
     this.#transaction(() => {
+      requireProjectionAppend(this.#database, metadata, entries, checkpoint)
       const result = this.#database
         .prepare(`
           UPDATE search_threads
@@ -180,6 +248,17 @@ export class SqliteThreadSearchProjection {
         throw new Error(`Thread ${metadata.id} has no search projection.`)
       }
       applyEntries(this.#database, metadata.id, entries)
+      writeCheckpoint(
+        this.#database,
+        metadata.id,
+        checkpoint ?? {
+          rolloutId: metadata.rolloutId,
+          endByteOffset: stamp.rolloutSize,
+          nextSeq:
+            (entries.at(-1)?.seq ?? this.readSummary(metadata.id)?.seq ?? 0) +
+            1,
+        },
+      )
     })
   }
 
@@ -437,16 +516,14 @@ function applyEntries(
   threadId: string,
   entries: readonly StoredRolloutItem[],
 ): void {
+  applyDisplayEntries(database, threadId, entries)
   const row = database
     .prepare("SELECT status_json FROM search_threads WHERE thread_id = ?")
     .get(threadId) as Readonly<{ status_json: string }>
   const status = JSON.parse(row.status_json) as ThreadStatusProjection
   database
     .prepare("UPDATE search_threads SET status_json = ? WHERE thread_id = ?")
-    .run(
-      JSON.stringify(advanceThreadStatus(status, entries)),
-      threadId,
-    )
+    .run(JSON.stringify(advanceThreadStatus(status, entries)), threadId)
   for (const record of entries) {
     if (record.item.type === "response_item") {
       const envelope = record.item.item
@@ -664,6 +741,8 @@ function initializeDatabase(database: DatabaseSync): void {
   if ((version?.user_version ?? 0) !== schemaVersion) {
     database.exec(`
       DROP TABLE IF EXISTS search_answer_items;
+      DROP TABLE IF EXISTS display_records;
+      DROP TABLE IF EXISTS rollout_checkpoints;
       DROP TABLE IF EXISTS search_messages;
       DROP TABLE IF EXISTS search_turns;
       DROP TABLE IF EXISTS search_threads;
@@ -717,4 +796,5 @@ function initializeDatabase(database: DatabaseSync): void {
 
     PRAGMA user_version = ${schemaVersion};
   `)
+  createDisplayTables(database)
 }

@@ -513,14 +513,19 @@ describe("session methods over real handlers", () => {
 
     const replayed = connection
       .notifications("session/event")
-      .map((frame) => (frame.params as { seq: number }).seq)
-    // Every durable event after the cursor up to the snapshot watermark, in
-    // order, and nothing at or below the cursor.
-    expect(replayed.length).toBeGreaterThan(0)
-    expect(replayed).toEqual(
-      Array.from({ length: replayed.length }, (_, index) => index + 3),
-    )
-    expect(replayed.at(-1)).toBe(snapshot.session.seq)
+      .map((frame) => frame.params as { seq: number; event: { type: string } })
+    // Display events preserve their canonical ordering; hidden context
+    // records consume sequence numbers without requiring cursor frames.
+    expect(replayed.map(({ event }) => event.type)).toEqual([
+      "input.admitted",
+      "turn.completed",
+      "turn.started",
+      "input.admitted",
+      "turn.completed",
+    ])
+    for (const [index, event] of replayed.entries())
+      expect(event.seq).toBeGreaterThan(replayed[index - 1]?.seq ?? 2)
+    expect(replayed.at(-1)?.seq).toBe(snapshot.session.seq)
   })
 })
 

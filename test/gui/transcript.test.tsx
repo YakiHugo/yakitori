@@ -29,6 +29,7 @@ import { inputParts } from "./input-fixtures.ts"
 const at = "2026-09-12T00:00:00Z"
 const historyActions = {
   loadEarlierHistory: useAppStore.getState().loadEarlierHistory,
+  prefetchEarlierHistory: useAppStore.getState().prefetchEarlierHistory,
   loadHistoryThrough: useAppStore.getState().loadHistoryThrough,
 }
 const entries: ExecutionEntry[] = [
@@ -286,7 +287,12 @@ it("keeps the visible message stationary when streaming continues during an earl
 
 it("waits for upward intent before loading history above a short latest reply", async () => {
   const loadEarlierHistory = vi.fn(async () => false)
-  useAppStore.setState({ historyBefore: 10, loadEarlierHistory })
+  const prefetchEarlierHistory = vi.fn(async () => true)
+  useAppStore.setState({
+    historyBefore: 10,
+    loadEarlierHistory,
+    prefetchEarlierHistory,
+  })
   render(<Transcript />)
   const viewport = document.querySelector<HTMLElement>(
     ".conversation-transcript-viewport",
@@ -309,6 +315,99 @@ it("waits for upward intent before loading history above a short latest reply", 
     fireEvent.keyDown(viewport, { key: "ArrowUp" })
   })
   expect(loadEarlierHistory).toHaveBeenCalledTimes(2)
+})
+
+it("preserves scroll when an earlier page replaces the first turn block", async () => {
+  let height = 1200
+  const loadEarlierHistory = vi.fn(
+    async (options?: Readonly<{ beforePrepend?: () => void }>) => {
+      options?.beforePrepend?.()
+      height += 300
+      useAppStore.setState((state) => ({
+        historyBefore: undefined,
+        execution: {
+          ...state.execution,
+          entries: [
+            {
+              kind: "assistant",
+              itemId: "earlier_progress",
+              turnId: "turn_1",
+              text: "Earlier progress",
+              status: "completed",
+              at,
+            },
+            ...state.execution.entries,
+          ],
+        },
+      }))
+      return true
+    },
+  )
+  useAppStore.setState((state) => ({
+    historyBefore: 10,
+    loadEarlierHistory,
+    execution: { ...state.execution, entries: entries.slice(1) },
+  }))
+  render(<Transcript />)
+  const viewport = document.querySelector<HTMLElement>(
+    ".conversation-transcript-viewport",
+  )
+  const first = document.querySelector(
+    ".conversation-content",
+  )?.firstElementChild
+  if (!viewport || !first) throw new Error("Expected transcript viewport")
+  scrollGeometry(viewport)
+  Object.defineProperty(viewport, "scrollHeight", {
+    get: () => height,
+    configurable: true,
+  })
+  await act(async () => fireEvent.wheel(viewport, { deltaY: -20 }))
+  expect(first.isConnected).toBe(false)
+  expect(viewport.scrollTop).toBe(300)
+})
+
+it("prefetches within one viewport of the earlier boundary without rendering or moving scroll", () => {
+  const prefetchEarlierHistory = vi.fn(async () => true)
+  const loadEarlierHistory = vi.fn(async () => false)
+  useAppStore.setState({
+    historyBefore: 10,
+    prefetchEarlierHistory,
+    loadEarlierHistory,
+  })
+  render(<Transcript />)
+  const viewport = document.querySelector<HTMLElement>(
+    ".conversation-transcript-viewport",
+  )
+  if (!viewport) throw new Error("Expected transcript viewport")
+  scrollGeometry(viewport)
+  viewport.scrollTop = 800
+  fireEvent.scroll(viewport)
+  expect(prefetchEarlierHistory).not.toHaveBeenCalled()
+  fireEvent.wheel(viewport, { deltaY: -20 })
+  viewport.scrollTop = 399
+  fireEvent.scroll(viewport)
+  expect(prefetchEarlierHistory).toHaveBeenCalledTimes(1)
+  expect(loadEarlierHistory).not.toHaveBeenCalled()
+  expect(viewport.scrollTop).toBe(399)
+  expect(useAppStore.getState().historyBefore).toBe(10)
+  expect(useAppStore.getState().execution.entries).toBe(entries)
+})
+
+it("requests one earlier page to fill an initially unfilled viewport", async () => {
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(400)
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(400)
+  const prefetchEarlierHistory = vi.fn(async () => true)
+  const loadEarlierHistory = vi.fn(async () => false)
+  useAppStore.setState({
+    historyBefore: 10,
+    prefetchEarlierHistory,
+    loadEarlierHistory,
+  })
+  render(<Transcript />)
+  expect(prefetchEarlierHistory).toHaveBeenCalledTimes(1)
+  expect(loadEarlierHistory).toHaveBeenCalledTimes(1)
+  await act(async () => {})
+  expect(loadEarlierHistory).toHaveBeenCalledTimes(1)
 })
 
 it.each([

@@ -47,6 +47,7 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import type { SessionInputStatusResponse } from "../protocol/rpc-methods.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import type {
@@ -250,6 +251,9 @@ export type ServerHandlers = {
   readSessionEvents(
     input: unknown,
   ): Promise<ApplicationResult<ApiReadSessionEventsResponse>>
+  readInputStatus(
+    input: unknown,
+  ): Promise<ApplicationResult<SessionInputStatusResponse>>
   readDisplayWindow(
     input: unknown,
   ): Promise<ApplicationResult<ApiDisplayWindowResponse>>
@@ -355,7 +359,8 @@ export function createThreadServerHandlers(
         .filter(
           (record) => hostSeq(record) > (publishedThrough.get(threadId) ?? 0),
         )
-        .map((record) => mapRolloutEvent(record, threadId)),
+        .map((record) => mapRolloutEvent(record, threadId))
+        .filter((event) => event.type !== "session.cursor"),
     )
     const last = records.at(-1)
     if (last !== undefined) {
@@ -1537,9 +1542,9 @@ export function createThreadServerHandlers(
               options.store,
               request.sessionId,
             )
-            const events = stored.rollout.map((record) =>
-              mapRolloutEvent(record, request.sessionId),
-            )
+            const events = stored.rollout
+              .map((record) => mapRolloutEvent(record, request.sessionId))
+              .filter((event) => event.type !== "session.cursor")
             publishedThrough.set(request.sessionId, threadSeq(stored))
             options.notifySidebarChanged?.(request.sessionId)
             return ok({
@@ -2176,31 +2181,57 @@ export function createThreadServerHandlers(
     async readSessionEvents(input) {
       try {
         const request = requireReadSessionEventsRequest(input)
-        const stored = await options.store.readThread(request.sessionId)
-        if (stored === undefined) {
+        const page = await options.store.readThreadEvents(request.sessionId, {
+          after: (request.after ?? 0) - 1,
+          ...(request.through === undefined
+            ? {}
+            : { through: request.through - 1 }),
+          limit: request.limit ?? 500,
+        })
+        if (page === undefined) {
           throw notFound(`Session ${request.sessionId} was not found.`, {
             sessionId: request.sessionId,
           })
         }
-        const after = request.after ?? 0
-        const through = request.through ?? Number.MAX_SAFE_INTEGER
-        const limit = request.limit ?? 500
-        const matching = stored.rollout.filter((record) => {
-          const seq = hostSeq(record)
-          return seq > after && seq <= through
-        })
-        const page = matching.slice(0, limit)
-        const last = page.at(-1)
         return ok({
-          events: page.map((record) =>
+          events: page.records.map((record) =>
             mapRolloutEvent(record, request.sessionId),
           ),
-          ...(matching.length > page.length && last !== undefined
-            ? { nextAfter: hostSeq(last) }
-            : {}),
+          ...(page.hasMore ? { nextAfter: page.nextAfter + 1 } : {}),
         })
       } catch (error) {
         return fail(error, reporter, "read-session-events")
+      }
+    },
+
+    async readInputStatus(input) {
+      try {
+        const record = requireRecord(
+          input,
+          "Input status request must be an object.",
+        )
+        const sessionId = requireSessionId(record.sessionId, "sessionId")
+        if (
+          !Array.isArray(record.requestIds) ||
+          !record.requestIds.every(
+            (id): id is string => typeof id === "string" && isRequestId(id),
+          )
+        )
+          throw invalidInput("requestIds must contain valid request IDs.")
+        const status = await options.store.readInputAdmissions(sessionId, [
+          ...new Set(record.requestIds),
+        ])
+        if (status === undefined)
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        return ok({
+          rolloutId: status.metadata.rolloutId,
+          seq: status.endSeq + 1,
+          events: status.records
+            .map((item) => mapRolloutEvent(item, sessionId))
+            .filter((event) => event.type === "input.admitted"),
+        })
+      } catch (error) {
+        return fail(error, reporter, "read-input-status")
       }
     },
 
@@ -2241,18 +2272,20 @@ export function createThreadServerHandlers(
           ...window.records,
         ])
         const replayRecords = replayRecordsForWindow(window)
+        const historyBefore = window.records[0]?.seq ?? window.coverageStartSeq
         return ok({
           session:
             expiry === undefined
               ? session
               : { ...session, cacheExpiry: expiry },
+          ...(!window.projectionReady ? { statePending: true } : {}),
           events: replayRecords.map((record) =>
             mapRolloutEvent(record, request.sessionId),
           ),
           // Supplemental state can precede unseen transcript records. Only
           // the contiguous window defines how far history has been covered.
-          ...(window.hasEarlier && window.records[0] !== undefined
-            ? { historyBefore: window.records[0].seq }
+          ...(window.hasEarlier && historyBefore !== undefined
+            ? { historyBefore }
             : {}),
         })
       } catch (error) {
@@ -2944,15 +2977,16 @@ function requireRequestId(value: unknown): string {
 function replayRecordsForWindow(
   window: DisplayWindowRead,
 ): readonly StoredRolloutItem[] {
-  const tokens = window.records.some(
+  const hasTokens = window.records.some(
     (record) => record.item.type === "token_count",
   )
-    ? []
-    : window.lookbehind
-        .filter((record) => record.item.type === "token_count")
-        .slice(-1)
+  const supplemental = window.lookbehind.filter(
+    (record) =>
+      record.item.type === "turn_started" ||
+      (!hasTokens && record.item.type === "token_count"),
+  )
   return [
-    ...tokens,
+    ...supplemental,
     ...window.records.filter((record) => record.item.type !== "session_meta"),
   ]
 }

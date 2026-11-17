@@ -22,6 +22,7 @@ import type {
 
 export class FakeSessionStream implements SessionStream {
   closed = false
+  snapshot: SessionSubscribeResponse | undefined
 
   constructor(
     readonly sessionId: string,
@@ -35,6 +36,7 @@ export class FakeSessionStream implements SessionStream {
   }
 
   emitSnapshot(response: SessionSubscribeResponse): void {
+    this.snapshot = response
     this.handlers.onSnapshot(response)
   }
 
@@ -133,6 +135,22 @@ export class FakeRpcClient {
     try {
       return await this.respond(method, params)
     } catch (error) {
+      if (
+        method === "session/input/status" &&
+        error instanceof ApiRequestError &&
+        error.code === "not_found"
+      ) {
+        const { sessionId } = params as { sessionId: string }
+        const snapshot = this.streams.findLast(
+          (stream) => stream.sessionId === sessionId && stream.snapshot,
+        )?.snapshot
+        if (snapshot)
+          return {
+            rolloutId: snapshot.session.rolloutId,
+            seq: snapshot.session.seq,
+            events: [],
+          }
+      }
       if (
         method === "session/queue/list" &&
         error instanceof ApiRequestError &&

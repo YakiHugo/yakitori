@@ -178,7 +178,7 @@ describe("buffered turn lifecycle", () => {
 })
 
 describe("session/subscribe", () => {
-  it("replays the display window instead of paging from the start", async () => {
+  it("embeds the display window without replaying it as notifications", async () => {
     const calls = { events: 0 }
     const windowEvent = makeTurnStarted(sessionId, 9, "turn_latest")
     const handlers = createFakeHandlers({
@@ -201,10 +201,12 @@ describe("session/subscribe", () => {
       recent: true,
     })
     await flush()
-    expect(response).toMatchObject({ result: { historyBefore: 8 } })
+    expect(response).toMatchObject({
+      result: { historyBefore: 8, events: [windowEvent] },
+    })
     expect(
       connection.notifications("session/event").map((frame) => frame.params),
-    ).toEqual([{ sessionId, seq: 9, event: windowEvent }])
+    ).toEqual([])
     expect(calls.events).toBe(0)
   })
 

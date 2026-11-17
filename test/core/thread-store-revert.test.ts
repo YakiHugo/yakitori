@@ -159,8 +159,8 @@ describe("JSONL stable session history", () => {
     })
     expect(firstRevert.historyEndSeqExclusive).toBe(9)
     expect(await pageSequences(store, id)).toEqual([
-      [1, 2, 3, 4],
-      [5, 6, 7, 8],
+      [1, 2, 4],
+      [5, 6, 8],
     ])
     expect((await store.readUsageSummary()).totals.inputTokens).toBe(60)
     expect(
@@ -206,7 +206,7 @@ describe("JSONL stable session history", () => {
     expect(stored.metadata.rolloutId).toBe(
       secondRevert.thread.metadata.rolloutId,
     )
-    expect(await pageSequences(reopened, id)).toEqual([[1, 2, 3, 4]])
+    expect(await pageSequences(reopened, id)).toEqual([[1, 2, 4]])
     expect((await reopened.readUsageSummary()).totals.inputTokens).toBe(100)
     expect(
       (
@@ -243,8 +243,8 @@ describe("JSONL stable session history", () => {
     await reopened.shutdownThread(id)
     const nested = new JsonlThreadStore({ root })
     expect(await pageSequences(nested, id)).toEqual([
-      [1, 2, 3, 4],
-      [5, 6, 7, 8],
+      [1, 2, 4],
+      [5, 6, 8],
     ])
     expect((await nested.readUsageSummary()).totals.inputTokens).toBe(220)
     expect(await assets.read(saved.reference)).toEqual(bytes)
