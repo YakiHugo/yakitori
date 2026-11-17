@@ -26,6 +26,8 @@ type SelectProps<T extends string | number> = Omit<
   onValueChange(value: T): void
   placeholder?: string
   required?: boolean
+  size?: "default" | "sm"
+  variant?: "outline" | "ghost"
 }
 
 export function Select<T extends string | number>({
@@ -37,6 +39,8 @@ export function Select<T extends string | number>({
   disabled,
   name,
   className,
+  size = "default",
+  variant = "outline",
   ...props
 }: SelectProps<T>) {
   const [trigger, setTrigger] = useState<HTMLButtonElement | null>(null)
@@ -56,12 +60,18 @@ export function Select<T extends string | number>({
       <Trigger
         ref={setTrigger}
         data-slot="select-trigger"
+        data-size={size}
+        data-variant={variant}
         className={cn("ui-select-trigger", className)}
         {...props}
       >
         <Value placeholder={placeholder} />
         <Icon asChild>
-          <ChevronDown size={14} className="ui-select-chevron" />
+          <ChevronDown
+            aria-hidden="true"
+            size={14}
+            className="ui-select-chevron"
+          />
         </Icon>
       </Trigger>
       {/* Keep the popup inside a native dialog's top layer when used in one. */}

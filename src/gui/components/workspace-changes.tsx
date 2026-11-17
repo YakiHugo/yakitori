@@ -16,6 +16,7 @@ import {
 } from "../store/workspace-store.ts"
 import { DiffView } from "./cells/diff-view.tsx"
 import { type ChangeFileItem, ChangeFileTree } from "./change-file-tree.tsx"
+import { Select } from "./ui/select.tsx"
 import { ChangeStats } from "./workspace-change-summary.tsx"
 import "./workspace-changes.css"
 
@@ -139,19 +140,19 @@ function ChangesBrowser({ cwd, apiBase, active = true, target }: ChangesProps) {
           >
             <ChangeStats stats={totals} />
           </span>
-          <select
+          <Select<typeof scope>
             aria-label="Change scope"
+            className="changes-scope-select"
+            size="sm"
+            variant="ghost"
             value={scope}
-            onChange={(event) => {
-              const value = event.target.value
-              if (value === "all" || value === "staged" || value === "unstaged")
-                setScope(value)
-            }}
-          >
-            <option value="all">All changes</option>
-            <option value="unstaged">Unstaged</option>
-            <option value="staged">Staged</option>
-          </select>
+            onValueChange={setScope}
+            options={[
+              { value: "all", label: "All changes" },
+              { value: "unstaged", label: "Unstaged" },
+              { value: "staged", label: "Staged" },
+            ]}
+          />
           <button
             type="button"
             className="changes-icon-button"

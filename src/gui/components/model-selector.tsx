@@ -1,6 +1,3 @@
-import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
-import type { ModelRoutePreview } from "../../protocol/model-routing.ts"
-import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
 import { Check, ChevronDown, ChevronLeft, Zap } from "lucide-react"
 import {
   type CSSProperties,
@@ -9,12 +6,16 @@ import {
   useRef,
   useState,
 } from "react"
-import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import type { ApiProviderModel } from "../../protocol/application.ts"
 import type { ModelSelection } from "../../protocol/events.ts"
+import { sortModelCatalog } from "../../protocol/model-catalog-order.ts"
+import type { ModelRoutePreview } from "../../protocol/model-routing.ts"
+import { useModelRoutePreview } from "../hooks/use-model-route-preview.ts"
+import { isUnmodifiedEscape } from "../lib/escape-key.ts"
 import { cn } from "../lib/utils.ts"
 import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
 import { ProviderLogo } from "./provider-logo.tsx"
+import "./ui/select.css"
 
 function displayEffort(effort: string): string {
   return effort
@@ -296,9 +297,11 @@ export function ModelSelector({
           type="button"
           aria-label="Select model and effort"
           aria-expanded={menu !== undefined}
+          data-size="sm"
+          data-variant="ghost"
           onClick={openFirstLevel}
           className={cn(
-            "h-8 max-w-64 min-w-0 items-center gap-1.5 rounded-full bg-muted/70 px-3 text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "ui-select-trigger relative z-20 max-w-64",
             menu === undefined
               ? "flex"
               : "grid w-40 grid-cols-[0.875rem_minmax(0,1fr)_0.875rem] text-center",
@@ -325,10 +328,8 @@ export function ModelSelector({
             </>
           )}
           <ChevronDown
-            className={cn(
-              "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
-              menu !== undefined && "rotate-180",
-            )}
+            aria-hidden="true"
+            className="ui-select-chevron size-3.5"
           />
         </button>
 
@@ -336,7 +337,7 @@ export function ModelSelector({
           <div
             ref={popoverRef}
             data-model-picker=""
-            className="composer-control-popover absolute bottom-full left-1/2 z-20 mb-2 overflow-hidden rounded-[20px] border bg-popover text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]"
+            className="ui-select-panel composer-control-popover absolute bottom-full left-1/2 z-20 mb-2 text-sm"
           >
             {menu === "effort" && effective !== undefined ? (
               <div className="p-3.5">
@@ -436,7 +437,7 @@ export function ModelSelector({
                               effective.model === model.id
                             }
                             onClick={() => selectModel(provider.name, model.id)}
-                            className="flex w-full items-center gap-2 rounded-xl py-1.5 pr-2.5 pl-8 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            className="ui-select-choice w-full gap-2 text-left"
                           >
                             <span className="min-w-0 flex-1 truncate">
                               {model.displayName ?? model.id}
@@ -448,7 +449,7 @@ export function ModelSelector({
                             effective.model === model.id ? (
                               <Check
                                 aria-hidden="true"
-                                className="size-4 shrink-0"
+                                className="ui-select-indicator size-3.5"
                               />
                             ) : null}
                           </button>
