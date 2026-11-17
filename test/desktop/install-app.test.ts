@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises"
@@ -23,7 +24,9 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "yakitori-installer-test-"))
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "yakitori-installer-test-")),
+  )
   temporary.push(root)
   const tools = join(root, "tools")
   const applications = join(root, "Applications")
@@ -96,6 +99,7 @@ syncBuiltinESMExports();
         cwd: root,
         env: {
           ...process.env,
+          TMPDIR: root,
           COMMAND_LOG: commands,
           FAIL_BUILD: failBuild ? "1" : "0",
           PATH: tools,

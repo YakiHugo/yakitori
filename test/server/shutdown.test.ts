@@ -1,6 +1,7 @@
+import { once } from "node:events"
 import { createServer, type Server } from "node:http"
 import net from "node:net"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   createShutdownController,
   drainAdmittedRequestsAndTurns,
@@ -143,41 +144,75 @@ describe("createShutdownController", () => {
 })
 
 describe("shutdownHttpApplication", () => {
-  it("force-closes hanging SSE-style connections and completes promptly", async () => {
+  it("force-closes an established hanging SSE connection", async () => {
     const server = createSseServer()
-    const port = await listen(server)
-    const socket = await openHangingRequest(port)
+    let socket: net.Socket | undefined
+    try {
+      const port = await listen(server)
+      socket = await openHangingRequest(port)
+      socket.resume()
+      const clientClosed = once(socket, "close")
+      const serverClosed = once(server, "close")
+      const timeouts: string[] = []
+      expect(socket.destroyed).toBe(false)
 
-    const started = Date.now()
-    const clean = await shutdownHttpApplication({
-      server,
-      closeApplication: async () => {},
-      timeoutMs: 1_000,
-    })
-    const elapsed = Date.now() - started
+      const clean = await shutdownHttpApplication({
+        server,
+        closeApplication: async () => {},
+        timeoutMs: 1_000,
+        onTimeout: (step) => timeouts.push(step),
+      })
 
-    expect(clean).toBe(true)
-    expect(elapsed).toBeLessThan(1_000)
-    socket.destroy()
+      expect(clean).toBe(true)
+      expect(timeouts).toEqual([])
+      await serverClosed
+      expect(server.listening).toBe(false)
+      expect(await clientClosed).toEqual([false])
+      expect(socket.readableEnded).toBe(true)
+      expect(socket.destroyed).toBe(true)
+    } finally {
+      socket?.destroy()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 
   it("times out a wedged application close instead of hanging forever", async () => {
     const server = createSseServer()
-    await listen(server)
+    const closeStarted = deferred<void>()
+    const releaseClose = deferred<void>()
     const timeouts: string[] = []
+    try {
+      await listen(server)
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      let completed = false
+      const closing = shutdownHttpApplication({
+        server,
+        closeApplication: () => {
+          closeStarted.resolve()
+          return releaseClose.promise
+        },
+        timeoutMs: 200,
+        onTimeout: (step) => timeouts.push(step),
+      }).then((clean) => {
+        completed = true
+        return clean
+      })
 
-    const started = Date.now()
-    const clean = await shutdownHttpApplication({
-      server,
-      closeApplication: () => new Promise<void>(() => {}),
-      timeoutMs: 200,
-      onTimeout: (step) => timeouts.push(step),
-    })
-    const elapsed = Date.now() - started
-
-    expect(clean).toBe(false)
-    expect(timeouts).toEqual(["application-close"])
-    expect(elapsed).toBeLessThan(1_000)
+      await closeStarted.promise
+      expect(server.listening).toBe(false)
+      await vi.advanceTimersByTimeAsync(199)
+      expect(completed).toBe(false)
+      expect(timeouts).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(closing).resolves.toBe(false)
+      expect(timeouts).toEqual(["application-close"])
+    } finally {
+      releaseClose.resolve()
+      vi.useRealTimers()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })
 
@@ -203,13 +238,21 @@ function listen(server: Server): Promise<number> {
 
 async function openHangingRequest(port: number): Promise<net.Socket> {
   const socket = net.connect(port, "127.0.0.1")
-  await new Promise<void>((resolve) => socket.once("connect", resolve))
-  socket.write(
-    "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n",
-  )
-  // Give the server a tick to accept and hold the connection.
-  await new Promise((resolve) => setTimeout(resolve, 100))
-  return socket
+  try {
+    await once(socket, "connect")
+    socket.write(
+      "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n",
+    )
+    let received = ""
+    for await (const chunk of socket.iterator({ destroyOnReturn: false })) {
+      received += chunk.toString()
+      if (received.includes(": connected\n\n")) return socket
+    }
+    throw new Error("SSE connection closed before its first frame.")
+  } catch (error) {
+    socket.destroy()
+    throw error
+  }
 }
 
 function deferred<T>(): {

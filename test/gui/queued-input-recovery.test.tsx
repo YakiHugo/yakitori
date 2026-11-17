@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
@@ -40,6 +41,51 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it("canceling one queued row removes it while preserving the other row", async () => {
+  const user = userEvent.setup()
+  let items = [
+    ...useAppStore.getState().queuedItems,
+    {
+      id: "input_2",
+      sessionId: "session_1",
+      input: {
+        submissionId: "request_2",
+        content: textInputDraft("keep this follow-up"),
+      },
+      createdAt: "2026-01-01T00:00:01.000Z",
+    },
+  ]
+  useAppStore.setState({ queuedItems: items })
+  request.mockImplementation(
+    async (method: string, params: { inputId?: string }) => {
+      if (method === "session/input/cancel") {
+        items = items.filter((item) => item.id !== params.inputId)
+        return { sessionId: "session_1", inputId: params.inputId }
+      }
+      if (method === "session/queue/list") return { items }
+      throw new Error(`Unexpected RPC method: ${method}`)
+    },
+  )
+  render(
+    <TooltipProvider>
+      <QueuedInputs />
+    </TooltipProvider>,
+  )
+  const row = screen.getByText("keep this follow-up").closest("div")
+  if (!row) throw new Error("Expected the queued input row")
+  await user.click(
+    within(row).getByRole("button", { name: "Cancel queued input" }),
+  )
+
+  await waitFor(() =>
+    expect(screen.queryByText("keep this follow-up")).toBeNull(),
+  )
+  expect(screen.getByText("hello")).toBeDefined()
+  expect(
+    screen.getAllByRole("button", { name: "Cancel queued input" }),
+  ).toHaveLength(1)
+})
+
 it.each([
   "Save",
   "Enter",
@@ -71,12 +117,10 @@ it.each([
   request.mockImplementation(async (method: string) =>
     method === "session/queue/list"
       ? {
-          items: useAppStore
-            .getState()
-            .queuedItems.map((item) => ({
-              ...item,
-              input: { ...item.input, content: textInputDraft("hello edited") },
-            })),
+          items: useAppStore.getState().queuedItems.map((item) => ({
+            ...item,
+            input: { ...item.input, content: textInputDraft("hello edited") },
+          })),
         }
       : {},
   )

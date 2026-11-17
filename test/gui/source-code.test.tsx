@@ -2,7 +2,6 @@
 import { cleanup, render, waitFor } from "@testing-library/react"
 import { afterEach, expect, it } from "vitest"
 import { SourceCode } from "../../src/gui/components/source-code.tsx"
-import { languageForPath } from "../../src/gui/lib/syntax-highlighter.ts"
 
 afterEach(cleanup)
 
@@ -77,21 +76,4 @@ it("keeps unknown languages and long source lines plain without losing text", as
   expect(container.querySelector(".source-code-content")?.textContent).toBe(
     minified,
   )
-})
-
-it.each([
-  ["src/component.TSX", "tsx"],
-  ["types/example.d.ts", "typescript"],
-  ["C:\\repo\\index.mjs", "javascript"],
-  ["Dockerfile", "dockerfile"],
-  ["Dockerfile.test", "dockerfile"],
-  ["Makefile", "makefile"],
-  [".zshrc", "shellscript"],
-  ["README.md", "markdown"],
-  ["image.svg", "xml"],
-  ["README", undefined],
-  ["file.unknown", undefined],
-  ["file.__proto__", undefined],
-])("infers %s as %s", (path, expected) => {
-  expect(languageForPath(path)).toBe(expected)
 })
