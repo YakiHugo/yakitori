@@ -16,6 +16,7 @@ import { Composer } from "../../src/gui/components/composer.tsx"
 import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
 import {
   createExecutionViewState,
+  prependExecutionHistory,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
 import { ConversationScrollContext } from "../../src/gui/hooks/conversation-scroll-context.ts"
@@ -199,15 +200,43 @@ describe("composer", () => {
     })
   })
 
-  it("resumes an interrupted turn without submitting or clearing a user message", async () => {
+  it.each([
+    false,
+    true,
+  ])("resumes the latest interrupted turn without submitting or clearing a user message (earlier history: %s)", async (earlierHistory) => {
+    const execution = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 20,
+        createdAt: "2026-07-24T00:01:00.000Z",
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_interrupted",
+            outcome: { status: "interrupted" },
+          },
+        },
+      }),
+    })
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      execution: {
-        ...createExecutionViewState(),
-        turnTimings: {
-          turn_interrupted: { outcome: { status: "interrupted" } },
-        },
-      },
+      execution: earlierHistory
+        ? prependExecutionHistory(execution, [
+            createEventEnvelope({
+              sessionId: "session_1",
+              seq: 2,
+              createdAt: "2026-07-24T00:01:00.000Z",
+              event: {
+                type: EventType.TurnCompleted,
+                data: {
+                  turnId: "turn_earlier",
+                  outcome: { status: "completed" },
+                },
+              },
+            }),
+          ])
+        : execution,
     })
     fakeRef.current.respond = (method, params) => {
       if (method === "session/turn/resume")

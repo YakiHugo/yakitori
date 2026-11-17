@@ -2977,15 +2977,16 @@ function requireRequestId(value: unknown): string {
 function replayRecordsForWindow(
   window: DisplayWindowRead,
 ): readonly StoredRolloutItem[] {
-  const tokens = window.records.some(
+  const hasTokens = window.records.some(
     (record) => record.item.type === "token_count",
   )
-    ? []
-    : window.lookbehind
-        .filter((record) => record.item.type === "token_count")
-        .slice(-1)
+  const supplemental = window.lookbehind.filter(
+    (record) =>
+      record.item.type === "turn_started" ||
+      (!hasTokens && record.item.type === "token_count"),
+  )
   return [
-    ...tokens,
+    ...supplemental,
     ...window.records.filter((record) => record.item.type !== "session_meta"),
   ]
 }

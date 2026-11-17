@@ -591,7 +591,9 @@ export function createSessionSubscriptions(
             events: needsInitialBody
               ? refreshed.value.events
               : refreshed.value.events.filter(
-                  (event) => event.type === "context.tokens",
+                  (event) =>
+                    event.type === "context.tokens" ||
+                    event.type === "turn.started",
                 ),
             ...(needsInitialBody && refreshed.value.historyBefore !== undefined
               ? { historyBefore: refreshed.value.historyBefore }

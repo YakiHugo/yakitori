@@ -1496,6 +1496,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 response.events.some(
                   (event) =>
                     event.type === "input.admitted" ||
+                    event.type === "turn.started" ||
                     event.type === "item.started" ||
                     event.type === "item.completed",
                 )

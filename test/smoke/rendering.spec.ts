@@ -1021,13 +1021,12 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
     ["Recovered", "Ready"],
   )
   await page.reload()
+  // Short responses may fill the viewport with earlier history on reopen.
+  // The newest completed diagram must still restore at the chronological end.
   await expectMermaidDiagram(
-    responses
-      .first()
-      .getByRole("img", { name: "Mermaid diagram", exact: true }),
+    responses.last().getByRole("img", { name: "Mermaid diagram", exact: true }),
     ["Recovered", "Ready"],
   )
-  await expect(responses).toHaveCount(1)
   await page.keyboard.press("ControlOrMeta+f")
   await page
     .getByRole("searchbox", { name: "Find in conversation" })
@@ -1045,6 +1044,7 @@ test("Mermaid waits for completed output, preserves invalid source and recovers 
     responses.nth(2).getByRole("img", { name: "Mermaid diagram", exact: true }),
     ["Recovered", "Ready"],
   )
+  await expect(responses).toHaveCount(3)
 })
 
 test("large Mermaid previews expose every edge at actual size and reset when reopened", async ({
@@ -1355,9 +1355,18 @@ test("async questions recover partial answers as editable references and reveal 
   }
   await page.reload()
   await expect(
-    page.getByRole("region", { name: "Response", exact: true }),
+    page.getByRole("region", { name: "Response", exact: true }).last(),
   ).toContainText("The question references were received.")
-  await expect(questions).toHaveCount(0)
+  // Filling a short viewport may restore the closed question's older page.
+  await expect(
+    questions.filter({ hasNotText: "Questions closed" }),
+  ).toHaveCount(0)
+  await expect(questions.getByRole("textbox")).toHaveCount(0)
+  await expect(questions.getByRole("combobox")).toHaveCount(0)
+  await expect(questions.getByRole("button")).toHaveCount(0)
+  await expect(
+    page.getByRole("status", { name: "Waiting for you", exact: true }),
+  ).toHaveCount(0)
   await page
     .getByRole("main")
     .getByRole("button", { name: "2 annotations", exact: true })

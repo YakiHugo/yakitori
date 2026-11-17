@@ -309,6 +309,75 @@ describe("partial conversation history", () => {
     expect(useAppStore.getState().historyBefore).toBe(90)
   })
 
+  it.each([
+    false,
+    true,
+  ])("restores supplemental turn timing from a fresh snapshot without changing newer completion state (completed: %s)", async (completed) => {
+    const startedAt = "2026-07-24T00:01:00.000Z"
+    const completedAt = "2026-07-24T00:02:00.000Z"
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    const session = {
+      ...sessionDetail,
+      seq: 100,
+      activeTurnId: "turn_large",
+    }
+    stream?.emitSnapshot({
+      session,
+      statePending: true,
+      events: [],
+      historyBefore: 90,
+    })
+    if (completed)
+      stream?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 101,
+          createdAt: completedAt,
+          event: {
+            type: EventType.TurnCompleted,
+            data: {
+              turnId: "turn_large",
+              outcome: { status: "completed" },
+            },
+          },
+        }),
+      )
+    stream?.emitSnapshot({
+      session,
+      events: [
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq: 20,
+          createdAt: startedAt,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_large", inputId: "input_large" },
+          },
+        }),
+      ],
+    })
+    stream?.emitReplayComplete()
+    const state = useAppStore.getState()
+    expect(state.execution.turnTimings.turn_large).toEqual({
+      startedAt,
+      inputId: "input_large",
+      ...(completed ? { completedAt, outcome: { status: "completed" } } : {}),
+    })
+    expect(state.execution.activeTurnId).toBe(
+      completed ? undefined : "turn_large",
+    )
+    expect(state.execution.activeTurnStartedAt).toBe(
+      completed ? undefined : startedAt,
+    )
+    expect(state.selectedSession?.activeTurnId).toBe(
+      completed ? undefined : "turn_large",
+    )
+    expect(state.execution.lastSeq).toBe(completed ? 101 : 100)
+    expect(state.selectedSession?.seq).toBe(completed ? 101 : 100)
+    expect(state.historyBefore).toBe(90)
+  })
+
   it("fills an empty pending window from a fresh snapshot while retaining newer live items once", async () => {
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]

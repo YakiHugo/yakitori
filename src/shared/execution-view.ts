@@ -40,6 +40,7 @@ type EntryPosition = Readonly<{ seq: number } | { afterSeq: number }>
 
 export type ExecutionViewState = Readonly<{
   turnTimings: Readonly<Record<string, TurnTiming>>
+  turnPositions: Readonly<Record<string, number>>
   entries: readonly ExecutionEntry[]
   entryPositions: Readonly<Record<string, EntryPosition>>
   activeTurnId: string | undefined
@@ -137,6 +138,7 @@ export function createExecutionViewState(
     entries: [],
     entryPositions: {},
     turnTimings: {},
+    turnPositions: {},
     activeTurnId: undefined,
     mateId: undefined,
     mateRevisionId: undefined,
@@ -392,11 +394,24 @@ export function prependExecutionHistory(
   for (const [turnId, timing] of Object.entries(prefix.turnTimings)) {
     turnTimings[turnId] = { ...timing, ...state.turnTimings[turnId] }
   }
+  const turnPositions = { ...prefix.turnPositions }
+  for (const [turnId, seq] of Object.entries(state.turnPositions)) {
+    turnPositions[turnId] = Math.min(turnPositions[turnId] ?? seq, seq)
+  }
   return {
     ...state,
     entries,
     entryPositions,
-    turnTimings,
+    // Consumers enumerate timings chronologically, including the composer's
+    // latest resumable turn. Arrival order changes as older pages are loaded.
+    turnTimings: Object.fromEntries(
+      Object.entries(turnTimings).sort(
+        ([left], [right]) =>
+          (turnPositions[left] ?? Number.POSITIVE_INFINITY) -
+          (turnPositions[right] ?? Number.POSITIVE_INFINITY),
+      ),
+    ),
+    turnPositions,
     activeTurnStartedAt:
       state.activeTurnId === undefined
         ? undefined
@@ -828,6 +843,16 @@ function applyDurable(
   replay: boolean,
 ): ExecutionViewState {
   let next: ExecutionViewState = { ...state, lastSeq: event.seq }
+  if (event.type === "turn.started" || event.type === "turn.completed") {
+    const turnId = event.data.turnId
+    next = {
+      ...next,
+      turnPositions: {
+        ...next.turnPositions,
+        [turnId]: Math.min(next.turnPositions[turnId] ?? event.seq, event.seq),
+      },
+    }
+  }
   switch (event.type) {
     case "session.created":
       return next

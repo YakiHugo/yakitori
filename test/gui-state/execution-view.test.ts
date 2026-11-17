@@ -17,6 +17,7 @@ import {
   type KernelEvent,
   type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
+import { canResumeTurn } from "../../src/protocol/turn-recovery.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { inputFixture } from "../fixtures/user-input.ts"
 import { inputParts } from "../gui/input-fixtures.ts"
@@ -503,6 +504,66 @@ describe("execution view", () => {
     expect(projectExecutionView(next).turnTimings.turn_latest?.inputId).toBe(
       "input_latest",
     )
+  })
+
+  it("keeps the latest interrupted turn resumable after older history and refreshed bodies arrive", () => {
+    // Equal timestamps require durable sequence order, rather than timestamp
+    // sorting or the order in which independent history requests complete.
+    const at = "2026-11-12T00:00:00.000Z"
+    const events = [
+      {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_older", inputId: "input_older" },
+      },
+      {
+        type: EventType.TurnCompleted,
+        data: { turnId: "turn_older", outcome: { status: "completed" } },
+      },
+      {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_latest", inputId: "input_latest" },
+      },
+      {
+        type: EventType.TurnCompleted,
+        data: { turnId: "turn_latest", outcome: { status: "interrupted" } },
+      },
+    ] satisfies KernelEvent[]
+    const envelopes = events.map((event, index) =>
+      createExecutionEnvelope({
+        sessionId,
+        seq: index + 1,
+        createdAt: at,
+        event,
+      }),
+    )
+    const resident = envelopes
+      .slice(2)
+      .reduce(
+        (state, event) =>
+          reduceExecutionView(state, { type: "durable", event, replay: true }),
+        createExecutionViewState(),
+      )
+    const prepended = prependExecutionHistory(resident, envelopes.slice(0, 2))
+    // A later independent refresh can repeat the latest body after older
+    // history is already resident; it must retain the same turn chronology.
+    const refreshed = prependExecutionHistory(prepended, envelopes.slice(2))
+    for (const state of [prepended, refreshed]) {
+      const view = projectExecutionView(state)
+      expect(Object.keys(view.turnTimings)).toEqual([
+        "turn_older",
+        "turn_latest",
+      ])
+      const latest = Object.entries(view.turnTimings).at(-1)
+      expect(latest?.[0]).toBe("turn_latest")
+      expect(canResumeTurn(latest?.[1].outcome)).toBe(true)
+      expect(view.turnTimings.turn_latest).toEqual({
+        inputId: "input_latest",
+        startedAt: at,
+        completedAt: at,
+        outcome: { status: "interrupted" },
+      })
+      expect(view.activeTurnId).toBeUndefined()
+    }
   })
 
   describe("bounded history pages", () => {
