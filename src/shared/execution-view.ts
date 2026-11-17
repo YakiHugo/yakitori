@@ -36,9 +36,12 @@ export type {
   TurnTiming,
 } from "../protocol/execution-view.ts"
 
+type EntryPosition = Readonly<{ seq: number } | { afterSeq: number }>
+
 export type ExecutionViewState = Readonly<{
   turnTimings: Readonly<Record<string, TurnTiming>>
   entries: readonly ExecutionEntry[]
+  entryPositions: Readonly<Record<string, EntryPosition>>
   activeTurnId: string | undefined
   mateId: string | undefined
   mateRevisionId: string | undefined
@@ -60,6 +63,9 @@ export type ExecutionViewState = Readonly<{
   admittedRequestIds: Readonly<Record<string, true>>
   // Live answerability is separate from durable question transcript entries.
   pendingQuestionIds: readonly string[]
+  completedTurnTelemetry: Readonly<
+    Record<string, Readonly<{ usage?: TokenUsage; metrics?: TurnMetrics }>>
+  >
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number
 }>
@@ -129,6 +135,7 @@ export function createExecutionViewState(
 ): ExecutionViewState {
   const initial: ExecutionViewState = {
     entries: [],
+    entryPositions: {},
     turnTimings: {},
     activeTurnId: undefined,
     mateId: undefined,
@@ -148,6 +155,7 @@ export function createExecutionViewState(
     queuedInputs: {},
     admittedRequestIds: {},
     pendingQuestionIds: [],
+    completedTurnTelemetry: {},
     timeToFirstTokenWeightedMs: 0,
     timeToFirstTokenSamples: 0,
   }
@@ -157,6 +165,73 @@ export function createExecutionViewState(
 }
 
 export function reduceExecutionView(
+  state: ExecutionViewState,
+  action: ExecutionViewAction,
+): ExecutionViewState {
+  const next = applyExecutionViewAction(state, action)
+  let positions: Record<string, EntryPosition> | undefined
+  if (action.type === "durable" && action.event.type !== "session.cursor") {
+    const key = durableEntryIdentity(action.event)
+    if (key !== undefined) {
+      const current = next.entryPositions[key]
+      const seq =
+        current !== undefined && "seq" in current
+          ? Math.min(current.seq, action.event.seq)
+          : action.event.seq
+      if (current === undefined || !("seq" in current) || current.seq !== seq) {
+        positions = { ...next.entryPositions, [key]: { seq } }
+      }
+    }
+  }
+  if (next.entries !== state.entries) {
+    for (const entry of next.entries) {
+      const key = executionEntryIdentity(entry)
+      if ((positions ?? next.entryPositions)[key] !== undefined) continue
+      positions ??= { ...next.entryPositions }
+      // Live items have no durable sequence yet. Keep their observed position
+      // after the cursor that preceded them until a start/completion anchors it.
+      positions[key] = { afterSeq: state.lastSeq }
+    }
+  }
+  return positions === undefined ? next : { ...next, entryPositions: positions }
+}
+
+function executionEntryIdentity(entry: ExecutionEntry): string {
+  switch (entry.kind) {
+    case "assistant":
+    case "reasoning":
+      return `item:${entry.itemId}`
+    case "tool":
+      return `item:${entry.execution.itemId}`
+    case "agent_input":
+    case "user_input":
+      return `input:${entry.inputId}`
+    default:
+      return `${entry.kind}:${executionEntryKey(entry)}`
+  }
+}
+
+function durableEntryIdentity(event: EventEnvelope): string | undefined {
+  switch (event.type) {
+    case "input.admitted":
+      return `input:${event.data.inputId}`
+    case "item.started":
+    case "item.completed":
+      return `item:${event.data.item.itemId}`
+    case "turn.completed": {
+      const outcome = event.data.outcome
+      const terminal =
+        outcome.status === "completed" ? outcome.reason : outcome.status
+      return terminal === undefined
+        ? undefined
+        : `turn_terminal:${event.data.turnId}:${terminal}`
+    }
+    default:
+      return undefined
+  }
+}
+
+function applyExecutionViewAction(
   state: ExecutionViewState,
   action: ExecutionViewAction,
 ): ExecutionViewState {
@@ -263,10 +338,56 @@ export function prependExecutionHistory(
       replay: true,
     })
   }
-  const samples = prefix.timeToFirstTokenSamples + state.timeToFirstTokenSamples
-  const weighted =
-    prefix.timeToFirstTokenWeightedMs + state.timeToFirstTokenWeightedMs
-  const entries = [...prefix.entries, ...state.entries]
+  const entryPositions = { ...prefix.entryPositions }
+  for (const [key, position] of Object.entries(state.entryPositions)) {
+    const earlier = entryPositions[key]
+    if ("seq" in position) {
+      entryPositions[key] = {
+        seq:
+          earlier !== undefined && "seq" in earlier
+            ? Math.min(earlier.seq, position.seq)
+            : position.seq,
+      }
+    } else if (earlier === undefined || !("seq" in earlier)) {
+      entryPositions[key] = position
+    }
+  }
+  // A refresh can contain later records than an already loaded older page.
+  // Canonical order is independent of which request supplied the newest body.
+  const entriesById = new Map<string, ExecutionEntry>()
+  for (const entry of [...prefix.entries, ...state.entries]) {
+    const key = executionEntryIdentity(entry)
+    const outcome =
+      entry.kind === "tool"
+        ? state.turnTimings[entry.turnId]?.outcome
+        : undefined
+    entriesById.set(
+      key,
+      entry.kind === "tool" &&
+        entry.state === "requested" &&
+        outcome !== undefined
+        ? {
+            ...entry,
+            state: outcome.status === "completed" ? "unknown" : "interrupted",
+          }
+        : entry,
+    )
+  }
+  const entries = [...entriesById.values()].sort((left, right) => {
+    const position = (entry: ExecutionEntry) => {
+      const known = entryPositions[executionEntryIdentity(entry)]
+      return known === undefined
+        ? Number.POSITIVE_INFINITY
+        : "seq" in known
+          ? known.seq
+          : known.afterSeq + 0.5
+    }
+    return position(left) - position(right)
+  })
+  const completedTurnTelemetry = {
+    ...prefix.completedTurnTelemetry,
+    ...state.completedTurnTelemetry,
+  }
   const turnTimings = { ...state.turnTimings }
   for (const [turnId, timing] of Object.entries(prefix.turnTimings)) {
     turnTimings[turnId] = { ...timing, ...state.turnTimings[turnId] }
@@ -274,34 +395,15 @@ export function prependExecutionHistory(
   return {
     ...state,
     entries,
+    entryPositions,
     turnTimings,
     activeTurnStartedAt:
       state.activeTurnId === undefined
         ? undefined
         : (state.activeTurnStartedAt ??
           turnTimings[state.activeTurnId]?.startedAt),
-    telemetry: {
-      turns: prefix.telemetry.turns + state.telemetry.turns,
-      steps: prefix.telemetry.steps + state.telemetry.steps,
-      modelDurationMs:
-        prefix.telemetry.modelDurationMs + state.telemetry.modelDurationMs,
-      toolDurationMs:
-        prefix.telemetry.toolDurationMs + state.telemetry.toolDurationMs,
-      inputTokens: prefix.telemetry.inputTokens + state.telemetry.inputTokens,
-      outputTokens:
-        prefix.telemetry.outputTokens + state.telemetry.outputTokens,
-      cacheReadInputTokens:
-        prefix.telemetry.cacheReadInputTokens +
-        state.telemetry.cacheReadInputTokens,
-      cacheWriteInputTokens:
-        prefix.telemetry.cacheWriteInputTokens +
-        state.telemetry.cacheWriteInputTokens,
-      ...(samples === 0
-        ? {}
-        : { averageTimeToFirstTokenMs: Math.round(weighted / samples) }),
-    },
-    timeToFirstTokenWeightedMs: weighted,
-    timeToFirstTokenSamples: samples,
+    completedTurnTelemetry,
+    ...summarizeTurnTelemetry(completedTurnTelemetry),
     admittedRequestIds: {
       ...prefix.admittedRequestIds,
       ...state.admittedRequestIds,
@@ -764,7 +866,8 @@ function applyDurable(
       const pendingIndex = next.entries.findIndex(
         (entry) =>
           entry.kind === "user_input" &&
-          entry.requestId === event.data.requestId,
+          (entry.inputId === event.data.inputId ||
+            entry.requestId === event.data.requestId),
       )
       const input: ExecutionEntry = {
         kind: "user_input",
@@ -821,46 +924,23 @@ function applyDurable(
         },
       }
     case "turn.completed": {
-      const metrics = event.data.metrics
-      const samples = Math.max(1, metrics?.modelCalls ?? 0)
-      const hasTimeToFirstToken =
-        metrics?.averageTimeToFirstTokenMs !== undefined
-      const timeToFirstTokenWeightedMs =
-        next.timeToFirstTokenWeightedMs +
-        (hasTimeToFirstToken
-          ? (metrics?.averageTimeToFirstTokenMs ?? 0) * samples
-          : 0)
-      const timeToFirstTokenSamples =
-        next.timeToFirstTokenSamples + (hasTimeToFirstToken ? samples : 0)
-      const telemetry = addUsage(
-        {
-          ...next.telemetry,
-          turns: next.telemetry.turns + 1,
-          steps:
-            next.telemetry.steps +
-            (metrics?.modelCalls ?? 0) +
-            (metrics?.toolCalls ?? 0),
-          modelDurationMs:
-            next.telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
-          toolDurationMs:
-            next.telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
-          ...(timeToFirstTokenSamples === 0
+      const completedTurnTelemetry = {
+        ...next.completedTurnTelemetry,
+        [event.data.turnId]: {
+          ...(event.data.usage === undefined
             ? {}
-            : {
-                averageTimeToFirstTokenMs: Math.round(
-                  timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
-                ),
-              }),
+            : { usage: event.data.usage }),
+          ...(event.data.metrics === undefined
+            ? {}
+            : { metrics: event.data.metrics }),
         },
-        event.data.usage,
-      )
+      }
       next = {
         ...next,
-        telemetry,
-        timeToFirstTokenWeightedMs,
-        timeToFirstTokenSamples,
+        completedTurnTelemetry,
+        ...summarizeTurnTelemetry(completedTurnTelemetry),
         lastTurnUsage: event.data.usage,
-        lastTurnMetrics: metrics,
+        lastTurnMetrics: event.data.metrics,
       }
       return finishTurn(
         next,
@@ -899,6 +979,7 @@ function applyDurable(
           },
         }
       }
+      if (next.itemEntryIndexes[item.itemId] !== undefined) return next
       return replaceItemEntry(next, item.itemId, {
         kind: "tool",
         toolCallId: item.toolCallId,
@@ -1292,6 +1373,53 @@ function projectActiveActivity(
   }
   if (streamingAssistant) return { kind: "responding" }
   return { kind: "reasoning" }
+}
+
+function summarizeTurnTelemetry(
+  turns: ExecutionViewState["completedTurnTelemetry"],
+): Pick<
+  ExecutionViewState,
+  "telemetry" | "timeToFirstTokenWeightedMs" | "timeToFirstTokenSamples"
+> {
+  let telemetry = EMPTY_TELEMETRY
+  let timeToFirstTokenWeightedMs = 0
+  let timeToFirstTokenSamples = 0
+  for (const { usage, metrics } of Object.values(turns)) {
+    if (metrics?.averageTimeToFirstTokenMs !== undefined) {
+      const samples = Math.max(1, metrics.modelCalls)
+      timeToFirstTokenWeightedMs += metrics.averageTimeToFirstTokenMs * samples
+      timeToFirstTokenSamples += samples
+    }
+    telemetry = addUsage(
+      {
+        ...telemetry,
+        turns: telemetry.turns + 1,
+        steps:
+          telemetry.steps +
+          (metrics?.modelCalls ?? 0) +
+          (metrics?.toolCalls ?? 0),
+        modelDurationMs:
+          telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
+        toolDurationMs:
+          telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
+      },
+      usage,
+    )
+  }
+  return {
+    telemetry: {
+      ...telemetry,
+      ...(timeToFirstTokenSamples === 0
+        ? {}
+        : {
+            averageTimeToFirstTokenMs: Math.round(
+              timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
+            ),
+          }),
+    },
+    timeToFirstTokenWeightedMs,
+    timeToFirstTokenSamples,
+  }
 }
 
 function addUsage(

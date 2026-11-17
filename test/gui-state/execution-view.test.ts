@@ -262,6 +262,15 @@ describe("execution view", () => {
         "question_two",
       ])
       expect(prepended.entries).toHaveLength(3)
+      const overlapping = prependExecutionHistory(prepended, [
+        history,
+        question("question_one", 1),
+      ])
+      expect(overlapping.pendingQuestionIds).toEqual([
+        "question_one",
+        "question_two",
+      ])
+      expect(overlapping.entries).toHaveLength(3)
     })
 
     it("settles live pending questions when their correlated answer arrives in replay", () => {
@@ -494,6 +503,440 @@ describe("execution view", () => {
     expect(projectExecutionView(next).turnTimings.turn_latest?.inputId).toBe(
       "input_latest",
     )
+  })
+
+  describe("bounded history pages", () => {
+    const startedAt = "2026-11-12T00:00:00.000Z"
+    const completedAt = "2026-11-12T00:00:30.000Z"
+    const facts: KernelEvent[] = [
+      {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request_page",
+          inputId: "input_page",
+          role: InputRole.User,
+          content: inputFixture(inputParts("Inspect the files")),
+        },
+      },
+      {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_page", inputId: "input_page" },
+      },
+      toolStarted({
+        turnId: "turn_page",
+        itemId: "item_page",
+        toolCallId: "call_page",
+        name: "inspect",
+        input: {},
+        requiresPermission: false,
+      }),
+      {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_page",
+          item: {
+            type: "reasoning",
+            itemId: "reasoning_page",
+            text: "Checking",
+          },
+        },
+      },
+      agentCompleted({
+        turnId: "turn_page",
+        itemId: "answer_page",
+        text: "Found the files",
+      }),
+      toolCompleted({
+        turnId: "turn_page",
+        itemId: "item_page",
+        toolCallId: "call_page",
+        resultItemId: "result_page",
+        content: { kind: "text", text: "Two files" },
+      }),
+      {
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: "turn_page",
+          outcome: { status: "interrupted", reason: "Stopped" },
+          usage: {
+            inputTokens: 100,
+            outputTokens: 20,
+            cacheReadInputTokens: 40,
+            cacheWriteInputTokens: 10,
+          },
+          metrics: {
+            modelCalls: 2,
+            toolCalls: 1,
+            modelDurationMs: 4_000,
+            toolDurationMs: 500,
+            averageTimeToFirstTokenMs: 100,
+          },
+        },
+      },
+    ]
+    const events = facts.map((event, index) =>
+      createExecutionEnvelope({
+        sessionId,
+        seq: index + 1,
+        createdAt: index === 6 ? completedAt : startedAt,
+        event,
+      }),
+    )
+    const replay = (page: typeof events) =>
+      page.reduce(
+        (state, event) =>
+          reduceExecutionView(state, { type: "durable", event, replay: true }),
+        createExecutionViewState(),
+      )
+
+    it.each([
+      1, 2, 3, 4, 5, 6,
+    ])("merges a turn split after event %i in original entry order", (split) => {
+      const next = prependExecutionHistory(
+        replay(events.slice(split)),
+        events.slice(0, split),
+      )
+      const view = projectExecutionView(next)
+      expect(view.entries).toEqual([
+        expect.objectContaining({
+          kind: "user_input",
+          inputId: "input_page",
+          text: "Inspect the files",
+        }),
+        expect.objectContaining({
+          kind: "tool",
+          toolCallId: "call_page",
+          state: "completed",
+          resultText: "Two files",
+        }),
+        expect.objectContaining({
+          kind: "reasoning",
+          itemId: "reasoning_page",
+          text: "Checking",
+          status: "completed",
+        }),
+        expect.objectContaining({
+          kind: "assistant",
+          itemId: "answer_page",
+          text: "Found the files",
+          status: "completed",
+        }),
+        {
+          kind: "turn_terminal",
+          turnId: "turn_page",
+          state: "interrupted",
+          message: "Stopped",
+        },
+      ])
+      expect(view.turnTimings).toEqual({
+        turn_page: {
+          inputId: "input_page",
+          startedAt,
+          completedAt,
+          outcome: { status: "interrupted", reason: "Stopped" },
+        },
+      })
+      expect(view.telemetry).toEqual({
+        turns: 1,
+        steps: 3,
+        modelDurationMs: 4_000,
+        toolDurationMs: 500,
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadInputTokens: 40,
+        cacheWriteInputTokens: 10,
+        averageTimeToFirstTokenMs: 100,
+      })
+      expect(next.lastSeq).toBe(7)
+      expect(view.activeTurnId).toBeUndefined()
+    })
+
+    it("counts overlapping completed turns once and weights latency by model calls", () => {
+      const newer = createExecutionEnvelope({
+        sessionId,
+        seq: 8,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_newer",
+            outcome: { status: "completed" },
+            usage: { inputTokens: 300, outputTokens: 40 },
+            metrics: {
+              modelCalls: 1,
+              toolCalls: 2,
+              modelDurationMs: 2_000,
+              toolDurationMs: 250,
+              averageTimeToFirstTokenMs: 400,
+            },
+          },
+        },
+      })
+      const state = replay([...events.slice(4), newer, newer])
+      const merged = prependExecutionHistory(state, events)
+      const repeated = prependExecutionHistory(merged, events)
+      expect(projectExecutionView(repeated).telemetry).toEqual({
+        turns: 2,
+        steps: 6,
+        modelDurationMs: 6_000,
+        toolDurationMs: 750,
+        inputTokens: 400,
+        outputTokens: 60,
+        cacheReadInputTokens: 40,
+        cacheWriteInputTokens: 10,
+        averageTimeToFirstTokenMs: 200,
+      })
+      expect(repeated.entries).toHaveLength(5)
+      expect(repeated.lastTurnUsage).toEqual({
+        inputTokens: 300,
+        outputTokens: 40,
+      })
+      expect(repeated.lastSeq).toBe(8)
+    })
+
+    it("retains live streaming output and accepts later deltas after older history", () => {
+      let state = replay(events.slice(1, 2))
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "assistant.delta",
+          sessionId,
+          turnId: "turn_page",
+          itemId: "answer_page",
+          streamId: "stream_live",
+          offset: 0,
+          delta: "Live answer",
+          createdAt: completedAt,
+        },
+      })
+      const liveEntry = state.entries[0]
+      const merged = prependExecutionHistory(state, events.slice(0, 5))
+      expect(merged.entries).toEqual([
+        expect.objectContaining({ kind: "user_input", inputId: "input_page" }),
+        expect.objectContaining({ kind: "tool", state: "requested" }),
+        expect.objectContaining({ kind: "reasoning", text: "Checking" }),
+        liveEntry,
+      ])
+      const next = reduceExecutionView(merged, {
+        type: "transient",
+        event: {
+          type: "assistant.delta",
+          sessionId,
+          turnId: "turn_page",
+          itemId: "answer_page",
+          streamId: "stream_live",
+          offset: 11,
+          delta: " continues",
+          createdAt: completedAt,
+        },
+      })
+      expect(next.entries[3]).toMatchObject({
+        kind: "assistant",
+        text: "Live answer continues",
+        status: "streaming",
+        streamId: "stream_live",
+      })
+      expect(next.activeTurnId).toBe("turn_page")
+      expect(next.activeTurnStartedAt).toBe(startedAt)
+      expect(next.lastSeq).toBe(2)
+    })
+
+    it.each([
+      false,
+      true,
+    ])("orders an indexed latest-body refresh after loaded older history and before live output (body already loaded: %s)", (alreadyLoaded) => {
+      let state = createExecutionViewState({
+        id: sessionId,
+        rolloutId: "rollout_refresh",
+        conversationId: "conversation_refresh",
+        seq: 20,
+        createdAt: startedAt,
+        updatedAt: completedAt,
+        activeTurnId: "turn_latest",
+        pendingInputs: [],
+        pendingPermissions: [],
+        counts: {
+          inputs: 2,
+          pendingInputs: 0,
+          turns: 2,
+          items: 2,
+          permissions: 0,
+          tools: 0,
+        },
+      })
+      const indexedBody = createExecutionEnvelope({
+        sessionId,
+        seq: 10,
+        event: agentCompleted({
+          turnId: "turn_latest",
+          itemId: "indexed_answer",
+          text: "Indexed answer",
+        }),
+      })
+      // The cold window was empty. An older page paints before the independent
+      // indexed-body refresh returns, while live output is already arriving.
+      state = prependExecutionHistory(state, events.slice(0, 1))
+      if (alreadyLoaded) state = prependExecutionHistory(state, [indexedBody])
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "assistant.delta",
+          sessionId,
+          turnId: "turn_latest",
+          itemId: "live_answer",
+          streamId: "stream_refresh",
+          offset: 0,
+          delta: "Live answer",
+          createdAt: completedAt,
+        },
+      })
+      const refreshed = prependExecutionHistory(state, [indexedBody])
+      const repeated = prependExecutionHistory(refreshed, [indexedBody])
+      expect(projectExecutionView(repeated).entries).toEqual([
+        expect.objectContaining({
+          kind: "user_input",
+          inputId: "input_page",
+          text: "Inspect the files",
+        }),
+        expect.objectContaining({
+          kind: "assistant",
+          itemId: "indexed_answer",
+          text: "Indexed answer",
+          status: "completed",
+        }),
+        expect.objectContaining({
+          kind: "assistant",
+          itemId: "live_answer",
+          text: "Live answer",
+          status: "streaming",
+          streamId: "stream_refresh",
+        }),
+      ])
+      expect(repeated.lastSeq).toBe(20)
+      expect(repeated.activeTurnId).toBe("turn_latest")
+      const continued = reduceExecutionView(repeated, {
+        type: "transient",
+        event: {
+          type: "assistant.delta",
+          sessionId,
+          turnId: "turn_latest",
+          itemId: "live_answer",
+          streamId: "stream_refresh",
+          offset: 11,
+          delta: " continues",
+          createdAt: completedAt,
+        },
+      })
+      expect(continued.entries[2]).toMatchObject({
+        itemId: "live_answer",
+        text: "Live answer continues",
+        status: "streaming",
+      })
+    })
+
+    it("keeps live entries before later committed items while merging history", () => {
+      let state = replay(events.slice(1, 2))
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "assistant.delta",
+          sessionId,
+          turnId: "turn_page",
+          itemId: "live_before_commit",
+          streamId: "stream_before_commit",
+          offset: 0,
+          delta: "Live first",
+          createdAt: startedAt,
+        },
+      })
+      state = reduceExecutionView(state, {
+        type: "durable",
+        event: createExecutionEnvelope({
+          sessionId,
+          seq: 8,
+          event: agentCompleted({
+            turnId: "turn_page",
+            itemId: "later_commit",
+            text: "Committed second",
+          }),
+        }),
+      })
+      const merged = prependExecutionHistory(state, events.slice(0, 1))
+      expect(merged.entries).toEqual([
+        expect.objectContaining({ kind: "user_input", inputId: "input_page" }),
+        expect.objectContaining({
+          kind: "assistant",
+          itemId: "live_before_commit",
+          text: "Live first",
+          status: "streaming",
+        }),
+        expect.objectContaining({
+          kind: "assistant",
+          itemId: "later_commit",
+          text: "Committed second",
+          status: "completed",
+        }),
+      ])
+    })
+
+    it("keeps a completion observed without its start when that start is replayed", () => {
+      const state = replay(events.slice(5, 6))
+      const next = events.slice(2, 3).reduce(
+        (current, event) =>
+          reduceExecutionView(current, {
+            type: "durable",
+            event,
+            replay: true,
+          }),
+        state,
+      )
+      expect(next.entries).toEqual([
+        expect.objectContaining({
+          kind: "tool",
+          state: "completed",
+          resultText: "Two files",
+        }),
+      ])
+    })
+
+    it.each([
+      { status: "completed", toolState: "unknown" },
+      { status: "interrupted", toolState: "interrupted" },
+    ] as const)("settles a start-only older tool when its newer turn is $status", ({
+      status,
+      toolState,
+    }) => {
+      const terminal = createExecutionEnvelope({
+        sessionId,
+        seq: 8,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: "turn_page", outcome: { status } },
+        },
+      })
+      const next = prependExecutionHistory(
+        replay([terminal]),
+        events.slice(0, 3),
+      )
+      expect(next.entries).toEqual([
+        expect.objectContaining({ kind: "user_input", inputId: "input_page" }),
+        expect.objectContaining({
+          kind: "tool",
+          toolCallId: "call_page",
+          state: toolState,
+        }),
+        ...(status === "completed"
+          ? []
+          : [
+              {
+                kind: "turn_terminal",
+                turnId: "turn_page",
+                state: "interrupted",
+                message: "Turn interrupted.",
+              },
+            ]),
+      ])
+      expect(projectExecutionView(next).activeTurnId).toBeUndefined()
+    })
   })
 
   it("shows the persisted provider rejection reason in the failed turn", () => {

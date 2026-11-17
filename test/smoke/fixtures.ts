@@ -101,6 +101,32 @@ export async function runFauxTurn(page: Page): Promise<void> {
 }
 
 export async function runConversationHistoryFlow(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const reads: string[] = []
+    Object.assign(window, { smokeHistoryReads: reads })
+    const send = WebSocket.prototype.send
+    WebSocket.prototype.send = function (payload) {
+      if (typeof payload !== "string") return send.call(this, payload)
+      const frame = JSON.parse(payload) as {
+        method?: string
+        params?: { sessionId?: string; before?: number }
+      }
+      if (
+        frame.method === "session/history" &&
+        frame.params?.sessionId !== undefined
+      )
+        reads.push(
+          JSON.stringify([frame.params.sessionId, frame.params.before]),
+        )
+      return send.call(this, payload)
+    }
+  })
+  const historyReads = () =>
+    page.evaluate(
+      () =>
+        (window as typeof window & { smokeHistoryReads?: string[] })
+          .smokeHistoryReads ?? [],
+    )
   await page.getByRole("button", { name: "New session", exact: true }).click()
   const prompts = [
     "Earlier history needle for navigation",
@@ -111,7 +137,14 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
   const promptMessage = (prompt: string) =>
     main.locator('[data-context-kind="message"]').filter({ hasText: prompt })
   for (const [index, prompt] of prompts.entries()) {
-    await page.getByRole("textbox", { name: "Message the Mate" }).fill(prompt)
+    const content =
+      index === 2
+        ? `${prompt}\n${Array.from(
+            { length: 24 },
+            (_, row) => `History viewport row ${row + 1}`,
+          ).join("\n")}`
+        : prompt
+    await page.getByRole("textbox", { name: "Message the Mate" }).fill(content)
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await expect(
       main
@@ -133,10 +166,22 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
     await expect(promptMessage(prompts[1])).toHaveCount(0)
   }
   await coldOpen()
+  // The preceding page is prepared before scrolling, but does not enter the
+  // rendered transcript until the reader actually reaches the boundary.
+  await expect
+    .poll(async () => (await historyReads()).length)
+    .toBeGreaterThan(0)
+  await expect(promptMessage(prompts[1])).toHaveCount(0)
+  const readsBeforePrepend = (await historyReads()).length
   await page.locator(".conversation-surface").hover()
-  await page.mouse.wheel(0, -400)
+  await page.mouse.wheel(0, -800)
   await expect(promptMessage(prompts[1])).toHaveCount(1)
   await expect(promptMessage(prompts[0])).toHaveCount(0)
+  // Once prepended, the next page may be prefetched; the cached page itself
+  // must not be fetched a second time.
+  const readsAfterPrepend = await historyReads()
+  expect(readsAfterPrepend.length).toBeLessThanOrEqual(readsBeforePrepend + 1)
+  expect(new Set(readsAfterPrepend).size).toBe(readsAfterPrepend.length)
   await coldOpen()
   await page.keyboard.press("ControlOrMeta+f")
   await page

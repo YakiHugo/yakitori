@@ -93,6 +93,15 @@ const executionViews = new Map<
   }>
 >()
 
+type EarlierHistoryPage = Readonly<{
+  selection: SessionSelection
+  rolloutId: string | undefined
+  before: number
+  response: Promise<RpcMethodResponses["session/history"]>
+}>
+let earlierHistoryPage: EarlierHistoryPage | undefined
+const earlierHistoryLoads = new Map<string, EarlierHistoryPage>()
+
 function executionViewKey(apiBase: string, sessionId: string): string {
   return `${apiBase}\0${sessionId}`
 }
@@ -305,6 +314,7 @@ export type AppStoreActions = {
   loadEarlierHistory(
     options?: Readonly<{ beforePrepend?: () => void }>,
   ): Promise<boolean>
+  prefetchEarlierHistory(): Promise<boolean>
   loadHistoryThrough(itemId: string, signal?: AbortSignal): Promise<boolean>
   selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
@@ -375,6 +385,8 @@ function subscriptionUsageLoading(
 
 export function createInitialAppState(): AppStoreData {
   executionViews.clear()
+  earlierHistoryPage = undefined
+  earlierHistoryLoads.clear()
   const newSessionThreadId = createDraftThreadId()
   return {
     sidebar: { sections: [], entries: {} },
@@ -720,6 +732,31 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     get().sessionSelectionIntentRevision === selection.revision &&
     get().selection.sessionId === selection.sessionId
 
+  const isCurrentEarlierPage = (page: EarlierHistoryPage): boolean =>
+    isCurrentSelection(page.selection) &&
+    get().selectedSession?.rolloutId === page.rolloutId &&
+    get().historyBefore === page.before
+
+  const readEarlierHistory = (): EarlierHistoryPage | undefined => {
+    const selection = currentSelection()
+    const before = get().historyBefore
+    if (!selection || before === undefined) return
+    if (earlierHistoryPage && isCurrentEarlierPage(earlierHistoryPage))
+      return earlierHistoryPage
+    const response = getAppRpcClient(selection.apiBase).request(
+      "session/history",
+      { sessionId: selection.sessionId, before },
+    )
+    const page = {
+      selection,
+      rolloutId: get().selectedSession?.rolloutId,
+      before,
+      response,
+    }
+    earlierHistoryPage = page
+    return page
+  }
+
   const projectQueuedInputs = (items: readonly QueuedInput[]): void => {
     const pendingInputs = items.map((item) => ({
       id: item.id,
@@ -855,11 +892,14 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   const restoreUncommittedSteers = (
     sessionId: string,
     turnId?: string,
+    requestIds?: ReadonlySet<string>,
   ): void => {
     set((state) => {
       const pending = state.pendingSteers[sessionId] ?? []
       const restoring = pending.filter(
-        (steer) => turnId === undefined || steer.turnId === turnId,
+        (steer) =>
+          (turnId === undefined || steer.turnId === turnId) &&
+          (requestIds === undefined || requestIds.has(steer.requestId)),
       )
       if (restoring.length === 0) return state
       const pendingSteers = {
@@ -1169,6 +1209,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
   ): void => {
     const cacheKey = executionViewKey(apiBase, sessionId)
     historyRevisions.set(cacheKey, historyRevision(apiBase, sessionId) + 1)
+    if (earlierHistoryPage?.selection.sessionId === sessionId)
+      earlierHistoryPage = undefined
+    earlierHistoryLoads.delete(sessionId)
     executionViews.delete(cacheKey)
     summarySnapshots.delete(sessionId)
     summaryReadRevisions.set(
@@ -1353,26 +1396,63 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           .filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
       },
     }))
-    // A cached resume already has its transcript. Every other subscribe,
-    // including a newly created session's tail, waits for replay before the
-    // composer accepts input.
+    // Legacy snapshot-only streams wait for replay. An embedded complete
+    // window releases hydration in onSnapshot; cached resumes have a body.
     const blockUntilReplay = options.blockUntilReplay !== false
     if (blockUntilReplay) set({ hydratingSessionId: selection.sessionId })
-    // Recovery interprets an absent admission as an unconfirmed send. Only a
-    // complete replay can establish that absence; ordinary opens use the tail.
-    const recent =
-      inputRecoveryMemory.listAdmissionsForSession(
-        get().apiBase,
-        selection.sessionId,
-      ).length === 0 &&
-      inputRecoveryMemory.readSteers(get().apiBase, selection.sessionId)
-        .length === 0
-
     let replaySnapshot: ApiSessionDetail | undefined
     // The RPC stream resumes after received events on reconnect, including
     // those not yet published to this view. Retain them across snapshots.
     const replayEvents = new Map<number, AppSessionEventEnvelope>()
     let initialSnapshot = true
+    let snapshotStatePending = false
+    let pendingHistoryBefore: number | undefined
+    const reconcileAdmissionEvent = (event: AppSessionEventEnvelope): void => {
+      if (
+        !isInputAdmittedEvent(event) ||
+        event.sessionId !== selection.sessionId
+      )
+        return
+      releaseUnsentSession(event.sessionId)
+      confirmAdmissionRequest(event.data.requestId)
+      const admission = inputRecoveryMemory.readAdmissionByRequestId(
+        get().apiBase,
+        selection.sessionId,
+        event.data.requestId,
+      )
+      const steer = inputRecoveryMemory
+        .readSteers(get().apiBase, selection.sessionId)
+        .find((candidate) => candidate.requestId === event.data.requestId)
+      const original = admission?.content ?? steer?.content
+      if (original !== undefined)
+        recordPromotedContent(original, event.data.content)
+      if (admission?.restored)
+        reconcileRecoveredInput(selection.sessionId, admission.content)
+      if (steer?.restored)
+        reconcileRecoveredInput(selection.sessionId, steer.content)
+      if (admission !== undefined)
+        inputRecoveryMemory.acknowledgeAdmission(admission)
+      inputRecoveryMemory.updateSteers(
+        get().apiBase,
+        selection.sessionId,
+        (steers) =>
+          steers.filter((steer) => steer.requestId !== event.data.requestId),
+      )
+      syncInputRecoveryNotice(selection.sessionId)
+      set((state) => ({
+        pendingSteers: {
+          ...state.pendingSteers,
+          [selection.sessionId]: (
+            state.pendingSteers[selection.sessionId] ?? []
+          ).filter((steer) => steer.requestId !== event.data.requestId),
+        },
+        restoredSteerRequestIds: Object.fromEntries(
+          Object.entries(state.restoredSteerRequestIds).filter(
+            ([requestId]) => requestId !== event.data.requestId,
+          ),
+        ),
+      }))
+    }
     const goalAtSubscribe = goalSnapshots.get(selection.sessionId)
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
@@ -1384,6 +1464,20 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               return
             }
             if (!reconcileRecoveryRollout(response.session)) return
+            if (response.statePending === true && !snapshotStatePending)
+              pendingHistoryBefore =
+                response.historyBefore ?? get().historyBefore
+            const completingPendingSnapshot =
+              snapshotStatePending && response.statePending !== true
+            const historyAdvanced =
+              completingPendingSnapshot &&
+              get().historyBefore !== pendingHistoryBefore
+            const retainHistoryBoundary =
+              historyAdvanced &&
+              (get().historyBefore === undefined ||
+                (response.historyBefore !== undefined &&
+                  (get().historyBefore ?? 0) <= response.historyBefore))
+            snapshotStatePending = response.statePending === true
             const initializeHistory = initialSnapshot && after === 0
             initialSnapshot = false
             const latestGoal = goalSnapshots.get(selection.sessionId)
@@ -1392,47 +1486,159 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 ...response,
                 session: withGoal(response.session, latestGoal.goal),
               }
-            replaySnapshot = response.session
+            replaySnapshot =
+              response.events === undefined ? response.session : undefined
+            const closingQuestions: ExecutionViewState[] = []
+            let execution = get().execution
+            if (response.events !== undefined) {
+              if (
+                completingPendingSnapshot &&
+                response.events.some(
+                  (event) =>
+                    event.type === "input.admitted" ||
+                    event.type === "item.started" ||
+                    event.type === "item.completed",
+                )
+              )
+                execution = {
+                  ...prependExecutionHistory(execution, response.events),
+                  lastSeq: Math.max(execution.lastSeq, response.session.seq),
+                }
+              const events = new Map(
+                [...replayEvents.values(), ...response.events].map((event) => [
+                  event.seq,
+                  event,
+                ]),
+              )
+              replayEvents.clear()
+              for (const event of [...events.values()].sort(
+                (left, right) => left.seq - right.seq,
+              )) {
+                if (
+                  event.seq <= execution.lastSeq &&
+                  !(
+                    event.type === "context.tokens" &&
+                    execution.contextTokens === undefined
+                  )
+                )
+                  continue
+                if (isTurnCompletedEvent(event))
+                  closingQuestions.push(execution)
+                const lastSeq = execution.lastSeq
+                execution = reduceExecutionView(execution, {
+                  type: "durable",
+                  event,
+                  replay: true,
+                })
+                if (execution.lastSeq < lastSeq)
+                  execution = { ...execution, lastSeq }
+              }
+              if (
+                !snapshotStatePending &&
+                response.session.activeTurnId === undefined
+              )
+                closingQuestions.push(execution)
+              execution = snapshotStatePending
+                ? {
+                    ...execution,
+                    lastSeq: Math.max(execution.lastSeq, response.session.seq),
+                    ...(response.session.workingDirectory === undefined
+                      ? {}
+                      : {
+                          workingDirectory: response.session.workingDirectory,
+                        }),
+                    ...(response.session.mateId === undefined
+                      ? {}
+                      : { mateId: response.session.mateId }),
+                    ...(response.session.mateRevisionId === undefined
+                      ? {}
+                      : { mateRevisionId: response.session.mateRevisionId }),
+                  }
+                : reduceExecutionView(execution, {
+                    type: "replay_completed",
+                    session: response.session,
+                  })
+            } else if (blockUntilReplay) {
+              execution = {
+                ...reduceExecutionView(execution, {
+                  type: "snapshot",
+                  session: response.session,
+                }),
+                // A legacy snapshot does not prove replay has reached the view.
+                lastSeq: execution.lastSeq,
+              }
+            }
+            if (
+              !snapshotStatePending &&
+              execution.lastModel === undefined &&
+              response.session.currentModel !== undefined
+            )
+              execution = {
+                ...execution,
+                lastModel: response.session.currentModel,
+              }
             let modelSelections = get().modelSelections
             let restoringModelSelectionFor = get().restoringModelSelectionFor
+            const currentSession = get().selectedSession
+            const newerExecution = execution.lastSeq > response.session.seq
+            let selectedSession = response.session
+            if (newerExecution && currentSession !== undefined) {
+              const {
+                activeTurnId: _activeTurnId,
+                status: _status,
+                currentModel: _currentModel,
+                ...metadata
+              } = response.session
+              const currentModel =
+                execution.lastModel ?? response.session.currentModel
+              selectedSession = {
+                ...metadata,
+                seq: Math.max(currentSession.seq, execution.lastSeq),
+                updatedAt: currentSession.updatedAt,
+                active: execution.activeTurnId !== undefined,
+                ...(execution.activeTurnId === undefined
+                  ? {}
+                  : { activeTurnId: execution.activeTurnId }),
+                ...(currentSession.status === undefined
+                  ? {}
+                  : { status: currentSession.status }),
+                ...(currentModel === undefined ? {} : { currentModel }),
+              }
+            }
             if (
               restoringModelSelectionFor === selection.sessionId &&
-              response.session.currentModel !== undefined
+              selectedSession.currentModel !== undefined
             ) {
               modelSelections = {
                 ...modelSelections,
-                [selection.sessionId]: response.session.currentModel,
+                [selection.sessionId]: selectedSession.currentModel,
               }
               persistModelSelections(modelSelections)
               restoringModelSelectionFor = undefined
             }
             set({
-              selectedSession: response.session,
+              selectedSession,
               sessionsByProject: replaceSessionSummaryInLists(
                 get().sessionsByProject,
-                response.session,
+                selectedSession,
               ),
-              ...(initializeHistory || response.historyBefore !== undefined
+              ...(initializeHistory ||
+              (response.historyBefore !== undefined && !retainHistoryBoundary)
                 ? { historyBefore: response.historyBefore }
                 : {}),
-              hydratingSessionId: blockUntilReplay
-                ? selection.sessionId
-                : undefined,
+              hydratingSessionId:
+                blockUntilReplay && response.events === undefined
+                  ? selection.sessionId
+                  : undefined,
               currentProject: response.session.projectId,
               modelSelections,
               restoringModelSelectionFor,
-              execution: blockUntilReplay
-                ? {
-                    ...reduceExecutionView(get().execution, {
-                      type: "snapshot",
-                      session: response.session,
-                    }),
-                    // The snapshot watermark is not proof that its history
-                    // has reached this view. Navigation may interrupt replay.
-                    lastSeq: get().execution.lastSeq,
-                  }
-                : get().execution,
+              execution,
             })
+            for (const closing of closingQuestions)
+              restoreQuestionDrafts(selection.sessionId, closing)
+            for (const event of response.events ?? [])
+              reconcileAdmissionEvent(event)
           },
           onReplayComplete: () => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
@@ -1473,6 +1679,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 execution,
               }
             })
+            if (snapshotStatePending) return
             authoritativeTurns.set(
               selection.sessionId,
               get().execution.activeTurnId,
@@ -1488,49 +1695,8 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               )
                 pending.finish()
             }
-            if (get().execution.activeTurnId !== undefined) {
-              for (const steer of get().pendingSteers[selection.sessionId] ??
-                []) {
-                if (
-                  steer.restored ||
-                  steer.turnId !== get().execution.activeTurnId
-                )
-                  restoreUncommittedSteers(selection.sessionId, steer.turnId)
-              }
-            } else {
-              restoreUncommittedSteers(selection.sessionId)
-            }
             for (const execution of closingQuestions)
               restoreQuestionDrafts(selection.sessionId, execution)
-            const confirmedSteers = inputRecoveryMemory
-              .readSteers(get().apiBase, selection.sessionId)
-              .filter(
-                (steer) => get().execution.admittedRequestIds[steer.requestId],
-              )
-            for (const steer of confirmedSteers) {
-              if (steer.restored)
-                reconcileRecoveredInput(selection.sessionId, steer.content)
-            }
-            inputRecoveryMemory.updateSteers(
-              get().apiBase,
-              selection.sessionId,
-              (steers) =>
-                steers.filter(
-                  (steer) =>
-                    !get().execution.admittedRequestIds[steer.requestId],
-                ),
-            )
-            set((state) => ({
-              pendingSteers: {
-                ...state.pendingSteers,
-                [selection.sessionId]: (
-                  state.pendingSteers[selection.sessionId] ?? []
-                ).filter(
-                  (steer) =>
-                    !state.execution.admittedRequestIds[steer.requestId],
-                ),
-              },
-            }))
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -1543,6 +1709,117 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                   )
                   .map((admission) => admission.requestId),
               )
+              const requestIds = [
+                ...new Set([
+                  ...inputRecoveryMemory
+                    .listAdmissionsForSession(
+                      selection.apiBase,
+                      selection.sessionId,
+                    )
+                    .map((admission) => admission.requestId),
+                  ...inputRecoveryMemory
+                    .readSteers(selection.apiBase, selection.sessionId)
+                    .map((steer) => steer.requestId),
+                ]),
+              ]
+              const checkedRequestIds = new Set(requestIds)
+              if (requestIds.length > 0) {
+                const rolloutId = get().selectedSession?.rolloutId
+                let confirmed = false
+                const checked = await runTask(
+                  async () => {
+                    const status = await getAppRpcClient(
+                      selection.apiBase,
+                    ).request("session/input/status", {
+                      sessionId: selection.sessionId,
+                      requestIds,
+                    })
+                    if (
+                      !isCurrentSelection(selection) ||
+                      get().selectedSession?.rolloutId !== rolloutId ||
+                      status.rolloutId !== rolloutId
+                    )
+                      return
+                    for (const event of status.events) {
+                      if (
+                        !isInputAdmittedEvent(event) ||
+                        event.sessionId !== selection.sessionId ||
+                        !requestIds.includes(event.data.requestId)
+                      )
+                        continue
+                      reconcileAdmissionEvent(event)
+                      // This lookup proves admission without adding an old
+                      // message to the bounded, currently displayed window.
+                      set((state) => ({
+                        execution: {
+                          ...state.execution,
+                          admittedRequestIds: {
+                            ...state.execution.admittedRequestIds,
+                            [event.data.requestId]: true,
+                          },
+                        },
+                      }))
+                    }
+                    confirmed = true
+                  },
+                  () => isCurrentSelection(selection),
+                  false,
+                  false,
+                )
+                // A failed lookup proves no absence. Keep recovery unresolved.
+                if (!checked || !confirmed) return
+              }
+              if (!isCurrentSelection(selection)) return
+              const confirmedSteers = inputRecoveryMemory
+                .readSteers(selection.apiBase, selection.sessionId)
+                .filter(
+                  (steer) =>
+                    get().execution.admittedRequestIds[steer.requestId],
+                )
+              for (const steer of confirmedSteers) {
+                if (steer.restored)
+                  reconcileRecoveredInput(selection.sessionId, steer.content)
+              }
+              inputRecoveryMemory.updateSteers(
+                selection.apiBase,
+                selection.sessionId,
+                (steers) =>
+                  steers.filter(
+                    (steer) =>
+                      !get().execution.admittedRequestIds[steer.requestId],
+                  ),
+              )
+              set((state) => ({
+                pendingSteers: {
+                  ...state.pendingSteers,
+                  [selection.sessionId]: (
+                    state.pendingSteers[selection.sessionId] ?? []
+                  ).filter(
+                    (steer) =>
+                      !state.execution.admittedRequestIds[steer.requestId],
+                  ),
+                },
+              }))
+              if (get().execution.activeTurnId !== undefined) {
+                for (const steer of get().pendingSteers[selection.sessionId] ??
+                  []) {
+                  if (
+                    steer.restored ||
+                    steer.turnId !== get().execution.activeTurnId
+                  )
+                    restoreUncommittedSteers(
+                      selection.sessionId,
+                      steer.turnId,
+                      checkedRequestIds,
+                    )
+                }
+              } else {
+                restoreUncommittedSteers(
+                  selection.sessionId,
+                  undefined,
+                  checkedRequestIds,
+                )
+              }
               let queuedRequestIds = new Set<string>()
               try {
                 const revision = ++queueReadRevision
@@ -1608,51 +1885,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             }
             if (event.sessionId !== selection.sessionId) return
             if (replaySnapshot !== undefined) replayEvents.set(event.seq, event)
-            if (isInputAdmittedEvent(event)) {
-              releaseUnsentSession(event.sessionId)
-              confirmAdmissionRequest(event.data.requestId)
-              const admission = inputRecoveryMemory.readAdmissionByRequestId(
-                get().apiBase,
-                selection.sessionId,
-                event.data.requestId,
-              )
-              const steer = inputRecoveryMemory
-                .readSteers(get().apiBase, selection.sessionId)
-                .find(
-                  (candidate) => candidate.requestId === event.data.requestId,
-                )
-              const original = admission?.content ?? steer?.content
-              if (original !== undefined)
-                recordPromotedContent(original, event.data.content)
-              if (admission?.restored)
-                reconcileRecoveredInput(selection.sessionId, admission.content)
-              if (steer?.restored)
-                reconcileRecoveredInput(selection.sessionId, steer.content)
-              if (admission !== undefined)
-                inputRecoveryMemory.acknowledgeAdmission(admission)
-              inputRecoveryMemory.updateSteers(
-                get().apiBase,
-                selection.sessionId,
-                (steers) =>
-                  steers.filter(
-                    (steer) => steer.requestId !== event.data.requestId,
-                  ),
-              )
-              syncInputRecoveryNotice(selection.sessionId)
-              set((state) => ({
-                pendingSteers: {
-                  ...state.pendingSteers,
-                  [selection.sessionId]: (
-                    state.pendingSteers[selection.sessionId] ?? []
-                  ).filter((steer) => steer.requestId !== event.data.requestId),
-                },
-                restoredSteerRequestIds: Object.fromEntries(
-                  Object.entries(state.restoredSteerRequestIds).filter(
-                    ([requestId]) => requestId !== event.data.requestId,
-                  ),
-                ),
-              }))
-            }
+            reconcileAdmissionEvent(event)
             const questionsBeforeEvent = get().execution
             set((state) => {
               const selectedSession = applyDurableSessionDetail(
@@ -1752,7 +1985,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             })
           },
         },
-        { recent },
+        { recent: true },
       )
       set({ stream: source })
     } catch (error) {
@@ -3049,30 +3282,38 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       return completed
     },
 
+    prefetchEarlierHistory: async () => {
+      const page = readEarlierHistory()
+      if (!page) return false
+      try {
+        await page.response
+        const current = isCurrentEarlierPage(page)
+        if (!current && earlierHistoryPage === page)
+          earlierHistoryPage = undefined
+        return current
+      } catch {
+        // A speculative read can be retried by the demand path, which owns
+        // user-visible history errors.
+        if (earlierHistoryPage === page) earlierHistoryPage = undefined
+        return false
+      }
+    },
+
     loadEarlierHistory: async (options) => {
-      const selection = currentSelection()
-      if (!selection) return false
+      const page = readEarlierHistory()
+      if (!page) return false
+      const { selection, before } = page
       const sessionId = selection.sessionId
-      const selectionRevision = selection.revision
-      const before = get().historyBefore
-      if (sessionId === undefined || before === undefined) return false
       const key = `history:${sessionId}`
-      if (get().inFlightActions.has(key)) return false
+      const loading = earlierHistoryLoads.get(sessionId)
+      if (loading && isCurrentEarlierPage(loading)) return false
+      earlierHistoryLoads.set(sessionId, page)
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
       try {
-        const response = await getAppRpcClient(get().apiBase).request(
-          "session/history",
-          { sessionId, before },
-        )
-        if (
-          get().selection.sessionId !== sessionId ||
-          get().sessionSelectionIntentRevision !== selectionRevision ||
-          get().historyBefore !== before
-        ) {
-          return false
-        }
+        const response = await page.response
+        if (!isCurrentEarlierPage(page)) return false
         if (
           response.historyBefore !== undefined &&
           response.historyBefore >= before
@@ -3080,28 +3321,32 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
           throw new ApiRequestError("Earlier history did not advance.")
         }
         options?.beforePrepend?.()
+        if (!isCurrentEarlierPage(page)) return false
+        if (earlierHistoryPage === page) earlierHistoryPage = undefined
         set({
           historyBefore: response.historyBefore,
           execution: prependExecutionHistory(get().execution, response.events),
         })
         return true
       } catch (error) {
-        if (
-          get().selection.sessionId === sessionId &&
-          get().sessionSelectionIntentRevision === selectionRevision
-        ) {
+        if (earlierHistoryPage === page) earlierHistoryPage = undefined
+        if (isCurrentEarlierPage(page)) {
           set({
             message: errorMessage(error, "Could not load earlier messages."),
           })
         }
         return false
       } finally {
-        set((state) => {
-          if (!isCurrentHistory(selection)) return state
-          const inFlightActions = new Set(state.inFlightActions)
-          inFlightActions.delete(key)
-          return { inFlightActions }
-        })
+        if (earlierHistoryPage === page && !isCurrentEarlierPage(page))
+          earlierHistoryPage = undefined
+        if (earlierHistoryLoads.get(sessionId) === page) {
+          earlierHistoryLoads.delete(sessionId)
+          set((state) => {
+            const inFlightActions = new Set(state.inFlightActions)
+            inFlightActions.delete(key)
+            return { inFlightActions }
+          })
+        }
       }
     },
 
