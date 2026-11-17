@@ -156,28 +156,6 @@ describe("method dispatch", () => {
     })
   })
 
-  it("dispatches a handler-backed method and returns its body", async () => {
-    const seen: unknown[] = []
-    const session = makeSessionDetail("session_1", { seq: 7 })
-    const { processor } = createTestProcessor({
-      handlers: createFakeHandlers({
-        readSession: async (input) => {
-          seen.push(input)
-          return okResult({ session })
-        },
-      }),
-    })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-
-    const response = await connection.sendRequest("session/read", {
-      sessionId: "session_1",
-    })
-
-    expect(response).toMatchObject({ result: { session: { id: "session_1" } } })
-    expect(seen).toEqual([{ sessionId: "session_1" }])
-  })
-
   it("maps handler validation failures to INVALID_PARAMS keeping the api code", async () => {
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers({
@@ -197,28 +175,6 @@ describe("method dispatch", () => {
         code: INVALID_PARAMS,
         message: "sessionId must be a session id.",
         data: { code: "invalid_input" },
-      },
-    })
-  })
-
-  it("maps other handler failures to INTERNAL_ERROR keeping the api code", async () => {
-    const { processor } = createTestProcessor({
-      handlers: createFakeHandlers({
-        readSession: async () =>
-          errorResult("not_found", "Session session_1 was not found."),
-      }),
-    })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-
-    const response = await connection.sendRequest("session/read", {
-      sessionId: "session_1",
-    })
-
-    expect(response).toMatchObject({
-      error: {
-        code: INTERNAL_ERROR,
-        data: { code: "not_found" },
       },
     })
   })

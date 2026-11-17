@@ -2491,24 +2491,6 @@ describe("model selector", () => {
     expect(useAppStore.getState().settingsSection).toBe("providers")
   })
 
-  it("offers effort stops and a speed toggle for reasoning models", async () => {
-    const user = userEvent.setup()
-    window.localStorage.clear()
-    useAppStore.setState({ ...selectModelState(), modelSelections: {} })
-    render(<Composer />)
-
-    await openEffortMenu(user)
-
-    // The effective default model is a reasoning model: effort stops show.
-    expect(screen.getByRole("slider", { name: "Reasoning effort" }))
-    expect(screen.getByRole("button", { name: "low" })).toBeDefined()
-    expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
-    expect(screen.getByRole("button", { name: "high" })).toBeDefined()
-
-    // And it has a speed tier toggle.
-    expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
-  })
-
   it.each([
     "preference",
     "session",
@@ -2648,6 +2630,10 @@ describe("model selector", () => {
         effort: "low",
       },
     })
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
+    expect(screen.queryByRole("button", { name: /speed/ })).toBeNull()
 
     // K3 does not offer OpenAI's "medium", so switching drops that effort.
     useAppStore.setState({
@@ -2676,7 +2662,13 @@ describe("model selector", () => {
     await openEffortMenu(user)
     const popover = container.querySelector("[data-model-picker]")
     expect(popover).not.toBeNull()
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
+    expect(screen.getByRole("button", { name: "low" })).toBeDefined()
     expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
+    expect(screen.getByRole("button", { name: "high" })).toBeDefined()
+    expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
     await user.click(screen.getByRole("button", { name: "Select model" }))
     expect(container.querySelector("[data-model-picker]")).toBe(popover)
     await user.click(screen.getByRole("button", { name: "K3" }))
@@ -2900,25 +2892,6 @@ describe("model selector", () => {
     expect(
       screen.queryByRole("button", { name: "Use standard speed" }),
     ).toBeNull()
-  })
-
-  it("hides the speed toggle for providers without tiers", async () => {
-    const user = userEvent.setup()
-    window.localStorage.clear()
-    useAppStore.setState({
-      ...selectModelState(),
-      modelSelections: {
-        session_1: { provider: "anthropic", model: "claude-sonnet-4-6" },
-      },
-    })
-    render(<Composer />)
-
-    await openEffortMenu(user)
-
-    expect(
-      screen.getByRole("slider", { name: "Reasoning effort" }),
-    ).toBeDefined()
-    expect(screen.queryByRole("button", { name: /speed/ })).toBeNull()
   })
 
   it("checks the effective model and records each explicit choice without a Default action", async () => {

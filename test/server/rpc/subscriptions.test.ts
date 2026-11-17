@@ -598,28 +598,10 @@ describe("session/subscribe", () => {
     expect(connection.notifications("session/transient")).toHaveLength(1)
   })
 
-  it("answers a snapshot failure with an error and keeps no subscription", async () => {
-    const handlers = createFakeHandlers({
-      readSession: async () =>
-        errorResult("not_found", `Session ${sessionId} was not found.`),
-    })
-    const { processor, eventHub } = createTestProcessor({ handlers })
-    const connection = openTestConnection(processor)
-    await initializeConnection(connection)
-
-    const response = await connection.sendRequest("session/subscribe", {
-      sessionId,
-    })
-    expect(response).toMatchObject({
-      error: { code: INTERNAL_ERROR, data: { code: "not_found" } },
-    })
-
-    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
-    await flush()
-    expect(connection.notifications("session/event")).toHaveLength(0)
-  })
-
-  it("releases the live listener when the initial snapshot rejects", async () => {
+  it.each([
+    "error result",
+    "rejection",
+  ])("answers an initial snapshot failure and releases its live listener (%s)", async (failureMode) => {
     const eventHub = createSessionEventHub()
     const subscribe = eventHub.subscribe.bind(eventHub)
     const close = vi.fn()
@@ -636,7 +618,9 @@ describe("session/subscribe", () => {
       eventHub,
       handlers: createFakeHandlers({
         readSession: async () => {
-          throw new Error("Snapshot storage is unavailable")
+          if (failureMode === "rejection")
+            throw new Error("Snapshot storage is unavailable")
+          return errorResult("not_found", `Session ${sessionId} was not found.`)
         },
       }),
       reportOperationalFailure: () => {},
@@ -644,12 +628,23 @@ describe("session/subscribe", () => {
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
     try {
-      expect(
-        await connection.sendRequest("session/subscribe", { sessionId }),
-      ).toMatchObject({ error: { code: INTERNAL_ERROR } })
+      const response = await connection.sendRequest("session/subscribe", {
+        sessionId,
+      })
+      expect(response).toMatchObject({
+        error: {
+          code: INTERNAL_ERROR,
+          ...(failureMode === "error result"
+            ? { data: { code: "not_found" } }
+            : {}),
+        },
+      })
       // Closing the live listener is the ownership contract: otherwise every
       // future event is retained in a replay buffer with no replay consumer.
       expect(close).toHaveBeenCalledOnce()
+      eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
+      await flush()
+      expect(connection.notifications("session/event")).toHaveLength(0)
       expect(await connection.sendRequest("server/ping", {})).toMatchObject({
         result: {},
       })

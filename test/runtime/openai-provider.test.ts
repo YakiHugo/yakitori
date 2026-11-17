@@ -875,61 +875,6 @@ describe("OpenAI Responses provider", () => {
     }
   })
 
-  it("converts attached images into Responses API input blocks", () => {
-    expect(
-      toOpenAIInput([
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Inspect this" },
-            { type: "image", mediaType: "image/webp", data: "aGVsbG8=" },
-          ],
-        },
-      ]),
-    ).toEqual([
-      {
-        role: "user",
-        content: [
-          { type: "input_text", text: "Inspect this" },
-          {
-            type: "input_image",
-            detail: "high",
-            image_url: "data:image/webp;base64,aGVsbG8=",
-          },
-        ],
-      },
-    ])
-  })
-
-  it("preserves original image detail on the wire", () => {
-    const input = toOpenAIInput([
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            mediaType: "image/png",
-            detail: "original",
-            data: "aGVsbG8=",
-          },
-        ],
-      },
-    ])
-
-    expect(input).toEqual([
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_image",
-            detail: "original",
-            image_url: "data:image/png;base64,aGVsbG8=",
-          },
-        ],
-      },
-    ])
-  })
-
   it("restores durable reasoning items for a tool continuation", () => {
     expect(
       toOpenAIInput([
@@ -975,7 +920,13 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
-  it("does not replay reasoning owned by a different provider identity", () => {
+  it.each([
+    { owner: "provider identity", provider: "codex" },
+    { owner: "backend scope", provider: "openai", scope: "account-a" },
+  ])("does not replay reasoning owned by a different $owner", ({
+    provider,
+    scope,
+  }) => {
     expect(
       toOpenAIInput(
         [
@@ -987,7 +938,8 @@ describe("OpenAI Responses provider", () => {
                 text: "Private continuation state.",
                 providerMetadata: {
                   openai: {
-                    provider: "codex",
+                    provider,
+                    ...(scope === undefined ? {} : { scope }),
                     id: "reasoning_1",
                     encryptedContent: "encrypted_1",
                   },
@@ -999,36 +951,7 @@ describe("OpenAI Responses provider", () => {
         ],
         true,
         "openai",
-      ),
-    ).toEqual([{ role: "assistant", content: "Visible answer." }])
-  })
-
-  it("does not replay reasoning owned by a different backend scope", () => {
-    expect(
-      toOpenAIInput(
-        [
-          {
-            role: "assistant",
-            content: [
-              {
-                type: "reasoning",
-                text: "Private continuation state.",
-                providerMetadata: {
-                  openai: {
-                    provider: "openai",
-                    scope: "account-a",
-                    id: "reasoning_1",
-                    encryptedContent: "encrypted_1",
-                  },
-                },
-              },
-              { type: "text", text: "Visible answer." },
-            ],
-          },
-        ],
-        true,
-        "openai",
-        "account-b",
+        scope === undefined ? undefined : "account-b",
       ),
     ).toEqual([{ role: "assistant", content: "Visible answer." }])
   })

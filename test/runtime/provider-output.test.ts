@@ -734,21 +734,61 @@ describe("provider output completeness", () => {
   })
 
   it.each([
-    { status: "incomplete", arguments: '{"path":"b.txt"}' },
-    { status: "completed", arguments: '{"path":"b.txt"' },
-    { status: "completed", arguments: "1e400" },
-  ])("does not commit OpenAI calls without complete items and complete JSON values (%j)", async (tail) => {
-    const item = {
+    {
+      name: "an incomplete function item",
       type: "function_call",
+      status: "incomplete",
+      arguments: '{"path":"b.txt"}',
+      completed: true,
+    },
+    {
+      name: "incomplete function JSON",
+      type: "function_call",
+      status: "completed",
+      arguments: '{"path":"b.txt"',
+      completed: true,
+    },
+    {
+      name: "a non-finite function value",
+      type: "function_call",
+      status: "completed",
+      arguments: "1e400",
+      completed: true,
+    },
+    {
+      name: "a pending custom item",
+      type: "custom_tool_call",
+      input: "*** Begin Patch",
+      completed: false,
+    },
+    {
+      name: "non-string custom input",
+      type: "custom_tool_call",
+      status: "completed",
+      input: { patch: "*** Begin Patch" },
+      completed: true,
+    },
+  ])("does not commit or replay $name", async ({
+    name: _name,
+    completed,
+    ...value
+  }) => {
+    const item = {
       id: "item_tail",
       call_id: "call_tail",
-      name: "read_file",
-      ...tail,
+      name: value.type === "function_call" ? "read_file" : "apply_patch",
+      ...value,
     }
     const events = await collect(
       openaiStream([
-        { type: "response.output_item.done", output_index: 0, item },
-        openaiFinish("max_output_tokens", [item]),
+        {
+          type: completed
+            ? "response.output_item.done"
+            : "response.output_item.added",
+          output_index: 0,
+          item,
+        },
+        openaiFinish("max_output_tokens", completed ? [item] : []),
       ]),
       { ...request("openai"), continuationScope: "account" },
     )
@@ -761,98 +801,6 @@ describe("provider output completeness", () => {
         incompleteToolCalls: true,
         content: [],
       },
-    })
-    if (terminal?.type !== "response") throw new Error("Missing response")
-    expect(terminal.response.native).toEqual([])
-    const history = await persistModelMessages([
-      {
-        role: "assistant",
-        content: terminal.response.content,
-        ...(terminal.response.native === undefined
-          ? {}
-          : { native: terminal.response.native }),
-      },
-    ])
-    expect(
-      toOpenAIInput(
-        history,
-        true,
-        "openai",
-        "account",
-        new Map(),
-        "test-model",
-      ),
-    ).toEqual([])
-  })
-
-  it("keeps custom OpenAI calls pending until an output item completion", async () => {
-    const events = await collect(
-      openaiStream([
-        {
-          type: "response.output_item.added",
-          output_index: 0,
-          item: {
-            type: "custom_tool_call",
-            id: "item_tail",
-            call_id: "call_tail",
-            name: "apply_patch",
-            input: "*** Begin Patch",
-          },
-        },
-        openaiFinish("max_output_tokens"),
-      ]),
-      { ...request("openai"), continuationScope: "account" },
-    )
-    expect(events.filter((event) => event.type === "output_item")).toEqual([])
-    const terminal = events.at(-1)
-    expect(terminal).toMatchObject({
-      type: "response",
-      response: { incompleteToolCalls: true, content: [] },
-    })
-    if (terminal?.type !== "response") throw new Error("Missing response")
-    expect(terminal.response.native).toEqual([])
-    const history = await persistModelMessages([
-      {
-        role: "assistant",
-        content: terminal.response.content,
-        ...(terminal.response.native === undefined
-          ? {}
-          : { native: terminal.response.native }),
-      },
-    ])
-    expect(
-      toOpenAIInput(
-        history,
-        true,
-        "openai",
-        "account",
-        new Map(),
-        "test-model",
-      ),
-    ).toEqual([])
-  })
-
-  it("does not replay an OpenAI custom call with non-string input", async () => {
-    const item = {
-      type: "custom_tool_call",
-      id: "item_tail",
-      call_id: "call_tail",
-      name: "apply_patch",
-      input: { patch: "*** Begin Patch" },
-      status: "completed",
-    }
-    const events = await collect(
-      openaiStream([
-        { type: "response.output_item.done", output_index: 0, item },
-        openaiFinish("max_output_tokens", [item]),
-      ]),
-      { ...request("openai"), continuationScope: "account" },
-    )
-    expect(events.filter((event) => event.type === "output_item")).toEqual([])
-    const terminal = events.at(-1)
-    expect(terminal).toMatchObject({
-      type: "response",
-      response: { incompleteToolCalls: true, content: [] },
     })
     if (terminal?.type !== "response") throw new Error("Missing response")
     expect(terminal.response.native).toEqual([])

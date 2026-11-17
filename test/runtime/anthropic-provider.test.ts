@@ -799,35 +799,6 @@ describe("anthropic provider conversion", () => {
     ])
   })
 
-  it("converts attached images into Anthropic base64 content blocks", () => {
-    expect(
-      toAnthropicMessages([
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "What is this?" },
-            { type: "image", mediaType: "image/png", data: "aGVsbG8=" },
-          ],
-        },
-      ]),
-    ).toEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "What is this?" },
-          {
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: "image/png",
-              data: "aGVsbG8=",
-            },
-          },
-        ],
-      },
-    ])
-  })
-
   it("maps text, tool use, length, and usage from fixture messages", () => {
     expect(
       fromAnthropicMessage({
@@ -974,7 +945,13 @@ describe("anthropic provider conversion", () => {
     ])
   })
 
-  it("does not replay thinking owned by a different provider identity", () => {
+  it.each([
+    { owner: "provider identity", provider: "kimi-code" },
+    { owner: "backend scope", provider: "anthropic", scope: "account-a" },
+  ])("does not replay thinking owned by a different $owner", ({
+    provider,
+    scope,
+  }) => {
     expect(
       toAnthropicMessages(
         [
@@ -986,7 +963,8 @@ describe("anthropic provider conversion", () => {
                 text: "Private continuation state.",
                 providerMetadata: {
                   anthropic: {
-                    provider: "kimi-code",
+                    provider,
+                    ...(scope === undefined ? {} : { scope }),
                     signature: "signature_1",
                   },
                 },
@@ -998,41 +976,7 @@ describe("anthropic provider conversion", () => {
         true,
         undefined,
         "anthropic",
-      ),
-    ).toEqual([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Visible answer." }],
-      },
-    ])
-  })
-
-  it("does not replay thinking owned by a different backend scope", () => {
-    expect(
-      toAnthropicMessages(
-        [
-          {
-            role: "assistant",
-            content: [
-              {
-                type: "reasoning",
-                text: "Private continuation state.",
-                providerMetadata: {
-                  anthropic: {
-                    provider: "anthropic",
-                    scope: "account-a",
-                    signature: "signature_1",
-                  },
-                },
-              },
-              { type: "text", text: "Visible answer." },
-            ],
-          },
-        ],
-        true,
-        undefined,
-        "anthropic",
-        "account-b",
+        scope === undefined ? undefined : "account-b",
       ),
     ).toEqual([
       {

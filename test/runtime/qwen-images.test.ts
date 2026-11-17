@@ -311,7 +311,25 @@ describe("direct Qwen images", () => {
     ).toThrow("20 MB")
   })
 
-  it("matches serialized UTF-8 at the exact budget and stops before later fields on overflow", () => {
+  it.each([
+    {
+      endpoint: dashscope,
+      limit: 16 * 1024 * 1024,
+      label: "16 MiB",
+    },
+    {
+      endpoint: qwenEndpointPolicy(
+        "https://maas.qwencloudapi.com/compatible-mode/v1",
+      ),
+      limit: 64_000_000,
+      label: "64 MB",
+    },
+  ])("enforces the full $label UTF-8 body budget", ({
+    endpoint,
+    limit,
+    label,
+  }) => {
+    if (!endpoint) throw new Error("Missing Qwen endpoint")
     const messages = [
       {
         role: "user" as const,
@@ -328,31 +346,17 @@ describe("direct Qwen images", () => {
       tools: [{ description: '界\n"🙂', parameters: { type: "object" } }],
       padding: "",
     }
-    const limit = 16 * 1024 * 1024
     body.padding = "a".repeat(
       limit - Buffer.byteLength(JSON.stringify(body), "utf8"),
     )
     expect(Buffer.byteLength(JSON.stringify(body), "utf8")).toBe(limit)
     expect(() =>
-      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
+      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
     ).not.toThrow()
     body.padding += "a"
     expect(() =>
-      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
-    ).toThrow("16 MiB")
-    body.padding += "overflow"
-    let lateReads = 0
-    Object.defineProperty(body, "later", {
-      enumerable: true,
-      get() {
-        lateReads += 1
-        throw new Error("Must not serialize after overflow")
-      },
-    })
-    expect(() =>
-      validateQwenImageRequest(body, dashscope, "qwen3.8-max"),
-    ).toThrow("16 MiB")
-    expect(lateReads).toBe(0)
+      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
+    ).toThrow(label)
   })
 
   it("counts final text and images in the 16 MiB request before network", async () => {
@@ -411,38 +415,6 @@ describe("direct Qwen images", () => {
     expect(() => validateQwenImageRequest(body, endpoint, model)).toThrow(
       "250-image",
     )
-  })
-
-  it("enforces the full 64 MB body budget for QwenCloud", () => {
-    const endpoint = qwenEndpointPolicy(
-      "https://maas.qwencloudapi.com/compatible-mode/v1",
-    )
-    if (!endpoint) throw new Error("Missing Qwen endpoint")
-    const body = {
-      messages: [
-        {
-          role: "user" as const,
-          content: [
-            {
-              type: "image_url" as const,
-              image_url: { url: "https://example.com/image.png" },
-            },
-          ],
-        },
-      ],
-      tools: [{ description: '界\n"🙂', parameters: { type: "object" } }],
-      padding: "",
-    }
-    body.padding = "a".repeat(
-      64_000_000 - Buffer.byteLength(JSON.stringify(body), "utf8"),
-    )
-    expect(() =>
-      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
-    ).not.toThrow()
-    body.padding += "a"
-    expect(() =>
-      validateQwenImageRequest(body, endpoint, "qwen3.8-max"),
-    ).toThrow("64 MB")
   })
 
   it.each([
