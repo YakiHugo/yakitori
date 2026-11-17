@@ -3,6 +3,7 @@ import {
   type CatalogModel,
   type ModelCapabilities,
   type ModelCapacity,
+  type ModelDelegationInstructions,
   type ModelToolOutputTruncation,
   type ResolvedModel,
   requireInstructionProfileId,
@@ -30,6 +31,7 @@ type ModelOverride = Partial<ConfiguredModel> &
   Readonly<{
     capabilities?: ModelCapabilities
     instructions?: string
+    delegationInstructions?: ModelDelegationInstructions
     toolOutputTruncation?: ModelToolOutputTruncation
     autoCompactTokenLimit?: number
     compactionHash?: string
@@ -72,6 +74,7 @@ export function mergeEffectiveModel(
           "inputModalities",
           "imageDetailModes",
           "instructions",
+          "delegationInstructions",
           "toolOutputTruncation",
           "autoCompactTokenLimit",
           "compactionHash",
@@ -104,6 +107,7 @@ export function mergeEffectiveModel(
     // its chat-only instructions or advertise unsupported request controls.
     const protectedKeys = [
       "instructions",
+      "delegationInstructions",
       "instructionProfileId",
       "inputModalities",
       "imageDetailModes",
@@ -132,6 +136,7 @@ export function effectiveModelDirectory(model: EffectiveModel): CatalogModel {
     provider: _,
     usedFallbackModelMetadata: __,
     instructions: ___,
+    delegationInstructions: _____,
     effectiveContextWindowPercent: ____,
     ...metadata
   } = model

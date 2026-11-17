@@ -13,6 +13,7 @@ import { createFileModelsCacheStore } from "./models-cache-store.ts"
 import { createDiscoveringModelsManager } from "./models-manager.ts"
 import { createOpenAIProvider } from "./openai-provider.ts"
 import { resolveProviderBackend } from "./provider-backend.ts"
+import { prepareGrokRequest } from "./grok-request.ts"
 
 export function createGrokProvider(
   modelsCacheDir: string,
@@ -111,7 +112,7 @@ export function createGrokProvider(
                   fetchOptions: { dispatcher },
                 }),
           })({
-            ...request,
+            ...prepareGrokRequest(request),
             continuationScope: scope,
           })
         } finally {

@@ -30,6 +30,7 @@ export function createCompactionReplacementHistory(input: {
     })),
     {
       role: "user",
+      context: { type: "compaction" },
       content: [
         {
           type: "text",

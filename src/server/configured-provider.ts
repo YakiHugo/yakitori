@@ -15,6 +15,7 @@ import {
 import type { ModelClientSession } from "../runtime/model-provider.ts"
 import type { ModelsManager } from "../runtime/models-manager.ts"
 import { resolveProviderBackend } from "../runtime/provider-backend.ts"
+import { prepareGrokRequest } from "../runtime/grok-request.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import type { ProviderConfiguration } from "./provider-configuration.ts"
 
@@ -153,7 +154,11 @@ export function createConfiguredProvider(
             }
             return
           }
-          for await (const event of stream(request)) {
+          const providerRequest =
+            backend.responseProfile === "grok"
+              ? prepareGrokRequest(request)
+              : request
+          for await (const event of stream(providerRequest)) {
             if (event.type === "response") dynamic?.result("ready")
             else if (event.type === "failure")
               dynamic?.result(

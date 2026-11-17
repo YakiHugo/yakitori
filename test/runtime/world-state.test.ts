@@ -156,7 +156,9 @@ describe("world state", () => {
     )
 
     expect(withoutTool?.fragments[0]?.text).not.toContain("spawn_agent")
-    expect(withTool?.fragments[0]?.text).toContain("spawn")
+    expect(withTool?.fragments[0]?.text).toContain(
+      "subject to the current delegation policy",
+    )
   })
 
   it("updates delegation guidance when the exposed spawn tool changes", () => {
@@ -192,7 +194,9 @@ describe("world state", () => {
     expect(enabled?.fragments).toContainEqual(
       expect.objectContaining({
         id: "multi_agent",
-        text: expect.stringContaining("You may spawn descendants"),
+        text: expect.stringContaining(
+          "subject to the current delegation policy",
+        ),
       }),
     )
   })

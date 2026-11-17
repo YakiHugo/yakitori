@@ -19,6 +19,26 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
+it("wraps subscription user queries when sending without modifying the request history", async () => {
+  const fixture = await setup()
+  const session = createGrokProvider(fixture.root, {
+    id: "grok",
+    credentialsPath: fixture.path,
+    ownerIdentity: "account:account_a",
+  }).startTurn()
+  const original = structuredClone(request.messages)
+  try {
+    await collect(session.stream, request)
+    expect(fixture.calls[0]?.body.input).toEqual([
+      { role: "user", content: "<user_query>\nWork\n</user_query>" },
+    ])
+    expect(request.messages).toEqual(original)
+  } finally {
+    await session.close()
+    await rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
 it("uses function tools for deferred external tools on a Grok subscription account", async () => {
   const fixture = await setup()
   const id = "account_grok"

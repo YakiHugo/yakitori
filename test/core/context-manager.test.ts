@@ -8,6 +8,50 @@ import type {
 } from "../../src/core/rollout.ts"
 import { toolContentText } from "../../src/runtime/model-tool-content.ts"
 
+it("preserves agent provenance in live and restored model history without changing stored text", () => {
+  const envelope: ResponseItemEnvelope = {
+    id: "agent_message",
+    turnId: "turn",
+    createdAt: "2026-11-17T00:00:00Z",
+    submissionMetadata: { source: "agent", purpose: "message" },
+    item: { role: "user", content: [{ type: "text", text: "Agent progress" }] },
+  }
+  const live = new ContextManager()
+  live.record([envelope])
+  const restored = ContextManager.fromStoredThread(
+    storedThread([
+      { type: "agent_message", messageId: "agent_message", item: envelope },
+    ]),
+  )
+  expect(live.snapshot().history).toEqual(restored.snapshot().history)
+  expect(live.snapshot().history[0]?.item).toEqual({
+    role: "user",
+    context: { type: "agent_message" },
+    content: [{ type: "text", text: "Agent progress" }],
+  })
+  expect(envelope.item).not.toHaveProperty("context")
+})
+
+it("keeps assigned agent tasks as task input in live and restored history", () => {
+  const envelope: ResponseItemEnvelope = {
+    id: "agent_task",
+    turnId: "turn",
+    createdAt: "2026-11-17T00:00:00Z",
+    submissionMetadata: { source: "agent", purpose: "task" },
+    item: {
+      role: "user",
+      content: [{ type: "text", text: "Inspect the child task" }],
+    },
+  }
+  const live = new ContextManager()
+  live.record([envelope])
+  const restored = ContextManager.fromStoredThread(
+    storedThread([{ type: "response_item", item: envelope }]),
+  )
+  expect(live.snapshot().history[0]?.item).toEqual(envelope.item)
+  expect(restored.snapshot().history[0]?.item).toEqual(envelope.item)
+})
+
 describe("ContextManager tool history", () => {
   it("shares a UTF-8 budget across text blocks while retaining media order", () => {
     const image = {

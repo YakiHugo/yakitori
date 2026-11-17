@@ -13,6 +13,7 @@ import {
   listCatalogModels,
   type ModelCapabilities,
   type ModelCapacity,
+  type ModelDelegationInstructions,
   type ModelToolOutputTruncation,
   type ResolvedModel,
   resolveModel,
@@ -56,6 +57,7 @@ export type DiscoveredModel = Omit<
     toolOutputTruncation?: ModelToolOutputTruncation
     capabilities?: ModelCapabilities
     instructions?: string
+    delegationInstructions?: ModelDelegationInstructions
     autoCompactTokenLimit?: number
     compactionHash?: string
     effectiveContextWindowPercent?: number

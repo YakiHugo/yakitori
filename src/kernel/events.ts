@@ -1051,6 +1051,11 @@ function isModelImageBlock(value: unknown): boolean {
 }
 
 function isModelHistoryContext(value: unknown): boolean {
+  if (
+    isRecord(value) &&
+    (value.type === "compaction" || value.type === "agent_message")
+  )
+    return onlyKeys(value, ["type"])
   if (isRecord(value) && value.type === "thread_message")
     return (
       onlyKeys(value, ["type", "sourceThreadId", "sourceRequestId"]) &&

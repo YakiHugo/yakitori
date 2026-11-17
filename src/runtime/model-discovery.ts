@@ -222,6 +222,20 @@ function parseCodexModel(value: unknown): readonly DiscoveredModel[] {
       ? value.model_messages.instructions_template
       : undefined
   const capabilities = codexModelCapabilities(value)
+  const mode =
+    isRecord(value.model_messages) &&
+    isRecord(value.model_messages.multi_agent) &&
+    isRecord(value.model_messages.multi_agent.mode)
+      ? value.model_messages.multi_agent.mode
+      : undefined
+  // Empty catalog strings intentionally suppress the bundled instruction.
+  const delegationInstructions = {
+    ...(typeof mode?.explicit === "string" ? { explicit: mode.explicit } : {}),
+    ...(typeof mode?.proactive === "string"
+      ? { proactive: mode.proactive }
+      : {}),
+    ...(typeof mode?.hint_text === "string" ? { hint: mode.hint_text } : {}),
+  }
   const truncation = value.truncation_policy
   const toolOutputTruncation: ModelToolOutputTruncation | undefined =
     isRecord(truncation) &&
@@ -272,6 +286,7 @@ function parseCodexModel(value: unknown): readonly DiscoveredModel[] {
       ...(toolOutputTruncation === undefined ? {} : { toolOutputTruncation }),
       ...(efforts === undefined ? {} : { efforts }),
       ...(instructions === undefined ? {} : { instructions }),
+      delegationInstructions,
       ...(displayName === undefined ? {} : { displayName }),
       ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
       ...(maxContextWindowTokens === undefined
