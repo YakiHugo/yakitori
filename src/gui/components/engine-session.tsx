@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { inputContent, inputContentText } from "../../protocol/user-input.ts"
-import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { projectEngineSession } from "../engine-session-view.ts"
+import { useChatInterrupt } from "../hooks/use-chat-interrupt.ts"
 import { useAppStore } from "../store/app-store.ts"
 import {
   answerEnginePermission,
@@ -24,6 +24,8 @@ export function EngineSelector() {
     <label htmlFor={id} className="text-xs text-muted-foreground">
       Engine{" "}
       <Select
+        size="sm"
+        variant="ghost"
         id={id}
         aria-label="New session engine"
         value={engineId ?? "yakitori"}

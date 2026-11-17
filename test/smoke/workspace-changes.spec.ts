@@ -85,11 +85,13 @@ async function reviewAndStageChanges(page: Page, cwd: string): Promise<void> {
     name: "Change scope",
     exact: true,
   })
-  await scope.selectOption("staged")
+  await scope.click()
+  await page.getByRole("option", { name: "Staged", exact: true }).click()
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible()
   await expect(workingFile).toHaveCount(0)
   await expect(stagedFile).toBeVisible()
-  await scope.selectOption("all")
+  await scope.click()
+  await page.getByRole("option", { name: "All changes", exact: true }).click()
   await expect(page.getByText("3 changed files", { exact: true })).toBeVisible()
 
   await workingFile.click()

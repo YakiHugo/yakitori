@@ -1001,6 +1001,11 @@ test("model picker groups choices by vendor and keeps the selected model explici
       path: testInfo.outputPath("model-groups-narrow.png"),
       animations: "disabled",
     })
+    await selector.click()
+    await expect(selector).toHaveAttribute("aria-expanded", "false")
+    await expect(page.locator("[data-model-picker]")).toHaveCount(0)
+    await selector.click()
+    await expect(selector).toHaveAttribute("aria-expanded", "true")
   } finally {
     await server?.stop()
     endpoint.closeAllConnections()

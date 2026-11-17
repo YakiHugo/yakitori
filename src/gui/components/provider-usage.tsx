@@ -94,6 +94,7 @@ export function ProviderUsage({
       <div className="provider-usage-toolbar">
         <h3>Usage</h3>
         <Select<UsageRange>
+          size="sm"
           aria-label="Usage period"
           value={range}
           onValueChange={setRange}

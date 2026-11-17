@@ -76,12 +76,8 @@ it("shows staged and unstaged files together and selects one diff at a time", as
     name: "Unstaged changes in src/both.ts",
   })
   expect(
-    (
-      screen.getByRole("combobox", {
-        name: "Change scope",
-      }) as HTMLSelectElement
-    ).value,
-  ).toBe("all")
+    screen.getByRole("combobox", { name: "Change scope" }).textContent,
+  ).toBe("All changes")
   expect(screen.getByText("6 changed files")).toBeDefined()
   expect(
     screen
@@ -154,7 +150,8 @@ it("clears review filters and selects the requested file diff", async () => {
   })
   await screen.findByText("unstaged patch src/both.ts")
   const scope = screen.getByRole("combobox", { name: "Change scope" })
-  await user.selectOptions(scope, "staged")
+  await user.click(scope)
+  await user.click(screen.getByRole("option", { name: "Staged" }))
   await user.type(filter, "missing")
   expect(
     within(
@@ -172,7 +169,7 @@ it("clears review filters and selects the requested file diff", async () => {
     name: "src/five.ts, unstaged",
   })
   expect((filter as HTMLInputElement).value).toBe("")
-  expect((scope as HTMLSelectElement).value).toBe("all")
+  expect(scope.textContent).toBe("All changes")
   expect(target.getAttribute("aria-current")).toBe("true")
   expect(await screen.findByText("unstaged patch src/five.ts")).toBeDefined()
   expect(screen.queryByText("unstaged patch src/both.ts")).toBeNull()
@@ -201,7 +198,8 @@ it("resets scope, query, and selection on every review-all request", async () =>
   const scope = screen.getByRole("combobox", { name: "Change scope" })
   const query = screen.getByRole("textbox", { name: "Filter changed files" })
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    await user.selectOptions(scope, "staged")
+    await user.click(scope)
+    await user.click(screen.getByRole("option", { name: "Staged" }))
     await user.type(query, "missing")
     expect(
       within(
@@ -210,7 +208,7 @@ it("resets scope, query, and selection on every review-all request", async () =>
     ).toBeDefined()
     act(() => useWorkspaceStore.getState().openChanges())
     await screen.findByText("unstaged patch src/both.ts")
-    expect((scope as HTMLSelectElement).value).toBe("all")
+    expect(scope.textContent).toBe("All changes")
     expect((query as HTMLInputElement).value).toBe("")
     expect(
       screen

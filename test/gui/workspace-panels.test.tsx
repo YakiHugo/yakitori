@@ -384,10 +384,8 @@ it("stages untracked files and renders renamed staged entries", async () => {
   await user.click(await screen.findByRole("button", { name: "Stage new.ts" }))
   await screen.findByRole("button", { name: "Unstage new.ts" })
   expect(screen.queryByRole("button", { name: "new.ts, unstaged" })).toBeNull()
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Change scope" }),
-    "staged",
-  )
+  await user.click(screen.getByRole("combobox", { name: "Change scope" }))
+  await user.click(screen.getByRole("option", { name: "Staged" }))
   expect(screen.getByRole("button", { name: "new.ts, staged" })).toBeDefined()
   await user.click(screen.getByRole("button", { name: "renamed.ts, staged" }))
   expect(
@@ -452,10 +450,8 @@ it("discards a diff from the previous scope and refreshes on focus", async () =>
   const user = userEvent.setup()
   render(<WorkspaceChanges cwd="/repo" apiBase="http://localhost" />)
   await screen.findByText("Loading diff…")
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Change scope" }),
-    "staged",
-  )
+  await user.click(screen.getByRole("combobox", { name: "Change scope" }))
+  await user.click(screen.getByRole("option", { name: "Staged" }))
   await screen.findByText("+staged content")
   await act(async () =>
     unstagedDiff.resolve({
