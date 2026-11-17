@@ -593,7 +593,10 @@ export function createSessionSubscriptions(
               : refreshed.value.events.filter(
                   (event) =>
                     event.type === "context.tokens" ||
-                    event.type === "turn.started",
+                    (event.type === "turn.started" &&
+                      !initialEvents?.some(
+                        (initial) => initial.id === event.id,
+                      )),
                 ),
             ...(needsInitialBody && refreshed.value.historyBefore !== undefined
               ? { historyBefore: refreshed.value.historyBefore }
