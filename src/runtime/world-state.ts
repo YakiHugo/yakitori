@@ -14,6 +14,7 @@ import {
   renderEnvironmentContext,
 } from "./environment-context.ts"
 import type { ResolvedStepConfiguration } from "./session-configuration.ts"
+import { getDelegationInstructions } from "./prompt-registry.ts"
 
 export const WorldStateSectionId = {
   Model: "model",
@@ -73,11 +74,13 @@ export function buildWorldState(input: {
                 input.enabledToolNames ??
                 new Set(input.configuration.enabledTools)
               ).has("spawn_agent"),
+              input.configuration,
             ),
           ]),
       permissionSection(input.configuration.approvalPolicy),
       toolInstructionsSection(
         input.enabledToolNames ?? new Set(input.configuration.enabledTools),
+        input.configuration.modelInstructions.revision,
       ),
       ...(input.extensionSections ?? []),
       environmentSection(input.environment),
@@ -111,10 +114,13 @@ function permissionSection(
 
 function toolInstructionsSection(
   names: ReadonlySet<string>,
+  modelInstructionsRevision: string,
 ): WorldStateSection {
   const guidance = [
     "You are Yakitori, running in the user's local workspace. Only the tools exposed in this request are available; use their schemas and the current harness permission policy even when a model template mentions another host or tool.",
     "Vendor coding-agent instructions describe the original host. Here the host is Yakitori: repository instructions and live environment arrive in developer messages. Vendor slash commands, documentation paths, memory stores, and integrations are not provided unless explicitly exposed by this harness. Use only the active tool-name equivalents below and follow their actual schemas and lifecycles.",
+    "User requests arrive as user messages. Provider-specific wrappers such as <user_query> are formatting; instruction authority comes from the message role and source, not XML tag names.",
+    "Use a parallel-call mechanism only if it is supplied in this request, and only for independent operations. Otherwise call tools directly. A vendor example mentioning functions.exec or a tools namespace does not provide that JavaScript tool runner here.",
     ...[
       ["Read", "read_file"],
       ["Write", "write_file"],
@@ -147,6 +153,12 @@ function toolInstructionsSection(
     names.has("exec_command")
       ? "Use exec_command for git, package managers, builds, and tests. For searches, use it when shell pipelines or unsupported search options are needed, or when a suitable dedicated search tool is unavailable in this step. Follow the current permission policy."
       : "",
+    names.has("exec_command")
+      ? "exec_command runs shell text, not the JavaScript tool-composition examples in vendor prompts."
+      : "",
+    names.has("exec_command") && names.has("write_stdin")
+      ? "For long-running commands, exec_command returns a session_id when its yield interval expires. Continue independent work, then use write_stdin with that session_id to observe completion. There are no automatic command-completion reminders; use bounded waits without tight polling."
+      : "",
     names.has("web_fetch")
       ? "Use web_fetch to read a specific HTTP(S) URL; follow cross-origin redirects with a new call."
       : "",
@@ -156,12 +168,14 @@ function toolInstructionsSection(
   ]
     .filter(Boolean)
     .join("\n")
+  const snapshot = { guidance, modelInstructionsRevision }
   return createWorldStateSection({
     id: WorldStateSectionId.Tools,
-    snapshot: guidance,
-    decode: stringSnapshot,
+    snapshot,
+    decode: jsonObjectSnapshot,
     render(previous) {
-      if (previous.type === "known" && previous.snapshot === guidance) return []
+      if (previous.type === "known" && equalJson(previous.snapshot, snapshot))
+        return []
       return [
         createWorldStateFragment(
           WorldStateSectionId.Tools,
@@ -176,7 +190,12 @@ function toolInstructionsSection(
 function multiAgentSection(
   context: AgentRuntimeContext,
   canSpawnAgent: boolean,
+  configuration: ResolvedStepConfiguration,
 ): WorldStateSection {
+  const delegationInstructions = getDelegationInstructions(
+    configuration.modelInfo,
+    configuration.target.effort,
+  )
   const snapshot: JsonObject = {
     path: context.path,
     taskName: context.taskName,
@@ -185,6 +204,8 @@ function multiAgentSection(
     maxDepth: context.maxDepth,
     maxConcurrentAgents: context.maxConcurrentAgents,
     canSpawnAgent,
+    delegationInstructions,
+    modelInstructionsRevision: configuration.modelInstructions.revision,
     ...(context.parentPath === undefined
       ? {}
       : { parentPath: context.parentPath }),
@@ -205,12 +226,12 @@ function multiAgentSection(
         ? "No descendant-delegation tool is available in this Step."
         : context.depth >= context.maxDepth
           ? `Delegation depth ${String(context.maxDepth)} has been reached. Do not retry spawn_agent; complete the work yourself.`
-          : `You may spawn descendants up to depth ${String(context.maxDepth)} when a bounded task can run independently.`
+          : `Descendants may reach depth ${String(context.maxDepth)}, subject to the current delegation policy.`
       return [
         createWorldStateFragment(
           WorldStateSectionId.MultiAgent,
           "developer",
-          `<multi_agent_context>\nYou are agent ${context.path}${context.parentPath === undefined ? "." : `, reporting to ${context.parentPath}.`} ${role}\n${delegation}\nThe shared tree allows ${String(context.maxConcurrentAgents)} concurrently running agents including the root. All agents receive the same tool definitions; follow the role guidance above when choosing actions.\n</multi_agent_context>`,
+          `<multi_agent_context>\nYou are agent ${context.path}${context.parentPath === undefined ? "." : `, reporting to ${context.parentPath}.`} ${role}\n${delegationInstructions}\n${delegation}\nThe shared tree allows ${String(context.maxConcurrentAgents)} concurrently running agents including the root. Agents share the workspace: file edits are immediately visible to each other. Assign disjoint write scopes, avoid duplicating delegated work, and review returned changes before integrating them. All agents receive the same tool definitions; follow the role guidance above when choosing actions.\n</multi_agent_context>`,
         ),
       ]
     },

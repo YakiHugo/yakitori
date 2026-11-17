@@ -42,7 +42,7 @@ export function createSpawnAgentTool(
   return {
     toolName: plainToolName("spawn_agent"),
     description:
-      "Spawn an agent for a concrete, bounded subtask that can run independently alongside useful local work. The child inherits the current model and tools, can spawn descendants within the configured depth limit, and returns immediately with an agent id and canonical task path. It starts with a fresh conversation context by default and receives message as its assigned task. Set fork_turns to all or a positive integer string only when the child genuinely needs parent history." +
+      "Spawn an agent subject to the current delegation policy for a concrete, bounded subtask that can run independently alongside useful local work. Keep the immediate blocking task local; delegate only when the result materially advances the task and you have useful non-overlapping work to do. The child inherits the current model and tools, can spawn descendants within the configured depth limit, and returns immediately with an agent id and canonical task path. It starts with a fresh conversation context by default and receives message as its assigned task. Set fork_turns to all or a positive integer string only when the child genuinely needs parent history." +
       ` ${options.description}`,
     approvalRequirement: noToolApprovalRequired,
     // Multiple spawn calls in one model response are intentionally safe to

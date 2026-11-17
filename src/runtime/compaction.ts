@@ -161,6 +161,7 @@ export function buildCompactionRequest(input: {
       ...input.source.flatMap((group) => group.messages),
       {
         role: "user",
+        context: { type: "compaction" },
         content: [
           {
             type: "text",

@@ -40,3 +40,32 @@ export function getModelInstructions(model: ResolvedModel): InstructionProfile {
     text: model.instructions,
   }
 }
+
+export function getDelegationInstructions(
+  model: ResolvedModel,
+  effort: string | undefined,
+): string {
+  const reset =
+    "Earlier model-specific delegation instructions no longer apply. Follow the current policy below; user requests take precedence."
+  const overrides = model.delegationInstructions
+  const codex =
+    overrides !== undefined ||
+    instructionManifest[model.instructionProfileId].agent === "codex" ||
+    model.provider.toLowerCase() === "codex"
+  // Codex ee344ca94583 (2026-11-15), session/multi_agents.rs:
+  // catalog hint > effort-specific catalog text > bundled mode. Older Codex
+  // profiles use the same explicit-request default as Yakitori host policy.
+  let policy = overrides?.hint
+  if (policy === undefined && effort === "ultra") {
+    policy = overrides?.proactive
+    if (policy === undefined && codex)
+      policy =
+        "Proactive multi-agent delegation is active. Delegate concrete, independent subtasks when doing so could save time or improve quality."
+  } else if (policy === undefined) {
+    policy = overrides?.explicit
+    if (policy === undefined && codex)
+      policy =
+        "Spawn sub-agents only when the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work. Requests for thoroughness, research, investigation, or detailed analysis alone do not request delegation. Otherwise complete the work locally without asking for permission to delegate."
+  }
+  return `${reset}\n${policy ?? "You may delegate concrete, bounded subtasks that can run independently alongside useful local work. Keep tightly coupled work local."}`
+}

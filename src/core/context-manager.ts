@@ -259,6 +259,16 @@ function projectHistoryItem(
   envelope: ResponseItemEnvelope,
 ): ResponseItemEnvelope {
   const copied = structuredClone(envelope)
+  if (
+    copied.submissionMetadata?.source === "agent" &&
+    copied.submissionMetadata.purpose === "message" &&
+    copied.item.role === "user" &&
+    copied.item.context === undefined
+  )
+    return {
+      ...copied,
+      item: { ...copied.item, context: { type: "agent_message" } },
+    }
   const budget = copied.historyOutputBudget
   if (copied.item.role !== "tool" || budget === undefined) return copied
   let remainingBytes = budget.maxBytes

@@ -132,6 +132,7 @@ describe("compaction request", () => {
       ...sourceTurn().messages,
       {
         role: "user",
+        context: { type: "compaction" },
         content: [
           {
             type: "text",

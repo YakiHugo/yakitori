@@ -62,6 +62,8 @@ export type ModelContentBlock =
   | ModelCompactionBlock
   | ModelToolCallBlock
 export type ModelHistoryContext =
+  | Readonly<{ type: "compaction" }>
+  | Readonly<{ type: "agent_message" }>
   | Readonly<{
       type: "thread_message"
       sourceThreadId: string

@@ -36,6 +36,18 @@ describe("narrow prompt host adaptations", () => {
     expect(text).not.toContain("one bounded wait")
   })
 
+  it.each([
+    "grok-4.5",
+    "grok-4.6",
+    "grok-4.7",
+  ] as const)("grounds %s in Yakitori user messages and file tools", (id) => {
+    const text = getInstructionProfile(id).text
+    expect(text).toContain("request, denoted within the <user_query> tag")
+    expect(text).toContain("`edit_file` replaces existing text")
+    expect(text).toContain("`write_file` creates files")
+    expect(text).not.toContain("~/.grok/docs")
+  })
+
   it("preserves Codex model-specific parallel-calling guidance", () => {
     expect(getInstructionProfile("gpt-5.5").text).toContain(
       "`multi_tool_use.parallel` for that parallelism, and only that",

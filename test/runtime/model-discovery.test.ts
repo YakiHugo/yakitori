@@ -13,11 +13,78 @@ import {
   createToolRegistry,
 } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
+import { getDelegationInstructions } from "../../src/runtime/prompt-registry.ts"
 
 describe("provider model discovery", () => {
-  it("uses discovered capabilities to plan tools for a new Codex model", async () => {
+  it.each([
+    {
+      mode: {
+        explicit: "Catalog explicit policy",
+        proactive: "Catalog proactive policy",
+      },
+      expected: ["Catalog explicit policy", "Catalog proactive policy"],
+    },
+    {
+      mode: {
+        explicit: "Unused explicit",
+        proactive: "Unused proactive",
+        hint_text: "Catalog hint",
+      },
+      expected: ["Catalog hint", "Catalog hint"],
+    },
+    {
+      mode: {
+        explicit: "Unused explicit",
+        proactive: "Unused proactive",
+        hint_text: "",
+      },
+      expected: ["", ""],
+    },
+    {
+      mode: { explicit: "", proactive: "" },
+      expected: ["", ""],
+    },
+  ])("carries catalog delegation overrides through model resolution: $mode", async ({
+    mode,
+    expected,
+  }) => {
     const manager = createDiscoveringModelsManager({
       provider: "codex",
+      identity: async () => "account",
+      discover: () =>
+        discoverCodexModels({
+          baseUrl: "https://chatgpt.example/backend-api/codex",
+          accessToken: "test",
+          fetchFn: async () =>
+            new Response(
+              JSON.stringify({
+                models: [
+                  {
+                    slug: "gpt-6.1-sol",
+                    model_messages: { multi_agent: { mode } },
+                  },
+                ],
+              }),
+            ),
+        }),
+    })
+    await manager.refresh()
+    const model = manager.resolve({ provider: "codex", model: "gpt-6.1-sol" })
+    expect(
+      getDelegationInstructions(model, "max").split("\n").slice(1).join("\n"),
+    ).toBe(expected[0])
+    expect(
+      getDelegationInstructions(model, "ultra").split("\n").slice(1).join("\n"),
+    ).toBe(expected[1])
+    expect(await manager.listModels()).not.toContainEqual(
+      expect.objectContaining({ delegationInstructions: expect.anything() }),
+    )
+  })
+
+  it("uses discovered capabilities to plan tools for a new Codex model", async () => {
+    const manager = createDiscoveringModelsManager({
+      provider: "custom-codex",
+      catalogProvider: "codex",
       identity: async () => "account",
       discover: () =>
         discoverCodexModels({
@@ -56,7 +123,7 @@ describe("provider model discovery", () => {
       applyPatchToolType: "custom",
       efforts: ["low", "xhigh"],
     })
-    const selection = { provider: "codex", model: "gpt-new-coder" }
+    const selection = { provider: "custom-codex", model: "gpt-new-coder" }
     expect(manager.resolve(selection)).toMatchObject({
       compactionHash: "compatible-v3",
       inputModalities: ["text", "image"],
@@ -65,6 +132,9 @@ describe("provider model discovery", () => {
       supportsNativeToolSearch: true,
       usedFallbackModelMetadata: false,
     })
+    expect(
+      getDelegationInstructions(manager.resolve(selection), "low"),
+    ).toContain("Spawn sub-agents only when")
     const registry = createToolRegistry(createDefaultTools())
     const configuration = SessionConfiguration.create(
       {
@@ -160,7 +230,7 @@ describe("provider model discovery", () => {
         accountId: "account-1",
         fetchFn,
       }),
-    ).resolves.toEqual([
+    ).resolves.toMatchObject([
       {
         id: "gpt-discovered",
         displayName: "GPT Discovered",

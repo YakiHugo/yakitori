@@ -8,6 +8,7 @@ export type ResolvedModel = Readonly<{
   toolPolicy?: "chat_only"
   toolOutputTruncation?: ModelToolOutputTruncation
   instructions?: string
+  delegationInstructions?: ModelDelegationInstructions
   autoCompactTokenLimit?: number
   compactionHash?: string
   defaultEffort?: string
@@ -61,6 +62,13 @@ export type CatalogModel = Readonly<{
 }>
 
 export type ModelInputModality = "image" | "text" | "video"
+// Codex mode overrides. Presence, including {}, selects Codex's effort-based
+// defaults for discovered models without a bundled instruction profile.
+export type ModelDelegationInstructions = Readonly<{
+  explicit?: string
+  proactive?: string
+  hint?: string
+}>
 export type ModelToolOutputTruncation = Readonly<{
   mode: "bytes" | "tokens"
   limit: number
