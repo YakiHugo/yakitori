@@ -31,7 +31,11 @@ import { isThreadMessageProvenance } from "../protocol/input-queue.ts"
 import { ContextManager } from "./context-manager.ts"
 import {
   type DisplayWindowRead,
+  displayPageBytes,
+  displayPageRecords,
+  displayRecord,
   displayTailReady,
+  readJsonlBatch,
   readJsonlFirst,
   readJsonlTail,
   selectDisplayWindow,
@@ -58,6 +62,7 @@ import {
   sessionInView,
   startAfterSectionCursor,
 } from "./session-sidebar.ts"
+import { ThreadProjectionChangedError } from "./sqlite-thread-display-projection.ts"
 import {
   SqliteThreadSearchProjection,
   type ThreadSearchProjectionStamp,
@@ -81,6 +86,8 @@ import {
   type RevertThreadInput,
   type RevertThreadResult,
   type RolloutAppend,
+  type ThreadEventRead,
+  type ThreadInputAdmissionsRead,
   type ThreadStore,
   type ThreadStoreForkResult,
   type ThreadStoreListInput,
@@ -160,8 +167,12 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #reservations = new Map<string, ForkReservation>()
   readonly #ephemeralAssetOwners = new Set<string>()
   readonly #ready: Promise<void>
+  #gcReady: Promise<void> | undefined
+  readonly #projectionRepairs = new Map<string, Promise<void>>()
   readonly #searchProjectionErrors = new Map<string, unknown>()
-  #searchProjectionDirty = false
+  // Startup does no global repair. The first explicit search must discover
+  // every durable Thread, including unopened histories after a schema reset.
+  #searchProjectionDirty = true
   #searchProjectionTail: Promise<void> = Promise.resolve()
   #usageProjectionTail: Promise<void> = Promise.resolve()
 
@@ -184,14 +195,21 @@ export class JsonlThreadStore implements ThreadStore {
       mkdir(this.#rolloutsDirectory, { recursive: true }),
       mkdir(this.#writerLocksDirectory, { recursive: true }),
       mkdir(this.#reservationLocksDirectory, { recursive: true }),
-    ])
-      .then(() => this.#collectUnreferencedRollouts())
-      .then(() => this.#synchronizeSearchProjection())
-      .then(() => undefined)
+    ]).then(() => undefined)
   }
 
   async initialize(): Promise<void> {
-    await this.#ready
+    await this.#initializeStorage()
+  }
+
+  #initializeStorage(): Promise<void> {
+    // Collection belongs to an awaited initialization/mutation boundary.
+    // Constructing a read-only store must not launch cleanup that can outlive
+    // the caller's storage directory.
+    this.#gcReady ??= this.#ready.then(() =>
+      this.#collectUnreferencedRollouts(),
+    )
+    return this.#gcReady
   }
 
   // Ephemeral owners (side chats and unsent composer drafts) keep files
@@ -271,7 +289,7 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
-    await this.#ready
+    await this.#initializeStorage()
     requireThreadId(metadata.id)
     if (
       "rolloutId" in metadata ||
@@ -338,7 +356,7 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async resumeThread(threadId: string): Promise<StoredThread | undefined> {
-    await this.#ready
+    await this.#initializeStorage()
     requireThreadId(threadId)
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
     if (this.#writers.has(threadId)) {
@@ -567,7 +585,7 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async prepareFork(input: PrepareForkInput): Promise<PreparedFork> {
-    await this.#ready
+    await this.#initializeStorage()
     requireThreadId(input.sourceThreadId)
     const staged = this.#staged.get(input.sourceThreadId)
     if (staged !== undefined) {
@@ -905,6 +923,14 @@ export class JsonlThreadStore implements ThreadStore {
     threadId: string,
     beforeSeqExclusive?: number,
   ): Promise<DisplayWindowRead | undefined> {
+    return this.#readDisplayWindow(threadId, beforeSeqExclusive, true)
+  }
+
+  async #readDisplayWindow(
+    threadId: string,
+    beforeSeqExclusive: number | undefined,
+    scheduleRepair: boolean,
+  ): Promise<DisplayWindowRead | undefined> {
     await this.#ready
     requireThreadId(threadId)
     const staged = this.#staged.get(threadId)
@@ -924,10 +950,24 @@ export class JsonlThreadStore implements ThreadStore {
     if (staged?.materializing !== undefined) await staged.materializing
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
     const metadata = await this.#readMetadata(threadId)
+    const stamp = await this.#searchProjectionStamp(metadata)
+    if (this.#searchProjection.isCurrent(threadId, stamp)) {
+      return {
+        metadata,
+        ...this.#searchProjection.readDisplayWindow(
+          threadId,
+          beforeSeqExclusive,
+        ),
+        endSeq: this.#searchProjection.readSummary(threadId)?.seq ?? 0,
+        projectionReady: true,
+      }
+    }
+    if (scheduleRepair) this.#scheduleProjectionRepair(threadId)
     const lineage = await this.#rolloutLineage(metadata.rolloutId)
     let records: readonly StoredRolloutItem[] = []
     let endSeq = 0
     let reachedRoot = false
+    let coverageStartSeq: number | undefined
     for (let index = lineage.length - 1; index >= 0; index -= 1) {
       const segment = lineage[index]
       if (segment === undefined) continue
@@ -935,22 +975,139 @@ export class JsonlThreadStore implements ThreadStore {
         ...segment.position,
         ...(beforeSeqExclusive === undefined ? {} : { beforeSeqExclusive }),
         parse: parseRolloutLine,
+        maxBytes: displayPageBytes * 2,
         enough: (rows, reachedStart) =>
-          displayTailReady([...rows, ...records], reachedStart && index === 0),
+          displayTailReady(
+            [...rows, ...records],
+            reachedStart && index === 0,
+          ) ||
+          rows.filter((row) => displayRecord(row) !== undefined).length >=
+            displayPageRecords,
       })
       validateRolloutSegment(tail.records, segment)
+      coverageStartSeq =
+        tail.records.find(({ item }) => item.type !== "session_meta")?.seq ??
+        coverageStartSeq
       endSeq = Math.max(endSeq, tail.endSeq)
       records = [
-        ...tail.records.filter((record) => record.item.type !== "session_meta"),
+        ...tail.records.flatMap((record) => {
+          const display = displayRecord(record)
+          return display === undefined ? [] : [display]
+        }),
         ...records,
       ]
       reachedRoot = tail.reachedStart && index === 0
-      if (displayTailReady(records, reachedRoot)) break
+      if (!tail.reachedStart || displayTailReady(records, reachedRoot)) break
     }
+    const window = windowFromRecords(metadata, records, undefined, reachedRoot)
+    const coverage = window.records[0]?.seq ?? coverageStartSeq
     return {
-      ...windowFromRecords(metadata, records, undefined, reachedRoot),
+      ...window,
       endSeq,
+      projectionReady: false,
+      ...(coverage === undefined ? {} : { coverageStartSeq: coverage }),
     }
+  }
+
+  async readThreadEvents(
+    threadId: string,
+    input: Readonly<{ after: number; through?: number; limit: number }>,
+  ): Promise<ThreadEventRead | undefined> {
+    await this.#ready
+    requireThreadId(threadId)
+    if (
+      !Number.isSafeInteger(input.after) ||
+      input.after < -1 ||
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      (input.through !== undefined &&
+        (!Number.isSafeInteger(input.through) || input.through < input.after))
+    )
+      throw new Error("Invalid Thread event range.")
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined && staged.materializing === undefined) {
+      const pending = staged.pendingDurableAppend
+      const visibleThrough =
+        pending === undefined
+          ? staged.rollout.length
+          : pending.throughSeq - pending.items.length
+      return eventsFromRecords(
+        {
+          metadata: staged.metadata,
+          rollout: staged.rollout.filter(({ seq }) => seq < visibleThrough),
+        },
+        input,
+      )
+    }
+    if (staged?.materializing !== undefined) await staged.materializing
+    if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
+    await this.#ensureSelectedProjection(threadId)
+    return this.#withSearchProjection(async () => {
+      const metadata = await this.#readMetadata(threadId)
+      const endSeq = this.#searchProjection.readSummary(threadId)?.seq ?? 0
+      const through = Math.max(
+        input.after,
+        Math.min(input.through ?? endSeq, endSeq),
+      )
+      const page = this.#searchProjection.readThreadEvents(threadId, {
+        ...input,
+        through,
+      })
+      if (input.after < 0 && through >= 0) {
+        const header: StoredRolloutItem = {
+          threadId,
+          rolloutId: metadata.rolloutId,
+          seq: 0,
+          createdAt: metadata.createdAt,
+          item: { type: "session_meta", metadata },
+        }
+        return eventsFromRecords(
+          { metadata, rollout: [header, ...page.records] },
+          input,
+          endSeq,
+          page.hasMore,
+        )
+      }
+      return { metadata, ...page, endSeq }
+    })
+  }
+
+  async readInputAdmissions(
+    threadId: string,
+    requestIds: readonly string[],
+  ): Promise<ThreadInputAdmissionsRead | undefined> {
+    await this.#ready
+    requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined && staged.materializing === undefined) {
+      const pending = staged.pendingDurableAppend
+      const visibleThrough =
+        pending === undefined
+          ? staged.rollout.length
+          : pending.throughSeq - pending.items.length
+      const records = staged.rollout.filter(({ seq }) => seq < visibleThrough)
+      const ids = new Set(requestIds)
+      return {
+        metadata: structuredClone(staged.metadata),
+        records: structuredClone(
+          records.filter(
+            (record) =>
+              record.item.type === "response_item" &&
+              ids.has(record.item.item.turnId) &&
+              displayRecord(record) !== undefined,
+          ),
+        ),
+        endSeq: records.at(-1)?.seq ?? 0,
+      }
+    }
+    if (staged?.materializing !== undefined) await staged.materializing
+    if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
+    await this.#ensureSelectedProjection(threadId)
+    return this.#withSearchProjection(async () => ({
+      metadata: await this.#readMetadata(threadId),
+      records: this.#searchProjection.readInputAdmissions(threadId, requestIds),
+      endSeq: this.#searchProjection.readSummary(threadId)?.seq ?? 0,
+    }))
   }
 
   async listThreadIds(): Promise<readonly string[]> {
@@ -1021,17 +1178,20 @@ export class JsonlThreadStore implements ThreadStore {
     }
     if (staged?.materializing !== undefined) await staged.materializing
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
-    return this.#withSearchProjection(async () => {
-      const metadata = await this.#readMetadata(threadId)
-      const stamp = await this.#searchProjectionStamp(metadata)
-      if (!this.#searchProjection.isCurrent(threadId, stamp)) {
-        this.#searchProjection.rebuild(
-          await this.#readRequiredThread(threadId),
-          stamp,
-        )
-      }
+    const metadata = await this.#readMetadata(threadId)
+    const stamp = await this.#searchProjectionStamp(metadata)
+    if (this.#searchProjection.isCurrent(threadId, stamp))
       return this.#searchProjection.readSummary(threadId)
-    })
+    // Sidebar enumeration needs a bounded summary, not a queued repair of
+    // every history ahead of the selected Session's recovery/model barrier.
+    const window = await this.#readDisplayWindow(threadId, undefined, false)
+    return window === undefined
+      ? undefined
+      : {
+          ...metadata,
+          ...advanceThreadStatus({}, [...window.lookbehind, ...window.records]),
+          seq: window.endSeq,
+        }
   }
 
   async #threadSummaries(): Promise<ThreadSummary[]> {
@@ -1556,14 +1716,27 @@ export class JsonlThreadStore implements ThreadStore {
       throw error
     }
     await this.#withSearchProjection(async () => {
-      if (this.#searchProjectionDirty) return
       try {
         const metadata = await this.#readMetadata(threadId)
-        this.#searchProjection.append(
-          metadata,
-          drained,
-          await this.#searchProjectionStamp(metadata),
+        const stamp = await this.#searchProjectionStamp(metadata)
+        const checkpoint = this.#searchProjection.checkpoint(
+          threadId,
+          metadata.rolloutId,
         )
+        const drainedBytes = drained.reduce(
+          (bytes, entry) =>
+            bytes + Buffer.byteLength(`${JSON.stringify(entry)}\n`),
+          0,
+        )
+        if (
+          checkpoint === undefined ||
+          checkpoint.endByteOffset !== stamp.rolloutSize - drainedBytes ||
+          (drained[0] !== undefined && checkpoint.nextSeq !== drained[0].seq)
+        ) {
+          await this.#catchUpSelectedProjection(threadId)
+          return
+        }
+        this.#searchProjection.append(metadata, drained, stamp)
       } catch {
         // Search is a rebuildable projection. A later search repairs it and
         // surfaces any canonical rollout read failure instead of omitting it.
@@ -1813,10 +1986,7 @@ export class JsonlThreadStore implements ThreadStore {
         const metadata = await this.#readMetadata(threadId)
         const stamp = await this.#searchProjectionStamp(metadata)
         if (this.#searchProjection.isCurrent(threadId, stamp)) continue
-        this.#searchProjection.rebuild(
-          await this.#readRequiredThread(threadId),
-          stamp,
-        )
+        await this.#catchUpSelectedProjection(threadId)
       } catch (error) {
         this.#searchProjection.delete(threadId)
         this.#searchProjectionErrors.set(threadId, error)
@@ -1828,6 +1998,136 @@ export class JsonlThreadStore implements ThreadStore {
       }
     }
     this.#searchProjectionDirty = this.#searchProjectionErrors.size > 0
+  }
+
+  #scheduleProjectionRepair(threadId: string): void {
+    if (this.#projectionRepairs.has(threadId)) return
+    const repair = this.#ensureSelectedProjection(threadId)
+    this.#projectionRepairs.set(threadId, repair)
+    void repair.then(
+      () => this.#projectionRepairs.delete(threadId),
+      (error: unknown) => {
+        this.#projectionRepairs.delete(threadId)
+        this.#searchProjectionErrors.set(threadId, error)
+        this.#searchProjectionDirty = true
+      },
+    )
+  }
+
+  #ensureSelectedProjection(threadId: string): Promise<void> {
+    return (
+      this.#projectionRepairs.get(threadId) ??
+      this.#withSearchProjection(() =>
+        this.#catchUpSelectedProjection(threadId),
+      )
+    )
+  }
+
+  async #catchUpSelectedProjection(threadId: string): Promise<void> {
+    for (;;) {
+      try {
+        await this.#catchUpProjectionOnce(threadId)
+        return
+      } catch (error) {
+        if (!(error instanceof ThreadProjectionChangedError)) throw error
+      }
+    }
+  }
+
+  async #catchUpProjectionOnce(threadId: string): Promise<void> {
+    const metadata = await this.#readMetadata(threadId)
+    let stamp = await this.#searchProjectionStamp(metadata)
+    if (this.#searchProjection.isCurrent(threadId, stamp)) return
+    const summary = this.#searchProjection.readSummary(threadId)
+    const currentCheckpoint = this.#searchProjection.checkpoint(
+      threadId,
+      metadata.rolloutId,
+    )
+    const preserveAncestors =
+      summary?.rolloutId === metadata.rolloutId &&
+      currentCheckpoint !== undefined &&
+      currentCheckpoint.endByteOffset <= stamp.rolloutSize
+    if (
+      summary?.rolloutId !== metadata.rolloutId ||
+      (currentCheckpoint !== undefined &&
+        currentCheckpoint.endByteOffset > stamp.rolloutSize)
+    )
+      this.#searchProjection.begin(metadata)
+    const lineage = await this.#rolloutLineage(metadata.rolloutId)
+    for (const segment of lineage) {
+      let checkpoint = this.#searchProjection.checkpoint(
+        threadId,
+        segment.rolloutId,
+      )
+      // A completed projection already contains immutable inherited prefixes.
+      if (segment.position !== undefined && preserveAncestors) continue
+      while (true) {
+        const batch = await readJsonlBatch(
+          this.#rolloutPath(segment.rolloutId),
+          {
+            ...segment.position,
+            startByteOffset: checkpoint?.endByteOffset ?? 0,
+            parse: parseRolloutLine,
+          },
+        )
+        validateRolloutSegment(batch.records, segment)
+        const firstContent = batch.records.find(
+          ({ item }) => item.type !== "session_meta",
+        )
+        if (
+          checkpoint !== undefined &&
+          firstContent !== undefined &&
+          firstContent.seq !== checkpoint.nextSeq
+        )
+          throw new Error("Rollout checkpoint has discontinuous sequence.")
+        const last = batch.records.at(-1)
+        checkpoint = {
+          rolloutId: segment.rolloutId,
+          endByteOffset: batch.endByteOffset,
+          nextSeq:
+            last === undefined || last.item.type === "session_meta"
+              ? (checkpoint?.nextSeq ??
+                segment.sessionMeta.item.metadata.historyBase
+                  ?.endSeqExclusive ??
+                1)
+              : last.seq + 1,
+        }
+        // Stamps remain invalid until every segment has been durably applied.
+        // Search/status, compact rows, and this complete-line offset commit in
+        // one transaction, so a restart cannot double-apply a suffix.
+        this.#searchProjection.append(
+          metadata,
+          batch.records,
+          {
+            metadataSize: -1,
+            metadataMtimeMs: -1,
+            rolloutSize: -1,
+            rolloutMtimeMs: -1,
+          },
+          checkpoint,
+        )
+        if (batch.reachedEnd) {
+          if (segment.position === undefined) {
+            stamp = await this.#searchProjectionStamp(metadata)
+            // Appends may finish writing while their projection update waits
+            // behind this repair. Never stamp unconsumed bytes as indexed.
+            if (stamp.rolloutSize !== batch.observedByteSize) continue
+          }
+          break
+        }
+      }
+    }
+    const checkpoint = this.#searchProjection.checkpoint(
+      threadId,
+      metadata.rolloutId,
+    )
+    if (checkpoint === undefined)
+      throw new Error("Current rollout checkpoint is missing.")
+    const currentMetadata = await this.#readMetadata(threadId)
+    if (currentMetadata.rolloutId !== metadata.rolloutId)
+      throw new ThreadProjectionChangedError()
+    this.#searchProjection.append(currentMetadata, [], stamp, checkpoint)
+    this.#searchProjectionErrors.delete(threadId)
   }
 
   async #repairSearchProjection(): Promise<void> {
@@ -1976,7 +2276,15 @@ export class JsonlThreadStore implements ThreadStore {
       if (!(await pathExists(path))) continue
       let sessionMeta: StoredRolloutItem | undefined
       try {
-        sessionMeta = (await readPhysicalRollout(path, { rolloutId }))[0]
+        sessionMeta = await readJsonlFirst(path, { parse: parseRolloutLine })
+        if (
+          sessionMeta?.rolloutId !== rolloutId ||
+          sessionMeta.seq !== 0 ||
+          sessionMeta.item.type !== "session_meta" ||
+          sessionMeta.item.metadata.rolloutId !== rolloutId ||
+          sessionMeta.threadId !== sessionMeta.item.metadata.id
+        )
+          throw new Error("Retained rollout has mismatched identity.")
       } catch {
         // If retained lineage is unreadable, ownership cannot be proven. Abort
         // collection without making healthy Threads unavailable.
@@ -2474,14 +2782,67 @@ function windowFromRecords(
   beforeSeqExclusive: number | undefined,
   reachedRoot: boolean,
 ): DisplayWindowRead {
-  const window = selectDisplayWindow(records, beforeSeqExclusive)
+  const window = selectDisplayWindow(
+    records.flatMap((record) => {
+      const display = displayRecord(record)
+      return display === undefined ? [] : [display]
+    }),
+    beforeSeqExclusive,
+  )
   return {
     metadata,
     records: window.records,
     lookbehind: window.lookbehind,
     hasEarlier: window.hasEarlier || !reachedRoot,
     endSeq: records.at(-1)?.seq ?? 0,
+    projectionReady: true,
   }
+}
+
+function eventsFromRecords(
+  stored: StoredThread,
+  input: Readonly<{ after: number; through?: number; limit: number }>,
+  endSeq = stored.rollout.at(-1)?.seq ?? 0,
+  more = false,
+): ThreadEventRead {
+  const through = Math.max(
+    input.after,
+    Math.min(input.through ?? endSeq, endSeq),
+  )
+  const eligible = stored.rollout.flatMap((record) => {
+    const display =
+      record.item.type === "session_meta"
+        ? record
+        : record.item.type === "turn_context"
+          ? undefined
+          : displayRecord(record)
+    return display !== undefined &&
+      record.seq > input.after &&
+      record.seq <= through
+      ? [display]
+      : []
+  })
+  const records: StoredRolloutItem[] = []
+  let bytes = 0
+  for (const record of eligible) {
+    const size = Buffer.byteLength(JSON.stringify(record))
+    if (
+      records.length > 0 &&
+      (records.length >= Math.min(input.limit, displayPageRecords) ||
+        bytes + size > displayPageBytes)
+    )
+      break
+    records.push(record)
+    bytes += size
+  }
+  const hasMore = more || records.length < eligible.length
+  return structuredClone({
+    metadata: stored.metadata,
+    records,
+    endSeq,
+    nextAfter: hasMore ? (records.at(-1)?.seq ?? input.after) : through,
+    hasMore,
+  })
 }
 
 // Existing rollouts stored user/tool text and media in separate arrays. Normalize

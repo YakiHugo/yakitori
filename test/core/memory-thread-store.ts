@@ -1,5 +1,10 @@
 import { ContextManager } from "../../src/core/context-manager.ts"
-import { selectDisplayWindow } from "../../src/core/display-window.ts"
+import {
+  displayPageBytes,
+  displayPageRecords,
+  displayRecord,
+  selectDisplayWindow,
+} from "../../src/core/display-window.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -33,6 +38,8 @@ import type {
   PrepareForkInput,
   RevertThreadInput,
   RevertThreadResult,
+  ThreadEventRead,
+  ThreadInputAdmissionsRead,
   ThreadStore,
   ThreadStoreListInput,
   ThreadStoreOccurrenceSearchInput,
@@ -410,14 +417,78 @@ export class MemoryThreadStore implements ThreadStore {
   async readDisplayWindow(threadId: string, beforeSeqExclusive?: number) {
     const thread = this.#threads.get(threadId)
     if (thread === undefined) return undefined
-    const window = selectDisplayWindow(thread.rollout, beforeSeqExclusive)
+    const window = selectDisplayWindow(
+      thread.rollout.flatMap((record) => displayRecord(record) ?? []),
+      beforeSeqExclusive,
+    )
     return {
       metadata: structuredClone(thread.metadata),
       records: window.records,
       lookbehind: window.lookbehind,
       hasEarlier: window.hasEarlier,
       endSeq: thread.rollout.at(-1)?.seq ?? 0,
+      projectionReady: true,
     }
+  }
+
+  async readThreadEvents(
+    threadId: string,
+    input: Readonly<{ after: number; through?: number; limit: number }>,
+  ): Promise<ThreadEventRead | undefined> {
+    const thread = this.#threads.get(threadId)
+    if (thread === undefined) return undefined
+    const endSeq = thread.rollout.at(-1)?.seq ?? 0
+    const through = Math.min(input.through ?? endSeq, endSeq)
+    const matching = thread.rollout.flatMap((record) =>
+      record.seq > input.after &&
+      record.seq <= through &&
+      record.item.type !== "turn_context"
+        ? record.item.type === "session_meta"
+          ? [record]
+          : (displayRecord(record) ?? [])
+        : [],
+    )
+    const records: StoredRolloutItem[] = []
+    let bytes = 0
+    for (const record of matching) {
+      const size = Buffer.byteLength(JSON.stringify(record))
+      if (
+        records.length > 0 &&
+        (records.length >= Math.min(input.limit, displayPageRecords) ||
+          bytes + size > displayPageBytes)
+      )
+        break
+      records.push(record)
+      bytes += size
+    }
+    const hasMore = records.length < matching.length
+    const last = records.at(-1)
+    return structuredClone({
+      metadata: thread.metadata,
+      records,
+      endSeq,
+      hasMore,
+      nextAfter: hasMore && last !== undefined ? last.seq : through,
+    })
+  }
+
+  async readInputAdmissions(
+    threadId: string,
+    requestIds: readonly string[],
+  ): Promise<ThreadInputAdmissionsRead | undefined> {
+    const thread = this.#threads.get(threadId)
+    if (thread === undefined) return undefined
+    const ids = new Set(requestIds)
+    return structuredClone({
+      metadata: thread.metadata,
+      records: thread.rollout.filter(
+        (record) =>
+          record.item.type === "response_item" &&
+          ids.has(record.item.item.turnId) &&
+          displayRecord(record) !== undefined,
+      ),
+      endSeq: thread.rollout.at(-1)?.seq ?? 0,
+    })
   }
 
   async listThreadIds(): Promise<readonly string[]> {

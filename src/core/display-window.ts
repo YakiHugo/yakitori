@@ -13,7 +13,50 @@ export type DisplayWindowRead = DisplayWindow &
     metadata: ThreadMetadata
     // Last stored sequence, even when reading a page before that sequence.
     endSeq: number
+    // False only for a bounded JSONL fallback while the shared index catches up.
+    projectionReady: boolean
+    // Canonical coverage boundary even when a bounded cold tail contains only
+    // hidden records. Supplemental state never advances this paging cursor.
+    coverageStartSeq?: number
   }>
+
+// Implementation safety boundaries, not conversation or Turn limits. A single
+// indivisible record may exceed the byte budget and is returned on its own.
+export const displayPageRecords = 200
+export const displayPageBytes = 256 * 1024
+
+export function displayRecord(
+  record: StoredRolloutItem,
+): StoredRolloutItem | undefined {
+  const { item } = record
+  if (item.type === "response_item") {
+    const envelope = item.item
+    const message = envelope.item
+    if (
+      !(
+        envelope.id.startsWith("input_") || envelope.id.startsWith("message_")
+      ) ||
+      !(
+        (message.role === "user" && message.context === undefined) ||
+        (message.role === "developer" &&
+          message.context?.type === "thread_message" &&
+          envelope.submissionMetadata?.content !== undefined &&
+          envelope.submissionMetadata.provenance !== undefined)
+      )
+    )
+      return undefined
+    const { providerMetadata: _providerMetadata, ...input } = envelope
+    return { ...record, item: { type: "response_item", item: input } }
+  }
+  return item.type === "turn_started" ||
+    item.type === "turn_context" ||
+    item.type === "turn_completed" ||
+    item.type === "item_started" ||
+    item.type === "item_completed" ||
+    item.type === "token_count"
+    ? record
+    : undefined
+}
 
 export function isDisplayInput(record: StoredRolloutItem): boolean {
   if (
@@ -101,8 +144,23 @@ export function selectDisplayWindow(
       (beforeSeqExclusive === undefined || record.seq < beforeSeqExclusive),
   )
   const { index: start } = displayStart(visible)
-  const selected = visible.slice(start)
-  const preceding = visible.slice(0, start)
+  let boundedStart = visible.length
+  let bytes = 0
+  while (boundedStart > start) {
+    const record = visible[boundedStart - 1]
+    if (record === undefined) break
+    const size = Buffer.byteLength(JSON.stringify(record))
+    if (
+      boundedStart < visible.length &&
+      (visible.length - boundedStart >= displayPageRecords ||
+        bytes + size > displayPageBytes)
+    )
+      break
+    bytes += size
+    boundedStart -= 1
+  }
+  const selected = visible.slice(boundedStart)
+  const preceding = visible.slice(0, boundedStart)
   const supplemental = new Map<number, StoredRolloutItem>()
   const add = (record: StoredRolloutItem | undefined) => {
     if (record !== undefined && record.seq < (selected[0]?.seq ?? 0)) {
@@ -114,6 +172,30 @@ export function selectDisplayWindow(
   }
   if (!selected.some((record) => record.item.type === "turn_context")) {
     add(preceding.findLast((record) => record.item.type === "turn_context"))
+  }
+  const first = selected[0]?.item
+  const turnId =
+    first === undefined
+      ? undefined
+      : first.type === "response_item"
+        ? first.item.turnId
+        : first.type === "turn_context"
+          ? first.context.turnId
+          : "turnId" in first
+            ? first.turnId
+            : undefined
+  if (turnId !== undefined) {
+    add(
+      preceding.findLast(
+        ({ item }) => item.type === "turn_started" && item.turnId === turnId,
+      ),
+    )
+    add(
+      preceding.findLast(
+        ({ item }) =>
+          item.type === "turn_context" && item.context.turnId === turnId,
+      ),
+    )
   }
   const cache = lastCacheState(visible)
   add(cache.completion)
@@ -184,6 +266,7 @@ export async function readJsonlTail(
   options: JsonlReadOptions &
     Readonly<{
       beforeSeqExclusive?: number
+      maxBytes?: number
       enough(
         records: readonly StoredRolloutItem[],
         reachedStart: boolean,
@@ -212,9 +295,11 @@ export async function readJsonlTail(
           )
     let partial: Buffer[] = []
     let records: StoredRolloutItem[] = []
+    let scannedBytes = 0
     while (cursor > 0) {
       const start = Math.max(0, cursor - tailChunkBytes)
       const chunk = await readBytes(file, start, cursor - start)
+      scannedBytes += chunk.length
       cursor = start
       const reachedStart = start === 0
       const firstNewline = reachedStart ? -1 : chunk.indexOf(10)
@@ -228,11 +313,76 @@ export async function readJsonlTail(
         partial.length === 0 ? complete : Buffer.concat([complete, ...partial])
       partial = completeStart === 0 ? [] : [chunk.subarray(0, completeStart)]
       records = [...parseCompleteLines(bytes, options.parse), ...records]
-      if (options.enough(records, reachedStart)) {
+      if (
+        options.enough(records, reachedStart) ||
+        (options.maxBytes !== undefined && scannedBytes >= options.maxBytes)
+      ) {
         return { records, reachedStart, endSeq }
       }
     }
     return { records, reachedStart: true, endSeq }
+  } finally {
+    await file.close()
+  }
+}
+
+// Reads complete records forward from a durable checkpoint. An incomplete
+// trailing line never advances the checkpoint and will be retried after append.
+export async function readJsonlBatch(
+  path: string,
+  options: JsonlReadOptions & Readonly<{ startByteOffset: number }>,
+): Promise<{
+  records: readonly StoredRolloutItem[]
+  endByteOffset: number
+  reachedEnd: boolean
+  observedByteSize: number
+}> {
+  const file = await open(path, "r")
+  try {
+    const end = await jsonlEnd(file, options)
+    if (options.startByteOffset > end)
+      throw new Error("Rollout checkpoint is outside its physical file.")
+    let cursor = options.startByteOffset
+    let completeEnd = cursor
+    let partial: Buffer[] = []
+    const records: StoredRolloutItem[] = []
+    while (cursor < end) {
+      const bytes = await readBytes(
+        file,
+        cursor,
+        Math.min(tailChunkBytes, end - cursor),
+      )
+      let start = 0
+      for (let index = 0; index < bytes.length; index += 1) {
+        if (bytes[index] !== 10) continue
+        const line =
+          partial.length === 0
+            ? bytes.subarray(start, index)
+            : Buffer.concat([...partial, bytes.subarray(start, index)])
+        if (line.length > 0) records.push(options.parse(line.toString("utf8")))
+        partial = []
+        completeEnd = cursor + index + 1
+        start = index + 1
+        if (
+          records.length >= displayPageRecords ||
+          completeEnd - options.startByteOffset >= displayPageBytes
+        )
+          return {
+            records,
+            endByteOffset: completeEnd,
+            reachedEnd: completeEnd === end,
+            observedByteSize: end,
+          }
+      }
+      if (start < bytes.length) partial.push(bytes.subarray(start))
+      cursor += bytes.length
+    }
+    return {
+      records,
+      endByteOffset: completeEnd,
+      reachedEnd: true,
+      observedByteSize: end,
+    }
   } finally {
     await file.close()
   }

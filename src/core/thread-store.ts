@@ -112,6 +112,21 @@ export type RolloutAppend = Readonly<{
   records: readonly StoredRolloutItem[]
 }>
 
+export type ThreadEventRead = Readonly<{
+  metadata: ThreadMetadata
+  records: readonly StoredRolloutItem[]
+  // All cursors are canonical rollout sequences (public event seq is seq + 1).
+  endSeq: number
+  nextAfter: number
+  hasMore: boolean
+}>
+
+export type ThreadInputAdmissionsRead = Readonly<{
+  metadata: ThreadMetadata
+  records: readonly StoredRolloutItem[]
+  endSeq: number
+}>
+
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
@@ -137,11 +152,22 @@ export type ThreadStore = {
   // Current history first, followed by retained versions of this same Thread.
   readThreadVersions(threadId: string): Promise<readonly StoredThread[]>
   readThreadSummary(threadId: string): Promise<ThreadSummary | undefined>
-  // Latest user prompt through the file end, without reading earlier history.
+  // Bounded recent display records plus supplemental Turn/model/cache state.
   readDisplayWindow(
     threadId: string,
     beforeSeqExclusive?: number,
   ): Promise<DisplayWindowRead | undefined>
+  // Ascending display-eligible records; after is exclusive, through inclusive.
+  // nextAfter advances to through/endSeq across excluded metadata when exhausted.
+  readThreadEvents(
+    threadId: string,
+    input: Readonly<{ after: number; through?: number; limit: number }>,
+  ): Promise<ThreadEventRead | undefined>
+  // Absence is established through endSeq after selected projection catchup.
+  readInputAdmissions(
+    threadId: string,
+    requestIds: readonly string[],
+  ): Promise<ThreadInputAdmissionsRead | undefined>
   listThreadIds(): Promise<readonly string[]>
   readSessionSidebar(): Promise<SessionSidebar>
   // Generated titles must test absence inside the same storage mutation lock
