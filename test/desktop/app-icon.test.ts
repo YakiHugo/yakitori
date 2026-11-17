@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
+import { load } from "cheerio"
 import sharp from "sharp"
 import { expect, test } from "vitest"
 import { parse } from "yaml"
@@ -49,9 +50,11 @@ test("app icons retain the approved master and all macOS representations", async
 })
 
 test("browser favicon is linked and generated assets are reproducible", async () => {
-  expect(await readFile("index.html", "utf8")).toContain(
-    '<link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />',
-  )
+  const document = load(await readFile("index.html", "utf8"))
+  const favicon = document('link[rel~="icon"][href="/favicon.png"]')
+  expect(favicon).toHaveLength(1)
+  expect(favicon.attr("type")).toBe("image/png")
+  expect(favicon.attr("sizes")).toBe("32x32")
   const metadata = await sharp("public/favicon.png").metadata()
   expect([metadata.width, metadata.height, metadata.format]).toEqual([
     32,

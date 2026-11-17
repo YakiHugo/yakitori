@@ -2182,9 +2182,10 @@ describe("Turn processor", () => {
     ).toEqual(["reasoning", "agent_message"])
   })
 
-  it("records assistant tool calls and tool results before the next model call", async () => {
+  it("commits tool history before follow-up sampling and streaming", async () => {
     const provider = createFauxProvider([
       {
+        snapshots: ["calling tool"],
         usage: { inputTokens: 10, outputTokens: 2, activeContextTokens: 9 },
         stopReason: ModelStopReason.ToolUse,
         content: [
@@ -2197,6 +2198,7 @@ describe("Turn processor", () => {
         ],
       },
       {
+        snapshots: ["final answer"],
         usage: { inputTokens: 4, outputTokens: 1, activeContextTokens: 3 },
         assertRequest(request) {
           expect(
@@ -2224,8 +2226,27 @@ describe("Turn processor", () => {
     await thread.startIfIdle({
       content: inputFixture([{ type: "text" as const, text: "use echo" }]),
     })
-    await nextLifecycleEvent(thread)
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    const events: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) throw new Error("Session ended before the Turn.")
+      events.push(event)
+      if (event.type === "turn.completed") break
+    }
+    const toolResultAt = events.findIndex(
+      (event) =>
+        event.type === "rollout.appended" &&
+        event.records.some(
+          ({ item }) =>
+            item.type === "response_item" && item.item.item.role === "tool",
+        ),
+    )
+    const finalStreamAt = events.findIndex(
+      (event) =>
+        event.type === "model.stream" && event.delta === "final answer",
+    )
+    expect(toolResultAt).toBeGreaterThan(-1)
+    expect(finalStreamAt).toBeGreaterThan(toolResultAt)
     expect(provider.callCount).toBe(2)
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
@@ -3273,69 +3294,6 @@ describe("Turn processor", () => {
     expect(thread.agentStatus).toEqual({ completed: "done" })
     expect(provider.callCount).toBe(3)
     expect(await readFile(path, "utf8")).toBe("changed\ntwo\n")
-  })
-
-  it("delivers committed tool history before the next model stream", async () => {
-    const provider = createFauxProvider([
-      {
-        snapshots: ["calling tool"],
-        stopReason: ModelStopReason.ToolUse,
-        content: [
-          {
-            type: "tool_call",
-            id: "tool_order",
-            name: "echo",
-            input: { text: "hello" },
-          },
-        ],
-      },
-      {
-        snapshots: ["final answer"],
-        content: [{ type: "text", text: "final answer" }],
-      },
-    ])
-    const runtime = await createRuntime(
-      provider.stream,
-      createToolRegistry([
-        {
-          toolName: plainToolName("echo"),
-          description: "Echo text",
-          inputSchema: { type: "object" },
-          effect: "observe",
-          approvalRequirement: { kind: "none" },
-          async execute(value) {
-            return { ok: true, output: value as never, content: "hello" }
-          },
-        },
-      ]),
-    )
-    const thread = await runtime.createThread()
-
-    await thread.startIfIdle({
-      content: inputFixture([{ type: "text" as const, text: "use echo" }]),
-    })
-    const events: SessionEvent[] = []
-    for (;;) {
-      const event = await thread.nextEvent()
-      if (event === undefined) throw new Error("Session ended before the Turn.")
-      events.push(event)
-      if (event.type === "turn.completed") break
-    }
-
-    const toolResultAt = events.findIndex(
-      (event) =>
-        event.type === "rollout.appended" &&
-        event.records.some(
-          ({ item }) =>
-            item.type === "response_item" && item.item.item.role === "tool",
-        ),
-    )
-    const finalStreamAt = events.findIndex(
-      (event) =>
-        event.type === "model.stream" && event.delta === "final answer",
-    )
-    expect(toolResultAt).toBeGreaterThan(-1)
-    expect(finalStreamAt).toBeGreaterThan(toolResultAt)
   })
 
   it("delivers permission events between the tool call and its result", async () => {

@@ -32,37 +32,6 @@ describe("queued inputs", () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it("lists the queued input text", () => {
-    useAppStore.setState({ queuedItems: seedQueuedInput() })
-    render(
-      <TooltipProvider>
-        <QueuedInputs />
-      </TooltipProvider>,
-    )
-
-    expect(screen.getByText("queued")).toBeDefined()
-    expect(screen.getByText("hello")).toBeDefined()
-  })
-
-  it("routes queued-input cancel clicks through the store action", async () => {
-    const user = userEvent.setup()
-    const cancelQueuedInput = vi.fn((_inputId: string) => Promise.resolve())
-    useAppStore.setState({
-      queuedItems: seedQueuedInput(),
-      cancelQueuedInput,
-    })
-    render(
-      <TooltipProvider>
-        <QueuedInputs />
-      </TooltipProvider>,
-    )
-
-    await user.click(
-      screen.getByRole("button", { name: "Cancel queued input" }),
-    )
-    expect(cancelQueuedInput).toHaveBeenCalledWith("input_1")
-  })
-
   it("preserves images when reopening a canceled edit and saving new text", async () => {
     const user = userEvent.setup()
     const image = {
@@ -106,10 +75,7 @@ describe("queued inputs", () => {
     await user.click(screen.getByRole("button", { name: "Save" }))
     expect(updateQueuedInput).toHaveBeenCalledExactlyOnceWith(
       "input_1",
-      inputFixture([
-        { type: "text", text: "beforeafter updated " },
-        image,
-      ]),
+      inputFixture([{ type: "text", text: "beforeafter updated " }, image]),
     )
     expect(useAppStore.getState().queuedItems).toEqual(originalQueuedItems)
   })

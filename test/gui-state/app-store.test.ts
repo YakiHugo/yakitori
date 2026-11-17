@@ -1812,11 +1812,12 @@ describe("delete session", () => {
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
   })
 
-  it("clears the selection when the selected session is deleted", async () => {
+  it("clears the selected session, its draft, stream, and workspace when deleted", async () => {
     fakeRef.current.respond = respondToDelete([])
 
     await useAppStore.getState().selectSession("session_1")
     emitSnapshot(fakeRef.current.streams[0])
+    useAppStore.getState().setPromptDraft(inputParts("draft for one"))
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     const stream = fakeRef.current.streams[0]
     useWorkspaceStore.setState({
@@ -1833,6 +1834,8 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession).toBeUndefined()
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([])
@@ -1956,23 +1959,6 @@ describe("session drafts", () => {
     expect(useAppStore.getState().sessionDrafts).toEqual({})
     expect(useAppStore.getState().selection.sessionId).toBe("session_2")
     expect(useAppStore.getState().promptDraft).toBeUndefined()
-  })
-
-  it("clears the live draft when the selected session is deleted", async () => {
-    fakeRef.current.respond = (method, params) => {
-      if (method === "session/delete") {
-        return { sessionId: (params as { sessionId: string }).sessionId }
-      }
-      if (method === "session/list") return { sessions: [] }
-      return notFound()
-    }
-    await useAppStore.getState().selectSession("session_1")
-    useAppStore.getState().setPromptDraft(inputParts("draft for one"))
-
-    await useAppStore.getState().deleteSession("session_1")
-
-    expect(useAppStore.getState().promptDraft).toBeUndefined()
-    expect(useAppStore.getState().sessionDrafts).toEqual({})
   })
 })
 

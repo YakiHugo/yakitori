@@ -337,7 +337,7 @@ describe("native Z.AI GLM vision", () => {
     expect(JSON.stringify(cumulative.events)).toContain("local 32 MB")
   })
 
-  it("counts final UTF-8 tools/text with exact boundary and early overflow stop", async () => {
+  it("counts final UTF-8 tools/text at the exact body budget boundary", async () => {
     const block = inline(await png())
     const policy = createGlmImagePolicy(
       request([{ role: "user", content: [block] }]),
@@ -364,17 +364,6 @@ describe("native Z.AI GLM vision", () => {
     expect(() => policy.validateBody(body)).not.toThrow()
     body.padding += "a"
     expect(() => policy.validateBody(body)).toThrow("local 32 MB")
-    body.padding += "overflow"
-    let lateReads = 0
-    Object.defineProperty(body, "later", {
-      enumerable: true,
-      get() {
-        lateReads += 1
-        throw new Error("Must not serialize after overflow")
-      },
-    })
-    expect(() => policy.validateBody(body)).toThrow("local 32 MB")
-    expect(lateReads).toBe(0)
   })
 
   it("leaves external URL fetching to Z.AI instead of downloading on the user's host", async () => {

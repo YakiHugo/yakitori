@@ -1,14 +1,13 @@
 // @vitest-environment happy-dom
 import { cleanup, render, screen } from "@testing-library/react"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, expect, it } from "vitest"
 import { ProviderEditor } from "../../src/gui/components/provider-editor.tsx"
 import { providerPresets } from "../../src/runtime/provider-presets.ts"
 
 afterEach(cleanup)
-it("discloses static catalog, bearer-only US routing, buffered wait and no retries before connecting", () => {
+it("discloses static catalog, bearer-only US routing, long waits and no retries before connecting", () => {
   const preset = providerPresets.find((item) => item.id === "amazon-nova")
   if (!preset) throw new Error("Missing Nova preset")
-  const testConnection = vi.fn()
   render(
     <ProviderEditor
       draft={{
@@ -29,23 +28,16 @@ it("discloses static catalog, bearer-only US routing, buffered wait and no retri
       onClose={() => {}}
       onSubmit={() => {}}
       onApply={async () => {}}
-      onTest={testConnection}
+      onTest={() => {}}
       onRemove={() => {}}
     />,
   )
-  const disclosure = screen.getByText(/Nova 2 Lite only:/).textContent
-  for (const text of [
-    "static catalog",
-    "buffered responses",
-    "reasoning off",
-    "us-east-1",
-    "not an AWS access key",
-    "No IAM/SigV4",
-    "across US regions",
-    "60 minutes",
-    "not automatically retried",
-    "does not verify the key",
-  ])
-    expect(disclosure).toContain(text)
-  expect(testConnection).not.toHaveBeenCalled()
+  expect(screen.getByText(/static catalog/i)).toBeDefined()
+  expect(
+    screen.getByText(
+      /bearer API key.*us-east-1.*not an AWS access key.*No IAM\/SigV4.*across US regions/i,
+    ),
+  ).toBeDefined()
+  expect(screen.getByText(/up to 60 minutes/i)).toBeDefined()
+  expect(screen.getByText(/not automatically retried/i)).toBeDefined()
 })

@@ -2,7 +2,7 @@ import { pngImageBase64 } from "../fixtures/images.ts"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { requireStoredAssetSource } from "../support/asset-source.ts"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
 import { pdfFixture } from "../runtime/tools/pdf-fixture.ts"
@@ -200,15 +200,39 @@ describe("spawnServerProcess", () => {
   })
 
   it("rejects and kills the child when no listening line arrives in time", async () => {
-    const started = Date.now()
-    await expect(
-      spawnServerProcess({
+    const childStarted = Promise.withResolvers<number>()
+    let pid: number | undefined
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      const starting = spawnServerProcess({
         command: node,
-        args: ["-e", "setInterval(() => {}, 60000)"],
+        args: [
+          "-e",
+          `console.log("child-pid " + process.pid);
+           setInterval(() => {}, 60000)`,
+        ],
         timeoutMs: 300,
-      }),
-    ).rejects.toThrow("did not report a listening URL")
-    expect(Date.now() - started).toBeLessThan(2_000)
+        onStdout: (line) => {
+          if (!line.startsWith("child-pid ")) return
+          pid = Number(line.slice("child-pid ".length))
+          childStarted.resolve(pid)
+        },
+      })
+      const rejected = expect(starting).rejects.toThrow(
+        "did not report a listening URL",
+      )
+      const childPid = await childStarted.promise
+      expect(isProcessRunning(childPid)).toBe(true)
+      await vi.advanceTimersByTimeAsync(300)
+      await rejected
+      vi.useRealTimers()
+      await expect.poll(() => isProcessRunning(childPid)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+      if (pid !== undefined && isProcessRunning(pid)) {
+        process.kill(pid, "SIGKILL")
+      }
+    }
   })
 
   it("rejects when the child exits before listening", async () => {
@@ -222,26 +246,37 @@ describe("spawnServerProcess", () => {
   })
 
   it("leaves a draining child alive until forceStop is requested", async () => {
+    const draining = Promise.withResolvers<void>()
     const server = await spawnServerProcess({
       command: node,
       args: [
         "-e",
-        `process.on("SIGTERM", () => {});
+        `process.on("SIGTERM", () => console.log("draining"));
          console.log("yakitori-listening http://127.0.0.1:1");
          setInterval(() => {}, 60000)`,
       ],
+      onStdout: (line) => {
+        if (line === "draining") draining.resolve()
+      },
     })
 
-    let stopped = false
-    const stopping = server.stop().then(() => {
-      stopped = true
-    })
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    try {
+      let stopped = false
+      const stopping = server.stop().then(() => {
+        stopped = true
+      })
+      await draining.promise
 
-    expect(stopped).toBe(false)
-    await server.forceStop()
-    await stopping
-    expect(server.child.signalCode).toBe("SIGKILL")
+      expect(stopped).toBe(false)
+      expect(server.child.exitCode).toBeNull()
+      expect(server.child.signalCode).toBeNull()
+      await server.forceStop()
+      await stopping
+      expect(stopped).toBe(true)
+      expect(server.child.signalCode).toBe("SIGKILL")
+    } finally {
+      await server.forceStop()
+    }
   })
 
   it("stops a well-behaved child with SIGTERM alone", async () => {
@@ -260,3 +295,15 @@ describe("spawnServerProcess", () => {
     expect(server.child.exitCode).toBe(0)
   })
 })
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      return false
+    }
+    throw error
+  }
+}

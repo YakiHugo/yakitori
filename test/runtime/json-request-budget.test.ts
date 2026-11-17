@@ -129,6 +129,19 @@ describe("plain JSON request byte budget", () => {
     expect(calls).toBe(0)
   })
 
+  it("returns overflow before inspecting later object fields", () => {
+    let lateReads = 0
+    const value = {
+      padding: "already over budget",
+      get later() {
+        lateReads += 1
+        throw new Error("Must not inspect fields after overflow")
+      },
+    }
+    expect(jsonRequestByteLength(value, 16)).toBeUndefined()
+    expect(lateReads).toBe(0)
+  })
+
   it("rejects invalid budgets and unsupported serialization rather than returning an incorrect size", () => {
     for (const budget of [-1, 0.5, NaN, Infinity])
       expect(() => jsonRequestByteLength({}, budget)).toThrow(RangeError)

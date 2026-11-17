@@ -814,6 +814,7 @@ describe("structured context and ephemeral forks", () => {
     await publicationFinished
     revertSpy.mockRestore()
     expect(edited.value.session.id).toBe(id)
+    expect(edited.value.historyEndSeqExclusive).toBe(2)
     await until(
       () => context.app.threadManager.getThread(id)?.status === "idle",
     )

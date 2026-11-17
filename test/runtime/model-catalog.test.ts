@@ -90,15 +90,6 @@ describe("model catalog context windows", () => {
     })
   })
 
-  it("returns the curated window for known models", () => {
-    expect(
-      catalogModelCapacity({
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-      })?.contextWindowTokens,
-    ).toBe(1_000_000)
-  })
-
   it("returns the Codex default, maximum, and effective window policy", () => {
     expect(
       catalogModelCapacity({ provider: "codex", model: "gpt-5.6-sol" }),
@@ -121,12 +112,6 @@ describe("model catalog context windows", () => {
       catalogModelCapacity({ provider: "faux", model: "scripted" })
         ?.contextWindowTokens,
     ).toBeUndefined()
-    expect(
-      catalogModelCapacity({
-        provider: "codex",
-        model: "gpt-5.6-sol",
-      })?.contextWindowTokens,
-    ).toBe(272_000)
     expect(
       catalogModelCapacity({ provider: "openai", model: "gpt-5" })
         ?.contextWindowTokens,

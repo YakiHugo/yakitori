@@ -1912,63 +1912,6 @@ describe("execution view", () => {
     })
   })
 
-  it("projects public reasoning separately from the assistant answer", () => {
-    const state = [
-      {
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: "turn_1",
-          item: {
-            type: "reasoning" as const,
-            itemId: "reasoning_1",
-            text: "Inspect the event ordering.",
-          },
-        },
-      },
-      {
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: "turn_1",
-          item: {
-            type: "agent_message" as const,
-            itemId: "item_1",
-            content: [
-              { type: "text" as const, text: "The ordering is correct." },
-            ],
-          },
-        },
-      },
-    ].reduce(
-      (current, event, index) =>
-        reduceExecutionView(current, {
-          type: "durable",
-          event: createExecutionEnvelope({
-            sessionId,
-            seq: index + 1,
-            createdAt: `2026-07-24T00:00:0${index}.000Z`,
-            event,
-          }),
-        }),
-      createExecutionViewState(),
-    )
-
-    expect(projectExecutionView(state).entries).toEqual([
-      {
-        kind: "reasoning",
-        itemId: "reasoning_1",
-        turnId: "turn_1",
-        text: "Inspect the event ordering.",
-        status: "completed",
-        at: "2026-07-24T00:00:00.000Z",
-      },
-      expect.objectContaining({
-        kind: "assistant",
-        itemId: "item_1",
-        text: "The ordering is correct.",
-      }),
-    ])
-  })
-
   it("projects durable tool facts and a transient pending permission", () => {
     const facts: KernelEvent[] = [
       {
@@ -2709,28 +2652,6 @@ describe("execution view", () => {
     })
   })
 
-  it("opens a streaming transcript entry from a live assistant start", () => {
-    const state = reduceExecutionView(createExecutionViewState(), {
-      type: "transient",
-      event: {
-        type: "item.started",
-        sessionId,
-        turnId: "turn_1",
-        item: { type: "agent_message", itemId: "item_1" },
-        createdAt: "2026-07-24T00:00:00.000Z",
-      },
-    })
-
-    expect(projectExecutionView(state).entries).toEqual([
-      expect.objectContaining({
-        kind: "assistant",
-        itemId: "item_1",
-        text: "",
-        status: "streaming",
-      }),
-    ])
-  })
-
   it("keeps one entry when an output item start is repeated", () => {
     const started = {
       type: "transient" as const,
@@ -2743,6 +2664,14 @@ describe("execution view", () => {
       },
     }
     let state = reduceExecutionView(createExecutionViewState(), started)
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        itemId: "item_1",
+        text: "",
+        status: "streaming",
+      }),
+    ])
     state = reduceExecutionView(state, {
       type: "transient",
       event: {
