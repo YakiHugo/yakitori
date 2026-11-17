@@ -126,7 +126,6 @@ describe("session goal", () => {
   it.each([
     "blocked",
     "usage_limited",
-    "complete",
     "budget_limited",
   ] as const)("shows the allowed control for %s", (status) => {
     useAppStore.setState({
@@ -140,6 +139,36 @@ describe("session goal", () => {
     expect(screen.queryByRole("button", { name: "Resume goal" }) !== null).toBe(
       status === "blocked" || status === "usage_limited",
     )
+  })
+
+  it("hides a completed goal when opening a session", () => {
+    useAppStore.setState({
+      selectedSession: { ...session, goal: { ...goal, status: "complete" } },
+    })
+    render(<GoalBar />)
+    expect(screen.queryByRole("region", { name: "Session goal" })).toBeNull()
+  })
+
+  it("hides the bar on completion and keeps the goal available in the editor", () => {
+    render(
+      <>
+        <GoalBar />
+        <GoalEditor />
+      </>,
+    )
+    expect(screen.getByRole("region", { name: "Session goal" })).toBeDefined()
+    act(() =>
+      useAppStore.setState({
+        selectedSession: { ...session, goal: { ...goal, status: "complete" } },
+      }),
+    )
+    expect(screen.queryByRole("region", { name: "Session goal" })).toBeNull()
+    act(() => useAppStore.getState().openGoalDialog())
+    expect(screen.getByRole("textbox", { name: "Goal" })).toHaveProperty(
+      "value",
+      goal.objective,
+    )
+    expect(fakeRef.current.requestsFor("goal/clear")).toHaveLength(0)
   })
 
   it("sets an explicit token budget and removes it when the editor is blank", async () => {
