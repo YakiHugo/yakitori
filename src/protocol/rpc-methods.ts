@@ -106,7 +106,26 @@ export type SessionSubscribeParams = Readonly<{
 
 export type SessionSubscribeResponse = ApiReadSessionResponse & {
   readonly historyBefore?: number
+  // A cold open carries its display window atomically with the snapshot.
+  readonly events?: readonly AppSessionEventEnvelope[]
+  readonly statePending?: boolean
 }
+
+export type SessionSnapshotNotification = Readonly<{
+  sessionId: string
+  snapshot: SessionSubscribeResponse
+}>
+
+export type SessionInputStatusParams = Readonly<{
+  sessionId: string
+  requestIds: readonly string[]
+}>
+
+export type SessionInputStatusResponse = Readonly<{
+  rolloutId: string
+  seq: number
+  events: readonly AppSessionEventEnvelope[]
+}>
 
 export type SessionHistoryParams = Readonly<{
   sessionId: string
@@ -256,6 +275,7 @@ export type RpcMethodParams = Readonly<
         Readonly<{ sessionId: string }>
       "session/compact": Readonly<{ sessionId: string; requestId?: string }>
       "session/input": ApiAdmitInputRequest
+      "session/input/status": SessionInputStatusParams
       "session/input/queue": ApiAdmitInputRequest
       "session/queue/list": ApiReadSessionRequest
       "session/queue/update": ApiAdmitInputRequest &
@@ -326,6 +346,7 @@ export type RpcMethodResponses = Readonly<
       "session/revert": ApiRevertSessionResponse
       "session/compact": ApiCompactSessionResponse
       "session/input": ApiAdmitInputResponse | ApiSteerInputResponse
+      "session/input/status": SessionInputStatusResponse
       "session/input/queue": ApiAdmitInputResponse
       "session/queue/list": Readonly<{ items: readonly QueuedInput[] }>
       "session/queue/update": Readonly<{ item: QueuedInput }>

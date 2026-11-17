@@ -626,10 +626,6 @@ describe("thread server handlers", () => {
     expect(events.value.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          type: "session.cursor",
-          data: {},
-        }),
-        expect.objectContaining({
           type: "item.completed",
           data: {
             turnId: "request_manual_compact",
@@ -2078,7 +2074,7 @@ describe("thread server handlers", () => {
     )
     expect(reads).toBe(auxiliary ? 1 : 0)
     if (extra !== undefined)
-      expect(durable[0]).toEqual({ seq: 2, type: "session.cursor" })
+      expect(durable[0]).toEqual({ seq: 3, type: "turn.started" })
 
     expect(deliveries.indexOf("turn.started")).toBeLessThan(
       deliveries.indexOf("assistant.delta"),

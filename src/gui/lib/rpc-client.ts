@@ -19,6 +19,7 @@ import type {
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
   SessionReplayCompleteNotification,
+  SessionSnapshotNotification,
   SessionSubscribeResponse,
   SessionSubscriptionErrorNotification,
   SidebarChangedNotification,
@@ -34,6 +35,7 @@ import {
   sessionPermissionRequestMethod,
   sessionQueueChangedMethod,
   sessionReplayCompleteMethod,
+  sessionSnapshotMethod,
   sessionSubscriptionErrorMethod,
   sessionsActivityMethod,
   sessionTransientMethod,
@@ -517,6 +519,22 @@ export function createAppRpcClient(options: {
         record.snapshotRevision !== record.subscribeRevision
       )
         return
+      record.lastSeq = Math.max(record.lastSeq, params.seq)
+      record.handlers.onReplayComplete()
+      return
+    }
+    if (message.method === sessionSnapshotMethod) {
+      const { sessionId, snapshot } =
+        message.params as SessionSnapshotNotification
+      const record = streams.get(sessionId)
+      if (
+        record === undefined ||
+        record.closed ||
+        record.snapshotRevision !== record.subscribeRevision
+      )
+        return
+      record.handlers.onSnapshot(snapshot)
+      record.lastSeq = Math.max(record.lastSeq, snapshot.session.seq)
       record.handlers.onReplayComplete()
       return
     }
@@ -632,6 +650,8 @@ export function createAppRpcClient(options: {
       }
       record.snapshotRevision = revision
       record.handlers.onSnapshot(response)
+      if (response.events !== undefined)
+        record.lastSeq = Math.max(record.lastSeq, response.session.seq)
     } catch (error) {
       if (
         record.closed ||

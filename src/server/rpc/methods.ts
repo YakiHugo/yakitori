@@ -8,6 +8,7 @@ import type {
   ProjectMoveParams,
   ProjectUpdateParams,
   SessionHistoryResponse,
+  SessionInputStatusResponse,
   SessionSubscribeParams,
   SessionUnsubscribeParams,
   SidebarChangedNotification,
@@ -34,6 +35,8 @@ export type {
   RpcMethodResponses,
   SessionCompletedNotification,
   SessionEventNotification,
+  SessionInputStatusParams,
+  SessionInputStatusResponse,
   SessionListParams,
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
@@ -718,6 +721,13 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
         },
       }
     },
+  ),
+  handlerEntry<SessionInputStatusResponse>(
+    "session/input/status",
+    // Recovery reads may catch up the selected projection. They must not hold
+    // the Session command queue or delay opening its current display window.
+    () => undefined,
+    (handlers, params) => handlers.readInputStatus(params),
   ),
   {
     method: "session/skills",

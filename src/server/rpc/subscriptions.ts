@@ -1,10 +1,12 @@
 import { isKernelEvent } from "../../kernel/index.ts"
 import type { AppSessionEventEnvelope } from "../../protocol/events.ts"
+import type { SessionSubscribeResponse } from "../../protocol/rpc-methods.ts"
 import {
   sessionEventMethod,
   sessionPermissionRequestedMethod,
   sessionPermissionRequestMethod,
   sessionReplayCompleteMethod,
+  sessionSnapshotMethod,
   sessionSubscriptionErrorMethod,
   sessionTransientMethod,
 } from "../../protocol/rpc-wire.ts"
@@ -21,10 +23,7 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "../operational-errors.ts"
-import type {
-  ApiPendingPermission,
-  ApiReadSessionResponse,
-} from "../protocol.ts"
+import type { ApiPendingPermission } from "../protocol.ts"
 import { INTERNAL_ERROR } from "./messages.ts"
 import type {
   SessionPermissionRequestParams,
@@ -50,7 +49,7 @@ export type SessionSubscribeInput = Readonly<{
 export type SessionSubscribeOutcome =
   | Readonly<{
       ok: true
-      response: ApiReadSessionResponse & { readonly historyBefore?: number }
+      response: SessionSubscribeResponse
       // Runs after the subscribe response is sent: durable replay,
       // replayComplete, permission replay, then the reconciled live buffer.
       replay(): Promise<void>
@@ -384,6 +383,7 @@ export function createSessionSubscriptions(
     let snapshot: Awaited<ReturnType<ServerHandlers["readSession"]>>
     let windowEvents: readonly AppSessionEventEnvelope[] | undefined
     let historyBefore: number | undefined
+    let statePending = false
     try {
       if (input.recent === true) {
         const window = await options.handlers.readDisplayWindow({
@@ -404,6 +404,7 @@ export function createSessionSubscriptions(
         )
           windowEvents = window.value.events
         historyBefore = window.value.historyBefore
+        statePending = window.value.statePending === true
       } else {
         snapshot = await options.handlers.readSession({
           sessionId: input.sessionId,
@@ -424,6 +425,18 @@ export function createSessionSubscriptions(
       return { ok: false, result: snapshot }
     }
     const watermark = snapshot.value.session.seq
+    // The first display window travels with its snapshot. A client can paint
+    // immediately, without consuming one notification per historical record.
+    const initialEvents = input.after === 0 ? windowEvents : undefined
+    const needsInitialBody =
+      initialEvents !== undefined &&
+      !initialEvents.some(
+        (event) =>
+          event.type === "input.admitted" ||
+          event.type === "item.started" ||
+          event.type === "item.completed",
+      )
+    if (initialEvents !== undefined) lastSeq = watermark
     // Entries the snapshot no longer lists belong to Turns that ended while
     // nobody was subscribed; rejecting them with the turn-transition marker
     // keeps the pending map bounded and their continuations silent.
@@ -462,13 +475,13 @@ export function createSessionSubscriptions(
 
     const replay = async (): Promise<void> => {
       try {
-        if (windowEvents !== undefined) {
+        if (initialEvents === undefined && windowEvents !== undefined) {
           for (const event of windowEvents) {
             if (closed) return
             if (event.seq <= input.after || event.seq > watermark) continue
             deliver({ kind: "durable", events: [event] })
           }
-        } else {
+        } else if (initialEvents === undefined) {
           let cursor = input.after
           for (;;) {
             if (closed) return
@@ -518,6 +531,21 @@ export function createSessionSubscriptions(
         )
         buffered.length = 0
         live = true
+        if (statePending)
+          void refreshProjectionSnapshot().catch((error: unknown) => {
+            if (closed) return
+            removeOwnedSubscription()
+            options.notify(input.connectionId, sessionSubscriptionErrorMethod, {
+              sessionId: input.sessionId,
+              message: "Session state could not be loaded.",
+            } satisfies SessionSubscriptionErrorNotification)
+            reportOperationalFailure(reporter, {
+              component: "session-subscriptions",
+              operation: "refresh-projection-snapshot",
+              cause: error,
+              sessionId: input.sessionId,
+            })
+          })
       } catch (error) {
         // The subscribe response is already sent, so a replay failure cannot
         // become an error response. A replaced or closed subscription must
@@ -537,10 +565,48 @@ export function createSessionSubscriptions(
         })
       }
     }
+    const refreshProjectionSnapshot = async (): Promise<void> => {
+      while (!closed) {
+        // This independent read waits for selected-thread indexing, after the
+        // bounded window has already painted and live deliveries are enabled.
+        const ready = await options.handlers.readInputStatus({
+          sessionId: input.sessionId,
+          requestIds: [],
+        })
+        if (closed) return
+        if (!ready.ok) throw new Error(ready.error.message)
+        const refreshed = await options.handlers.readDisplayWindow({
+          sessionId: input.sessionId,
+        })
+        if (closed) return
+        if (!refreshed.ok) throw new Error(refreshed.error.message)
+        if (refreshed.value.statePending) continue
+        options.notify(input.connectionId, sessionSnapshotMethod, {
+          sessionId: input.sessionId,
+          snapshot: {
+            session: refreshed.value.session,
+            // A sparse raw suffix may contain no display body at all. In that
+            // case install the indexed first window; otherwise only supplement
+            // state, preserving the reader's existing history coverage.
+            events: needsInitialBody
+              ? refreshed.value.events
+              : refreshed.value.events.filter(
+                  (event) => event.type === "context.tokens",
+                ),
+            ...(needsInitialBody && refreshed.value.historyBefore !== undefined
+              ? { historyBefore: refreshed.value.historyBefore }
+              : {}),
+          },
+        })
+        return
+      }
+    }
     return {
       ok: true,
       response: {
         ...snapshot.value,
+        ...(initialEvents === undefined ? {} : { events: initialEvents }),
+        ...(statePending ? { statePending: true } : {}),
         ...(input.after !== 0 || historyBefore === undefined
           ? {}
           : { historyBefore }),
