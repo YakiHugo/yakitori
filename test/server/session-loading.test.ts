@@ -7,6 +7,11 @@ import type { RolloutItem } from "../../src/core/rollout.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { PersistContext } from "../../src/core/thread-store.ts"
 import { createEventEnvelope } from "../../src/kernel/events.ts"
+import type {
+  SessionActivityResponse,
+  SessionHistoryResponse,
+  SessionSubscribeResponse,
+} from "../../src/protocol/rpc-methods.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { mapRolloutEvent } from "../../src/server/session-event-projection.ts"
 import {
@@ -26,7 +31,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-async function setup(options: { cold?: boolean } = {}) {
+async function setup(options: { cold?: boolean; activity?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-session-loading-"))
   let store = new JsonlThreadStore({ root: join(root, "store") })
   await store.createThread({
@@ -38,7 +43,10 @@ async function setup(options: { cold?: boolean } = {}) {
   })
   // Public event sequences include the initial session metadata record:
   // old=2..6, middle=7..11, latest=12..16. Each fifth record is hidden.
-  const items: RolloutItem[] = ["old", "middle", "latest"].flatMap((name) => [
+  const names = options.activity
+    ? ["first", "second", "third", "fourth", "old", "middle", "latest"]
+    : ["old", "middle", "latest"]
+  const items: RolloutItem[] = names.flatMap((name) => [
     {
       type: "response_item" as const,
       item: {
@@ -75,6 +83,64 @@ async function setup(options: { cold?: boolean } = {}) {
       settings: { provider: "faux", model: "scripted" },
     },
   ])
+  if (options.activity) {
+    const turnId = "request_latest"
+    const answerPiece = (id: string, text: string): RolloutItem => ({
+      type: "response_item",
+      item: {
+        id,
+        turnId,
+        createdAt,
+        item: { role: "assistant", content: [{ type: "text", text }] },
+      },
+    })
+    const completed = items.findIndex(
+      (record) =>
+        record.type === "item_completed" && record.turnId === "request_latest",
+    )
+    items.splice(
+      completed,
+      0,
+      answerPiece("answer_begin", "First part. "),
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "agent_message",
+          itemId: "answer_begin",
+          content: [{ type: "text", text: "First part. " }],
+        },
+      },
+      ...Array.from(
+        { length: 24 },
+        (_, index): RolloutItem => ({
+          type: "item_completed",
+          turnId: "request_latest",
+          item: {
+            type: "command_execution",
+            itemId: `tool_${index}`,
+            toolCallId: `call_${index}`,
+            name: "exec_command",
+            input: { cmd: "fixture" },
+            command: "fixture",
+            requiresPermission: false,
+            resultItemId: `result_${index}`,
+            content: { kind: "text", text: "x".repeat(16 * 1024) },
+          },
+        }),
+      ),
+      answerPiece("answer_latest", "Answer latest"),
+    )
+    const end = items.findIndex(
+      (record) => record.type === "turn_completed" && record.turnId === turnId,
+    )
+    items[end] = {
+      type: "turn_completed",
+      turnId,
+      outcome: "completed",
+      completion: { answerItemIds: ["answer_begin", "answer_latest"] },
+    }
+  }
   if (options.cold)
     items.push({
       type: "token_count",
@@ -124,6 +190,117 @@ async function setup(options: { cold?: boolean } = {}) {
 }
 
 describe("bounded session loading", () => {
+  it("keeps recent prompts and answers together while completed activity pages separately", async () => {
+    const { connection } = await setup({ activity: true })
+    const response = await connection.sendRequest("session/subscribe", {
+      sessionId,
+      after: 0,
+      recent: "transcript",
+    })
+    if (!("result" in response))
+      throw new Error("Expected subscription result.")
+    const result = response.result as SessionSubscribeResponse
+    const { session, historyBefore } = result
+    expect(result).toMatchObject({
+      activityTurnIds: ["request_latest"],
+    })
+    expect(
+      result.events?.flatMap((event) =>
+        event.type === "input.admitted" ? [event.data.inputId] : [],
+      ),
+    ).toEqual([
+      "input_third",
+      "input_fourth",
+      "input_old",
+      "input_middle",
+      "input_latest",
+    ])
+    expect(
+      result.events?.flatMap((event) =>
+        event.type === "item.completed" ? [event.data.item.itemId] : [],
+      ),
+    ).toEqual([
+      "answer_third",
+      "answer_fourth",
+      "answer_old",
+      "answer_middle",
+      "answer_begin",
+      "answer_latest",
+    ])
+    expect(result.events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.completed",
+        data: expect.objectContaining({
+          turnId: "request_latest",
+          outcome: {
+            status: "completed",
+            answerItemIds: ["answer_begin", "answer_latest"],
+          },
+        }),
+      }),
+    )
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThan(16 * 1024)
+    if (historyBefore === undefined)
+      throw new Error("Expected older transcript.")
+
+    const older = await connection.sendRequest("session/history", {
+      sessionId,
+      before: historyBefore,
+      transcript: true,
+    })
+    if (!("result" in older)) throw new Error("Expected history result.")
+    const olderPage = older.result as SessionHistoryResponse
+    expect(
+      olderPage.events.flatMap((event) =>
+        event.type === "input.admitted" ? [event.data.inputId] : [],
+      ),
+    ).toEqual(["input_first", "input_second"])
+    expect(olderPage.historyBefore).toBeUndefined()
+
+    const params = {
+      sessionId,
+      rolloutId: session.rolloutId,
+      turnId: "request_latest",
+    }
+    const activity = await connection.sendRequest(
+      "session/activity/read",
+      params,
+    )
+    if (!("result" in activity)) throw new Error("Expected activity result.")
+    const activityPage = activity.result as SessionActivityResponse
+    const nextBefore = activityPage.nextBefore
+    if (nextBefore === undefined) throw new Error("Expected older activity.")
+    const earlier = await connection.sendRequest("session/activity/read", {
+      ...params,
+      before: nextBefore,
+    })
+    if (!("result" in earlier))
+      throw new Error("Expected earlier activity result.")
+    const earlierPage = earlier.result as SessionActivityResponse
+    expect(earlierPage.nextBefore).toBeUndefined()
+    expect(
+      [...earlierPage.events, ...activityPage.events].flatMap((event) =>
+        event.type === "item.completed" ? [event.data.item.itemId] : [],
+      ),
+    ).toEqual(Array.from({ length: 24 }, (_, index) => `tool_${index}`))
+    expect(
+      await connection.sendRequest("session/activity/read", {
+        ...params,
+        rolloutId: "different_rollout",
+      }),
+    ).toHaveProperty("error")
+  })
+
+  it("reads the queue and skills while full rollout reads are unavailable", async () => {
+    const { connection } = await setup()
+    expect(
+      await connection.sendRequest("session/queue/list", { sessionId }),
+    ).toMatchObject({ result: { items: [] } })
+    expect(
+      await connection.sendRequest("session/skills", { sessionId }),
+    ).toMatchObject({ result: { skills: [] } })
+  })
+
   it("embeds the latest display window without replaying its events as notifications", async () => {
     const { connection } = await setup()
     const response = await connection.sendRequest("session/subscribe", {
@@ -334,7 +511,7 @@ describe("bounded session loading", () => {
     const subscribing = connection.sendRequest("session/subscribe", {
       sessionId,
       after: 0,
-      recent: true,
+      recent: "transcript",
     })
     await captured.promise
     const appended = await store.appendItems(sessionId, [

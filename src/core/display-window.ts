@@ -2,10 +2,13 @@ import { type FileHandle, open } from "node:fs/promises"
 import type { StoredRolloutItem, ThreadMetadata } from "./rollout.ts"
 
 export type DisplayWindow = Readonly<{
-  // Contiguous history coverage. Supplemental state must not move its cursor.
+  // Supplemental state never advances the cursor. Transcript pages have
+  // separate coverage because they omit activity within the selected turns.
   records: readonly StoredRolloutItem[]
   lookbehind: readonly StoredRolloutItem[]
   hasEarlier: boolean
+  transcriptStart?: number
+  activityTurnIds?: readonly string[]
 }>
 
 export type DisplayWindowRead = DisplayWindow &
@@ -24,6 +27,21 @@ export type DisplayWindowRead = DisplayWindow &
 // indivisible record may exceed the byte budget and is returned on its own.
 export const displayPageRecords = 200
 export const displayPageBytes = 256 * 1024
+
+export function isTranscriptRecord({ item }: StoredRolloutItem): boolean {
+  if (item.type === "item_started")
+    return item.item.type === "context_compaction"
+  if (item.type !== "item_completed") return true
+  const execution = item.item
+  return (
+    execution.type === "agent_message" ||
+    execution.type === "context_compaction" ||
+    (execution.type === "reasoning" && execution.text === "") ||
+    ("name" in execution &&
+      (execution.name === "request_user_input_async" ||
+        execution.name === "update_plan"))
+  )
+}
 
 export function displayRecord(
   record: StoredRolloutItem,

@@ -396,6 +396,7 @@ export type ApiDisplayWindowResponse = {
   readonly events: readonly AppSessionEventEnvelope[]
   readonly historyBefore?: number
   readonly statePending?: boolean
+  readonly activityTurnIds?: readonly string[]
 }
 
 export type ApiSessionSummary = Readonly<{

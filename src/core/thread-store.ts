@@ -156,7 +156,20 @@ export type ThreadStore = {
   readDisplayWindow(
     threadId: string,
     beforeSeqExclusive?: number,
+    transcript?: boolean,
   ): Promise<DisplayWindowRead | undefined>
+  readDisplayActivity(
+    threadId: string,
+    rolloutId: string,
+    turnId: string,
+    before: number,
+  ): Promise<
+    | Readonly<{
+        records: readonly StoredRolloutItem[]
+        nextBefore?: number
+      }>
+    | undefined
+  >
   // Ascending display-eligible records; after is exclusive, through inclusive.
   // nextAfter advances to through/endSeq across excluded metadata when exhausted.
   readThreadEvents(

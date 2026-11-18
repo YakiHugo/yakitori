@@ -43,7 +43,7 @@ export type SessionSubscribeInput = Readonly<{
   after: number
   // Cold open paints the latest prompt and its replies. A caught-up cursor
   // still replays only the tail after `after`.
-  recent?: boolean
+  recent?: boolean | "transcript"
 }>
 
 export type SessionSubscribeOutcome =
@@ -384,10 +384,13 @@ export function createSessionSubscriptions(
     let windowEvents: readonly AppSessionEventEnvelope[] | undefined
     let historyBefore: number | undefined
     let statePending = false
+    const transcript = input.after === 0 && input.recent === "transcript"
+    let activityTurnIds: readonly string[] | undefined
     try {
-      if (input.recent === true) {
+      if (input.recent === true || input.recent === "transcript") {
         const window = await options.handlers.readDisplayWindow({
           sessionId: input.sessionId,
+          ...(transcript ? { transcript } : {}),
         })
         if (closed) return closedOutcome()
         if (!window.ok) {
@@ -405,6 +408,7 @@ export function createSessionSubscriptions(
           windowEvents = window.value.events
         historyBefore = window.value.historyBefore
         statePending = window.value.statePending === true
+        activityTurnIds = window.value.activityTurnIds
       } else {
         snapshot = await options.handlers.readSession({
           sessionId: input.sessionId,
@@ -577,10 +581,13 @@ export function createSessionSubscriptions(
         if (!ready.ok) throw new Error(ready.error.message)
         const refreshed = await options.handlers.readDisplayWindow({
           sessionId: input.sessionId,
+          ...(transcript ? { transcript } : {}),
         })
         if (closed) return
         if (!refreshed.ok) throw new Error(refreshed.error.message)
         if (refreshed.value.statePending) continue
+        const refreshBody =
+          needsInitialBody || refreshed.value.activityTurnIds !== undefined
         options.notify(input.connectionId, sessionSnapshotMethod, {
           sessionId: input.sessionId,
           snapshot: {
@@ -588,7 +595,7 @@ export function createSessionSubscriptions(
             // A sparse raw suffix may contain no display body at all. In that
             // case install the indexed first window; otherwise only supplement
             // state, preserving the reader's existing history coverage.
-            events: needsInitialBody
+            events: refreshBody
               ? refreshed.value.events
               : refreshed.value.events.filter(
                   (event) =>
@@ -598,9 +605,12 @@ export function createSessionSubscriptions(
                         (initial) => initial.id === event.id,
                       )),
                 ),
-            ...(needsInitialBody && refreshed.value.historyBefore !== undefined
+            ...(refreshBody && refreshed.value.historyBefore !== undefined
               ? { historyBefore: refreshed.value.historyBefore }
               : {}),
+            ...(refreshed.value.activityTurnIds === undefined
+              ? {}
+              : { activityTurnIds: refreshed.value.activityTurnIds }),
           },
         })
         return
@@ -612,6 +622,7 @@ export function createSessionSubscriptions(
         ...snapshot.value,
         ...(initialEvents === undefined ? {} : { events: initialEvents }),
         ...(statePending ? { statePending: true } : {}),
+        ...(activityTurnIds === undefined ? {} : { activityTurnIds }),
         ...(input.after !== 0 || historyBefore === undefined
           ? {}
           : { historyBefore }),

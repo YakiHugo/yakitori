@@ -431,6 +431,10 @@ export class MemoryThreadStore implements ThreadStore {
     }
   }
 
+  async readDisplayActivity() {
+    return undefined
+  }
+
   async readThreadEvents(
     threadId: string,
     input: Readonly<{ after: number; through?: number; limit: number }>,

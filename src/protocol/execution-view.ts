@@ -148,7 +148,10 @@ export type ContextTokens = Readonly<{
   model?: string
 }>
 
+export type TurnActivityPage = number | "unloaded" | "loaded"
+
 export type ExecutionView = Readonly<{
+  deferredTurnActivity?: Readonly<Record<string, TurnActivityPage>>
   turnTimings: Readonly<Record<string, TurnTiming>>
   entries: readonly ExecutionEntry[]
   activeTurnId?: string

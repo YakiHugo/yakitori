@@ -15,6 +15,7 @@ import {
   createDisplayTables,
   type RolloutCheckpoint,
   readCheckpoint,
+  readDisplayActivity,
   readDisplayEvents,
   readDisplayPage,
   readInputAdmissions,
@@ -83,7 +84,7 @@ type OccurrenceCursor = Readonly<{
 
 // Status, compact display history and checkpoints share a disposable projection,
 // so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -153,8 +154,13 @@ export class SqliteThreadSearchProjection {
   readDisplayWindow(
     threadId: string,
     before = Number.MAX_SAFE_INTEGER,
+    transcript = false,
   ): DisplayWindow {
-    return readDisplayPage(this.#database, threadId, before)
+    return readDisplayPage(this.#database, threadId, before, transcript)
+  }
+
+  readDisplayActivity(threadId: string, turnId: string, before: number) {
+    return readDisplayActivity(this.#database, threadId, turnId, before)
   }
 
   readThreadEvents(

@@ -1,6 +1,7 @@
 import { ChevronRight, Info } from "lucide-react"
 import {
   memo,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -15,9 +16,11 @@ import {
   type ActiveModelRetry,
   type ExecutionEntry,
   executionEntryKey,
+  type TurnActivityPage,
   type TurnTiming,
 } from "../execution-view.ts"
 import { cn } from "../lib/utils.ts"
+import { useAppStore } from "../store/app-store.ts"
 import { useThreadScopeState } from "../store/thread-scope-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { ActivityBatch } from "./activity-batch.tsx"
@@ -54,19 +57,35 @@ type TranscriptBlock = {
 function groupEntries(
   entries: readonly ExecutionEntry[],
   previous: readonly TranscriptBlock[],
+  deferred: ExecutionView["deferredTurnActivity"],
 ): TranscriptBlock[] {
   const blocks: {
     key: string
     turnId: string | undefined
     entries: ExecutionEntry[]
   }[] = []
+  const usedKeys = new Map<string, number>()
+  let anchor = ""
   for (const entry of entries) {
     const turnId = "turnId" in entry ? entry.turnId : undefined
+    if (turnId === undefined) anchor = executionEntryKey(entry)
     const last = blocks.at(-1)
     if (turnId !== undefined && last?.turnId === turnId)
       last.entries.push(entry)
-    else
-      blocks.push({ key: executionEntryKey(entry), turnId, entries: [entry] })
+    else {
+      // Deferred activity may insert entries before the first reply.
+      const base =
+        turnId !== undefined && deferred?.[turnId] !== undefined
+          ? JSON.stringify([turnId, anchor])
+          : executionEntryKey(entry)
+      const occurrence = usedKeys.get(base) ?? 0
+      usedKeys.set(base, occurrence + 1)
+      blocks.push({
+        key: occurrence === 0 ? base : JSON.stringify([base, occurrence]),
+        turnId,
+        entries: [entry],
+      })
+    }
   }
   const previousByKey = new Map(previous.map((block) => [block.key, block]))
   return blocks.map((block) => {
@@ -102,10 +121,38 @@ export function ConversationMessages({
       previousAnswers.current.clear()
       previousScope.current = { sessionId, historyRevision }
     }
-    const next = groupEntries(view.entries, previousBlocks.current)
+    const next = groupEntries(
+      view.entries,
+      previousBlocks.current,
+      view.deferredTurnActivity,
+    )
     previousBlocks.current = next
-    return next
-  }, [sessionId, historyRevision, view.entries])
+    const blocks = [...next]
+    const responded = new Set(blocks.map(({ turnId }) => turnId))
+    for (const [turnId, page] of Object.entries(
+      view.deferredTurnActivity ?? {},
+    )) {
+      if (page === "loaded" || responded.has(turnId)) continue
+      const inputId = view.turnTimings[turnId]?.inputId
+      const index = blocks.findIndex(
+        ({ entries: [entry] }) =>
+          (entry?.kind === "user_input" || entry?.kind === "agent_input") &&
+          entry.inputId === inputId,
+      )
+      blocks.splice(index < 0 ? blocks.length : index + 1, 0, {
+        key: JSON.stringify([turnId, blocks[index]?.key ?? ""]),
+        turnId,
+        entries: [],
+      })
+    }
+    return blocks
+  }, [
+    sessionId,
+    historyRevision,
+    view.entries,
+    view.deferredTurnActivity,
+    view.turnTimings,
+  ])
   // Steering inputs can split a turn into several blocks. Its current retry
   // belongs only to the latest block, even when earlier activity is expanded.
   const activeBlockIndex =
@@ -210,6 +257,9 @@ export function ConversationMessages({
         return block.turnId ? (
           <TurnBlock
             key={`${historyRevision}:${block.key}`}
+            blockKey={block.key}
+            turnId={block.turnId}
+            activityPage={view.deferredTurnActivity?.[block.turnId]}
             entries={block.entries}
             active={view.activeTurnId === block.turnId}
             timing={view.turnTimings[block.turnId]}
@@ -225,6 +275,9 @@ export function ConversationMessages({
       {view.activeTurnId !== undefined && activeBlockIndex === -1 ? (
         <TurnBlock
           key={`${historyRevision}:${view.activeTurnId}`}
+          blockKey={view.activeTurnId}
+          turnId={view.activeTurnId}
+          activityPage={undefined}
           entries={[]}
           active
           timing={view.turnTimings[view.activeTurnId]}
@@ -244,12 +297,18 @@ type FinalAnswer = Readonly<{
 
 const TurnBlock = memo(
   function TurnBlock({
+    blockKey,
+    turnId,
+    activityPage,
     entries,
     active,
     timing,
     finalAnswer,
     retry,
   }: Readonly<{
+    blockKey: string
+    turnId: string
+    activityPage: TurnActivityPage | undefined
     entries: readonly ExecutionEntry[]
     active: boolean
     timing: TurnTiming | undefined
@@ -257,7 +316,6 @@ const TurnBlock = memo(
     retry: ActiveModelRetry | undefined
   }>) {
     const { threadId, sessionId } = useConversationScope()
-    const blockKey = entries[0] ? executionEntryKey(entries[0]) : "active"
     const [liveActivityCollapsed, setLiveActivityCollapsed] =
       useThreadScopeState(threadId, `turn:${blockKey}:live-collapsed`, false)
     const [activityExpanded, setActivityExpanded] = useThreadScopeState(
@@ -353,7 +411,33 @@ const TurnBlock = memo(
       : undefined
     // Live activity is visible, but completion starts with the process closed.
     const expanded = completed ? activityExpanded : !liveActivityCollapsed
-    const hasDisclosure = timeline.length > 0
+    const hasDeferredActivity =
+      activityPage !== undefined && activityPage !== "loaded"
+    const hasDisclosure = timeline.length > 0 || hasDeferredActivity
+    const [loadingActivity, setLoadingActivity] = useState(false)
+    const [activityError, setActivityError] = useState<string>()
+    const loadActivity = useCallback(async () => {
+      setActivityError(undefined)
+      setLoadingActivity(true)
+      try {
+        await useAppStore.getState().loadTurnActivity(turnId)
+      } catch (error) {
+        setActivityError(
+          error instanceof Error ? error.message : "Could not load activity.",
+        )
+      } finally {
+        setLoadingActivity(false)
+      }
+    }, [turnId])
+    useEffect(() => {
+      if (
+        expanded &&
+        activityPage === "unloaded" &&
+        !loadingActivity &&
+        activityError === undefined
+      )
+        void loadActivity()
+    }, [expanded, activityPage, loadingActivity, activityError, loadActivity])
     const activityLabel = (
       <TurnActivityLabel
         id={labelId}
@@ -392,7 +476,7 @@ const TurnBlock = memo(
         className="conversation-response"
         aria-label={active ? "Current response" : "Response"}
       >
-        {entries.length > 0 || active ? (
+        {entries.length > 0 || active || hasDisclosure ? (
           <div>
             <div className="turn-activity-header" data-completed={completed}>
               {hasDisclosure ? (
@@ -448,6 +532,24 @@ const TurnBlock = memo(
                 refreshWhenClosed={completed}
               >
                 <div className="conversation-activity-content">
+                  {loadingActivity ? (
+                    <p role="status">Loading activity…</p>
+                  ) : null}
+                  {activityError ? <p role="alert">{activityError}</p> : null}
+                  {!hasDeferredActivity ||
+                  loadingActivity ||
+                  (activityPage === "unloaded" &&
+                    activityError === undefined) ? null : (
+                    <button
+                      className="text-caption text-muted-foreground"
+                      type="button"
+                      onClick={() => void loadActivity()}
+                    >
+                      {activityError === undefined
+                        ? "Load earlier activity"
+                        : "Retry"}
+                    </button>
+                  )}
                   {timelineContent}
                 </div>
               </TranscriptDisclosureContent>
@@ -467,6 +569,8 @@ const TurnBlock = memo(
     )
   },
   (previous, next) =>
+    previous.activityPage === next.activityPage &&
+    previous.blockKey === next.blockKey &&
     previous.active === next.active &&
     previous.timing === next.timing &&
     previous.finalAnswer === next.finalAnswer &&

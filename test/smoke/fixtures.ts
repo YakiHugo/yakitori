@@ -128,17 +128,22 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
           .smokeHistoryReads ?? [],
     )
   await page.getByRole("button", { name: "New session", exact: true }).click()
+  const latestPrompt = "Latest history prompt"
   const prompts = [
     "Earlier history needle for navigation",
     "Middle history prompt",
-    "Latest history prompt",
+    "First recent history prompt",
+    "Second recent history prompt",
+    "Third recent history prompt",
+    "Fourth recent history prompt",
+    latestPrompt,
   ] as const
   const main = page.getByRole("main")
   const promptMessage = (prompt: string) =>
     main.locator('[data-context-kind="message"]').filter({ hasText: prompt })
   for (const [index, prompt] of prompts.entries()) {
     const content =
-      index === 2
+      prompt === latestPrompt
         ? `${prompt}\n${Array.from(
             { length: 24 },
             (_, row) => `History viewport row ${row + 1}`,
@@ -161,22 +166,30 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
       .locator('.sidebar-session [data-sidebar-drag="session"]')
       .first()
       .click()
-    await expect(promptMessage(prompts[2])).toBeVisible()
+    await expect(promptMessage(latestPrompt)).toBeVisible()
+    await expect(promptMessage(prompts[2])).toHaveCount(1)
     await expect(promptMessage(prompts[0])).toHaveCount(0)
     await expect(promptMessage(prompts[1])).toHaveCount(0)
   }
+  const scrollHistoryTo = (top: number) =>
+    page
+      .locator(".conversation-transcript-viewport")
+      .evaluate((viewport, offset) => {
+        viewport.scrollTop = offset
+        viewport.dispatchEvent(new Event("scroll"))
+      }, top)
   await coldOpen()
   // The preceding page is prepared before scrolling, but does not enter the
   // rendered transcript until the reader actually reaches the boundary.
+  await scrollHistoryTo(100)
   await expect
     .poll(async () => (await historyReads()).length)
     .toBeGreaterThan(0)
   await expect(promptMessage(prompts[1])).toHaveCount(0)
   const readsBeforePrepend = (await historyReads()).length
-  await page.locator(".conversation-surface").hover()
-  await page.mouse.wheel(0, -800)
+  await scrollHistoryTo(0)
   await expect(promptMessage(prompts[1])).toHaveCount(1)
-  await expect(promptMessage(prompts[0])).toHaveCount(0)
+  await expect(promptMessage(prompts[0])).toHaveCount(1)
   // Once prepended, the next page may be prefetched; the cached page itself
   // must not be fetched a second time.
   const readsAfterPrepend = await historyReads()
