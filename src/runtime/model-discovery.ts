@@ -1,3 +1,4 @@
+import codexRelease from "./codex-client-version.json" with { type: "json" }
 import type {
   ModelCapabilities,
   ModelToolOutputTruncation,
@@ -178,9 +179,8 @@ function grokDisplayName(modelId: string): string | undefined {
   return parts.join(" ")
 }
 
-// Catalog behavior was verified against Codex CLI 0.163.0. This is the
-// backend catalog protocol version, independent of Yakitori's app version.
-export const CODEX_CATALOG_CLIENT_VERSION = "0.163.0"
+// Update the bundled client version with pnpm codex:sync.
+export const CODEX_CATALOG_CLIENT_VERSION = codexRelease.clientVersion
 
 export async function discoverCodexModels(input: {
   baseUrl: string

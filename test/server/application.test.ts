@@ -19,6 +19,9 @@ import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { BrowserControlError } from "../../src/protocol/desktop-browser.ts"
 import { createChatCompletionsProvider } from "../../src/runtime/chat-completions-provider.ts"
+import codexRelease from "../../src/runtime/codex-client-version.json" with {
+  type: "json",
+}
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
@@ -5178,7 +5181,10 @@ describe("provider login registration", () => {
               access_token: "imported-access",
               refresh_token: "imported-refresh",
             })
-          if (url.includes("/codex/models"))
+          if (
+            url ===
+            `https://chatgpt.com/backend-api/codex/models?client_version=${codexRelease.clientVersion}`
+          )
             return Response.json({
               models: [
                 { slug: "gpt-6-astra", display_name: "Imported account model" },
@@ -5321,6 +5327,14 @@ describe("provider login registration", () => {
             (entry) => entry.url === "https://auth.openai.com/oauth/token",
           ),
         ).toHaveLength(1)
+        expect(new Set(requests.map(({ url }) => url))).toEqual(
+          new Set([
+            "https://auth.openai.com/oauth/token",
+            `https://chatgpt.com/backend-api/codex/models?client_version=${codexRelease.clientVersion}`,
+            "https://chatgpt.com/backend-api/wham/usage",
+            "https://chatgpt.com/backend-api/codex/responses",
+          ]),
+        )
         expect(
           requests
             .filter((entry) => entry.url.includes("chatgpt.com"))

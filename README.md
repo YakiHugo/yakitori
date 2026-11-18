@@ -189,6 +189,10 @@ This builds in the current checkout; packaging restores native modules for
 ordinary Node development and tests afterward. `pnpm package` only creates
 the app under `release/` without installing it.
 
+`pnpm app:install` checks the official `@openai/codex` package metadata before
+building. If the lookup fails, it builds with the version in the checkout.
+Use `pnpm codex:sync` to update the version file without building.
+
 Installation currently targets Apple Silicon macOS 14+ and requires Xcode
 Command Line Tools for local builds. If the local signing identity is missing,
 run `pnpm setup:computer-signing` once to create it in your Keychain.

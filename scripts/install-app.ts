@@ -2,6 +2,10 @@ import { spawn } from "node:child_process"
 import { access, mkdir, mkdtemp, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
+import {
+  CodexVersionLookupError,
+  syncCodexVersion,
+} from "./sync-codex-version.ts"
 
 const artifactName = "yakitori-macos-arm64"
 const installTarget =
@@ -23,6 +27,14 @@ const localBuild = options.includes("--build")
 const staging = await mkdtemp(join(tmpdir(), "yakitori-install-"))
 try {
   if (source === "workspace") {
+    try {
+      await syncCodexVersion(process.cwd())
+    } catch (error) {
+      if (!(error instanceof CodexVersionLookupError)) throw error
+      console.warn(
+        `${error.message} Building with the workspace's Codex catalog client version.`,
+      )
+    }
     console.log(
       `Building current workspace at ${process.cwd()} (including local changes)…`,
     )

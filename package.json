@@ -17,6 +17,7 @@
     "build:package": "node scripts/build-desktop.ts",
     "app:install": "node scripts/install-app.ts workspace",
     "app:update": "node scripts/install-app.ts main",
+    "codex:sync": "node scripts/sync-codex-version.ts",
     "dev:gui": "vite --host 127.0.0.1 --strictPort",
     "dev:server": "pnpm build:computer && node src/server/start.ts",
     "dev:shell": "YAKITORI_STORE_DIR=.yakitori-desktop ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .",
