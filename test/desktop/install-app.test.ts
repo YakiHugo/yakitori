@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process"
 import {
-  mkdtemp,
   mkdir,
-  readFile,
+  mkdtemp,
   readdir,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -23,7 +23,7 @@ afterEach(async () => {
   )
 })
 
-async function fixture() {
+async function fixture(registryResponse = "stable") {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "yakitori-installer-test-")),
   )
@@ -33,7 +33,10 @@ async function fixture() {
   const source = join(root, "source.app")
   const commands = join(root, "commands.jsonl")
   const target = join(applications, "Yakitori.app")
+  const catalogVersionPath = join(root, "src/runtime/codex-client-version.json")
   await mkdir(tools)
+  await mkdir(join(root, "src/runtime"), { recursive: true })
+  await writeFile(catalogVersionPath, '{"clientVersion":"1.0.0"}\n')
   await mkdir(join(source, "Contents", "MacOS"), { recursive: true })
   await mkdir(join(target, "Contents", "MacOS"), { recursive: true })
   await writeFile(
@@ -47,7 +50,7 @@ async function fixture() {
   await writeFile(join(target, "old-only.txt"), "previous installation")
   const fakeTool = `#!${process.execPath}
 const { basename, join } = require("node:path");
-const { appendFileSync, cpSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const { appendFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 const command = basename(process.argv[1]);
 appendFileSync(process.env.COMMAND_LOG, JSON.stringify({command, args, cwd: process.cwd()}) + "\\n");
@@ -56,7 +59,10 @@ if (command === "git" && args[1] === "add") mkdirSync(args[3], {recursive: true}
 if (command === "git" && args[1] === "remove") rmSync(args[3], {recursive: true, force: true});
 if (command === "pnpm" && args[0] === "package") {
   if (process.env.FAIL_BUILD === "1") process.exit(1);
-  cpSync(process.env.PACKAGE_FIXTURE, join(process.cwd(), "release/mac-arm64/Yakitori.app"), {recursive: true});
+  const app = join(process.cwd(), "release/mac-arm64/Yakitori.app");
+  cpSync(process.env.PACKAGE_FIXTURE, app, {recursive: true});
+  const catalogVersion = join(process.cwd(), "src/runtime/codex-client-version.json");
+  if (existsSync(catalogVersion)) cpSync(catalogVersion, join(app, "Contents/codex-client-version.json"));
 }
 if (command === "gh" && args[1] === "list") console.log(JSON.stringify([{databaseId: 1, headSha: "1234567"}]));
 if (command === "tar") cpSync(process.env.PACKAGE_FIXTURE, join(args[args.indexOf("-C") + 1], "Yakitori.app"), { recursive: true });
@@ -83,6 +89,15 @@ fs.rename = async (from, to) => {
   return rename(from, to);
 };
 syncBuiltinESMExports();
+globalThis.fetch = async (input) => {
+  if (String(input) !== "https://registry.npmjs.org/@openai%2Fcodex/latest")
+    throw new Error("Unexpected URL: " + input);
+  const mode = process.env.CODEX_REGISTRY_RESPONSE;
+  if (mode === "offline") throw new TypeError("fetch failed");
+  if (mode === "unavailable") return new Response(null, { status: 503 });
+  if (mode === "invalid JSON") return new Response("unavailable");
+  return Response.json({ name: "@openai/codex", version: mode === "prerelease" ? "1.2.0-beta.1" : "1.1.0" });
+};
 `,
   )
   const run = (
@@ -101,6 +116,7 @@ syncBuiltinESMExports();
           ...process.env,
           TMPDIR: root,
           COMMAND_LOG: commands,
+          CODEX_REGISTRY_RESPONSE: registryResponse,
           FAIL_BUILD: failBuild ? "1" : "0",
           PATH: tools,
           PACKAGE_FIXTURE: source,
@@ -116,6 +132,7 @@ syncBuiltinESMExports();
     target,
     run,
     root,
+    catalogVersionPath,
     commands: async () =>
       (await readFile(commands, "utf8"))
         .trim()
@@ -202,7 +219,7 @@ it("installs a prepared application when no previous application exists", async 
   expect(await readdir(applications)).toEqual(["Yakitori.app"])
 })
 
-it("packages the current workspace without fetching main or querying CI", async () => {
+it("syncs the Codex version before packaging the current workspace", async () => {
   const { run, commands, root, target } = await fixture()
   const { stdout } = await run("success", false, false, ["workspace"])
   expect(stdout).toContain("including local changes")
@@ -216,6 +233,32 @@ it("packages the current workspace without fetching main or querying CI", async 
   expect(await readFile(join(target, "Contents/MacOS/Yakitori"), "utf8")).toBe(
     "new executable",
   )
+  expect(
+    JSON.parse(
+      await readFile(
+        join(target, "Contents/codex-client-version.json"),
+        "utf8",
+      ),
+    ),
+  ).toEqual({ clientVersion: "1.1.0" })
+})
+
+it.each([
+  "offline",
+  "unavailable",
+  "invalid JSON",
+  "prerelease",
+])("installs with the checkout's Codex version when the registry response is %s", async (registryResponse) => {
+  const { run, target, catalogVersionPath } = await fixture(registryResponse)
+  const { stderr } = await run("success", false, false, ["workspace"])
+  expect(stderr).toContain(
+    "Building with the workspace's Codex catalog client version.",
+  )
+  const savedVersion = await readFile(catalogVersionPath, "utf8")
+  expect(savedVersion).toBe('{"clientVersion":"1.0.0"}\n')
+  expect(
+    await readFile(join(target, "Contents/codex-client-version.json"), "utf8"),
+  ).toBe(savedVersion)
 })
 
 it("builds fetched main in an isolated worktree and cleans it after installation", async () => {

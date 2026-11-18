@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest"
+import codexRelease from "../../src/runtime/codex-client-version.json" with {
+  type: "json",
+}
 import {
   discoverCodexModels,
   discoverOpenAiCompatibleModels,
 } from "../../src/runtime/model-discovery.ts"
 import { createDiscoveringModelsManager } from "../../src/runtime/models-manager.ts"
+import { getDelegationInstructions } from "../../src/runtime/prompt-registry.ts"
 import {
   SessionConfiguration,
   toolHistoryOutputBudget,
@@ -13,7 +17,6 @@ import {
   createToolRegistry,
 } from "../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../src/runtime/tools/spec-plan.ts"
-import { getDelegationInstructions } from "../../src/runtime/prompt-registry.ts"
 
 describe("provider model discovery", () => {
   it.each([
@@ -242,7 +245,7 @@ describe("provider model discovery", () => {
       },
     ])
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://chatgpt.example/backend-api/codex/models?client_version=0.163.0",
+      `https://chatgpt.example/backend-api/codex/models?client_version=${codexRelease.clientVersion}`,
       expect.objectContaining({
         headers: {
           authorization: "Bearer access-token",
