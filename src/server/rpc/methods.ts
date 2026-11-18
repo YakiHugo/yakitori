@@ -7,6 +7,7 @@ import type {
   ProjectListParams,
   ProjectMoveParams,
   ProjectUpdateParams,
+  SessionActivityResponse,
   SessionHistoryResponse,
   SessionInputStatusResponse,
   SessionSubscribeParams,
@@ -259,8 +260,12 @@ function parseSessionSubscribeParams(params: unknown): SessionSubscribeParams {
     throw invalidParams("after must be a non-negative integer.")
   }
   const recent = record.recent
-  if (recent !== undefined && typeof recent !== "boolean") {
-    throw invalidParams("recent must be a boolean.")
+  if (
+    recent !== undefined &&
+    typeof recent !== "boolean" &&
+    recent !== "transcript"
+  ) {
+    throw invalidParams('recent must be a boolean or "transcript".')
   }
   return {
     sessionId,
@@ -715,6 +720,9 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
         ok: true,
         value: {
           events: result.value.events,
+          ...(result.value.activityTurnIds === undefined
+            ? {}
+            : { activityTurnIds: result.value.activityTurnIds }),
           ...(result.value.historyBefore === undefined
             ? {}
             : { historyBefore: result.value.historyBefore }),
@@ -728,6 +736,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     // the Session command queue or delay opening its current display window.
     () => undefined,
     (handlers, params) => handlers.readInputStatus(params),
+  ),
+  handlerEntry<SessionActivityResponse>(
+    "session/activity/read",
+    () => undefined,
+    (handlers, params) => handlers.readDisplayActivity(params),
   ),
   {
     method: "session/skills",

@@ -922,14 +922,21 @@ export class JsonlThreadStore implements ThreadStore {
   async readDisplayWindow(
     threadId: string,
     beforeSeqExclusive?: number,
+    transcript = false,
   ): Promise<DisplayWindowRead | undefined> {
-    return this.#readDisplayWindow(threadId, beforeSeqExclusive, true)
+    return this.#readDisplayWindow(
+      threadId,
+      beforeSeqExclusive,
+      true,
+      transcript,
+    )
   }
 
   async #readDisplayWindow(
     threadId: string,
     beforeSeqExclusive: number | undefined,
     scheduleRepair: boolean,
+    transcript = false,
   ): Promise<DisplayWindowRead | undefined> {
     await this.#ready
     requireThreadId(threadId)
@@ -957,6 +964,7 @@ export class JsonlThreadStore implements ThreadStore {
         ...this.#searchProjection.readDisplayWindow(
           threadId,
           beforeSeqExclusive,
+          transcript,
         ),
         endSeq: this.#searchProjection.readSummary(threadId)?.seq ?? 0,
         projectionReady: true,
@@ -1007,6 +1015,26 @@ export class JsonlThreadStore implements ThreadStore {
       projectionReady: false,
       ...(coverage === undefined ? {} : { coverageStartSeq: coverage }),
     }
+  }
+
+  async readDisplayActivity(
+    threadId: string,
+    rolloutId: string,
+    turnId: string,
+    before: number,
+  ) {
+    const metadata = await this.readThreadMetadata(threadId)
+    if (metadata?.rolloutId !== rolloutId) return undefined
+    await this.#ensureSelectedProjection(threadId)
+    return this.#withSearchProjection(async () => {
+      if ((await this.readThreadMetadata(threadId))?.rolloutId !== rolloutId)
+        return undefined
+      return this.#searchProjection.readDisplayActivity(
+        threadId,
+        turnId,
+        before,
+      )
+    })
   }
 
   async readThreadEvents(

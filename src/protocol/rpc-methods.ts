@@ -101,7 +101,7 @@ export type SessionListParams = Readonly<{
 export type SessionSubscribeParams = Readonly<{
   sessionId: string
   after?: number
-  recent?: boolean
+  recent?: boolean | "transcript"
 }>
 
 export type SessionSubscribeResponse = ApiReadSessionResponse & {
@@ -109,6 +109,7 @@ export type SessionSubscribeResponse = ApiReadSessionResponse & {
   // A cold open carries its display window atomically with the snapshot.
   readonly events?: readonly AppSessionEventEnvelope[]
   readonly statePending?: boolean
+  readonly activityTurnIds?: readonly string[]
 }
 
 export type SessionSnapshotNotification = Readonly<{
@@ -130,11 +131,25 @@ export type SessionInputStatusResponse = Readonly<{
 export type SessionHistoryParams = Readonly<{
   sessionId: string
   before: number
+  transcript?: true
 }>
 
 export type SessionHistoryResponse = Readonly<{
   events: readonly AppSessionEventEnvelope[]
   historyBefore?: number
+  activityTurnIds?: readonly string[]
+}>
+
+export type SessionActivityParams = Readonly<{
+  sessionId: string
+  rolloutId: string
+  turnId: string
+  before?: number
+}>
+
+export type SessionActivityResponse = Readonly<{
+  events: readonly AppSessionEventEnvelope[]
+  nextBefore?: number
 }>
 
 export type SessionUnsubscribeParams = Readonly<{ sessionId: string }>
@@ -291,6 +306,7 @@ export type RpcMethodParams = Readonly<
       "session/turn/resume": ApiResumeTurnRequest
       "session/subscribe": SessionSubscribeParams
       "session/history": SessionHistoryParams
+      "session/activity/read": SessionActivityParams
       "session/unsubscribe": SessionUnsubscribeParams
       "project/list": ProjectListParams
       "project/read": ProjectReadParams
@@ -358,6 +374,7 @@ export type RpcMethodResponses = Readonly<
       "session/turn/resume": ApiResumeTurnResponse
       "session/subscribe": SessionSubscribeResponse
       "session/history": SessionHistoryResponse
+      "session/activity/read": SessionActivityResponse
       "session/unsubscribe": Readonly<Record<string, never>>
       "project/list": ApiListProjectsResponse
       "project/read": ApiReadProjectResponse

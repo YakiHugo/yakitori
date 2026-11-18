@@ -131,6 +131,10 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
   const prompts = [
     "Earlier history needle for navigation",
     "Middle history prompt",
+    "First recent history prompt",
+    "Second recent history prompt",
+    "Third recent history prompt",
+    "Fourth recent history prompt",
     "Latest history prompt",
   ] as const
   const main = page.getByRole("main")
@@ -138,7 +142,7 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
     main.locator('[data-context-kind="message"]').filter({ hasText: prompt })
   for (const [index, prompt] of prompts.entries()) {
     const content =
-      index === 2
+      index === prompts.length - 1
         ? `${prompt}\n${Array.from(
             { length: 24 },
             (_, row) => `History viewport row ${row + 1}`,
@@ -161,13 +165,20 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
       .locator('.sidebar-session [data-sidebar-drag="session"]')
       .first()
       .click()
-    await expect(promptMessage(prompts[2])).toBeVisible()
+    await expect(promptMessage(prompts[6])).toBeVisible()
+    await expect(promptMessage(prompts[2])).toHaveCount(1)
     await expect(promptMessage(prompts[0])).toHaveCount(0)
     await expect(promptMessage(prompts[1])).toHaveCount(0)
   }
   await coldOpen()
   // The preceding page is prepared before scrolling, but does not enter the
   // rendered transcript until the reader actually reaches the boundary.
+  await page
+    .locator(".conversation-transcript-viewport")
+    .evaluate((viewport) => {
+      viewport.scrollTop = 100
+      viewport.dispatchEvent(new Event("scroll"))
+    })
   await expect
     .poll(async () => (await historyReads()).length)
     .toBeGreaterThan(0)
@@ -176,7 +187,7 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
   await page.locator(".conversation-surface").hover()
   await page.mouse.wheel(0, -800)
   await expect(promptMessage(prompts[1])).toHaveCount(1)
-  await expect(promptMessage(prompts[0])).toHaveCount(0)
+  await expect(promptMessage(prompts[0])).toHaveCount(1)
   // Once prepended, the next page may be prefetched; the cached page itself
   // must not be fetched a second time.
   const readsAfterPrepend = await historyReads()

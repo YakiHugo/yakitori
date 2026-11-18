@@ -276,6 +276,7 @@ export function createFakeHandlers(
         session: makeSessionDetail("session_1"),
         events: [],
       }),
+    readDisplayActivity: async () => okResult({ events: [] }),
   }
   return { ...base, ...overrides }
 }

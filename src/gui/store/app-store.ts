@@ -102,6 +102,22 @@ type EarlierHistoryPage = Readonly<{
 let earlierHistoryPage: EarlierHistoryPage | undefined
 const earlierHistoryLoads = new Map<string, EarlierHistoryPage>()
 
+function deferTurnActivity(
+  execution: ExecutionViewState,
+  turnIds: readonly string[] | undefined,
+): ExecutionViewState {
+  if (!turnIds?.length) return execution
+  return {
+    ...execution,
+    deferredTurnActivity: {
+      ...Object.fromEntries(
+        turnIds.map((turnId) => [turnId, "unloaded" as const]),
+      ),
+      ...execution.deferredTurnActivity,
+    },
+  }
+}
+
 function executionViewKey(apiBase: string, sessionId: string): string {
   return `${apiBase}\0${sessionId}`
 }
@@ -315,6 +331,7 @@ export type AppStoreActions = {
     options?: Readonly<{ beforePrepend?: () => void }>,
   ): Promise<boolean>
   prefetchEarlierHistory(): Promise<boolean>
+  loadTurnActivity(turnId: string): Promise<void>
   loadHistoryThrough(itemId: string, signal?: AbortSignal): Promise<boolean>
   selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
@@ -745,7 +762,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       return earlierHistoryPage
     const response = getAppRpcClient(selection.apiBase).request(
       "session/history",
-      { sessionId: selection.sessionId, before },
+      { sessionId: selection.sessionId, before, transcript: true },
     )
     const page = {
       selection,
@@ -756,6 +773,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
     earlierHistoryPage = page
     return page
   }
+  const activityLoads = new Map<string, Promise<void>>()
 
   const projectQueuedInputs = (items: readonly QueuedInput[]): void => {
     const pendingInputs = items.map((item) => ({
@@ -1617,6 +1635,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
               persistModelSelections(modelSelections)
               restoringModelSelectionFor = undefined
             }
+            execution = deferTurnActivity(execution, response.activityTurnIds)
             set({
               selectedSession,
               sessionsByProject: replaceSessionSummaryInLists(
@@ -1624,7 +1643,9 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
                 selectedSession,
               ),
               ...(initializeHistory ||
-              (response.historyBefore !== undefined && !retainHistoryBoundary)
+              ((response.historyBefore !== undefined ||
+                response.activityTurnIds !== undefined) &&
+                !retainHistoryBoundary)
                 ? { historyBefore: response.historyBefore }
                 : {}),
               hydratingSessionId:
@@ -1986,7 +2007,7 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
             })
           },
         },
-        { recent: true },
+        { recent: "transcript" },
       )
       set({ stream: source })
     } catch (error) {
@@ -3300,6 +3321,55 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
       }
     },
 
+    loadTurnActivity: async (turnId) => {
+      const selection = currentSelection()
+      const state = get()
+      const rolloutId = state.selectedSession?.rolloutId
+      const before = state.execution.deferredTurnActivity[turnId]
+      if (
+        !selection ||
+        rolloutId === undefined ||
+        before === undefined ||
+        before === "loaded"
+      )
+        return
+      const key = JSON.stringify([selection.revision, rolloutId, turnId])
+      const ongoing = activityLoads.get(key)
+      if (ongoing) return ongoing
+      const request = getAppRpcClient(selection.apiBase)
+        .request("session/activity/read", {
+          sessionId: selection.sessionId,
+          rolloutId,
+          turnId,
+          ...(before === "unloaded" ? {} : { before }),
+        })
+        .then((page) => {
+          if (
+            !isCurrentSelection(selection) ||
+            get().selectedSession?.rolloutId !== rolloutId
+          )
+            return
+          if (
+            before !== "unloaded" &&
+            page.nextBefore !== undefined &&
+            page.nextBefore >= before
+          )
+            throw new ApiRequestError("Earlier activity did not advance.")
+          set((current) => ({
+            execution: {
+              ...prependExecutionHistory(current.execution, page.events),
+              deferredTurnActivity: {
+                ...current.execution.deferredTurnActivity,
+                [turnId]: page.nextBefore ?? "loaded",
+              },
+            },
+          }))
+        })
+        .finally(() => activityLoads.delete(key))
+      activityLoads.set(key, request)
+      return request
+    },
+
     loadEarlierHistory: async (options) => {
       const page = readEarlierHistory()
       if (!page) return false
@@ -3326,7 +3396,10 @@ export const useAppStore = create<AppStore>()((set, get, store) => {
         if (earlierHistoryPage === page) earlierHistoryPage = undefined
         set({
           historyBefore: response.historyBefore,
-          execution: prependExecutionHistory(get().execution, response.events),
+          execution: deferTurnActivity(
+            prependExecutionHistory(get().execution, response.events),
+            response.activityTurnIds,
+          ),
         })
         return true
       } catch (error) {

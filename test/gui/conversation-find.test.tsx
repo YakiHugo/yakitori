@@ -269,6 +269,7 @@ it("loads an unloaded search target before highlighting and jumping", async () =
   expect(request).toHaveBeenCalledWith("session/history", {
     sessionId: "session",
     before: 10,
+    transcript: true,
   })
   expect(
     document

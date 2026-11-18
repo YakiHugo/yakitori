@@ -120,9 +120,9 @@ afterEach(() => {
 })
 
 describe("partial conversation history", () => {
-  it("opens ordinary sessions with recent history", async () => {
+  it("opens ordinary sessions with recent transcript history", async () => {
     await useAppStore.getState().selectSession("session_1")
-    expect(fakeRef.current.streams[0]?.options?.recent).toBe(true)
+    expect(fakeRef.current.streams[0]?.options?.recent).toBe("transcript")
   })
 
   it("publishes a complete snapshot window before replay completion and applies the live tail", async () => {
@@ -534,7 +534,7 @@ describe("partial conversation history", () => {
     })
     await useAppStore.getState().selectSession("session_1")
     const stream = fakeRef.current.streams[0]
-    expect(stream?.options?.recent).toBe(true)
+    expect(stream?.options?.recent).toBe("transcript")
     const event = createEventEnvelope({
       sessionId: "session_1",
       seq: 2,
@@ -685,11 +685,11 @@ describe("partial conversation history", () => {
     expect(fakeRef.current.requestsFor("session/history")).toEqual([
       {
         method: "session/history",
-        params: { sessionId: "session_1", before: 10 },
+        params: { sessionId: "session_1", before: 10, transcript: true },
       },
       {
         method: "session/history",
-        params: { sessionId: "session_1", before: 5 },
+        params: { sessionId: "session_1", before: 5, transcript: true },
       },
     ])
     expect(useAppStore.getState().execution.lastSeq).toBe(100)
@@ -2578,7 +2578,7 @@ describe("revert session", () => {
     ).toHaveLength(1)
     const reconnect = fakeRef.current.streams.at(-1)
     expect(reconnect?.after).toBe(0)
-    expect(reconnect?.options?.recent).toBe(true)
+    expect(reconnect?.options?.recent).toBe("transcript")
     emitSnapshot(reconnect, {
       ...sessionDetail,
       rolloutId: changed ? "rollout_reverted" : sessionDetail.rolloutId,

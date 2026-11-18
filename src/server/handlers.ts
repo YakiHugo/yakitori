@@ -47,7 +47,10 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
-import type { SessionInputStatusResponse } from "../protocol/rpc-methods.ts"
+import type {
+  SessionActivityResponse,
+  SessionInputStatusResponse,
+} from "../protocol/rpc-methods.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import type {
@@ -257,6 +260,9 @@ export type ServerHandlers = {
   readDisplayWindow(
     input: unknown,
   ): Promise<ApplicationResult<ApiDisplayWindowResponse>>
+  readDisplayActivity(
+    input: unknown,
+  ): Promise<ApplicationResult<SessionActivityResponse>>
 }
 
 export type ThreadServerHandlers = ServerHandlers & {
@@ -1349,23 +1355,22 @@ export function createThreadServerHandlers(
     async listSkills(input) {
       try {
         const { sessionId } = requireReadSessionRequest(input)
-        const stored = await options.store.readThread(sessionId)
-        if (stored === undefined) {
+        const metadata = await options.store.readThreadMetadata(sessionId)
+        if (metadata === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
         if (options.listSessionSkills === undefined) {
           return ok({ skills: [] })
         }
         const workingDirectory =
-          stored.metadata.workingDirectory ??
-          options.sessionDefaults?.workingDirectory
+          metadata.workingDirectory ?? options.sessionDefaults?.workingDirectory
         if (workingDirectory === undefined) return ok({ skills: [] })
         const discovered = await options.listSessionSkills({
           sessionId,
           workingDirectory,
-          ...(stored.metadata.projectId === undefined
+          ...(metadata.projectId === undefined
             ? {}
-            : { projectId: stored.metadata.projectId }),
+            : { projectId: metadata.projectId }),
         })
         return ok({
           skills: discovered
@@ -1744,7 +1749,8 @@ export function createThreadServerHandlers(
     async listQueuedInputs(input) {
       try {
         const { sessionId } = requireReadSessionRequest(input)
-        await requireStoredThread(options.store, sessionId)
+        if ((await options.store.readThreadMetadata(sessionId)) === undefined)
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         return ok({ items: queuedItems.list(sessionId) })
       } catch (error) {
         return fail(error, reporter, "list-queued-inputs")
@@ -2243,6 +2249,9 @@ export function createThreadServerHandlers(
         const window = await options.store.readDisplayWindow(
           request.sessionId,
           request.before,
+          request.transcript &&
+            (request.before !== undefined ||
+              live?.snapshot().activeTurnId === undefined),
         )
         if (window === undefined) {
           throw notFound(`Session ${request.sessionId} was not found.`, {
@@ -2272,13 +2281,19 @@ export function createThreadServerHandlers(
           ...window.records,
         ])
         const replayRecords = replayRecordsForWindow(window)
-        const historyBefore = window.records[0]?.seq ?? window.coverageStartSeq
+        const historyBefore =
+          window.transcriptStart ??
+          window.records[0]?.seq ??
+          window.coverageStartSeq
         return ok({
           session:
             expiry === undefined
               ? session
               : { ...session, cacheExpiry: expiry },
           ...(!window.projectionReady ? { statePending: true } : {}),
+          ...(window.activityTurnIds === undefined
+            ? {}
+            : { activityTurnIds: window.activityTurnIds }),
           events: replayRecords.map((record) =>
             mapRolloutEvent(record, request.sessionId),
           ),
@@ -2290,6 +2305,37 @@ export function createThreadServerHandlers(
         })
       } catch (error) {
         return fail(error, reporter, "read-display-window")
+      }
+    },
+
+    async readDisplayActivity(input) {
+      try {
+        const request = requireRecord(
+          input,
+          "Session activity request must be an object.",
+        )
+        const sessionId = requireSessionId(request.sessionId, "sessionId")
+        const page = await options.store.readDisplayActivity(
+          sessionId,
+          requireString(request.rolloutId, "rolloutId"),
+          requireString(request.turnId, "turnId"),
+          requireOptionalSequence(request.before, "before") ??
+            Number.MAX_SAFE_INTEGER,
+        )
+        if (page === undefined)
+          throw notFound("This session history is no longer available.", {
+            sessionId,
+          })
+        return ok({
+          events: page.records.map((record) =>
+            mapRolloutEvent(record, sessionId),
+          ),
+          ...(page.nextBefore === undefined
+            ? {}
+            : { nextBefore: page.nextBefore }),
+        })
+      } catch (error) {
+        return fail(error, reporter, "read-display-activity")
       }
     },
   }
@@ -2999,6 +3045,7 @@ function requireDisplayWindowRequest(input: unknown) {
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     before: requireOptionalSequence(record.before, "before"),
+    transcript: record.transcript === true,
   }
 }
 

@@ -17,6 +17,7 @@ import type {
   ExecutionEntry,
   ExecutionView,
   SessionTelemetry,
+  TurnActivityPage,
   TurnTiming,
 } from "../protocol/execution-view.ts"
 import type { LiveSessionEvent } from "../protocol/live-events.ts"
@@ -33,12 +34,14 @@ export type {
   ExecutionView,
   SessionTelemetry,
   ToolDiff,
+  TurnActivityPage,
   TurnTiming,
 } from "../protocol/execution-view.ts"
 
 type EntryPosition = Readonly<{ seq: number } | { afterSeq: number }>
 
 export type ExecutionViewState = Readonly<{
+  deferredTurnActivity: Readonly<Record<string, TurnActivityPage>>
   turnTimings: Readonly<Record<string, TurnTiming>>
   turnPositions: Readonly<Record<string, number>>
   entries: readonly ExecutionEntry[]
@@ -135,6 +138,7 @@ export function createExecutionViewState(
   session?: ApiSessionDetail,
 ): ExecutionViewState {
   const initial: ExecutionViewState = {
+    deferredTurnActivity: {},
     entries: [],
     entryPositions: {},
     turnTimings: {},
@@ -431,6 +435,9 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
   const activeActivity = projectActiveActivity(state)
   return {
     entries: state.entries,
+    ...(Object.keys(state.deferredTurnActivity).length === 0
+      ? {}
+      : { deferredTurnActivity: state.deferredTurnActivity }),
     ...(state.activeTurnId === undefined
       ? {}
       : { activeTurnId: state.activeTurnId }),
