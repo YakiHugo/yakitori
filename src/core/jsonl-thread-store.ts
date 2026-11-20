@@ -172,7 +172,10 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #ephemeralAssetOwners = new Set<string>()
   readonly #ready: Promise<void>
   #gcReady: Promise<void> | undefined
-  readonly #scheduledProjectionRepairs = new Set<string>()
+  readonly #scheduledProjectionRepairs = new Map<
+    string,
+    { runAgain: boolean }
+  >()
   readonly #searchProjectionErrors = new Map<string, unknown>()
   readonly #threadSearchProjectionTails = new Map<string, Promise<void>>()
   readonly #searchProjectionPublications = new Set<Promise<void>>()
@@ -1864,6 +1867,10 @@ export class JsonlThreadStore implements ThreadStore {
       this.#searchProjectionDirty = true
       throw error
     }
+    if (this.#threadSearchProjectionTails.has(threadId)) {
+      this.#scheduleProjectionRepair(threadId, true)
+      return
+    }
     await this.#withThreadSearchProjection(threadId, async () => {
       try {
         const metadata = await this.#readMetadata(threadId)
@@ -1878,7 +1885,7 @@ export class JsonlThreadStore implements ThreadStore {
           checkpoint.endByteOffset !== stamp.rolloutSize - drainedBytes ||
           (drained[0] !== undefined && checkpoint.nextSeq !== drained[0].seq)
         ) {
-          await this.#catchUpSelectedProjection(threadId)
+          this.#scheduleProjectionRepair(threadId, true)
           return
         }
         const locations = new Map<number, RolloutRecordLocation>()
@@ -2170,14 +2177,28 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  #scheduleProjectionRepair(threadId: string): void {
-    if (this.#scheduledProjectionRepairs.has(threadId)) return
-    this.#scheduledProjectionRepairs.add(threadId)
-    const repair = this.#withThreadSearchProjection(threadId, () =>
-      this.#catchUpSelectedProjection(threadId),
-    )
-    const forget = () => this.#scheduledProjectionRepairs.delete(threadId)
-    void repair.then(forget, forget)
+  #scheduleProjectionRepair(threadId: string, afterWrite = false): void {
+    const scheduled = this.#scheduledProjectionRepairs.get(threadId)
+    if (scheduled !== undefined) {
+      // An append can land after a repair has checked the file length but
+      // before it publishes its final stamp.
+      if (afterWrite) scheduled.runAgain = true
+      return
+    }
+    const work = { runAgain: true }
+    this.#scheduledProjectionRepairs.set(threadId, work)
+    const repair = this.#withThreadSearchProjection(threadId, async () => {
+      try {
+        while (work.runAgain) {
+          work.runAgain = false
+          await this.#repairThreadProjection(threadId)
+        }
+      } finally {
+        this.#scheduledProjectionRepairs.delete(threadId)
+      }
+    })
+    // A corpus search must account for queued repairs as well as active ones.
+    void this.#trackSearchProjectionPublication(repair).catch(() => {})
   }
 
   #catchUpSelectedProjection(threadId: string): Promise<void> {
