@@ -726,6 +726,9 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
           ...(result.value.historyBefore === undefined
             ? {}
             : { historyBefore: result.value.historyBefore }),
+          ...(result.value.historyAfter === undefined
+            ? {}
+            : { historyAfter: result.value.historyAfter }),
         },
       }
     },

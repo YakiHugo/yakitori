@@ -1,8 +1,9 @@
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import type { HistoryLocation } from "../protocol/application.ts"
 import { answerTextParts } from "../protocol/model-output.ts"
-import type { DisplayWindow } from "./display-window.ts"
+import type { DisplayWindow, RolloutRecordLocation } from "./display-window.ts"
 import type {
   StoredRolloutItem,
   StoredThread,
@@ -22,6 +23,11 @@ import {
   requireProjectionAppend,
   writeCheckpoint,
 } from "./sqlite-thread-display-projection.ts"
+import {
+  createTranscriptLocationTable,
+  findTranscriptLocation,
+  indexTranscriptLocations,
+} from "./sqlite-transcript-locations.ts"
 import {
   literalMatches,
   markdownVisibleText,
@@ -84,7 +90,7 @@ type OccurrenceCursor = Readonly<{
 
 // Status, compact display history and checkpoints share a disposable projection,
 // so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -159,6 +165,54 @@ export class SqliteThreadSearchProjection {
     return readDisplayPage(this.#database, threadId, before, transcript)
   }
 
+  readDisplayLocation(
+    threadId: string,
+    location: HistoryLocation,
+    page: Readonly<{ before?: number; after?: number }>,
+  ) {
+    const summary = this.readSummary(threadId)
+    if (summary?.rolloutId !== location.rolloutId) return undefined
+    const match = this.#database
+      .prepare(`
+      SELECT seq FROM search_messages WHERE thread_id = ? AND turn_id = ? AND item_id = ?
+    `)
+      .get(threadId, location.turnId, location.itemId) as
+      | { seq: number }
+      | undefined
+    if (match === undefined) return undefined
+    let before = page.before
+    if (page.after !== undefined) {
+      // Use the next finished turn as the end of the page. The transcript
+      // byte budget can trim preceding turns, so jumping several ends here
+      // could skip a turn in between.
+      const next = this.#database
+        .prepare(`
+        SELECT seq FROM display_records
+        WHERE thread_id = ? AND kind = 'turn_completed' AND seq >= ?
+        ORDER BY seq LIMIT 1
+      `)
+        .get(threadId, page.after) as { seq: number } | undefined
+      before = (next?.seq ?? summary.seq) + 1
+    }
+    if (before === undefined) {
+      const turnEnd = this.#database
+        .prepare(`
+        SELECT seq FROM display_records WHERE thread_id = ? AND turn_id = ?
+          AND kind = 'turn_completed' AND seq >= ?
+        ORDER BY seq DESC LIMIT 1
+      `)
+        .get(threadId, location.turnId, match.seq) as
+        | { seq: number }
+        | undefined
+      before = (turnEnd?.seq ?? match.seq) + 1
+    }
+    return {
+      ...this.readDisplayWindow(threadId, before, true),
+      endSeq: summary.seq,
+      ...(before <= summary.seq ? { historyAfter: before } : {}),
+    }
+  }
+
   readDisplayActivity(threadId: string, turnId: string, before: number) {
     return readDisplayActivity(this.#database, threadId, turnId, before)
   }
@@ -197,7 +251,11 @@ export class SqliteThreadSearchProjection {
     })
   }
 
-  rebuild(stored: StoredThread, stamp: ThreadSearchProjectionStamp): void {
+  rebuild(
+    stored: StoredThread,
+    stamp: ThreadSearchProjectionStamp,
+    locations?: ReadonlyMap<number, RolloutRecordLocation>,
+  ): void {
     this.#transaction(() => {
       this.#database
         .prepare("DELETE FROM search_threads WHERE thread_id = ?")
@@ -210,6 +268,13 @@ export class SqliteThreadSearchProjection {
         stamp,
       )
       applyEntries(this.#database, stored.metadata.id, stored.rollout)
+      if (locations !== undefined)
+        indexTranscriptLocations(
+          this.#database,
+          stored.metadata.id,
+          stored.rollout,
+          locations,
+        )
       writeCheckpoint(this.#database, stored.metadata.id, {
         rolloutId: stored.metadata.rolloutId,
         endByteOffset: stamp.rolloutSize,
@@ -223,6 +288,7 @@ export class SqliteThreadSearchProjection {
     entries: readonly StoredRolloutItem[],
     stamp: ThreadSearchProjectionStamp,
     checkpoint?: RolloutCheckpoint,
+    locations?: ReadonlyMap<number, RolloutRecordLocation>,
   ): void {
     this.#transaction(() => {
       requireProjectionAppend(this.#database, metadata, entries, checkpoint)
@@ -254,6 +320,13 @@ export class SqliteThreadSearchProjection {
         throw new Error(`Thread ${metadata.id} has no search projection.`)
       }
       applyEntries(this.#database, metadata.id, entries)
+      if (locations !== undefined)
+        indexTranscriptLocations(
+          this.#database,
+          metadata.id,
+          entries,
+          locations,
+        )
       writeCheckpoint(
         this.#database,
         metadata.id,
@@ -266,6 +339,10 @@ export class SqliteThreadSearchProjection {
         },
       )
     })
+  }
+
+  findTranscriptItem(threadId: string, itemId: string, through?: number) {
+    return findTranscriptLocation(this.#database, threadId, itemId, through)
   }
 
   delete(threadId: string): void {
@@ -317,10 +394,13 @@ export class SqliteThreadSearchProjection {
             )
     ) as ThreadRow[]
     const page = rows.slice(0, input.limit)
-    const matches = page.map((row) => ({
-      summary: summaryFromRow(row),
-      snippet: this.#firstSnippet(row, input.searchTerm),
-    }))
+    const matches = page.map((row) => {
+      const summary = summaryFromRow(row)
+      return {
+        summary,
+        ...this.#firstMatch(row, summary.rolloutId, input.searchTerm),
+      }
+    })
     const last = page.at(-1)
     return {
       matches,
@@ -438,10 +518,10 @@ export class SqliteThreadSearchProjection {
       .get(input.threadId, input.searchTerm) as MessageRow | undefined
   }
 
-  #firstSnippet(row: ThreadRow, searchTerm: string): string {
+  #firstMatch(row: ThreadRow, rolloutId: string, searchTerm: string) {
     const titleMatch = literalMatches(row.title, searchTerm, 1)[0]
     if (titleMatch !== undefined)
-      return snippetForMatch(row.title, titleMatch).snippet
+      return { snippet: snippetForMatch(row.title, titleMatch).snippet }
     const message = this.#database
       .prepare(`
         SELECT seq, item_id, turn_id, text
@@ -458,7 +538,10 @@ export class SqliteThreadSearchProjection {
     if (match === undefined) {
       throw new Error(`Thread ${row.thread_id} has an invalid search match.`)
     }
-    return snippetForMatch(message.text, match).snippet
+    return {
+      snippet: snippetForMatch(message.text, match).snippet,
+      location: { rolloutId, turnId: message.turn_id, itemId: message.item_id },
+    }
   }
 
   #transaction(operation: () => void): void {
@@ -748,6 +831,7 @@ function initializeDatabase(database: DatabaseSync): void {
     database.exec(`
       DROP TABLE IF EXISTS search_answer_items;
       DROP TABLE IF EXISTS display_records;
+      DROP TABLE IF EXISTS transcript_locations;
       DROP TABLE IF EXISTS rollout_checkpoints;
       DROP TABLE IF EXISTS search_messages;
       DROP TABLE IF EXISTS search_turns;
@@ -803,4 +887,5 @@ function initializeDatabase(database: DatabaseSync): void {
     PRAGMA user_version = ${schemaVersion};
   `)
   createDisplayTables(database)
+  createTranscriptLocationTable(database)
 }

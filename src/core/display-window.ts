@@ -28,6 +28,8 @@ export type DisplayWindowRead = DisplayWindow &
 export const displayPageRecords = 200
 export const displayPageBytes = 256 * 1024
 
+export type RolloutRecordLocation = Readonly<{ start: number; length: number }>
+
 export function isTranscriptRecord({ item }: StoredRolloutItem): boolean {
   if (item.type === "item_started")
     return item.item.type === "context_compaction"
@@ -351,6 +353,7 @@ export async function readJsonlBatch(
   options: JsonlReadOptions & Readonly<{ startByteOffset: number }>,
 ): Promise<{
   records: readonly StoredRolloutItem[]
+  locations: readonly RolloutRecordLocation[]
   endByteOffset: number
   reachedEnd: boolean
   observedByteSize: number
@@ -364,6 +367,7 @@ export async function readJsonlBatch(
     let completeEnd = cursor
     let partial: Buffer[] = []
     const records: StoredRolloutItem[] = []
+    const locations: RolloutRecordLocation[] = []
     while (cursor < end) {
       const bytes = await readBytes(
         file,
@@ -377,7 +381,13 @@ export async function readJsonlBatch(
           partial.length === 0
             ? bytes.subarray(start, index)
             : Buffer.concat([...partial, bytes.subarray(start, index)])
-        if (line.length > 0) records.push(options.parse(line.toString("utf8")))
+        if (line.length > 0) {
+          records.push(options.parse(line.toString("utf8")))
+          locations.push({
+            start: cursor + index - line.length,
+            length: line.length + 1,
+          })
+        }
         partial = []
         completeEnd = cursor + index + 1
         start = index + 1
@@ -387,6 +397,7 @@ export async function readJsonlBatch(
         )
           return {
             records,
+            locations,
             endByteOffset: completeEnd,
             reachedEnd: completeEnd === end,
             observedByteSize: end,
@@ -397,10 +408,27 @@ export async function readJsonlBatch(
     }
     return {
       records,
+      locations,
       endByteOffset: completeEnd,
       reachedEnd: true,
       observedByteSize: end,
     }
+  } finally {
+    await file.close()
+  }
+}
+
+export async function readJsonlRecordAt(
+  path: string,
+  location: RolloutRecordLocation,
+  parse: (line: string) => StoredRolloutItem,
+): Promise<StoredRolloutItem> {
+  const file = await open(path, "r")
+  try {
+    const bytes = await readBytes(file, location.start, location.length)
+    if (bytes.length !== location.length || bytes.at(-1) !== 10)
+      throw new Error("Indexed rollout record is incomplete.")
+    return parse(bytes.subarray(0, -1).toString("utf8"))
   } finally {
     await file.close()
   }

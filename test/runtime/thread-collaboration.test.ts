@@ -819,6 +819,7 @@ describe("independent session collaboration", () => {
       expect(occurrences).toMatchObject({
         occurrences: [{ itemId: "input_exact", turnId: "turn_exact" }],
       })
+      const fullHistoryRead = vi.spyOn(f.store, "readThread")
       let page = await control.read({
         threadId: f.target.id,
         itemId: "input_exact",
@@ -860,6 +861,7 @@ describe("independent session collaboration", () => {
       expect(page).toMatchObject({
         snapshot: { itemCount: 1, newerItemsAvailable: true },
       })
+      expect(fullHistoryRead).not.toHaveBeenCalled()
       expect(JSON.parse(chunks.join(""))).toEqual({
         role: "user",
         content: [{ type: "text", text }],

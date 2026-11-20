@@ -128,15 +128,23 @@ export type SessionInputStatusResponse = Readonly<{
   events: readonly AppSessionEventEnvelope[]
 }>
 
-export type SessionHistoryParams = Readonly<{
-  sessionId: string
-  before: number
-  transcript?: true
-}>
+export type SessionHistoryParams =
+  | Readonly<{
+      sessionId: string
+      before: number
+      transcript?: true
+    }>
+  | Readonly<{
+      sessionId: string
+      location: import("./application.ts").HistoryLocation
+      before?: number
+      after?: number
+    }>
 
 export type SessionHistoryResponse = Readonly<{
   events: readonly AppSessionEventEnvelope[]
   historyBefore?: number
+  historyAfter?: number
   activityTurnIds?: readonly string[]
 }>
 

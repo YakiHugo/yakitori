@@ -18,6 +18,86 @@ afterEach(async () => {
 })
 
 describe("persisted thread search", () => {
+  it("opens a body match in the requested history version and preserves forked source records", async () => {
+    const { root, store } = await setup()
+    const threadId = "session_location"
+    const turnId = "turn_first"
+    const itemId = "input_located"
+    await save(
+      store,
+      threadId,
+      [
+        { type: "turn_started", turnId, inputItemId: itemId },
+        {
+          type: "response_item",
+          item: { ...envelope(turnId, "user", "unique needle 🧭"), id: itemId },
+        },
+        completed(turnId),
+        {
+          type: "turn_started",
+          turnId: "turn_next",
+          inputItemId: "input_next",
+        },
+        completed("turn_next"),
+      ],
+      { title: "title only" },
+    )
+    const reopened = new JsonlThreadStore({ root })
+    const result = await reopened.searchThreads({
+      searchTerm: "unique needle",
+      limit: 5,
+    })
+    const location = result.matches[0]?.location
+    expect(location).toEqual({ rolloutId: threadId, turnId, itemId })
+    if (location === undefined) throw new Error("Missing search location.")
+    const page = await reopened.readDisplayLocation(threadId, location, {})
+    expect(page?.records.map(({ seq }) => seq)).toEqual([1, 2, 3])
+    expect(page?.historyAfter).toBe(4)
+    const later = await reopened.readDisplayLocation(threadId, location, {
+      after: 4,
+    })
+    expect(later?.records.some(({ seq }) => seq === 5)).toBe(true)
+    expect(later?.historyAfter).toBeUndefined()
+    expect(
+      (await reopened.searchThreads({ searchTerm: "title only", limit: 5 }))
+        .matches[0]?.location,
+    ).toBeUndefined()
+    const prepared = await reopened.prepareFork({
+      sourceThreadId: threadId,
+      boundary: { type: "through_turn", turnId },
+    })
+    const forkId = "session_location_fork"
+    await reopened.createFork({
+      prepared,
+      target: {
+        id: forkId,
+        conversationId: forkId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    })
+    await reopened.revertThread({
+      threadId,
+      beforeTurnId: turnId,
+      expectedRolloutId: threadId,
+    })
+    expect(
+      await reopened.readDisplayLocation(threadId, location, {}),
+    ).toBeUndefined()
+    const inherited = await reopened.readTranscriptItem(forkId, itemId)
+    expect(inherited?.record).toMatchObject({
+      rolloutId: threadId,
+      item: {
+        item: {
+          id: itemId,
+          item: { content: [{ type: "text", text: "unique needle 🧭" }] },
+        },
+      },
+    })
+    await reopened.shutdownThread(threadId)
+    await reopened.shutdownThread(forkId)
+  })
+
   it("searches user source and rendered terminal answers while excluding internal and unfinished messages", async () => {
     const { root, store } = await setup()
     await save(store, "session_search", [
