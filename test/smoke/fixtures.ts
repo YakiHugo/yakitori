@@ -200,11 +200,26 @@ export async function runConversationHistoryFlow(page: Page): Promise<void> {
   await page
     .getByRole("searchbox", { name: "Find in conversation" })
     .fill("Earlier history needle")
-  await expect(promptMessage(prompts[0])).toBeVisible()
-  await expect(page.locator("[data-find-current]")).toContainText(
+  const result = page.getByRole("dialog")
+  await expect(result.locator("[data-find-current]")).toContainText(
     "Earlier history needle",
   )
+  await expect(promptMessage(prompts[0])).toHaveCount(0)
+  await result.getByRole("button", { name: "Later", exact: true }).click()
+  await expect(result.getByText(prompts[1], { exact: true })).toBeVisible()
+  await result.getByRole("button", { name: "Close", exact: true }).click()
+  await expect(result).toHaveCount(0)
   await page.getByRole("button", { name: "Close find", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Search sessions", exact: true })
+    .click()
+  await page
+    .getByRole("textbox", { name: "Search sessions" })
+    .fill("Earlier history needle")
+  await page.getByRole("button", { name: /Earlier history needle/ }).click()
+  await expect(result.locator("[data-find-current]")).toContainText(
+    "Earlier history needle",
+  )
 }
 
 export async function runIndependentSessionFlow(

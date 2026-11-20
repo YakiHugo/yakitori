@@ -6,6 +6,7 @@ import {
   EngineConversation,
   EngineSessionHeading,
 } from "./components/engine-session.tsx"
+import { HistoryMatchDialog } from "./components/history-match-dialog.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { GoalBar, GoalEditor } from "./components/session-goal.tsx"
@@ -16,9 +17,9 @@ import { Transcript } from "./components/transcript.tsx"
 import { Select } from "./components/ui/select.tsx"
 import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
-import { UNCONFIRMED_INPUT_NOTICE } from "./input-recovery-memory.ts"
 import { useChatInterrupt } from "./hooks/use-chat-interrupt.ts"
 import { useSessionRead } from "./hooks/use-session-read.ts"
+import { UNCONFIRMED_INPUT_NOTICE } from "./input-recovery-memory.ts"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 import { useEngineStore } from "./store/engine-store.ts"
 
@@ -87,6 +88,7 @@ export function App() {
   return (
     <TooltipProvider>
       <PreferencesEffects />
+      <HistoryMatchDialog />
       <WorkspaceFrame
         heading={
           settingsOpen ? (

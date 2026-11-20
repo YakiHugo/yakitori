@@ -10,6 +10,7 @@ export type ConversationScope = {
   workspaceRoot: string | undefined
   editable: boolean
   interactiveQuestions: boolean
+  loadTurnActivity?(turnId: string): Promise<void>
 }
 
 export const ConversationScopeContext = createContext<

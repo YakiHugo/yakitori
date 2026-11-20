@@ -64,10 +64,20 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
   }, [term, fetchPage])
   const results = result?.data ?? []
   const open = (index: number) => {
-    const session = results[index]?.session
-    if (!session) return
+    const match = results[index]
+    if (!match) return
+    const { session, location } = match
     onClose()
-    void selectSession(session.id, session)
+    if (location === undefined) void selectSession(session.id, session)
+    else
+      useAppStore.setState({
+        historyMatch: {
+          sessionId: session.id,
+          location,
+          ...(session.title === undefined ? {} : { title: session.title }),
+          summary: session,
+        },
+      })
   }
   return (
     <SidebarDialog title="Search sessions" onClose={onClose}>

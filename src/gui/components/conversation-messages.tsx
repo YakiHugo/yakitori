@@ -315,7 +315,7 @@ const TurnBlock = memo(
     finalAnswer: FinalAnswer | undefined
     retry: ActiveModelRetry | undefined
   }>) {
-    const { threadId, sessionId } = useConversationScope()
+    const { threadId, sessionId, loadTurnActivity } = useConversationScope()
     const [liveActivityCollapsed, setLiveActivityCollapsed] =
       useThreadScopeState(threadId, `turn:${blockKey}:live-collapsed`, false)
     const [activityExpanded, setActivityExpanded] = useThreadScopeState(
@@ -420,7 +420,9 @@ const TurnBlock = memo(
       setActivityError(undefined)
       setLoadingActivity(true)
       try {
-        await useAppStore.getState().loadTurnActivity(turnId)
+        await (loadTurnActivity ?? useAppStore.getState().loadTurnActivity)(
+          turnId,
+        )
       } catch (error) {
         setActivityError(
           error instanceof Error ? error.message : "Could not load activity.",
@@ -428,7 +430,7 @@ const TurnBlock = memo(
       } finally {
         setLoadingActivity(false)
       }
-    }, [turnId])
+    }, [turnId, loadTurnActivity])
     useEffect(() => {
       if (
         expanded &&

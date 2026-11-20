@@ -17,6 +17,7 @@ import "./conversation-find.css"
 type Occurrence = ApiSearchSessionOccurrencesResponse["data"][number]
 type FindResult = Readonly<{
   term: string
+  rolloutId?: string
   data: readonly Occurrence[]
   loading: boolean
   error?: string
@@ -36,6 +37,9 @@ export function ConversationFind({
   const inputCount = useAppStore(
     (state) => state.selectedSession?.counts.inputs,
   )
+  const rolloutId = useAppStore((state) => state.selectedSession?.rolloutId)
+  const title = useAppStore((state) => state.selectedSession?.title)
+  const entries = useAppStore((state) => state.execution.entries)
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
   const historyBefore = useAppStore((state) => state.historyBefore)
   const loadingHistory = useAppStore((state) =>
@@ -72,6 +76,7 @@ export function ConversationFind({
     term,
     apiBase,
     sessionId,
+    rolloutId,
     inputCount,
     activeTurnId,
     revision,
@@ -179,7 +184,12 @@ export function ConversationFind({
           if (disposed) return
           data.push(...page.data)
           cursor = page.nextCursor
-          setResult({ term, data: [...data], loading: cursor !== undefined })
+          setResult({
+            term,
+            ...(rolloutId === undefined ? {} : { rolloutId }),
+            data: [...data],
+            loading: cursor !== undefined,
+          })
         } while (cursor !== undefined)
       } catch (cause) {
         if (!disposed)
@@ -198,9 +208,20 @@ export function ConversationFind({
       disposed = true
       window.clearTimeout(timer)
     }
-  }, [open, term, apiBase, sessionId, inputCount, activeTurnId, revision])
+  }, [
+    open,
+    term,
+    apiBase,
+    sessionId,
+    rolloutId,
+    inputCount,
+    activeTurnId,
+    revision,
+  ])
 
   const selectedItemId = selected?.itemId
+  const selectedTurnId = selected?.turnId
+  const selectedRolloutId = current?.rolloutId
   useEffect(() => {
     if (!open || selectedItemId === undefined) {
       historyRequest.current = undefined
@@ -210,6 +231,28 @@ export function ConversationFind({
     const key = JSON.stringify([sessionId, selectedItemId, historyBefore])
     if (historyRequest.current === key) return
     historyRequest.current = key
+    if (selectedRolloutId && selectedTurnId) {
+      const loaded = entries.some((entry) =>
+        entry.kind === "user_input" || entry.kind === "agent_input"
+          ? entry.inputId === selectedItemId
+          : entry.kind === "assistant" &&
+            (entry.itemId === selectedItemId ||
+              entry.source?.itemId === selectedItemId),
+      )
+      if (!loaded)
+        useAppStore.setState({
+          historyMatch: {
+            sessionId,
+            ...(title === undefined ? {} : { title }),
+            location: {
+              rolloutId: selectedRolloutId,
+              turnId: selectedTurnId,
+              itemId: selectedItemId,
+            },
+          },
+        })
+      return
+    }
     const controller = new AbortController()
     void loadHistoryThrough(selectedItemId, controller.signal)
     return () => controller.abort()
@@ -217,6 +260,10 @@ export function ConversationFind({
     open,
     sessionId,
     selectedItemId,
+    selectedTurnId,
+    selectedRolloutId,
+    title,
+    entries,
     historyBefore,
     loadingHistory,
     loadHistoryThrough,

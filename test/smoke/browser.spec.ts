@@ -41,7 +41,11 @@ test("conversation history opens at the latest prompt and loads older search tar
       command: process.execPath,
       args: [resolve("src/server/start.ts")],
       cwd: environment.root,
-      env: { ...environment.env, YAKITORI_GUI_DIR: resolve("dist/gui") },
+      env: {
+        ...environment.env,
+        YAKITORI_GUI_DIR:
+          environment.env.YAKITORI_GUI_DIR ?? resolve("dist/gui"),
+      },
     })
     await page.goto(server.url)
     await runConversationHistoryFlow(page)
