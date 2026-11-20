@@ -56,7 +56,7 @@ test("conversation history opens at the latest prompt and loads older search tar
   }
 })
 
-test("tool activity search opens the matching tool and its recorded output", async ({
+test("a message search result lets readers expand the recorded activity", async ({
   page,
 }) => {
   const environment = await createSmokeEnvironment()
@@ -89,19 +89,21 @@ test("tool activity search opens the matching tool and its recorded output", asy
     await page
       .getByRole("button", { name: "Search sessions", exact: true })
       .click()
-    await page.getByRole("checkbox", { name: "Search tool activity" }).check()
+    const dialog = page.getByRole("dialog")
+    await expect(dialog.getByRole("checkbox")).toHaveAccessibleName(
+      "Search archived conversations",
+    )
     await page
       .getByRole("textbox", { name: "Search sessions" })
-      .fill("README.md")
-    await page.getByRole("button", { name: /README.md/ }).click()
-    const toolResult = page
-      .getByRole("dialog")
-      .locator("[data-history-tool-id][data-find-current]")
-    await expect(toolResult).toContainText("README.md")
+      .fill("via faux tool loop")
+    await dialog.getByRole("button", { name: /via faux tool loop/ }).click()
+    await expect(dialog.locator("[data-find-current]")).toContainText(
+      "Read README.md via faux tool loop.",
+    )
+    await dialog.getByRole("button", { name: /^(Activity|Worked for)/ }).click()
+    await dialog.getByRole("button", { name: /^Read .*README\.md/ }).click()
     await expect(
-      toolResult
-        .getByText("Recorded tool output marker", { exact: false })
-        .first(),
+      dialog.getByText("Recorded tool output marker", { exact: false }).first(),
     ).toBeVisible()
   } finally {
     await server?.stop()

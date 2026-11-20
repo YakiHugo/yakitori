@@ -44,12 +44,6 @@ function HistoryMatchPage({
   const [error, setError] = useState<string>()
   const viewport = useRef<HTMLDivElement>(null)
   const requestVersion = useRef(0)
-  const initialPage =
-    position.before === undefined && position.after === undefined
-  const toolItemId =
-    initialPage && location.resultItemId !== undefined
-      ? location.itemId
-      : undefined
   const close = () => useAppStore.setState({ historyMatch: undefined })
   useEffect(() => {
     const revision = ++requestVersion.current
@@ -91,13 +85,12 @@ function HistoryMatchPage({
     if (page === undefined) return
     const content = viewport.current
     if (content === null) return
-    const anchor = initialPage
-      ? content.querySelector(
-          toolItemId === undefined
-            ? `[data-context-message-id="${CSS.escape(location.itemId)}"]`
-            : `[data-history-tool-id="${CSS.escape(toolItemId)}"]`,
-        )
-      : undefined
+    const anchor =
+      position.before === undefined && position.after === undefined
+        ? content.querySelector(
+            `[data-context-message-id="${CSS.escape(location.itemId)}"]`,
+          )
+        : undefined
     if (!(anchor instanceof HTMLElement)) {
       content.scrollTop =
         position.after === undefined ? 0 : content.scrollHeight
@@ -110,7 +103,7 @@ function HistoryMatchPage({
       anchor.removeAttribute("data-find-current")
       anchor.removeAttribute("data-find-fallback")
     }
-  }, [location.itemId, page, position.after, initialPage, toolItemId])
+  }, [location.itemId, page, position])
 
   const loadTurnActivity = useCallback(
     async (turnId: string) => {
@@ -167,9 +160,6 @@ function HistoryMatchPage({
                 editable: false,
                 interactiveQuestions: false,
                 loadTurnActivity,
-                ...(toolItemId === undefined
-                  ? {}
-                  : { focusedToolItemId: toolItemId }),
               }}
             >
               <ConversationMessages view={projectExecutionView(execution)} />

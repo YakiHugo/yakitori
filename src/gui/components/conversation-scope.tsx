@@ -11,7 +11,6 @@ export type ConversationScope = {
   editable: boolean
   interactiveQuestions: boolean
   loadTurnActivity?(turnId: string): Promise<void>
-  focusedToolItemId?: string
 }
 
 export const ConversationScopeContext = createContext<
