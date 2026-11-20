@@ -290,6 +290,87 @@ describe("persisted display projection", () => {
   })
 
   it.each([
+    "write",
+    "search",
+  ] as const)("flushes a Session independently of its own cold repair started by %s", async (trigger) => {
+    const { root, store, id } = await createStore()
+    await store.appendItems(id, turn("old"))
+    await store.flushThread(id)
+    await store.searchThreads({ searchTerm: "old", limit: 10 })
+    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+    database.prepare("DELETE FROM search_threads WHERE thread_id = ?").run(id)
+    database.close()
+
+    const log = join(root, "rollouts", id, "rollout.jsonl")
+    const blocked = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const pauseRepair = async () => {
+      blocked.resolve()
+      await release.promise
+    }
+    let opens = 0
+    io.beforeOpen = async (path) => {
+      if (path !== log) return
+      if (trigger === "search") {
+        io.beforeOpen = undefined
+        await pauseRepair()
+      } else if (++opens === 2) {
+        io.beforeOpen = undefined
+        // Hold the background repair after it has read the rollout and
+        // checked its size, but before it can publish the final stamp.
+        io.beforeReadFile = async (metadataPath) => {
+          if (metadataPath !== join(root, "threads", `${id}.json`)) return
+          io.beforeReadFile = undefined
+          await pauseRepair()
+        }
+      }
+    }
+    const repairs =
+      trigger === "search"
+        ? store.searchThreadOccurrences({
+            threadId: id,
+            searchTerm: "old",
+            limit: 10,
+          })
+        : store.appendItems(id, turn("starts_background_repair"))
+    await blocked.promise
+    let flushed = false
+    const saving = (async () => {
+      await store.appendItems(id, turn("written_before_repair"))
+      await store.flushThread(id)
+      flushed = true
+    })()
+    let searchFinished = false
+    const search = store.searchThreads({
+      searchTerm: "written_before_repair",
+      limit: 10,
+    })
+    void search.then(
+      () => {
+        searchFinished = true
+      },
+      () => {
+        searchFinished = true
+      },
+    )
+    const settled = Promise.allSettled([repairs, saving, search])
+    try {
+      await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 2_000 })
+      expect(searchFinished).toBe(false)
+      expect(await readFile(log, "utf8")).toContain(
+        "input_written_before_repair",
+      )
+    } finally {
+      release.resolve()
+      await settled
+      await store.shutdownThread(id)
+    }
+    expect((await search).matches[0]?.location?.itemId).toBe(
+      "input_written_before_repair",
+    )
+  })
+
+  it.each([
     "batch",
     "final_metadata",
   ] as const)("restarts selected repair after another store reverts during %s I/O", async (phase) => {
