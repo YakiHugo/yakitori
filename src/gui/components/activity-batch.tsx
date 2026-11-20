@@ -17,7 +17,7 @@ export function ActivityBatch({
 }: Readonly<{
   entries: readonly [ActivityBatchEntry, ...ActivityBatchEntry[]]
 }>) {
-  const { workspaceRoot, apiBase, focusedToolItemId } = useConversationScope()
+  const { workspaceRoot, apiBase } = useConversationScope()
   const [expanded, setExpanded] = useState<boolean>()
   const contentId = useId()
   const tools = entries.filter((entry) => entry.kind === "tool")
@@ -32,10 +32,7 @@ export function ActivityBatch({
   const interrupted = tools.some((entry) => entry.state === "interrupted")
   const hasProblem = failed || interrupted
   const grouped = entries.length > 1
-  const focused = tools.some(
-    (entry) => entry.execution.itemId === focusedToolItemId,
-  )
-  const open = !grouped || (expanded ?? focused)
+  const open = !grouped || expanded === true
   const summary = tools.length > 0 ? summarizeToolBatch(tools) : "Reasoning"
   const Icon = active ? LoaderCircle : tools.length > 0 ? Wrench : Brain
 
