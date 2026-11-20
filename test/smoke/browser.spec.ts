@@ -56,6 +56,59 @@ test("conversation history opens at the latest prompt and loads older search tar
   }
 })
 
+test("tool activity search opens the matching tool and its recorded output", async ({
+  page,
+}) => {
+  const environment = await createSmokeEnvironment()
+  let server: ServerProcess | undefined
+  try {
+    await writeFile(
+      join(environment.root, "workspace", "README.md"),
+      "Recorded tool output marker",
+    )
+    server = await spawnServerProcess({
+      command: process.execPath,
+      args: [resolve("src/server/start.ts")],
+      cwd: environment.root,
+      env: {
+        ...environment.env,
+        YAKITORI_FAUX_SCENARIO: "file",
+        YAKITORI_GUI_DIR:
+          environment.env.YAKITORI_GUI_DIR ?? resolve("dist/gui"),
+      },
+    })
+    await page.goto(server.url)
+    await page.getByRole("button", { name: "New session", exact: true }).click()
+    await page
+      .getByRole("textbox", { name: "Message the Mate" })
+      .fill("Inspect the workspace")
+    await page.getByRole("button", { name: "Send", exact: true }).click()
+    await expect(
+      page.getByText("Read README.md via faux tool loop.", { exact: true }),
+    ).toBeVisible()
+    await page
+      .getByRole("button", { name: "Search sessions", exact: true })
+      .click()
+    await page.getByRole("checkbox", { name: "Search tool activity" }).check()
+    await page
+      .getByRole("textbox", { name: "Search sessions" })
+      .fill("README.md")
+    await page.getByRole("button", { name: /README.md/ }).click()
+    const toolResult = page
+      .getByRole("dialog")
+      .locator("[data-history-tool-id][data-find-current]")
+    await expect(toolResult).toContainText("README.md")
+    await expect(
+      toolResult
+        .getByText("Recorded tool output marker", { exact: false })
+        .first(),
+    ).toBeVisible()
+  } finally {
+    await server?.stop()
+    await environment.cleanup()
+  }
+})
+
 test("browser attachment picker uploads bytes and removes abandoned staging files", async ({
   page,
 }) => {

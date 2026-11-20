@@ -71,6 +71,7 @@ type MessageRow = Readonly<{
   item_id: string
   turn_id: string
   text: string
+  result_item_id?: string | null
 }>
 
 type TurnRow = Readonly<{
@@ -86,11 +87,12 @@ type OccurrenceCursor = Readonly<{
   seq: number
   itemId: string
   occurrenceIndex: number
+  toolActivity?: boolean
 }>
 
 // Status, compact display history and checkpoints share a disposable projection,
 // so a schema reset rebuilds them consistently from authoritative JSONL.
-const schemaVersion = 10
+const schemaVersion = 11
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -174,10 +176,10 @@ export class SqliteThreadSearchProjection {
     if (summary?.rolloutId !== location.rolloutId) return undefined
     const match = this.#database
       .prepare(`
-      SELECT seq FROM search_messages WHERE thread_id = ? AND turn_id = ? AND item_id = ?
+      SELECT seq, kind FROM search_messages WHERE thread_id = ? AND turn_id = ? AND item_id = ?
     `)
       .get(threadId, location.turnId, location.itemId) as
-      | { seq: number }
+      | { seq: number; kind: string }
       | undefined
     if (match === undefined) return undefined
     let before = page.before
@@ -194,6 +196,8 @@ export class SqliteThreadSearchProjection {
         .get(threadId, page.after) as { seq: number } | undefined
       before = (next?.seq ?? summary.seq) + 1
     }
+    const opensTool = before === undefined && match.kind === "tool"
+    if (opensTool) before = match.seq + 1
     if (before === undefined) {
       const turnEnd = this.#database
         .prepare(`
@@ -207,7 +211,7 @@ export class SqliteThreadSearchProjection {
       before = (turnEnd?.seq ?? match.seq) + 1
     }
     return {
-      ...this.readDisplayWindow(threadId, before, true),
+      ...this.readDisplayWindow(threadId, before, !opensTool),
       endSeq: summary.seq,
       ...(before <= summary.seq ? { historyAfter: before } : {}),
     }
@@ -376,11 +380,11 @@ export class SqliteThreadSearchProjection {
       anchor === undefined
         ? this.#database
             .prepare(
-              `${matchingThreadsSql()}${filter} ORDER BY updated_at DESC, thread_id DESC LIMIT ?`,
+              `${matchingThreadsSql(input.toolActivity)}${filter} ORDER BY updated_at DESC, thread_id DESC LIMIT ?`,
             )
             .all(...parameters, input.limit + 1)
         : this.#database
-            .prepare(`${matchingThreadsSql()}${filter}
+            .prepare(`${matchingThreadsSql(input.toolActivity)}${filter}
             AND (updated_at < ? OR (updated_at = ? AND thread_id < ?))
             ORDER BY updated_at DESC, thread_id DESC
             LIMIT ?
@@ -398,7 +402,12 @@ export class SqliteThreadSearchProjection {
       const summary = summaryFromRow(row)
       return {
         summary,
-        ...this.#firstMatch(row, summary.rolloutId, input.searchTerm),
+        ...this.#firstMatch(
+          row,
+          summary.rolloutId,
+          input.searchTerm,
+          input.toolActivity,
+        ),
       }
     })
     const last = page.at(-1)
@@ -423,7 +432,12 @@ export class SqliteThreadSearchProjection {
     let cursor =
       input.cursor === undefined
         ? undefined
-        : parseOccurrenceCursor(input.cursor, input.threadId, input.searchTerm)
+        : parseOccurrenceCursor(
+            input.cursor,
+            input.threadId,
+            input.searchTerm,
+            input.toolActivity,
+          )
     let after: Readonly<{ seq: number; itemId: string }> | undefined
     const occurrences: ThreadSearchOccurrence[] = []
 
@@ -452,12 +466,16 @@ export class SqliteThreadSearchProjection {
               seq: row.seq,
               itemId: row.item_id,
               occurrenceIndex: firstOccurrence + index,
+              ...(input.toolActivity ? { toolActivity: true } : {}),
             } satisfies OccurrenceCursor),
           }
         }
         occurrences.push({
           turnId: row.turn_id,
           itemId: row.item_id,
+          ...(row.result_item_id == null
+            ? {}
+            : { resultItemId: row.result_item_id }),
           ...snippetForMatch(row.text, match),
         })
       }
@@ -471,12 +489,13 @@ export class SqliteThreadSearchProjection {
     cursor: OccurrenceCursor | undefined,
     after: Readonly<{ seq: number; itemId: string }> | undefined,
   ): MessageRow | undefined {
+    const kind = searchedKind(input.toolActivity)
     if (cursor !== undefined) {
       return this.#database
         .prepare(`
-          SELECT seq, item_id, turn_id, text
+          SELECT seq, item_id, turn_id, text, result_item_id
           FROM search_messages
-          WHERE thread_id = ? AND literal_match(text, ?) = 1
+          WHERE thread_id = ? AND ${kind} AND literal_match(text, ?) = 1
             AND (seq > ? OR (seq = ? AND item_id >= ?))
           ORDER BY seq ASC, item_id ASC
           LIMIT 1
@@ -492,9 +511,9 @@ export class SqliteThreadSearchProjection {
     if (after !== undefined) {
       return this.#database
         .prepare(`
-          SELECT seq, item_id, turn_id, text
+          SELECT seq, item_id, turn_id, text, result_item_id
           FROM search_messages
-          WHERE thread_id = ? AND literal_match(text, ?) = 1
+          WHERE thread_id = ? AND ${kind} AND literal_match(text, ?) = 1
             AND (seq > ? OR (seq = ? AND item_id > ?))
           ORDER BY seq ASC, item_id ASC
           LIMIT 1
@@ -509,24 +528,31 @@ export class SqliteThreadSearchProjection {
     }
     return this.#database
       .prepare(`
-        SELECT seq, item_id, turn_id, text
+        SELECT seq, item_id, turn_id, text, result_item_id
         FROM search_messages
-        WHERE thread_id = ? AND literal_match(text, ?) = 1
+        WHERE thread_id = ? AND ${kind} AND literal_match(text, ?) = 1
         ORDER BY seq ASC, item_id ASC
         LIMIT 1
       `)
       .get(input.threadId, input.searchTerm) as MessageRow | undefined
   }
 
-  #firstMatch(row: ThreadRow, rolloutId: string, searchTerm: string) {
-    const titleMatch = literalMatches(row.title, searchTerm, 1)[0]
+  #firstMatch(
+    row: ThreadRow,
+    rolloutId: string,
+    searchTerm: string,
+    toolActivity: boolean | undefined,
+  ) {
+    const titleMatch = toolActivity
+      ? undefined
+      : literalMatches(row.title, searchTerm, 1)[0]
     if (titleMatch !== undefined)
       return { snippet: snippetForMatch(row.title, titleMatch).snippet }
     const message = this.#database
       .prepare(`
-        SELECT seq, item_id, turn_id, text
+        SELECT seq, item_id, turn_id, text, result_item_id
         FROM search_messages
-        WHERE thread_id = ? AND literal_match(text, ?) = 1
+        WHERE thread_id = ? AND ${searchedKind(toolActivity)} AND literal_match(text, ?) = 1
         ORDER BY seq ASC, item_id ASC
         LIMIT 1
       `)
@@ -540,7 +566,14 @@ export class SqliteThreadSearchProjection {
     }
     return {
       snippet: snippetForMatch(message.text, match).snippet,
-      location: { rolloutId, turnId: message.turn_id, itemId: message.item_id },
+      location: {
+        rolloutId,
+        turnId: message.turn_id,
+        itemId: message.item_id,
+        ...(message.result_item_id == null
+          ? {}
+          : { resultItemId: message.result_item_id }),
+      },
     }
   }
 
@@ -556,7 +589,11 @@ export class SqliteThreadSearchProjection {
   }
 }
 
-function matchingThreadsSql(): string {
+function searchedKind(toolActivity: boolean | undefined): string {
+  return toolActivity ? "kind = 'tool'" : "kind IN ('user', 'assistant')"
+}
+
+function matchingThreadsSql(toolActivity: boolean | undefined): string {
   return `
     WITH presented AS (
       SELECT thread_id, metadata_json, status_json, seq, updated_at,
@@ -565,10 +602,11 @@ function matchingThreadsSql(): string {
     )
     SELECT thread_id, metadata_json, status_json, seq, title
     FROM presented AS thread
-    WHERE (literal_match(title, ?) = 1 OR EXISTS (
+    WHERE ((${toolActivity ? "0" : "1"} AND literal_match(title, ?) = 1) OR EXISTS (
       SELECT 1
       FROM search_messages AS message
       WHERE message.thread_id = thread.thread_id
+        AND ${searchedKind(toolActivity)}
         AND literal_match(message.text, ?) = 1
     ))
   `
@@ -614,6 +652,29 @@ function applyEntries(
     .prepare("UPDATE search_threads SET status_json = ? WHERE thread_id = ?")
     .run(JSON.stringify(advanceThreadStatus(status, entries)), threadId)
   for (const record of entries) {
+    if (
+      record.item.type === "item_completed" &&
+      "resultItemId" in record.item.item
+    ) {
+      const { item, turnId } = record.item
+      const paths =
+        item.type === "file_change"
+          ? item.request.paths
+          : item.type === "file_read" || item.type === "file_search"
+            ? [item.path]
+            : []
+      insertMessage(
+        database,
+        threadId,
+        record.seq,
+        turnId,
+        item.itemId,
+        "tool",
+        [item.name, ...paths, item.error?.code].filter(Boolean).join("\n"),
+        item.resultItemId,
+      )
+      continue
+    }
     if (record.item.type === "response_item") {
       const envelope = record.item.item
       const message = envelope.item
@@ -749,18 +810,19 @@ function insertMessage(
   seq: number,
   turnId: string,
   itemId: string,
-  kind: "assistant" | "user",
+  kind: "assistant" | "user" | "tool",
   text: string,
+  resultItemId: string | null = null,
 ): void {
   database
     .prepare(`
-      INSERT INTO search_messages (thread_id, seq, turn_id, item_id, kind, text)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO search_messages (thread_id, seq, turn_id, item_id, kind, text, result_item_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (thread_id, item_id)
       DO UPDATE SET seq = excluded.seq, turn_id = excluded.turn_id,
-                    kind = excluded.kind, text = excluded.text
+                    kind = excluded.kind, text = excluded.text, result_item_id = excluded.result_item_id
     `)
-    .run(threadId, seq, turnId, itemId, kind, text)
+    .run(threadId, seq, turnId, itemId, kind, text, resultItemId)
 }
 
 function summaryFromRow(row: ThreadRow): ThreadSummary {
@@ -784,6 +846,7 @@ function parseOccurrenceCursor(
   cursor: string,
   threadId: string,
   searchTerm: string,
+  toolActivity: boolean | undefined,
 ): OccurrenceCursor {
   let value: unknown
   try {
@@ -798,6 +861,8 @@ function parseOccurrenceCursor(
     value.threadId !== threadId ||
     !("searchTerm" in value) ||
     value.searchTerm !== searchTerm ||
+    ("toolActivity" in value && value.toolActivity === true) !==
+      Boolean(toolActivity) ||
     !("seq" in value) ||
     typeof value.seq !== "number" ||
     !Number.isSafeInteger(value.seq) ||
@@ -857,8 +922,9 @@ function initializeDatabase(database: DatabaseSync): void {
       seq INTEGER NOT NULL,
       turn_id TEXT NOT NULL,
       item_id TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('user', 'assistant')),
+      kind TEXT NOT NULL CHECK (kind IN ('user', 'assistant', 'tool')),
       text TEXT NOT NULL,
+      result_item_id TEXT,
       PRIMARY KEY (thread_id, item_id)
     ) STRICT;
 

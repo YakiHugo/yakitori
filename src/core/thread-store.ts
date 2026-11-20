@@ -85,6 +85,7 @@ export type ThreadStoreSearchInput = Readonly<{
   archived?: boolean
   sectionId?: string | null
   searchTerm: string
+  toolActivity?: boolean
   cursor?: string
   limit: number
 }>
@@ -102,6 +103,7 @@ export type ThreadStoreSearchResult = Readonly<{
 export type ThreadStoreOccurrenceSearchInput = Readonly<{
   threadId: string
   searchTerm: string
+  toolActivity?: boolean
   cursor?: string
   limit: number
 }>

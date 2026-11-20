@@ -16,6 +16,7 @@ export class ThreadCollaborationError extends Error {
 }
 export type ListThreadsInput = Readonly<{
   searchTerm?: string
+  toolActivity?: boolean
   archived?: boolean
   cursor?: string
   limit?: number
@@ -23,6 +24,7 @@ export type ListThreadsInput = Readonly<{
 export type ReadThreadInput = Readonly<{
   threadId: string
   searchTerm?: string
+  toolActivity?: boolean
   turnId?: string
   itemId?: string
   cursor?: string
@@ -57,6 +59,7 @@ export function createThreadReader(input: {
         "list",
         request.searchTerm ?? null,
         archived,
+        request.toolActivity ?? false,
       ])
       const cursor = readCursor(request.cursor, scope)?.position
       if (cursor !== undefined && typeof cursor !== "string")
@@ -66,6 +69,7 @@ export function createThreadReader(input: {
         const result = await input.store.searchThreads({
           view: "sessions",
           searchTerm: request.searchTerm,
+          ...(request.toolActivity ? { toolActivity: true } : {}),
           archived,
           limit,
           ...(cursor === undefined ? {} : { cursor }),
@@ -114,6 +118,7 @@ export function createThreadReader(input: {
           "occurrences",
           request.threadId,
           request.searchTerm,
+          request.toolActivity ?? false,
         ])
         const cursor = readCursor(request.cursor, scope)?.position
         if (cursor !== undefined && typeof cursor !== "string")
@@ -121,6 +126,7 @@ export function createThreadReader(input: {
         const result = await input.store.searchThreadOccurrences({
           threadId: request.threadId,
           searchTerm: request.searchTerm,
+          ...(request.toolActivity ? { toolActivity: true } : {}),
           limit,
           ...(cursor === undefined ? {} : { cursor }),
         })

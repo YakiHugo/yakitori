@@ -1090,12 +1090,17 @@ export function createThreadServerHandlers(
     async searchSessions(input = {}) {
       try {
         const request = requireSearchSessionsRequest(input)
+        const resource = JSON.stringify([
+          "sessions",
+          request.archived,
+          request.toolActivity,
+        ])
         const storeCursor =
           request.cursor === undefined
             ? undefined
             : decodeSearchCursor(
                 request.cursor,
-                request.archived ? "archived-sessions" : "sessions",
+                resource,
                 request.searchTerm,
                 request.limit,
               )
@@ -1103,6 +1108,7 @@ export function createThreadServerHandlers(
           view: "sessions",
           archived: request.archived,
           searchTerm: request.searchTerm,
+          ...(request.toolActivity ? { toolActivity: true } : {}),
           limit: request.limit,
           ...(storeCursor === undefined ? {} : { cursor: storeCursor }),
         })
@@ -1128,7 +1134,7 @@ export function createThreadServerHandlers(
             ? {}
             : {
                 nextCursor: encodeSearchCursor(
-                  request.archived ? "archived-sessions" : "sessions",
+                  resource,
                   request.searchTerm,
                   request.limit,
                   result.nextCursor,
@@ -1143,18 +1149,24 @@ export function createThreadServerHandlers(
     async searchSessionOccurrences(input) {
       try {
         const request = requireSearchSessionOccurrencesRequest(input)
+        const resource = JSON.stringify([
+          "session-occurrences",
+          request.sessionId,
+          request.toolActivity,
+        ])
         const storeCursor =
           request.cursor === undefined
             ? undefined
             : decodeSearchCursor(
                 request.cursor,
-                `session-occurrences:${request.sessionId}`,
+                resource,
                 request.searchTerm,
                 request.limit,
               )
         const result = await options.store.searchThreadOccurrences({
           threadId: request.sessionId,
           searchTerm: request.searchTerm,
+          ...(request.toolActivity ? { toolActivity: true } : {}),
           limit: request.limit,
           ...(storeCursor === undefined ? {} : { cursor: storeCursor }),
         })
@@ -1169,7 +1181,7 @@ export function createThreadServerHandlers(
             ? {}
             : {
                 nextCursor: encodeSearchCursor(
-                  `session-occurrences:${request.sessionId}`,
+                  resource,
                   request.searchTerm,
                   request.limit,
                   result.nextCursor,
@@ -2774,6 +2786,7 @@ function requireSearchSessionsRequest(input: unknown) {
   const cursor = requireOptionalString(record.cursor, "cursor")
   return {
     archived: requireArchivedFilter(record.archived),
+    toolActivity: requireToolActivityFilter(record.toolActivity),
     searchTerm: requireSearchTerm(record.searchTerm),
     limit: requireSearchLimit(record.limit),
     ...(cursor === undefined ? {} : { cursor }),
@@ -2788,10 +2801,19 @@ function requireSearchSessionOccurrencesRequest(input: unknown) {
   const cursor = requireOptionalString(record.cursor, "cursor")
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
+    toolActivity: requireToolActivityFilter(record.toolActivity),
     searchTerm: requireSearchTerm(record.searchTerm),
     limit: requireSearchLimit(record.limit),
     ...(cursor === undefined ? {} : { cursor }),
   }
+}
+
+function requireToolActivityFilter(value: unknown): boolean {
+  if (value === undefined) return false
+  if (typeof value === "boolean") return value
+  throw invalidInput("toolActivity must be a boolean.", {
+    field: "toolActivity",
+  })
 }
 
 function requireSearchTerm(value: unknown): string {

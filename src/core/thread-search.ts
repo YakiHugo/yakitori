@@ -9,6 +9,7 @@ import type { ThreadSummary } from "./rollout.ts"
 export type ThreadSearchOccurrence = Readonly<{
   turnId: string
   itemId: string
+  resultItemId?: string
   snippet: string
   snippetMatchRange: Readonly<{ start: number; end: number }>
 }>
