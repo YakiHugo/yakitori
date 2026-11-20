@@ -11,6 +11,7 @@ import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
   ApiUserModelPreference,
+  HistoryLocation,
 } from "../../protocol/application.ts"
 import { COMPACT_DIRECTIVE } from "../../protocol/directives.ts"
 import {
@@ -101,6 +102,13 @@ type EarlierHistoryPage = Readonly<{
 }>
 let earlierHistoryPage: EarlierHistoryPage | undefined
 const earlierHistoryLoads = new Map<string, EarlierHistoryPage>()
+
+export type HistoryMatch = Readonly<{
+  sessionId: string
+  location: HistoryLocation
+  title?: string
+  summary?: ApiSessionSummary
+}>
 
 function deferTurnActivity(
   execution: ExecutionViewState,
@@ -231,6 +239,7 @@ export type AppStoreData = {
   hydratingSessionId: string | undefined
   // Stored sequence before the loaded transcript. Absent once the start is loaded.
   historyBefore: number | undefined
+  historyMatch: HistoryMatch | undefined
   projects: ApiProject[]
   // Last project-list load failure; the sidebar keeps the last good list and
   // shows a retry note while this is set.
@@ -432,6 +441,7 @@ export function createInitialAppState(): AppStoreData {
     sessionSkillsError: undefined,
     hydratingSessionId: undefined,
     historyBefore: undefined,
+    historyMatch: undefined,
     projects: [],
     projectsError: undefined,
     accounts: [],
