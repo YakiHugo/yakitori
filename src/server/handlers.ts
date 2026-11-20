@@ -1111,7 +1111,7 @@ export function createThreadServerHandlers(
           result.matches.map(({ summary }) => summary),
         )
         return ok({
-          data: result.matches.map(({ summary, snippet }) => ({
+          data: result.matches.map(({ summary, snippet, location }) => ({
             session: mapThreadSummary(
               summary,
               liveProjects,
@@ -1119,6 +1119,7 @@ export function createThreadServerHandlers(
               options,
             ),
             snippet,
+            ...(location === undefined ? {} : { location }),
           })),
           ...(result.unavailableThreadCount === undefined
             ? {}
@@ -2246,14 +2247,30 @@ export function createThreadServerHandlers(
         const request = requireDisplayWindowRequest(input)
         const live = options.manager.getThread(request.sessionId)
         if (live !== undefined) await ensureEventPump(live)
-        const window = await options.store.readDisplayWindow(
-          request.sessionId,
-          request.before,
-          request.transcript &&
-            (request.before !== undefined ||
-              live?.snapshot().activeTurnId === undefined),
-        )
+        const window =
+          request.location === undefined
+            ? await options.store.readDisplayWindow(
+                request.sessionId,
+                request.before,
+                request.transcript &&
+                  (request.before !== undefined ||
+                    live?.snapshot().activeTurnId === undefined),
+              )
+            : await options.store.readDisplayLocation?.(
+                request.sessionId,
+                request.location,
+                {
+                  ...(request.before === undefined
+                    ? {}
+                    : { before: request.before }),
+                  ...(request.after === undefined
+                    ? {}
+                    : { after: request.after }),
+                },
+              )
         if (window === undefined) {
+          if (request.location !== undefined)
+            throw notFound("This match is no longer in the current history.")
           throw notFound(`Session ${request.sessionId} was not found.`, {
             sessionId: request.sessionId,
           })
@@ -2301,6 +2318,10 @@ export function createThreadServerHandlers(
           // the contiguous window defines how far history has been covered.
           ...(window.hasEarlier && historyBefore !== undefined
             ? { historyBefore }
+            : {}),
+          ...("historyAfter" in window &&
+          typeof window.historyAfter === "number"
+            ? { historyAfter: window.historyAfter }
             : {}),
         })
       } catch (error) {
@@ -3042,9 +3063,28 @@ function requireDisplayWindowRequest(input: unknown) {
     input,
     "Session display request must be an object.",
   )
+  const before = requireOptionalSequence(record.before, "before")
+  const after = requireOptionalSequence(record.after, "after")
+  const location =
+    record.location === undefined
+      ? undefined
+      : requireRecord(record.location, "History location must be an object.")
+  if (after !== undefined && (location === undefined || before !== undefined))
+    throw invalidInput(
+      "A history location can page in one direction at a time.",
+    )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
-    before: requireOptionalSequence(record.before, "before"),
+    before,
+    after,
+    location:
+      location === undefined
+        ? undefined
+        : {
+            rolloutId: requireString(location.rolloutId, "location.rolloutId"),
+            turnId: requireString(location.turnId, "location.turnId"),
+            itemId: requireString(location.itemId, "location.itemId"),
+          },
     transcript: record.transcript === true,
   }
 }

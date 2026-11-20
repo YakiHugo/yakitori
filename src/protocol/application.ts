@@ -88,10 +88,17 @@ export type ApiSearchSessionsRequest = {
   readonly cursor?: string
 }
 
+export type HistoryLocation = Readonly<{
+  rolloutId: string
+  turnId: string
+  itemId: string
+}>
+
 export type ApiSearchSessionsResponse = Readonly<{
   data: readonly Readonly<{
     session: ApiSessionSummary
     snippet: string
+    location?: HistoryLocation
   }>[]
   nextCursor?: string
   unavailableSessionCount?: number
@@ -395,6 +402,7 @@ export type ApiDisplayWindowResponse = {
   readonly session: ApiSessionDetail
   readonly events: readonly AppSessionEventEnvelope[]
   readonly historyBefore?: number
+  readonly historyAfter?: number
   readonly statePending?: boolean
   readonly activityTurnIds?: readonly string[]
 }

@@ -4,7 +4,7 @@ import type {
   ThreadSummary,
 } from "../core/rollout.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
-import type { ThreadStore } from "../core/thread-store.ts"
+import type { ThreadStore, TranscriptItemRead } from "../core/thread-store.ts"
 
 export class ThreadCollaborationError extends Error {
   readonly code: string
@@ -74,6 +74,9 @@ export function createThreadReader(input: {
           threads: result.matches.map((match) => ({
             ...summary(match.summary),
             snippet: match.snippet,
+            ...(match.location === undefined
+              ? {}
+              : { location: match.location }),
           })),
           truncated: result.nextCursor !== undefined,
           ...(result.nextCursor === undefined
@@ -131,6 +134,50 @@ export function createThreadReader(input: {
             : { nextCursor: cursorFor(scope, result.nextCursor) }),
         }
       }
+      if (request.itemId !== undefined && input.store.readTranscriptItem) {
+        const position = readCursor(
+          request.cursor,
+          transcriptScope(request),
+        )?.position
+        const indexed =
+          position === undefined
+            ? await input.store.readTranscriptItem(
+                request.threadId,
+                request.itemId,
+              )
+            : isRecord(position) &&
+                typeof position.rolloutId === "string" &&
+                isNatural(position.through)
+              ? await input.store.readTranscriptItem(
+                  request.threadId,
+                  request.itemId,
+                  {
+                    rolloutId: position.rolloutId,
+                    through: position.through,
+                  },
+                )
+              : undefined
+        if (indexed !== undefined) {
+          const item = indexed.record.item
+          if (item.type === "response_item" || item.type === "agent_message") {
+            const message = item.item.item
+            // A collaboration receipt can assign a different effective turn.
+            const relayed =
+              "context" in message && message.context?.type === "thread_message"
+            if (
+              !relayed &&
+              (request.turnId === undefined ||
+                request.turnId === item.item.turnId)
+            )
+              return readTranscriptPage(
+                { metadata: indexed.metadata, rollout: [indexed.record] },
+                request,
+                limit,
+                indexed,
+              )
+          }
+        }
+      }
       let stored = await input.store.readThread(request.threadId)
       if (stored === undefined) throw missingThread(request.threadId)
       if (request.turnId !== undefined || request.itemId !== undefined) {
@@ -186,6 +233,7 @@ function readTranscriptPage(
   stored: StoredThread,
   request: ReadThreadInput,
   limit: number,
+  indexed?: TranscriptItemRead,
 ) {
   const maxCharacters = request.maxCharacters ?? DEFAULT_PAGE_CHARACTERS
   if (
@@ -213,18 +261,16 @@ function readTranscriptPage(
       ? [{ record, envelope: record.item.item }]
       : [],
   )
-  const through =
-    position === undefined ? records.length : Number(position.through)
+  const itemCount = indexed?.itemCount ?? records.length
+  const through = position === undefined ? itemCount : Number(position.through)
+  const anchorRecord = indexed?.anchor ?? records[through - 1]?.record
   const anchor = JSON.stringify(
-    records[through - 1]?.record
-      ? [
-          records[through - 1]?.record.rolloutId,
-          records[through - 1]?.record.seq,
-        ]
-      : null,
+    anchorRecord === undefined
+      ? null
+      : [anchorRecord.rolloutId, anchorRecord.seq],
   )
   if (
-    through > records.length ||
+    through > itemCount ||
     (position !== undefined && position.anchor !== anchor)
   )
     throw invalidCursor()
@@ -302,7 +348,7 @@ function readTranscriptPage(
     representation: "model_content_json" as const,
     snapshot: {
       itemCount: through,
-      newerItemsAvailable: records.length > through,
+      newerItemsAvailable: itemCount > through,
     },
     items,
     truncated,

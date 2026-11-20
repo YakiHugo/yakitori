@@ -1,3 +1,4 @@
+import type { HistoryLocation } from "../protocol/application.ts"
 import type { DisplayWindowRead } from "./display-window.ts"
 import type {
   HistoryPosition,
@@ -89,7 +90,11 @@ export type ThreadStoreSearchInput = Readonly<{
 }>
 
 export type ThreadStoreSearchResult = Readonly<{
-  matches: readonly Readonly<{ summary: ThreadSummary; snippet: string }>[]
+  matches: readonly Readonly<{
+    summary: ThreadSummary
+    snippet: string
+    location?: HistoryLocation
+  }>[]
   nextCursor?: string
   unavailableThreadCount?: number
 }>
@@ -110,6 +115,13 @@ export type RolloutAppend = Readonly<{
   // Exclusive rollout sequence reached by this append, including staged items.
   throughSeq: number
   records: readonly StoredRolloutItem[]
+}>
+
+export type TranscriptItemRead = Readonly<{
+  metadata: ThreadMetadata
+  record: StoredRolloutItem
+  itemCount: number
+  anchor: Readonly<{ rolloutId: string; seq: number }>
 }>
 
 export type ThreadEventRead = Readonly<{
@@ -149,6 +161,11 @@ export type ThreadStore = {
   releasePreparedFork(prepared: PreparedFork): Promise<void>
   readThreadMetadata(threadId: string): Promise<ThreadMetadata | undefined>
   readThread(threadId: string): Promise<StoredThread | undefined>
+  readTranscriptItem?(
+    threadId: string,
+    itemId: string,
+    snapshot?: Readonly<{ rolloutId: string; through: number }>,
+  ): Promise<TranscriptItemRead | undefined>
   // Current history first, followed by retained versions of this same Thread.
   readThreadVersions(threadId: string): Promise<readonly StoredThread[]>
   readThreadSummary(threadId: string): Promise<ThreadSummary | undefined>
@@ -158,6 +175,11 @@ export type ThreadStore = {
     beforeSeqExclusive?: number,
     transcript?: boolean,
   ): Promise<DisplayWindowRead | undefined>
+  readDisplayLocation?(
+    threadId: string,
+    location: HistoryLocation,
+    page: Readonly<{ before?: number; after?: number }>,
+  ): Promise<(DisplayWindowRead & { historyAfter?: number }) | undefined>
   readDisplayActivity(
     threadId: string,
     rolloutId: string,

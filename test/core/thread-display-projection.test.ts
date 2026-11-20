@@ -190,6 +190,105 @@ describe("persisted display projection", () => {
     ])
   })
 
+  it("repairs only the selected Session for a local history search", async () => {
+    const unrelatedId = "thread_unrelated_search"
+    const selectedId = "thread_selected_search"
+    const { root, store } = await createStore(unrelatedId)
+    await store.appendItems(unrelatedId, turn("unrelated"))
+    await store.shutdownThread(unrelatedId)
+    await store.createThread(metadata(selectedId))
+    await store.persistThread(selectedId, PersistContext.TurnStart)
+    await store.appendItems(selectedId, turn("selected"))
+    await store.shutdownThread(selectedId)
+    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+    database.exec("PRAGMA user_version = 0")
+    database.close()
+
+    const restarted = new JsonlThreadStore({ root })
+    const occurrences = await restarted.searchThreadOccurrences({
+      threadId: selectedId,
+      searchTerm: "selected",
+      limit: 10,
+    })
+    expect(occurrences?.occurrences.map(({ itemId }) => itemId)).toEqual([
+      "input_selected",
+    ])
+    expect(checkpoint(root, selectedId)).toMatchObject({ next_seq: 6 })
+    expect(checkpoint(root, unrelatedId)).toBeUndefined()
+  })
+
+  it("flushes another Session while its cold neighbor is being indexed", async () => {
+    const { root, store, id } = await createStore()
+    await store.appendItems(id, turn("warm_writer"))
+    await store.flushThread(id)
+    const coldId = "thread_cold_index"
+    await store.createThread(metadata(coldId))
+    await store.persistThread(coldId, PersistContext.TurnStart)
+    await store.appendItems(coldId, [
+      ...Array.from({ length: displayPageRecords }, (_, index) =>
+        input(`padding_${index}`),
+      ),
+      ...turn("late_search_result"),
+    ])
+    await store.shutdownThread(coldId)
+    await store.searchThreads({ searchTerm: "warm_writer", limit: 10 })
+    const database = new DatabaseSync(join(root, "thread-search.sqlite"))
+    database
+      .prepare("DELETE FROM search_threads WHERE thread_id = ?")
+      .run(coldId)
+    database.close()
+
+    const blocked = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let opens = 0
+    io.beforeOpen = async (path) => {
+      if (
+        path !== join(root, "rollouts", coldId, "rollout.jsonl") ||
+        ++opens !== 3
+      )
+        return
+      // The lineage header and first batch have already been read.
+      io.beforeOpen = undefined
+      blocked.resolve()
+      await release.promise
+    }
+    const repairing = store.readInputAdmissions(coldId, [
+      "turn_late_search_result",
+    ])
+    await blocked.promise
+
+    let searchFinished = false
+    const searching = store.searchThreads({
+      searchTerm: "late_search_result",
+      limit: 10,
+    })
+    void searching.then(
+      () => (searchFinished = true),
+      () => (searchFinished = true),
+    )
+    let flushed = false
+    const saving = (async () => {
+      await store.appendItems(id, turn("while_cold_indexing"))
+      await store.flushThread(id)
+      flushed = true
+    })()
+    const settled = Promise.allSettled([repairing, searching, saving])
+    try {
+      await vi.waitFor(() => expect(flushed).toBe(true), { timeout: 2_000 })
+      expect(searchFinished).toBe(false)
+    } finally {
+      release.resolve()
+      await settled
+      await store.shutdownThread(id)
+    }
+    expect((await repairing)?.records.map(({ seq }) => seq)).toEqual([
+      displayPageRecords + 3,
+    ])
+    expect((await searching).matches.map(({ summary }) => summary.id)).toEqual([
+      coldId,
+    ])
+  })
+
   it.each([
     "batch",
     "final_metadata",
