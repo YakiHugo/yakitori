@@ -90,9 +90,9 @@ test("a message search result lets readers expand the recorded activity", async 
       .getByRole("button", { name: "Search sessions", exact: true })
       .click()
     const dialog = page.getByRole("dialog")
-    await expect(dialog.getByRole("checkbox")).toHaveAccessibleName(
-      "Search archived conversations",
-    )
+    await expect(
+      dialog.getByRole("checkbox", { name: "Search tool activity" }),
+    ).toHaveCount(0)
     await page
       .getByRole("textbox", { name: "Search sessions" })
       .fill("via faux tool loop")
