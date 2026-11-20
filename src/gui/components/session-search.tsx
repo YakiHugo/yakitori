@@ -11,6 +11,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
   const projects = useAppStore((state) => state.projects)
   const [query, setQuery] = useState("")
   const [archived, setArchived] = useState(false)
+  const [toolActivity, setToolActivity] = useState(false)
   const [result, setResult] = useState<ApiSearchSessionsResponse>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
@@ -28,6 +29,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           {
             searchTerm: term,
             archived,
+            ...(toolActivity ? { toolActivity: true } : {}),
             ...(cursor === undefined ? {} : { cursor }),
           },
         )
@@ -47,7 +49,7 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
         if (revision.current === requestRevision) setLoading(false)
       }
     },
-    [apiBase, term, archived],
+    [apiBase, term, archived, toolActivity],
   )
   useEffect(() => {
     const requestRevision = ++revision.current
@@ -86,7 +88,11 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
         <input
           aria-label="Search sessions"
           data-autofocus
-          placeholder="Search titles and messages"
+          placeholder={
+            toolActivity
+              ? "Search tools, paths, and errors"
+              : "Search titles and messages"
+          }
           value={query}
           onChange={(event) => {
             if (event.target.value.trim() !== term) revision.current += 1
@@ -126,6 +132,18 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
           }}
         />
         Search archived conversations
+      </label>
+      <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={toolActivity}
+          onChange={(event) => {
+            revision.current += 1
+            setToolActivity(event.target.checked)
+          }}
+          className="accent-primary"
+        />
+        Search tool activity
       </label>
       <section
         ref={list}

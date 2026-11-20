@@ -195,7 +195,9 @@ it("does not append an old page after the archive filter changes", async () => {
     await screen.findByRole("button", { name: "Show more results" }),
   )
   expect(finishPage).toBeDefined()
-  fireEvent.click(screen.getByRole("checkbox"))
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "Search archived conversations" }),
+  )
   await screen.findByRole("button", { name: /Archived/ })
   await act(async () => finishPage?.({ data: [summary("Old page")] }))
   expect(screen.queryByRole("button", { name: /Current|Old page/ })).toBeNull()

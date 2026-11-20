@@ -60,11 +60,13 @@ export function ToolCell({
     presentation.detail?.kind === "collaboration"
       ? presentation.detail
       : undefined
-  const { threadId, interactiveQuestions } = useConversationScope()
+  const { threadId, interactiveQuestions, focusedToolItemId } =
+    useConversationScope()
+  const focused = entry.execution.itemId === focusedToolItemId
   const [open, setOpen] = useThreadScopeState(
     threadId,
     `tool:${entry.toolCallId}`,
-    entry.state === "failed" || entry.state === "interrupted",
+    focused || entry.state === "failed" || entry.state === "interrupted",
   )
   const active = entry.state === "requested"
   const contentId = useId()
@@ -109,10 +111,10 @@ export function ToolCell({
         }[entry.execution.type]
 
   useEffect(() => {
-    if (entry.state === "failed" || entry.state === "interrupted") {
+    if (focused || entry.state === "failed" || entry.state === "interrupted") {
       setOpen(true)
     }
-  }, [entry.state, setOpen])
+  }, [entry.state, focused, setOpen])
 
   if (!entry.resultError && entry.output !== undefined) {
     if (
@@ -132,12 +134,18 @@ export function ToolCell({
     }
     if (entry.execution.name === "update_plan") {
       const plan = parseSessionPlan(entry.output)
-      if (plan) return <PlanCell plan={plan} />
+      if (plan)
+        return (
+          <div data-history-tool-id={entry.execution.itemId}>
+            <PlanCell plan={plan} />
+          </div>
+        )
     }
   }
 
   return (
     <Collapsible
+      data-history-tool-id={entry.execution.itemId}
       open={open}
       onOpenChange={(expanded) => {
         setOpen(expanded)

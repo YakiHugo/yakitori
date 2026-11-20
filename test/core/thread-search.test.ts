@@ -18,6 +18,85 @@ afterEach(async () => {
 })
 
 describe("persisted thread search", () => {
+  it("finds tool metadata and opens its activity or exact result", async () => {
+    const { root, store } = await setup()
+    const threadId = "session_tool_history"
+    const turnId = "turn_tool"
+    const itemId = "item_tool_card"
+    const result = envelope(turnId, "tool", "raw tool output marker")
+    await save(store, threadId, [
+      { type: "turn_started", turnId, inputItemId: "input_tool" },
+      { type: "response_item", item: result },
+      {
+        type: "item_completed",
+        turnId,
+        item: {
+          type: "file_read",
+          itemId,
+          toolCallId: `call_${turnId}`,
+          name: "read_file",
+          path: "src/retry.ts",
+          input: { path: "src/retry.ts" },
+          requiresPermission: false,
+          resultItemId: result.id,
+          content: { kind: "text", text: "raw tool output marker" },
+          error: { code: "ETIMEDOUT", message: "Timed out" },
+        },
+      },
+      completed(turnId),
+    ])
+    const reopened = new JsonlThreadStore({ root })
+    const location = {
+      rolloutId: threadId,
+      turnId,
+      itemId,
+      resultItemId: result.id,
+    }
+    for (const searchTerm of ["read_file", "retry.ts", "ETIMEDOUT"]) {
+      expect(
+        (await reopened.searchThreads({ searchTerm, limit: 5 })).matches,
+      ).toEqual([])
+      expect(
+        (
+          await reopened.searchThreads({
+            searchTerm,
+            toolActivity: true,
+            limit: 5,
+          })
+        ).matches,
+      ).toMatchObject([{ location }])
+    }
+    expect(
+      (
+        await reopened.searchThreads({
+          searchTerm: "raw tool output marker",
+          toolActivity: true,
+          limit: 5,
+        })
+      ).matches,
+    ).toEqual([])
+    expect(
+      (
+        await reopened.searchThreadOccurrences({
+          threadId,
+          searchTerm: "retry.ts",
+          toolActivity: true,
+          limit: 5,
+        })
+      )?.occurrences,
+    ).toMatchObject([{ turnId, itemId, resultItemId: result.id }])
+    const page = await reopened.readDisplayLocation(threadId, location, {})
+    expect(
+      page?.records.some(
+        ({ item }) =>
+          item.type === "item_completed" && item.item.itemId === itemId,
+      ),
+    ).toBe(true)
+    expect(
+      (await reopened.readTranscriptItem(threadId, result.id))?.record.item,
+    ).toEqual({ type: "response_item", item: result })
+  })
+
   it("opens a body match in the requested history version and preserves forked source records", async () => {
     const { root, store } = await setup()
     const threadId = "session_location"

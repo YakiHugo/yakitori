@@ -1544,6 +1544,7 @@ export class JsonlThreadStore implements ThreadStore {
   async searchThreadOccurrences(input: {
     readonly threadId: string
     readonly searchTerm: string
+    readonly toolActivity?: boolean
     readonly cursor?: string
     readonly limit: number
   }) {

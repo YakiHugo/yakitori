@@ -83,6 +83,7 @@ export type ApiClearGoalResponse = Readonly<{ goal: null }>
 
 export type ApiSearchSessionsRequest = {
   readonly archived?: boolean
+  readonly toolActivity?: boolean
   readonly searchTerm: string
   readonly limit?: number
   readonly cursor?: string
@@ -92,6 +93,7 @@ export type HistoryLocation = Readonly<{
   rolloutId: string
   turnId: string
   itemId: string
+  resultItemId?: string
 }>
 
 export type ApiSearchSessionsResponse = Readonly<{
@@ -107,6 +109,7 @@ export type ApiSearchSessionsResponse = Readonly<{
 export type ApiSearchSessionOccurrencesRequest = {
   readonly sessionId: string
   readonly searchTerm: string
+  readonly toolActivity?: boolean
   readonly limit?: number
   readonly cursor?: string
 }
@@ -115,6 +118,7 @@ export type ApiSearchSessionOccurrencesResponse = {
   readonly data: readonly Readonly<{
     turnId: string
     itemId: string
+    resultItemId?: string
     snippet: string
     snippetMatchRange: Readonly<{ start: number; end: number }>
   }>[]
