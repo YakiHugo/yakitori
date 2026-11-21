@@ -310,7 +310,7 @@ describe("bounded file tools", () => {
           message: `Cannot create ${path} because the file already exists.`,
         })
         expect(result.content).toContain(
-          "Use a non-empty oldString to edit it, or write_file for an intentional whole-file replacement.",
+          "Use a non-empty oldString to edit the existing file.",
         )
         expect(await readFile(join(workspace, path), "utf8")).toBe(content)
       }

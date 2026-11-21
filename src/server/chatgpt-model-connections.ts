@@ -89,6 +89,7 @@ export function createChatGPTModelConnections(input: {
           const previous = JSON.stringify(await current.listModels())
           current = createConfiguredModelsManager({
             provider: providerId,
+            catalogProvider: "chatgpt-plan",
             wireApi: "openai_responses",
             models: catalog.models,
           })
@@ -152,13 +153,13 @@ export function createChatGPTModelConnections(input: {
           capabilities: {
             remoteCompaction: false,
             nativePdf: false,
-            tools: { supportsCustomTools: false },
+            tools: { supportsCustomTools: true },
           },
         },
         models,
         continuationScope: scope,
         // The preview has no remote compaction, warmup or native tool_search.
-        // Yakitori keeps its own loop and emits ordinary local function tools.
+        // Yakitori executes local function and custom tools in its namespace.
         // https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
         createTurnStream() {
           const stream = createChatGPTPlanProvider(options)

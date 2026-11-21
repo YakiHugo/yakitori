@@ -135,23 +135,25 @@ function toolInstructionsSection(
         : [],
     ),
     names.has("read_file")
-      ? "Use read_file to read files; continue paginated or truncated instruction reads."
+      ? "read_file supports paginated reads. Continue reading when instruction files are truncated."
       : "",
     names.has("glob")
-      ? "Prefer glob for bounded file-pattern searches. It uses ripgrep for file discovery and is the dedicated-tool counterpart of model guidance recommending rg --files."
+      ? "glob finds files by path pattern using ripgrep."
       : "",
     names.has("grep")
-      ? "Prefer grep for bounded content searches. It uses ripgrep, so model guidance recommending rg for search performance also applies here."
+      ? "grep searches file contents using ripgrep."
       : "",
     names.has("apply_patch")
       ? "Use apply_patch for source patches, following its schema."
       : "",
-    names.has("edit_file") ? "Use edit_file for targeted replacements." : "",
+    names.has("edit_file")
+      ? "edit_file replaces matching text. To create a new file, pass an empty oldString and its contents as newString."
+      : "",
     names.has("write_file")
-      ? "Use write_file for intentional whole-file writes."
+      ? "write_file creates files and can intentionally replace whole files."
       : "",
     names.has("exec_command")
-      ? "Use exec_command for git, package managers, builds, and tests. For searches, use it when shell pipelines or unsupported search options are needed, or when a suitable dedicated search tool is unavailable in this step. Follow the current permission policy."
+      ? "exec_command can read and search text, run pipelines, invoke git and package managers, and run builds and tests. Choose the available read or search method that fits the task. Follow the current permission policy."
       : "",
     names.has("exec_command")
       ? "exec_command runs shell text, not the JavaScript tool-composition examples in vendor prompts."

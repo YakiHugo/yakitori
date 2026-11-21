@@ -105,8 +105,8 @@ export function createConfiguredModelsManager(input: {
       // implementation. grok-build Responses currently uses FunctionTool only.
       const nativeResponses =
         input.wireApi === "openai_responses" &&
-        input.catalogProvider === "openai" &&
-        known !== undefined
+        (input.catalogProvider === "openai" ||
+          input.catalogProvider === "chatgpt-plan")
       const nativeMessages =
         input.wireApi === "anthropic_messages" &&
         input.catalogProvider === "anthropic" &&
