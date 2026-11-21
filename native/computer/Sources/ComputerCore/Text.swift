@@ -93,7 +93,7 @@ func insertTextValue(_ text: String, element: AXUIElement, replace: Bool, checkp
     return ["text_route": "accessibility_value", "value_matches": true]
 }
 
-func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement) async throws -> [String: Any] {
+func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElement, beforeDispatch: () throws -> Void) async throws -> [String: Any] {
     switch action {
     case "press", "perform_action":
         let name: String
@@ -107,11 +107,13 @@ func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElem
               (available as? [String] ?? []).contains(name) else {
             throw ComputerFailure("action_refused", "The target does not currently expose \(name).")
         }
+        try beforeDispatch()
         let error = AXUIElementPerformAction(element, name as CFString)
         guard error == .success else { throw ComputerFailure("action_refused", "\(name) failed (\(error.rawValue)); observe before another input.") }
         return [:]
     case "set_value":
         guard let value = args["value"], value is String || value is NSNumber else { throw ComputerFailure("invalid_arguments", "set_value requires a string, number, or boolean value.") }
+        try beforeDispatch()
         let error = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef)
         guard error == .success else { throw ComputerFailure("action_refused", "AXValue was refused (\(error.rawValue)); the app may not support direct value changes.") }
         let actual = attribute(element, kAXValueAttribute)
@@ -122,6 +124,7 @@ func accessibilityInput(_ action: String, args: [String: Any], element: AXUIElem
             throw ComputerFailure("invalid_arguments", "select_text requires readable text, text, and selection_type=text/cursor_before/cursor_after.")
         }
         let range = try selectedRange(in: value, text: text, prefix: args["prefix"] as? String, suffix: args["suffix"] as? String, kind: kind)
+        try beforeDispatch()
         try await confirmSelection(range, element: element)
         return ["selection": ["location": range.location, "length": range.length]]
     default: preconditionFailure("Unexpected AX input action")
