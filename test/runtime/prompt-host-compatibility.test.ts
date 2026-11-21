@@ -43,8 +43,8 @@ describe("narrow prompt host adaptations", () => {
   ] as const)("grounds %s in Yakitori user messages and file tools", (id) => {
     const text = getInstructionProfile(id).text
     expect(text).toContain("request, denoted within the <user_query> tag")
-    expect(text).toContain("`edit_file` replaces existing text")
-    expect(text).toContain("`write_file` creates files")
+    expect(text).toContain("tool schemas and guidance in the current request")
+    expect(text).not.toMatch(/\b(?:edit_file|write_file)\b/)
     expect(text).not.toContain("~/.grok/docs")
   })
 

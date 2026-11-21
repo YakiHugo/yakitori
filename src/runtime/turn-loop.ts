@@ -605,7 +605,7 @@ async function executeTurn(input: {
     if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
       input.session.emitWarning(
         input.execution,
-        `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using generic model settings${turn.requestSettings.modelInfo.fileEditingToolType === "none" ? "; file editing tools are unavailable" : " and coding tools"}.`,
+        `Complete model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using defaults for unreported settings.`,
       )
     }
     const stream = modelSession?.stream ?? input.options.stream

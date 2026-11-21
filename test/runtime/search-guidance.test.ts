@@ -20,9 +20,9 @@ it.each([
   { label: "shell only", names: ["exec_command"] },
   {
     label: "dedicated tools and shell",
-    names: ["grep", "glob", "exec_command"],
+    names: ["read_file", "grep", "glob", "exec_command"],
   },
-])("maps search preferences to the actual request: $label", async ({
+])("describes the available read and search methods: $label", async ({
   names,
 }) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-search-guidance-"))
@@ -88,36 +88,14 @@ it.each([
         ),
       )
       .join("\n")
-    if (names.includes("grep")) {
-      expect(guidance).toContain("Vendor tool Grep corresponds to grep.")
-      expect(guidance).toContain("Prefer grep for bounded content searches.")
-      expect(guidance).toContain(
-        "model guidance recommending rg for search performance also applies here",
+    for (const name of ["read_file", "grep", "glob", "exec_command"]) {
+      expect(new RegExp(`\\b${name}\\b`).test(guidance)).toBe(
+        names.includes(name),
       )
-    } else {
-      expect(guidance).not.toMatch(/\bgrep\b/)
-    }
-    if (names.includes("glob")) {
-      expect(guidance).toContain("Vendor tool Glob corresponds to glob.")
-      expect(guidance).toContain(
-        "Prefer glob for bounded file-pattern searches.",
-      )
-      expect(guidance).toContain(
-        "counterpart of model guidance recommending rg --files",
-      )
-    } else {
-      expect(guidance).not.toContain("glob")
     }
     if (names.includes("exec_command")) {
-      expect(guidance).toContain(
-        "shell pipelines or unsupported search options",
-      )
-      expect(guidance).toContain(
-        "a suitable dedicated search tool is unavailable in this step",
-      )
-      expect(guidance).toContain("Follow the current permission policy.")
-    } else {
-      expect(guidance).not.toContain("exec_command")
+      expect(guidance).toContain("exec_command can read and search text")
+      expect(guidance).toContain("method that fits the task")
     }
   } finally {
     await manager.shutdown()

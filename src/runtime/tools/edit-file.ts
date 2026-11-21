@@ -409,8 +409,7 @@ function fileExistsFailure(path: string): ToolExecutionResult {
     "file_exists",
     `Cannot create ${path} because the file already exists.`,
     {
-      suggestion:
-        "Use a non-empty oldString to edit it, or write_file for an intentional whole-file replacement.",
+      suggestion: "Use a non-empty oldString to edit the existing file.",
     },
   )
 }

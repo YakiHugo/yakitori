@@ -253,10 +253,27 @@ export function resolveModel(input: {
       usedFallbackModelMetadata: false,
     }
   }
+  const fallback = resolveFallbackModel(input)
+  const provider = input.provider.toLowerCase()
+  // ID-only catalogs omit the Codex editing format. Discovery can override
+  // these defaults with the subscription account's actual capabilities.
+  // https://github.com/openai/codex/blob/bb5b9c6240136de8ff4d30215e2341c44559aa04/codex-rs/models-manager/models.json
+  if (
+    (provider === "openai" ||
+      provider === "codex" ||
+      provider === "chatgpt-plan") &&
+    (input.model === "gpt-6.2-sol" || input.model === "gpt-6.2-astra")
+  ) {
+    return {
+      ...fallback,
+      applyPatchToolType: "custom",
+      fileEditingToolType: "none",
+      supportsCustomTools: true,
+    }
+  }
   // Kimi Code binds one shared agent profile independently of its model alias.
   // New aliases inherit that profile, never another SKU's limits or efforts.
-  const fallback = resolveFallbackModel(input)
-  return input.provider.toLowerCase() === "kimi-code"
+  return provider === "kimi-code"
     ? {
         ...fallback,
         instructionProfileId: "kimi-code",
