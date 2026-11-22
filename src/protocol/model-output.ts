@@ -1,4 +1,5 @@
 export type AssistantTextPurpose = "commentary" | "final_answer"
+export type ReasoningRepresentation = "summary" | "raw" | "redacted"
 
 export type ModelOutputSource = Readonly<{
   callId: string
@@ -8,7 +9,7 @@ export type ModelOutputSource = Readonly<{
 export type ModelOutputPresentation = Readonly<{
   source?: ModelOutputSource
   purpose?: AssistantTextPurpose
-  representation?: "summary"
+  representation?: ReasoningRepresentation
 }>
 
 // Display IDs identify parts of one persisted conversation item. The same
@@ -17,8 +18,13 @@ export function modelOutputItemId(
   itemId: string,
   kind: "assistant" | "reasoning",
   partIndex = 0,
+  representation?: ReasoningRepresentation,
 ): string {
-  const base = kind === "reasoning" ? `${itemId}_reasoning` : itemId
+  const suffix =
+    representation === "raw" || representation === "redacted"
+      ? `_${representation}`
+      : ""
+  const base = kind === "reasoning" ? `${itemId}_reasoning${suffix}` : itemId
   return partIndex === 0 ? base : `${base}_part_${partIndex}`
 }
 

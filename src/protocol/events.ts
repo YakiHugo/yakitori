@@ -5,7 +5,10 @@ import type {
 } from "./conversation.ts"
 import type { ContextExcerpt } from "./input-context.ts"
 import type { InputSource, ThreadMessageProvenance } from "./input-queue.ts"
-import type { ModelOutputSource } from "./model-output.ts"
+import type {
+  ModelOutputSource,
+  ReasoningRepresentation,
+} from "./model-output.ts"
 import type { InputContent } from "./user-input.ts"
 export const EventType = {
   SessionCreated: "session.created",
@@ -283,7 +286,8 @@ export type ReasoningExecutionItem = Readonly<{
   itemId: string
   text: string
   source?: ModelOutputSource
-  representation?: "summary"
+  representation?: ReasoningRepresentation
+  durationMs?: number
   providerMetadata?: EventMetadata
 }>
 

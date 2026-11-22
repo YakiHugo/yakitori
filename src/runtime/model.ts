@@ -1,5 +1,8 @@
 import type { ModelFailureKind } from "../protocol/model-failure.ts"
-import type { AssistantTextPurpose } from "../protocol/model-output.ts"
+import type {
+  AssistantTextPurpose,
+  ReasoningRepresentation,
+} from "../protocol/model-output.ts"
 
 export type { ModelFailureKind } from "../protocol/model-failure.ts"
 
@@ -234,7 +237,7 @@ export type ModelStreamReasoningDeltaEvent = Readonly<{
   text: string
   itemId?: string
   partIndex?: number
-  representation?: "summary"
+  representation?: ReasoningRepresentation
 }>
 
 export type ModelStreamOutputItemEvent = Readonly<{

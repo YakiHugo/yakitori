@@ -712,6 +712,10 @@ async function* streamOpenAI(
     failureStage = "response_body"
     const completedItems = new Map<number, Response["output"][number]>()
     const startedItems = new Map<number, Response["output"][number]>()
+    const rawReasoning = new Map<
+      string,
+      { outputIndex: number; parts: Map<number, string> }
+    >()
     const fragments = new Map<
       string,
       {
@@ -769,11 +773,10 @@ async function* streamOpenAI(
           "OpenAI returned an event after its terminal response.",
         )
       // These are semantic payloads, not ignorable progress notifications.
-      // Their asset/native-reasoning contracts need dedicated IR support.
+      // Their asset contracts need dedicated IR support.
       if (
         event.type.startsWith("response.audio.") ||
-        event.type.startsWith("response.image_generation_call.") ||
-        event.type.startsWith("response.reasoning_text.")
+        event.type.startsWith("response.image_generation_call.")
       )
         throw new OpenAIProtocolError(
           `Unsupported OpenAI content event: ${event.type}.`,
@@ -781,13 +784,41 @@ async function* streamOpenAI(
       if (
         (event.type === "response.content_part.added" ||
           event.type === "response.content_part.done") &&
-        !["output_text", "refusal", "summary_text"].includes(event.part.type)
+        !["output_text", "refusal", "summary_text", "reasoning_text"].includes(
+          event.part.type,
+        )
       )
         throw new OpenAIProtocolError(
           `Unsupported OpenAI content part: ${event.part.type}.`,
         )
       if (event.type === "response.output_item.added") {
         startedItems.set(event.output_index, event.item)
+        continue
+      }
+      if (
+        event.type === "response.reasoning_text.delta" ||
+        event.type === "response.reasoning_text.done"
+      ) {
+        if (completedItems.has(event.output_index)) continue
+        const fragment = rawReasoning.get(event.item_id) ?? {
+          outputIndex: event.output_index,
+          parts: new Map<number, string>(),
+        }
+        const previous = fragment.parts.get(event.content_index) ?? ""
+        const text =
+          event.type === "response.reasoning_text.delta"
+            ? previous + event.delta
+            : event.text
+        fragment.parts.set(event.content_index, text)
+        rawReasoning.set(event.item_id, fragment)
+        if (text.startsWith(previous) && text.length > previous.length)
+          yield {
+            type: "reasoning_delta",
+            representation: "raw",
+            text: text.slice(previous.length),
+            partIndex: event.content_index,
+            ...(request.streamOutputItems ? { itemId: event.item_id } : {}),
+          }
         continue
       }
       if (
@@ -901,6 +932,7 @@ async function* streamOpenAI(
               request.continuationScope,
               request.target.model,
               new Set([outputItemId(item)].filter((id) => id !== undefined)),
+              rawReasoning,
             )
             if (result.incompleteToolCalls) break
             nextOutputIndex += 1
@@ -1027,6 +1059,14 @@ async function* streamOpenAI(
             })
           }
         }
+        for (const [id, fragment] of rawReasoning) {
+          if (!outputByIndex.has(fragment.outputIndex))
+            outputByIndex.set(fragment.outputIndex, {
+              type: "reasoning",
+              id,
+              summary: [],
+            })
+        }
         const response = {
           ...event.response,
           output: [...outputByIndex.entries()]
@@ -1051,6 +1091,7 @@ async function* streamOpenAI(
               request.target.model,
               completedIds,
               responseProfile,
+              rawReasoning,
             ),
           }
         }
@@ -1568,6 +1609,7 @@ export function fromOpenAIResponse(
   model = response.model,
   completedItemIds: ReadonlySet<string> = new Set(),
   responseProfile: OpenAIResponseProfile = "openai",
+  rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
 ): ModelResponse {
   if (response.status === "cancelled") {
     throw new OpenAIProtocolError(
@@ -1624,6 +1666,7 @@ export function fromOpenAIResponse(
           }),
         )
       : completedItemIds,
+    rawReasoning,
   )
   if (
     result.incompleteToolCalls &&
@@ -1689,6 +1732,7 @@ function fromOpenAIOutput(
   continuationScope: string | undefined,
   model: string,
   completedItemIds: ReadonlySet<string>,
+  rawReasoning?: ReadonlyMap<string, { parts: ReadonlyMap<number, string> }>,
 ): {
   content: ModelContentBlock[]
   incompleteToolCalls: boolean
@@ -1739,14 +1783,36 @@ function fromOpenAIOutput(
       continue
     }
     if (item.type === "reasoning") {
-      for (const [index, summary] of (item.summary.length > 0
-        ? item.summary
-        : [{ text: "" }]
-      ).entries()) {
+      const raw = new Map(rawReasoning?.get(item.id)?.parts)
+      for (const [index, part] of (item.content ?? []).entries())
+        if (part.text.length > 0 || !raw.has(index)) raw.set(index, part.text)
+      const rawParts = [...raw.entries()].sort(
+        ([left], [right]) => left - right,
+      )
+      const visible = [
+        ...item.summary.map(({ text }) => ({
+          text,
+          representation: "summary" as const,
+        })),
+        ...rawParts.map(([, text]) => ({
+          text,
+          representation: "raw" as const,
+        })),
+      ]
+      const parts = visible.some(({ text }) => text.length > 0)
+        ? visible
+        : [
+            {
+              text: "",
+              representation: item.encrypted_content
+                ? ("redacted" as const)
+                : ("summary" as const),
+            },
+          ]
+      for (const [index, part] of parts.entries()) {
         content.push({
           type: "reasoning",
-          text: summary.text,
-          representation: "summary",
+          ...part,
           ...(index === 0
             ? {
                 providerMetadata: {
@@ -1953,9 +2019,12 @@ function toOpenAIReasoningItem(
     type: "reasoning",
     id: metadata.id,
     summary:
-      block.text.length === 0
+      block.text.length === 0 || block.representation === "raw"
         ? []
         : [{ type: "summary_text", text: block.text }],
+    ...(block.representation === "raw" && block.text.length > 0
+      ? { content: [{ type: "reasoning_text" as const, text: block.text }] }
+      : {}),
     ...(typeof encryptedContent === "string"
       ? { encrypted_content: encryptedContent }
       : {}),

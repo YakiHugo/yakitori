@@ -1690,6 +1690,7 @@ async function executeTurnModelLoop(
       const committedContent: ModelContentBlock[] = []
       const committedNative: ModelNativeItem[] = []
       const committedCallIds = new Set<string>()
+      const reasoningTimes = new Map<string, { first: number; last: number }>()
       if (!continuingAnswer) answerItemIds.length = 0
       let answerStartIndex = answerItemIds.length
       let explicitAnswer = false
@@ -1728,7 +1729,7 @@ async function executeTurnModelLoop(
         await input.session.recordConversationItems(input.execution, [item])
         await input.session.recordItemCompletions(
           input.execution,
-          completedResponseItems(item),
+          completedResponseItems(item, reasoningTimes),
         )
         if (content.some((block) => block.type === "tool_call")) {
           answerItemIds.length = 0
@@ -1764,6 +1765,7 @@ async function executeTurnModelLoop(
       const response = await consumeModelStream({
         request: { ...request, signal: samplingSignal },
         discardOutput: (itemIds) => {
+          for (const itemId of itemIds) reasoningTimes.delete(itemId)
           // Steering replaces provisional output in the same Turn. Explicit
           // interruption retains its partial prefix for the stopped transcript.
           if (!input.signal.aborted)
@@ -1795,12 +1797,20 @@ async function executeTurnModelLoop(
         emitModelStream: (event) => {
           if (event.kind === "assistant" && event.delta.trim().length > 0)
             latency.firstUsefulOutputMs ??= elapsed()
+          if (event.kind === "reasoning" && event.delta.length > 0) {
+            const now = performance.now()
+            const prior = reasoningTimes.get(event.itemId)
+            if (prior === undefined)
+              reasoningTimes.set(event.itemId, { first: now, last: now })
+            else prior.last = now
+          }
           input.session.emitModelStream(input.execution, event)
         },
         emitWarning: (message, diagnostic) =>
           input.session.emitWarning(input.execution, message, diagnostic),
         onOperationalFailure: input.options.onOperationalFailure,
         onRetry(committed) {
+          reasoningTimes.clear()
           input.session.invalidateRequestStartedAt(input.execution)
           if (committed) {
             // A transport retry starts another attempt, not a Length answer
@@ -2492,14 +2502,8 @@ async function consumeModelStream(input: {
         if (itemId === undefined)
           throw new Error("Committed output requires a display item id.")
         await input.onOutputItem(event.content, itemId, event.native)
-        const indexes = { assistant: 0, reasoning: 0 }
-        for (const block of event.content) {
-          if (block.type !== "text" && block.type !== "reasoning") continue
-          const kind = block.type === "text" ? "assistant" : "reasoning"
-          provisionalItems.delete(
-            modelOutputItemId(itemId, kind, indexes[kind]++),
-          )
-        }
+        for (const part of displayOutputParts(itemId, event.content))
+          provisionalItems.delete(part.itemId)
         continue
       }
       if (event.type !== "response") {
@@ -2509,7 +2513,12 @@ async function consumeModelStream(input: {
           event.type === "reasoning_delta" ? "reasoning" : "assistant"
         const parentItemId = displayItemId(event.itemId)
         if (parentItemId !== undefined) {
-          const itemId = modelOutputItemId(parentItemId, kind, event.partIndex)
+          const itemId = modelOutputItemId(
+            parentItemId,
+            kind,
+            event.partIndex,
+            event.type === "reasoning_delta" ? event.representation : undefined,
+          )
           provisionalItems.add(itemId)
           input.emitModelStream?.({
             itemId,
@@ -3017,8 +3026,33 @@ async function compactLiveHistory(
   }
 }
 
+function* displayOutputParts(
+  itemId: string,
+  content: readonly ModelContentBlock[],
+) {
+  const indexes = { assistant: 0, summary: 0, raw: 0, redacted: 0 }
+  for (const block of content) {
+    if (block.type === "text")
+      yield {
+        block,
+        itemId: modelOutputItemId(itemId, "assistant", indexes.assistant++),
+      }
+    else if (block.type === "reasoning")
+      yield {
+        block,
+        itemId: modelOutputItemId(
+          itemId,
+          "reasoning",
+          indexes[block.representation ?? "summary"]++,
+          block.representation,
+        ),
+      }
+  }
+}
+
 function completedResponseItems(
   response: ResponseItemEnvelope,
+  reasoningTimes: Map<string, { first: number; last: number }>,
 ): readonly CompletedExecutionItem[] {
   if (response.item.role !== "assistant") return []
   const providerMetadata = response.providerMetadata
@@ -3029,13 +3063,14 @@ function completedResponseItems(
           callId: response.item.response.callId,
           itemId: response.id,
         }
-  const indexes = { assistant: 0, reasoning: 0 }
-  return response.item.content.flatMap<CompletedExecutionItem>((block) => {
-    if (block.type !== "text" && block.type !== "reasoning") return []
-    const kind = block.type === "text" ? "assistant" : "reasoning"
-    const itemId = modelOutputItemId(response.id, kind, indexes[kind]++)
-    return [
-      {
+  return Array.from(
+    displayOutputParts(response.id, response.item.content),
+    ({ block, itemId }): CompletedExecutionItem => {
+      const time = reasoningTimes.get(itemId)
+      reasoningTimes.delete(itemId)
+      const durationMs =
+        time === undefined ? 0 : Math.floor(time.last - time.first)
+      return {
         ...(block.type === "text"
           ? { type: "agent_message" as const, content: [block] }
           : {
@@ -3044,13 +3079,14 @@ function completedResponseItems(
               ...(block.representation === undefined
                 ? {}
                 : { representation: block.representation }),
+              ...(durationMs === 0 ? {} : { durationMs }),
             }),
         itemId,
         ...(source === undefined ? {} : { source }),
         ...(providerMetadata === undefined ? {} : { providerMetadata }),
-      },
-    ]
-  })
+      }
+    },
+  )
 }
 
 function completeCompactionItem(

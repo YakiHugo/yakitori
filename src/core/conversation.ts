@@ -14,11 +14,12 @@ export type {
 } from "../protocol/conversation.ts"
 
 import type { JsonObject, JsonValue } from "../kernel/events.ts"
+import type { ReasoningRepresentation } from "../protocol/model-output.ts"
 import type { ContextExcerpt } from "./input-context.ts"
 export type ModelReasoningBlock = Readonly<{
   type: "reasoning"
   text: string
-  representation?: "summary"
+  representation?: ReasoningRepresentation
   providerMetadata?: JsonObject
 }>
 // Opaque history owned by one provider/account. Convert it through that owner

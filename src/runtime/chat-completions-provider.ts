@@ -20,6 +20,7 @@ import type {
 } from "openai/resources/chat/completions/completions"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
+import type { ReasoningRepresentation } from "../protocol/model-output.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
 import { chatCompletionsIncompatibility } from "./chat-completions-compatibility.ts"
 import {
@@ -445,7 +446,38 @@ async function* streamChatCompletions(
     stage = "response_body"
     let completionId: string | undefined
     let text = ""
-    let reasoning = ""
+    const reasoningParts: {
+      text: string
+      representation: ReasoningRepresentation
+      partIndex: number
+    }[] = []
+    const reasoningIndexes = { raw: 0, summary: 0, redacted: 0 }
+    const addReasoningPart = (representation: ReasoningRepresentation) => {
+      const part = {
+        text: "",
+        representation,
+        partIndex: reasoningIndexes[representation]++,
+      }
+      reasoningParts.push(part)
+      return part
+    }
+    let plainReasoning: (typeof reasoningParts)[number] | undefined
+    const detailParts = new Map<number, (typeof reasoningParts)[number]>()
+    const reasoningDelta = (
+      part: (typeof reasoningParts)[number],
+      fragment: string,
+    ): ModelStreamEvent => {
+      part.text += fragment
+      return {
+        type: "reasoning_delta",
+        text: fragment,
+        representation: part.representation,
+        ...(part.partIndex === 0 ? {} : { partIndex: part.partIndex }),
+        ...(request.streamOutputItems && completionId !== undefined
+          ? { itemId: `${completionId}_0` }
+          : {}),
+      }
+    }
     let refusal = ""
     let nativeText = ""
     let nativeContentParts: JsonObject[] | undefined
@@ -536,6 +568,7 @@ async function* streamChatCompletions(
             )
           annotations.push(...delta.annotations)
         }
+        const structuredText: string[] = []
         if (delta.reasoning_details !== undefined) {
           if (
             !Array.isArray(delta.reasoning_details) ||
@@ -581,6 +614,32 @@ async function* streamChatCompletions(
               }
             }
             reasoningDetails[index] = previous
+            const representation =
+              previous.type === "reasoning.summary"
+                ? "summary"
+                : previous.type === "reasoning.text"
+                  ? "raw"
+                  : previous.type === "reasoning.encrypted"
+                    ? "redacted"
+                    : undefined
+            if (representation === undefined) continue
+            const detailText =
+              representation === "summary" ? fragment.summary : fragment.text
+            const existing = detailParts.get(index)
+            if (representation === "redacted") {
+              if (existing !== undefined) continue
+              const part = addReasoningPart(representation)
+              detailParts.set(index, part)
+              yield reasoningDelta(part, "")
+            } else if (
+              typeof detailText === "string" &&
+              detailText.length > 0
+            ) {
+              const part = existing ?? addReasoningPart(representation)
+              detailParts.set(index, part)
+              structuredText.push(detailText)
+              yield reasoningDelta(part, detailText)
+            }
           }
         }
         // Mistral switches from thinking/text parts to plain strings within a
@@ -630,16 +689,19 @@ async function* streamChatCompletions(
                 })
                 .join("")
               type = "reasoning_delta"
-              reasoning += fragment
             } else {
               throw new ChatCompletionsProtocolError(
                 "Unsupported completion content part.",
               )
             }
             appendChatContentPart(nativeContentParts, part)
-            if (fragment.length > 0)
+            if (fragment.length === 0) continue
+            if (type === "reasoning_delta") {
+              plainReasoning ??= addReasoningPart("raw")
+              yield reasoningDelta(plainReasoning, fragment)
+            } else
               yield {
-                type,
+                type: "delta",
                 text: fragment,
                 ...(request.streamOutputItems && completionId !== undefined
                   ? { itemId: `${completionId}_0` }
@@ -647,6 +709,7 @@ async function* streamChatCompletions(
               }
           }
         }
+        const plainFragments = new Set<string>()
         for (const [field, type] of [
           ["content", "delta"],
           ["reasoning_content", "reasoning_delta"],
@@ -659,9 +722,20 @@ async function* streamChatCompletions(
           if (typeof fragment !== "string")
             throw new ChatCompletionsProtocolError(`Invalid ${field} delta.`)
           if (type === "reasoning_delta") {
-            reasoning += fragment
             nativeReasoning[field] =
               String(nativeReasoning[field] ?? "") + fragment
+            // Some endpoints mirror detail text in the flat reasoning fields.
+            if (
+              fragment.length > 0 &&
+              !plainFragments.has(fragment) &&
+              !structuredText.includes(fragment) &&
+              fragment !== structuredText.join("")
+            ) {
+              plainFragments.add(fragment)
+              plainReasoning ??= addReasoningPart("raw")
+              yield reasoningDelta(plainReasoning, fragment)
+            }
+            continue
           } else {
             text += fragment
             if (field === "refusal") refusal += fragment
@@ -793,11 +867,18 @@ async function* streamChatCompletions(
         "Invalid completion finish reason.",
       )
     const content: ModelContentBlock[] = []
-    if (reasoning.length > 0)
+    if (
+      reasoningParts.length === 0 &&
+      typeof nativeReasoning.encrypted_content === "string" &&
+      nativeReasoning.encrypted_content.length > 0
+    )
+      addReasoningPart("redacted")
+    for (const part of reasoningParts)
       content.push({
         type: "reasoning",
-        text: reasoning,
-        ...(portableChat
+        text: part.text,
+        representation: part.representation,
+        ...(portableChat || part !== plainReasoning
           ? {}
           : {
               providerMetadata: {

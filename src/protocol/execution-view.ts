@@ -62,7 +62,8 @@ export type ExecutionEntry =
   | {
       readonly kind: "reasoning"
       readonly source?: ModelOutputPresentation["source"]
-      readonly representation?: "summary"
+      readonly representation?: ModelOutputPresentation["representation"]
+      readonly durationMs?: number
       readonly itemId: string
       readonly turnId: string
       readonly text: string

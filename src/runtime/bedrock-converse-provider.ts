@@ -453,8 +453,24 @@ function parseContent(
   return parts.flatMap((part): ModelContentBlock[] => {
     if (typeof part.text === "string" && Object.keys(part).length === 1)
       return [{ type: "text", text: part.text }]
-    if (isJsonObject(part.reasoningContent) && Object.keys(part).length === 1)
-      return [] // Opaque, retained only in owner-fenced native history.
+    if (isJsonObject(part.reasoningContent) && Object.keys(part).length === 1) {
+      const { reasoningText, redactedContent } = part.reasoningContent
+      if (
+        isJsonObject(reasoningText) &&
+        typeof reasoningText.text === "string" &&
+        reasoningText.text.length > 0
+      )
+        return [
+          {
+            type: "reasoning",
+            text: reasoningText.text,
+            representation: "raw",
+          },
+        ]
+      if (typeof redactedContent === "string" && redactedContent.length > 0)
+        return [{ type: "reasoning", text: "", representation: "redacted" }]
+      return []
+    }
     if (isJsonObject(part.toolUse) && Object.keys(part).length === 1) {
       const call = part.toolUse
       if (
