@@ -23,10 +23,10 @@ vi.mock("node:os", async (original) => ({
 }))
 
 it.each([
-  "doubao-seed-2-1-pro-260915",
-  "doubao-seed-evolving",
-  "doubao-seed-2-1-turbo-260628",
-])("persists %s encrypted tool continuation across reopening without leaking to renderer or another account/provider", async (model) => {
+  ["doubao-seed-2-1-pro-260915", "Inspect first"],
+  ["doubao-seed-evolving", ""],
+  ["doubao-seed-2-1-turbo-260628", "Inspect first"],
+])("persists %s encrypted tool continuation across reopening without leaking to renderer or another account/provider", async (model, reasoning) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-ark-continuation-"))
   home.path = root
   const bodies: string[] = []
@@ -39,7 +39,7 @@ it.each([
       const chunks =
         bodies.length === 1
           ? [
-              { reasoning_content: "Inspect first" },
+              { reasoning_content: reasoning },
               {
                 content: "",
                 reasoning_content: "",
@@ -134,11 +134,20 @@ it.each([
     expect(bodies[1]).toContain('"encrypted_content":"opaque-ark-secret"')
     const stored = await runtime.store.readThread(id)
     expect(JSON.stringify(stored?.rollout)).toContain("opaque-ark-secret")
-    expect(
-      JSON.stringify(
-        stored?.rollout.map((record) => mapRolloutEvent(record, id)),
-      ),
-    ).not.toContain("opaque-ark-secret")
+    const events = stored?.rollout.map((record) => mapRolloutEvent(record, id))
+    expect(JSON.stringify(events)).not.toContain("opaque-ark-secret")
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "item.completed",
+        data: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "reasoning",
+            text: reasoning,
+            representation: reasoning ? "raw" : "redacted",
+          }),
+        }),
+      }),
+    )
     await runtime.manager.shutdown()
     runtime = makeManager("account-a")
     const reopened = await runtime.manager.resumeThread(id)

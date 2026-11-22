@@ -147,12 +147,7 @@ async function* streamAnthropic(
   }
 
   const nativeThinking = request.providerOptions?.body.thinking
-  const thinkingDisplay =
-    isJsonObject(nativeThinking) &&
-    (nativeThinking.display === "updates" ||
-      nativeThinking.display === "summarized")
-      ? nativeThinking.display
-      : undefined
+  let thinkingDisplay: "summarized" | "updates" | undefined
   let stream: AsyncIterable<BetaRawMessageStreamEvent | RawMessageStreamEvent>
   let providerRequestId: string | undefined
   const customFallbackKeys = new Map(
@@ -484,6 +479,13 @@ async function* streamAnthropic(
       throw new AssetMediaError(
         "Media was not sent: thinking controls exceed the 32 MB Yakitori whole-request budget. Reduce other content; originals have not been changed.",
       )
+    const effectiveThinking = body.thinking
+    thinkingDisplay =
+      isJsonObject(effectiveThinking) &&
+      (effectiveThinking.display === "updates" ||
+        effectiveThinking.display === "summarized")
+        ? effectiveThinking.display
+        : undefined
     const pendingRequest =
       bindingBeta ||
       media.uploadedFiles.size > 0 ||
@@ -624,6 +626,15 @@ async function* streamAnthropic(
           completed: false,
           invalidInput: false,
         })
+        if (event.content_block.type === "redacted_thinking")
+          yield {
+            type: "reasoning_delta",
+            text: "",
+            representation: "redacted",
+            ...(request.streamOutputItems
+              ? { itemId: `${message.id}_block_${event.index}` }
+              : {}),
+          }
         continue
       }
       if (event.type === "content_block_delta") {
@@ -667,9 +678,12 @@ async function* streamAnthropic(
             text: event.delta.thinking,
             ...(thinkingDisplay === "updates"
               ? { purpose: "commentary" as const }
-              : thinkingDisplay === "summarized"
-                ? { representation: "summary" as const }
-                : {}),
+              : {
+                  representation:
+                    thinkingDisplay === "summarized"
+                      ? ("summary" as const)
+                      : ("raw" as const),
+                }),
             ...(request.streamOutputItems ? { itemId } : {}),
           }
         } else if (event.delta.type === "signature_delta") {
@@ -1193,15 +1207,26 @@ export function fromAnthropicMessage(
     if (!isRecord(block))
       throw new AnthropicProtocolError("Invalid Anthropic content block.")
     if (block.type === "thinking" && typeof block.thinking === "string") {
+      const signature =
+        typeof block.signature === "string" && block.signature.length > 0
+          ? block.signature
+          : undefined
+      const redacted = block.thinking === "" && signature !== undefined
+      const presentation =
+        !redacted && thinkingDisplay === "updates"
+          ? ({ type: "text", purpose: "commentary" } as const)
+          : ({
+              type: "reasoning",
+              representation: redacted
+                ? "redacted"
+                : thinkingDisplay === "summarized"
+                  ? "summary"
+                  : "raw",
+            } as const)
       content.push({
-        type: thinkingDisplay === "updates" ? "text" : "reasoning",
+        ...presentation,
         text: block.thinking,
-        ...(thinkingDisplay === "updates"
-          ? { purpose: "commentary" as const }
-          : thinkingDisplay === "summarized"
-            ? { representation: "summary" as const }
-            : {}),
-        ...(typeof block.signature === "string" && block.signature.length > 0
+        ...(signature !== undefined
           ? {
               providerMetadata: {
                 anthropic: {
@@ -1209,7 +1234,7 @@ export function fromAnthropicMessage(
                   ...(continuationScope === undefined
                     ? {}
                     : { scope: continuationScope }),
-                  signature: block.signature,
+                  signature,
                 },
               },
             }
@@ -1221,6 +1246,7 @@ export function fromAnthropicMessage(
       content.push({
         type: "reasoning",
         text: "",
+        representation: "redacted",
         providerMetadata: {
           anthropic: {
             provider,

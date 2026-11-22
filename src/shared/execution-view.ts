@@ -569,7 +569,7 @@ function reconcileExecution(
     ) {
       if (!authoritative)
         return [{ ...entry, status: "suspended", incomplete: true }]
-      return entry.text.length === 0 ? [] : [{ ...entry, status: "completed" }]
+      return hasStreamOutput(entry) ? [{ ...entry, status: "completed" }] : []
     }
     if (
       entry.kind === "tool" &&
@@ -1041,7 +1041,11 @@ function applyDurable(
             : item.text
         const sources =
           item.type === "agent_message" ? citationSources(item.content) : []
-        if (text.length === 0 && sources.length === 0)
+        if (
+          text.length === 0 &&
+          sources.length === 0 &&
+          !(item.type === "reasoning" && item.representation === "redacted")
+        )
           return removeItemEntry(next, item.itemId)
         const entry: ExecutionEntry =
           item.type === "agent_message"
@@ -1064,6 +1068,9 @@ function applyDurable(
                 ...(item.representation === undefined
                   ? {}
                   : { representation: item.representation }),
+                ...(item.durationMs === undefined
+                  ? {}
+                  : { durationMs: item.durationMs }),
                 itemId: item.itemId,
                 turnId: event.data.turnId,
                 text,
@@ -1248,6 +1255,15 @@ function removeItemEntry(
   }
 }
 
+function hasStreamOutput(
+  entry: Extract<ExecutionEntry, { kind: "assistant" | "reasoning" }>,
+): boolean {
+  return (
+    entry.text.length > 0 ||
+    (entry.kind === "reasoning" && entry.representation === "redacted")
+  )
+}
+
 function settleStreamingEntries(
   state: ExecutionViewState,
   turnId: string,
@@ -1263,7 +1279,7 @@ function settleStreamingEntries(
       return [entry]
     }
     changed = true
-    if (!preserveText || entry.text.length === 0) return []
+    if (!preserveText || !hasStreamOutput(entry)) return []
     return [{ ...entry, status: "completed" }]
   })
   if (!changed) return state
@@ -1383,7 +1399,11 @@ function projectActiveActivity(
     if (entry.kind === "permission" && entry.state !== "resolved") {
       return { kind: "waiting_permission", action: entry.action }
     }
-    if (entry.kind === "reasoning" && entry.status === "streaming") {
+    if (
+      entry.kind === "reasoning" &&
+      entry.status === "streaming" &&
+      entry.representation !== "redacted"
+    ) {
       streamingReasoning = true
     } else if (
       runningTool === undefined &&

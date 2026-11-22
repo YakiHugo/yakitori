@@ -410,12 +410,15 @@ function isReasoningItem(
       "providerMetadata",
       "source",
       "representation",
+      "durationMs",
     ]) &&
     isString(value.itemId) &&
     isString(value.text) &&
     isModelOutputSource(value.source) &&
-    (value.representation === undefined ||
-      value.representation === "summary") &&
+    isReasoningText(value.text, value.representation) &&
+    (value.durationMs === undefined ||
+      (isNonNegativeInteger(value.durationMs) &&
+        Number.isSafeInteger(value.durationMs))) &&
     (value.providerMetadata === undefined ||
       isJsonObject(value.providerMetadata))
   )
@@ -947,8 +950,7 @@ function isModelContentBlock(value: unknown): boolean {
     return (
       onlyKeys(value, ["type", "text", "providerMetadata", "representation"]) &&
       isString(value.text) &&
-      (value.representation === undefined ||
-        value.representation === "summary") &&
+      isReasoningText(value.text, value.representation) &&
       (value.providerMetadata === undefined ||
         isJsonObject(value.providerMetadata))
     )
@@ -998,6 +1000,15 @@ function isModelContentBlock(value: unknown): boolean {
           value.toolKind === "function" ||
           value.toolKind === "tool_search") &&
         value.customInputFallbackKey === undefined)
+  )
+}
+
+function isReasoningText(text: string, representation: unknown): boolean {
+  return (
+    representation === undefined ||
+    representation === "summary" ||
+    representation === "raw" ||
+    (representation === "redacted" && text === "")
   )
 }
 

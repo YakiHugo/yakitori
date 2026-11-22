@@ -351,7 +351,7 @@ it.each([
   "response.image_generation_call.partial_image",
   "response.reasoning_text.delta",
   "response.reasoning_text.done",
-])("rejects unsupported semantic stream event %s even when terminal output is empty", async (type) => {
+])("rejects unsupported or malformed semantic stream event %s even when terminal output is empty", async (type) => {
   const client = withSDKResponse({
     responses: {
       async create() {
@@ -388,7 +388,7 @@ it.each([
             output_index: 0,
             item_id: "native",
             content_index: 0,
-            part: { type: "reasoning_text", text: "unhandled" },
+            part: { type: "output_audio", data: "unhandled" },
           }
           yield { type: "response.completed", response: response([]) }
         })()
@@ -421,6 +421,13 @@ it("retains native reasoning content independently of its display summary", () =
       ]),
     ),
   ).toMatchObject({
+    content: [
+      {
+        type: "reasoning",
+        text: "Meaningful reasoning",
+        representation: "raw",
+      },
+    ],
     native: [
       {
         value: {

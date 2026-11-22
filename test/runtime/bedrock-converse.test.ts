@@ -556,6 +556,29 @@ describe("Bedrock Converse native adapter", () => {
     })
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
+  it("projects readable and encrypted Bedrock reasoning while retaining the signed wire blocks", async () => {
+    const native = [
+      {
+        reasoningContent: {
+          reasoningText: { text: "Bedrock reasoning.", signature: "private" },
+        },
+      },
+      { reasoningContent: { redactedContent: "Y2lwaGVy" } },
+      { text: "Done." },
+    ]
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(reply(native))
+    const [event] = await collect(
+      createBedrockConverseProvider({ ...options, fetchFn }),
+    )
+    if (event?.type !== "response") throw new Error("Missing response")
+    expect(event.response.content).toEqual([
+      { type: "reasoning", text: "Bedrock reasoning.", representation: "raw" },
+      { type: "reasoning", text: "", representation: "redacted" },
+      { type: "text", text: "Done." },
+    ])
+    expect(event.response.native?.map((item) => item.value)).toEqual(native)
+  })
+
   it("drops foreign account native reasoning but preserves portable text", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(reply())
     await collect(

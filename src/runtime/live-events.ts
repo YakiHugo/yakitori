@@ -89,7 +89,7 @@ export function createCoalescingDeltaPublisher(
 
   return {
     publish(input) {
-      if (input.delta === "") return
+      if (input.delta === "" && input.representation !== "redacted") return
 
       const now = Date.now()
       if (now - lastPublishedAt >= minIntervalMs) {

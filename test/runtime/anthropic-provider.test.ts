@@ -870,7 +870,7 @@ describe("anthropic provider conversion", () => {
     ).toBe(ModelStopReason.Length)
   })
 
-  it("maps summarized and redacted thinking with continuation metadata", () => {
+  it("maps raw and redacted thinking with continuation metadata", () => {
     expect(
       fromAnthropicMessage({
         stop_reason: "end_turn",
@@ -888,6 +888,7 @@ describe("anthropic provider conversion", () => {
       {
         type: "reasoning",
         text: "Inspect the event log.",
+        representation: "raw",
         providerMetadata: {
           anthropic: {
             provider: "anthropic",
@@ -898,6 +899,7 @@ describe("anthropic provider conversion", () => {
       {
         type: "reasoning",
         text: "",
+        representation: "redacted",
         providerMetadata: {
           anthropic: {
             provider: "anthropic",
@@ -1053,9 +1055,21 @@ describe("anthropic provider conversion", () => {
       thinking: { type: "adaptive", display: "summarized" },
     })
     expect(events).toEqual([
-      { type: "reasoning_delta", text: "Inspect" },
-      { type: "reasoning_delta", text: " files" },
-      expect.objectContaining({ type: "response" }),
+      { type: "reasoning_delta", text: "Inspect", representation: "summary" },
+      { type: "reasoning_delta", text: " files", representation: "summary" },
+      expect.objectContaining({
+        type: "response",
+        response: expect.objectContaining({
+          content: [
+            {
+              type: "reasoning",
+              text: "Inspect files",
+              representation: "summary",
+            },
+            { type: "text", text: "Done." },
+          ],
+        }),
+      }),
     ])
   })
 

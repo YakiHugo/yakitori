@@ -17,7 +17,7 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("provider output completeness", () => {
-  it("keeps reasoning summary parts distinct through streaming and completion", async () => {
+  it("keeps raw and summary positions separate and displays encrypted-only reasoning on completion", async () => {
     const item = {
       type: "reasoning",
       id: "thought",
@@ -25,6 +25,12 @@ describe("provider output completeness", () => {
         { type: "summary_text", text: "**Inspecting output**" },
         { type: "summary_text", text: "**Checking persistence**" },
       ],
+    }
+    const encrypted = {
+      type: "reasoning",
+      id: "encrypted",
+      summary: [],
+      encrypted_content: "opaque",
     }
     const events = await collect(
       openaiStream([
@@ -36,6 +42,41 @@ describe("provider output completeness", () => {
           delta: "**Inspecting output**",
         },
         {
+          type: "response.content_part.added",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "reasoning_text", text: "" },
+        },
+        {
+          type: "response.reasoning_text.delta",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          delta: "Raw ",
+        },
+        {
+          type: "response.reasoning_text.done",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          text: "Raw reasoning.",
+        },
+        {
+          type: "response.content_part.done",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "reasoning_text", text: "Raw reasoning." },
+        },
+        {
+          type: "response.content_part.done",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 1,
+          part: { type: "reasoning_text", text: "Snapshot reasoning." },
+        },
+        {
           type: "response.reasoning_summary_text.delta",
           item_id: "thought",
           output_index: 0,
@@ -43,7 +84,8 @@ describe("provider output completeness", () => {
           delta: "**Checking persistence**",
         },
         { type: "response.output_item.done", output_index: 0, item },
-        openaiFinish(undefined, [item]),
+        { type: "response.output_item.done", output_index: 1, item: encrypted },
+        openaiFinish(undefined, []),
       ]),
       request("openai"),
     )
@@ -51,6 +93,19 @@ describe("provider output completeness", () => {
       events.filter((event) => event.type === "reasoning_delta"),
     ).toMatchObject([
       { itemId: "thought", partIndex: 0, representation: "summary" },
+      { itemId: "thought", partIndex: 0, representation: "raw", text: "Raw " },
+      {
+        itemId: "thought",
+        partIndex: 0,
+        representation: "raw",
+        text: "reasoning.",
+      },
+      {
+        itemId: "thought",
+        partIndex: 1,
+        representation: "raw",
+        text: "Snapshot reasoning.",
+      },
       { itemId: "thought", partIndex: 1, representation: "summary" },
     ])
     expect(events.find((event) => event.type === "output_item")).toMatchObject({
@@ -65,8 +120,30 @@ describe("provider output completeness", () => {
           text: "**Checking persistence**",
           representation: "summary",
         },
+        { type: "reasoning", text: "Raw reasoning.", representation: "raw" },
+        {
+          type: "reasoning",
+          text: "Snapshot reasoning.",
+          representation: "raw",
+        },
       ],
+      native: [{ value: item }],
     })
+    expect(
+      events.find(
+        (event) => event.type === "output_item" && event.itemId === "encrypted",
+      ),
+    ).toMatchObject({
+      content: [{ type: "reasoning", text: "", representation: "redacted" }],
+      native: [{ value: encrypted }],
+    })
+    const final = events.at(-1)
+    if (final?.type !== "response") throw new Error("Missing response")
+    expect(final.response.content).toEqual(
+      events.flatMap((event) =>
+        event.type === "output_item" ? event.content : [],
+      ),
+    )
   })
 
   it("recognizes explicit progress-update thinking without changing its native replay", async () => {
@@ -407,7 +484,7 @@ describe("provider output completeness", () => {
     const terminal = events.at(-1)
     if (terminal?.type !== "response") throw new Error("Missing response")
     expect(terminal.response.content).toEqual([
-      { type: "reasoning", text: "Partial reasoning" },
+      { type: "reasoning", text: "Partial reasoning", representation: "raw" },
     ])
     expect(terminal.response.native).toEqual([])
     const history = await persistModelMessages([

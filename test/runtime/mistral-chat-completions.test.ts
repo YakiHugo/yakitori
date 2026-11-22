@@ -82,8 +82,18 @@ describe("Mistral structured Chat Completions", () => {
               event.type === "delta" || event.type === "reasoning_delta",
           ),
         ).toEqual([
-          { type: "reasoning_delta", text: "Inspect ", itemId: "mistral_0" },
-          { type: "reasoning_delta", text: "the repo", itemId: "mistral_0" },
+          {
+            type: "reasoning_delta",
+            text: "Inspect ",
+            itemId: "mistral_0",
+            representation: "raw",
+          },
+          {
+            type: "reasoning_delta",
+            text: "the repo",
+            itemId: "mistral_0",
+            representation: "raw",
+          },
           { type: "delta", text: "I will ", itemId: "mistral_0" },
           { type: "delta", text: "inspect it.", itemId: "mistral_0" },
         ])

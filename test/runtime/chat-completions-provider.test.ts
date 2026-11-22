@@ -1491,6 +1491,60 @@ describe("Chat Completions provider", () => {
     )
   })
 
+  it("streams and commits structured reasoning without displaying encrypted data or mirrored text", async () => {
+    await withServer(
+      (_incoming, outgoing) =>
+        send(outgoing, [
+          chunk({
+            reasoning_details: [
+              { type: "reasoning.summary", index: 0, summary: "Summary." },
+              { type: "reasoning.text", index: 1, text: "Raw " },
+              { type: "reasoning.encrypted", index: 2, data: "opaque-" },
+            ],
+            reasoning: "Raw ",
+          }),
+          chunk({
+            reasoning_details: [
+              { index: 1, text: "details.", signature: "signature" },
+              { index: 2, data: "ciphertext" },
+            ],
+            reasoning_content: "details.",
+          }),
+          chunk({ content: "Answer." }, "stop"),
+        ]),
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(request({ streamOutputItems: true })),
+        )
+        expect(
+          events.filter((event) => event.type === "reasoning_delta"),
+        ).toMatchObject([
+          { text: "Summary.", representation: "summary" },
+          { text: "Raw ", representation: "raw" },
+          { text: "", representation: "redacted" },
+          { text: "details.", representation: "raw" },
+        ])
+        const projected = [
+          { type: "reasoning", text: "Summary.", representation: "summary" },
+          { type: "reasoning", text: "Raw details.", representation: "raw" },
+          { type: "reasoning", text: "", representation: "redacted" },
+          { type: "text", text: "Answer." },
+        ]
+        expect(terminal(events).content).toEqual(projected)
+        expect(
+          events.find((event) => event.type === "output_item"),
+        ).toHaveProperty("content", projected)
+        expect(
+          terminal(events).native?.[0]?.value.reasoning_details,
+        ).toMatchObject([
+          { summary: "Summary." },
+          { text: "Raw details.", signature: "signature" },
+          { data: "opaque-ciphertext" },
+        ])
+      },
+    )
+  })
+
   it("preserves streamed completion annotations and rejects unsupported semantic media", async () => {
     const annotation = {
       type: "url_citation",
