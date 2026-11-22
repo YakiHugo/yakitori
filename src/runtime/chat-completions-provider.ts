@@ -55,6 +55,7 @@ import {
   modelFailureFromUnknown,
   providerErrorMessage,
 } from "./model-failure.ts"
+import { openAICitations } from "./model-citations.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
   ModelHistoryScopeError,
@@ -806,10 +807,12 @@ async function* streamChatCompletions(
               },
             }),
       })
-    if (text.length > 0 || annotations.length > 0)
+    if (text.length > 0 || annotations.length > 0) {
+      const citations = openAICitations(annotations, text)
       content.push({
         type: "text",
         text,
+        ...(citations.length === 0 ? {} : { annotations: citations }),
         ...(annotations.length === 0
           ? {}
           : {
@@ -818,6 +821,7 @@ async function* streamChatCompletions(
               },
             }),
       })
+    }
     let incompleteToolCalls = false
     const ids = new Set<string>()
     for (const [, call] of [...calls].sort(([left], [right]) => left - right)) {

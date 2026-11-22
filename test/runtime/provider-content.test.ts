@@ -24,6 +24,12 @@ const annotation = {
   title: "Source",
   url: "https://example.com/source",
 }
+const webAnnotation = {
+  kind: "url",
+  title: "Source",
+  url: "https://example.com/source",
+  responseSpan: { start: 0, end: 6 },
+}
 const citation = {
   type: "web_search_result_location",
   cited_text: "Source",
@@ -57,6 +63,7 @@ it("preserves annotated OpenAI message boundaries and phase across durable repla
     content: [
       {
         text: "Source",
+        annotations: [webAnnotation],
         providerMetadata: {
           openai: { part: { annotations: [annotation] }, phase: "commentary" },
         },
@@ -178,6 +185,7 @@ it("retains streamed OpenAI annotations when the terminal output is omitted", as
         {
           type: "text",
           text: "Source",
+          annotations: [webAnnotation],
           providerMetadata: {
             openai: {
               phase: "final_answer",
@@ -236,6 +244,14 @@ it("accumulates Anthropic citation deltas and preserves source metadata through 
     content: [
       {
         text: "Source",
+        annotations: [
+          {
+            kind: "url",
+            title: "Source",
+            url: "https://example.com/source",
+            citedText: "Source",
+          },
+        ],
         providerMetadata: { anthropic: { citations: [citation] } },
       },
     ],
@@ -283,7 +299,17 @@ it("retains Anthropic source provenance without replaying unbound request-relati
     "account",
   )
   expect(parsed.content).toMatchObject([
-    { providerMetadata: { anthropic: { citations: [source] } } },
+    {
+      annotations: [
+        {
+          kind: "document",
+          title: "Report",
+          citedText: "Quote",
+          sourceLocation: { unit: "page", start: 1, end: 2 },
+        },
+      ],
+      providerMetadata: { anthropic: { citations: [source] } },
+    },
   ])
   const wire = toAnthropicMessages(
     [{ role: "assistant", content: parsed.content }],

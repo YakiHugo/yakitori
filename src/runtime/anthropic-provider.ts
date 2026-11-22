@@ -49,6 +49,7 @@ import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
+import { anthropicCitations } from "./model-citations.ts"
 import { groupModelResponses } from "./model-history.ts"
 import {
   ModelHistoryScopeError,
@@ -1239,9 +1240,11 @@ export function fromAnthropicMessage(
           !block.citations.every(isJsonObject))
       )
         throw new AnthropicProtocolError("Invalid Anthropic citations.")
+      const annotations = anthropicCitations(block.citations)
       content.push({
         type: "text",
         text: block.text,
+        ...(annotations.length === 0 ? {} : { annotations }),
         ...(Array.isArray(block.citations) && block.citations.length > 0
           ? {
               providerMetadata: {
