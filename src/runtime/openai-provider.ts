@@ -797,18 +797,46 @@ async function* streamOpenAI(
       }
       if (
         event.type === "response.reasoning_text.delta" ||
-        event.type === "response.reasoning_text.done"
+        event.type === "response.reasoning_text.done" ||
+        ((event.type === "response.content_part.added" ||
+          event.type === "response.content_part.done") &&
+          event.part.type === "reasoning_text")
       ) {
+        const received =
+          "part" in event
+            ? event.part.text
+            : event.type === "response.reasoning_text.delta"
+              ? event.delta
+              : event.text
+        if (
+          typeof event.item_id !== "string" ||
+          event.item_id.length === 0 ||
+          !Number.isSafeInteger(event.output_index) ||
+          event.output_index < 0 ||
+          !Number.isSafeInteger(event.content_index) ||
+          event.content_index < 0 ||
+          typeof received !== "string"
+        )
+          throw new OpenAIProtocolError("Invalid OpenAI reasoning text event.")
         if (completedItems.has(event.output_index)) continue
         const fragment = rawReasoning.get(event.item_id) ?? {
           outputIndex: event.output_index,
           parts: new Map<number, string>(),
         }
+        if (fragment.outputIndex !== event.output_index)
+          throw new OpenAIProtocolError(
+            "OpenAI reasoning output index changed.",
+          )
+        if (
+          event.type === "response.content_part.added" &&
+          fragment.parts.has(event.content_index)
+        )
+          continue
         const previous = fragment.parts.get(event.content_index) ?? ""
         const text =
           event.type === "response.reasoning_text.delta"
-            ? previous + event.delta
-            : event.text
+            ? previous + received
+            : received
         fragment.parts.set(event.content_index, text)
         rawReasoning.set(event.item_id, fragment)
         if (text.startsWith(previous) && text.length > previous.length)

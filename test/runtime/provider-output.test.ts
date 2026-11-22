@@ -42,6 +42,13 @@ describe("provider output completeness", () => {
           delta: "**Inspecting output**",
         },
         {
+          type: "response.content_part.added",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "reasoning_text", text: "" },
+        },
+        {
           type: "response.reasoning_text.delta",
           item_id: "thought",
           output_index: 0,
@@ -54,6 +61,20 @@ describe("provider output completeness", () => {
           output_index: 0,
           content_index: 0,
           text: "Raw reasoning.",
+        },
+        {
+          type: "response.content_part.done",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "reasoning_text", text: "Raw reasoning." },
+        },
+        {
+          type: "response.content_part.done",
+          item_id: "thought",
+          output_index: 0,
+          content_index: 1,
+          part: { type: "reasoning_text", text: "Snapshot reasoning." },
         },
         {
           type: "response.reasoning_summary_text.delta",
@@ -79,6 +100,12 @@ describe("provider output completeness", () => {
         representation: "raw",
         text: "reasoning.",
       },
+      {
+        itemId: "thought",
+        partIndex: 1,
+        representation: "raw",
+        text: "Snapshot reasoning.",
+      },
       { itemId: "thought", partIndex: 1, representation: "summary" },
     ])
     expect(events.find((event) => event.type === "output_item")).toMatchObject({
@@ -94,6 +121,11 @@ describe("provider output completeness", () => {
           representation: "summary",
         },
         { type: "reasoning", text: "Raw reasoning.", representation: "raw" },
+        {
+          type: "reasoning",
+          text: "Snapshot reasoning.",
+          representation: "raw",
+        },
       ],
       native: [{ value: item }],
     })
