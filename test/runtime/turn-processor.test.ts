@@ -2974,7 +2974,7 @@ describe("Turn processor", () => {
             type: "tool_call",
             id: "tool_read_value",
             name: "read_file",
-            input: { path: "value.txt" },
+            input: { path: "value.txt", offset: -1 },
           },
         ],
       },
@@ -3055,6 +3055,7 @@ describe("Turn processor", () => {
       ),
     ).toMatchObject({
       type: "file_read",
+      offset: -1,
       result: { path: "value.txt", kind: "file" },
     })
     expect(
@@ -3294,6 +3295,99 @@ describe("Turn processor", () => {
     expect(thread.agentStatus).toEqual({ completed: "done" })
     expect(provider.callCount).toBe(3)
     expect(await readFile(path, "utf8")).toBe("changed\ntwo\n")
+  })
+
+  it("checks stale overwrites after a clipped read still showed some file contents", async () => {
+    let path = ""
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "clipped_read",
+            name: "read_file",
+            input: { path: "value.txt" },
+          },
+        ],
+      },
+      {
+        async assertRequest() {
+          await writeFile(path, "first\nexternal change\nthird\nlast\n")
+        },
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "clipped_write",
+            name: "write_file",
+            input: { path: "value.txt", content: "bad overwrite" },
+          },
+          {
+            type: "tool_call",
+            id: "clipped_replace_all",
+            name: "edit_file",
+            input: {
+              path: "value.txt",
+              oldString: "first",
+              newString: "bad edit",
+              replaceAll: true,
+            },
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const runtime = await createRuntime(provider.stream, createToolRegistry(), {
+      executionPolicy: createSessionExecutionPolicy({
+        modelVisibleToolResultLines: 3,
+      }),
+    })
+    const thread = await runtime.createThread()
+    path = join(runtime.root, "value.txt")
+    await writeFile(path, "first\nsecond\nthird\nlast\n")
+    await thread.startIfIdle({
+      content: inputFixture([{ type: "text", text: "update" }]),
+    })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(provider.callCount).toBe(3)
+    const read = provider.requests[1]?.messages.find(
+      (item) => item.role === "tool" && item.toolCallId === "clipped_read",
+    )
+    expect(read).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("first") }],
+      fileObservations: [
+        { kind: "ranged_read", complete: false, sha256: expect.any(String) },
+      ],
+    })
+    const outcomes = provider.requests[2]?.messages.filter(
+      (item) =>
+        item.role === "tool" &&
+        (item.toolCallId === "clipped_write" ||
+          item.toolCallId === "clipped_replace_all"),
+    )
+    expect(outcomes).toMatchObject([
+      {
+        isError: true,
+        content: [
+          { type: "text", text: expect.stringContaining("stale_sha256") },
+        ],
+      },
+      {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining("file_changed_since_observation"),
+          },
+        ],
+      },
+    ])
+    expect(await readFile(path, "utf8")).toBe(
+      "first\nexternal change\nthird\nlast\n",
+    )
   })
 
   it("delivers permission events between the tool call and its result", async () => {

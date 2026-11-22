@@ -90,7 +90,7 @@ describe("tool presentation", () => {
   it("presents a failed read as an error instead of a file excerpt", () => {
     const presentation = presentTool(
       entry("read_file", {
-        input: { path: "missing.ts" },
+        input: { path: "missing.ts", offset: -5 },
         state: "failed",
         resultError: true,
         resultText: "path_not_found: Path does not exist.",
@@ -107,7 +107,7 @@ describe("tool presentation", () => {
     expect(
       presentTool(
         entry("read_file", {
-          input: { path: "src/index.ts", offset: 10, limit: 20 },
+          input: { path: "src/index.ts", offset: -20, limit: 20 },
           output: {
             path: "src/index.ts",
             truncated: true,
@@ -134,18 +134,21 @@ describe("tool presentation", () => {
             path: "src",
             kind: "directory",
             count: 2,
-            entries: ["a.ts", "b.ts"],
+            entries: ["nested/", "b.ts"],
+            range: { offset: 3, limit: 2 },
             truncated: false,
           },
-          resultText: "Listed 2 entries in src.\na.ts\nb.ts",
+          resultText: "Directory src (4 entries)\nnested/\nb.ts",
         }),
       ),
     ).toMatchObject({
       verb: "List",
       subject: "src",
+      meta: ["entries 3–4"],
+      target: { kind: "file", path: "src" },
       detail: {
         kind: "file_list",
-        paths: ["src/a.ts", "src/b.ts"],
+        paths: ["src/nested/", "src/b.ts"],
       },
     })
   })
@@ -473,6 +476,34 @@ describe("tool presentation", () => {
           { path: "src/a.ts", kind: "update" },
           { path: "src/b.ts", kind: "add" },
         ],
+      },
+    })
+  })
+
+  it("shows the failure and the committed part of an incomplete batch", () => {
+    const base = entry("edit_file", {
+      state: "failed",
+      resultError: true,
+      resultText: "write_failed: Could not write src/b.ts.",
+    })
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "file_change",
+          request: { operation: "edit", paths: ["src/a.ts", "src/b.ts"] },
+          changes: [{ path: "src/a.ts", kind: "update" }],
+          exact: false,
+        },
+      }),
+    ).toMatchObject({
+      subject: "src/a.ts",
+      meta: ["partial"],
+      detail: {
+        kind: "file_changes",
+        changes: [{ path: "src/a.ts" }],
+        errorText: "write_failed: Could not write src/b.ts.",
       },
     })
   })

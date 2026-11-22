@@ -52,7 +52,11 @@ describe("visible file observations", () => {
       complete: false,
       sha256: "b".repeat(64),
     })
-    expect(withoutVisibleBase.latest("src/value.ts")).toBeUndefined()
+    expect(withoutVisibleBase.latest("src/value.ts")).toEqual({
+      sha256: "b".repeat(64),
+      complete: false,
+      observation: "edit",
+    })
   })
 
   it("treats whole-file writes and edit creations as authorship", () => {
@@ -122,6 +126,29 @@ describe("visible file observations", () => {
       complete: true,
       observation: "whole_file_read",
       ranges: [{ startLine: 100, endLine: 119 }],
+    })
+  })
+
+  it("replaces the known revision and ranges after a page of a changed file", () => {
+    const visible = createVisibleFileObservations()
+    visible.apply({
+      path: "value.ts",
+      kind: "whole_file_read",
+      complete: true,
+      sha256: "a".repeat(64),
+    })
+    visible.apply({
+      path: "value.ts",
+      kind: "ranged_read",
+      complete: false,
+      sha256: "b".repeat(64),
+      ranges: [{ startLine: 10, endLine: 20 }],
+    })
+    expect(visible.latest("value.ts")).toEqual({
+      sha256: "b".repeat(64),
+      complete: false,
+      observation: "ranged_read",
+      ranges: [{ startLine: 10, endLine: 20 }],
     })
   })
 
@@ -222,6 +249,20 @@ describe("visible file observations", () => {
       kind: "invalidate",
       complete: true,
     })
-    expect(visible.latest("destination.txt")).toBeUndefined()
+    expect(visible.latest("destination.txt")).toEqual({
+      complete: false,
+      observation: "invalidate",
+    })
+    expect(visible.requiresRefresh("destination.txt")).toBe(true)
+    visible.apply({
+      path: "destination.txt",
+      kind: "ranged_read",
+      complete: false,
+      sha256: "b".repeat(64),
+    })
+    expect(visible.latest("destination.txt")).toMatchObject({
+      sha256: "b".repeat(64),
+    })
+    expect(visible.requiresRefresh("destination.txt")).toBe(false)
   })
 })

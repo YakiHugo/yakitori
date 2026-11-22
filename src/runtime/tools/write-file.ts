@@ -4,8 +4,9 @@ import {
   completeFileChangeExecution,
   fileChangeExecution,
 } from "./execution-descriptors.ts"
-import { resolveWritePath } from "./path-policy.ts"
-import { compareAndWriteTextFile } from "./text-file-write.ts"
+import { isSameWriteTarget, resolveWritePath } from "./path-policy.ts"
+import { readTextFileSnapshot } from "./text-file-snapshot.ts"
+import { withTextFileWriteLocks } from "./text-file-write.ts"
 import { plainToolName } from "./tool-name.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -15,7 +16,7 @@ export function createWriteFileTool(
   return {
     toolName: plainToolName("write_file"),
     description:
-      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Accepts paths relative to the workspace and absolute paths. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
+      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Accepts paths relative to the workspace and absolute paths. New files are created without a prior read. An existing file may be intentionally replaced without a full read. If a previously observed revision has changed, read it again before replacing it. Prefer edit_file for focused modifications.",
     approvalRequirement: fileChangeApprovalRequirement,
     effect: "mutate",
     describeExecution: fileChangeExecution("write"),
@@ -41,51 +42,92 @@ export function createWriteFileTool(
       const resolved = await resolveWritePath(
         context.workspaceRoot,
         parsed.path,
+        true,
       )
       if (!resolved.ok) {
         return writeFailure(resolved.error.code, resolved.error.message)
       }
-      const observed = context.visibleFileObservations?.latest(
-        resolved.displayPath,
-      )
-      if (resolved.exists && observed === undefined) {
-        return writeFailure(
-          "file_not_observed",
-          `${resolved.displayPath} has not been read in the current model context.`,
-          "Read the complete file before replacing it.",
-        )
-      }
-      if (
-        observed !== undefined &&
-        (!observed.complete || observed.sha256 === undefined)
-      ) {
-        return writeFailure(
-          "file_not_fully_observed",
-          `${resolved.displayPath} has only been partially observed.`,
-          "Read the complete file before replacing it.",
-        )
-      }
-
-      const written = await compareAndWriteTextFile({
-        workspaceRoot: context.workspaceRoot,
-        path: resolved.displayPath,
-        content: parsed.content,
-        expectedSha256: observed?.sha256 ?? null,
-      })
-      if (!written.ok) return written
-      return {
-        ...written,
-        output: {
-          ...written.output,
-          fileObservation: {
-            path: written.output.path,
-            kind: "write",
-            complete: true,
-            sha256: written.output.sha256,
-            ...(written.output.created ? { created: true } : {}),
-          },
+      return withTextFileWriteLocks(
+        [resolved.absolutePath, ...resolved.missingParents],
+        async (locked) => {
+          context.signal?.throwIfAborted()
+          const target = await resolveWritePath(
+            context.workspaceRoot,
+            parsed.path,
+            true,
+          )
+          if (!target.ok)
+            return writeFailure(target.error.code, target.error.message)
+          if (
+            !(await isSameWriteTarget(
+              context.workspaceRoot,
+              resolved.absolutePath,
+              target.absolutePath,
+              !resolved.exists,
+            ))
+          ) {
+            return writeFailure(
+              "path_changed",
+              `The target of ${parsed.path} changed. Read it again before replacing it.`,
+            )
+          }
+          const observations = context.visibleFileObservations
+          if (
+            observations?.targetChanged(
+              target.displayPath,
+              target.requestedDisplayPath,
+            )
+          ) {
+            return writeFailure(
+              "path_changed",
+              `The target of ${parsed.path} changed since it was observed. Read it again before replacing it.`,
+            )
+          }
+          if (observations?.requiresRefresh(target.displayPath)) {
+            return writeFailure(
+              "file_revision_unknown",
+              `Read ${target.displayPath} before replacing it after the incomplete change.`,
+            )
+          }
+          let expectedSha256 =
+            observations?.latest(target.displayPath)?.sha256 ?? null
+          if (target.exists) {
+            const current = await readTextFileSnapshot(
+              target.absolutePath,
+              target.displayPath,
+              maxBytes,
+            )
+            if (!current.ok) return current
+            expectedSha256 ??= current.sha256
+          }
+          context.signal?.throwIfAborted()
+          const written = await locked.write(resolved.absolutePath, {
+            workspaceRoot: context.workspaceRoot,
+            path: parsed.path,
+            content: parsed.content,
+            expectedSha256,
+            maxBytes,
+            createParentDirectories: true,
+          })
+          if (!written.ok) return written
+          return {
+            ...written,
+            output: {
+              ...written.output,
+              fileObservation: {
+                path: written.output.path,
+                ...(target.requestedDisplayPath === written.output.path
+                  ? {}
+                  : { aliases: [target.requestedDisplayPath] }),
+                kind: "write",
+                complete: true,
+                sha256: written.output.sha256,
+                ...(written.output.created ? { created: true } : {}),
+              },
+            },
+          }
         },
-      }
+      )
     },
   }
 }
@@ -128,6 +170,12 @@ function parseWriteInput(
     return {
       ok: false,
       result: writeInputFailure("write_file content must be a string."),
+    }
+  }
+  if (record.content.includes("\0")) {
+    return {
+      ok: false,
+      result: writeInputFailure("write_file content cannot contain NUL bytes."),
     }
   }
   if (Buffer.byteLength(record.content, "utf8") > maxBytes) {

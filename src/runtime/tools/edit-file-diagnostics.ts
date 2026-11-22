@@ -1,4 +1,7 @@
+import type { JsonObject } from "../../kernel/index.ts"
 import type { TextMatch } from "./edit-file-match.ts"
+import { normalizeUnicodePunctuation } from "./text-file-format.ts"
+import type { ToolFailure } from "./types.ts"
 
 const MAX_SCORE_LINES = 8
 const MAX_SNIPPET_LINES = 6
@@ -53,6 +56,51 @@ export function closestEditCandidates(
     )
   }
   return candidates
+}
+
+export function editMismatchEvidence(
+  content: string,
+  oldString: string,
+  newString: string,
+) {
+  if (newString.length >= 20 && content.includes(newString)) {
+    return {
+      diagnostic: "already_applied",
+      suggestion:
+        "The replacement is already present. Check whether the requested change has been applied.",
+    }
+  }
+  const actual = content.replace(/\r\n|\r/g, "\n")
+  const expected = oldString.replace(/\r\n|\r/g, "\n")
+  const unindent = (value: string) => value.replace(/^[ \t]+/gmu, "")
+  if (
+    unindent(expected).trim() !== "" &&
+    unindent(actual).includes(unindent(expected))
+  ) {
+    return {
+      diagnostic: "indentation_mismatch",
+      suggestion: "Use the indentation shown in the current file.",
+    }
+  }
+  const normalized = normalizeUnicodePunctuation(actual)
+  const index = normalized.indexOf(normalizeUnicodePunctuation(expected))
+  if (
+    index !== -1 &&
+    actual.slice(index, index + expected.length) !== expected
+  ) {
+    const lines = matchedEditLocations(actual, [
+      { start: index, end: index + expected.length },
+    ])
+    const found = lines[0]
+    if (found !== undefined) {
+      return {
+        diagnostic: "unicode_punctuation_mismatch",
+        locations: lines,
+        suggestion: `Use the exact Unicode punctuation or spacing on lines ${found.startLine}–${found.endLine}.`,
+      }
+    }
+  }
+  return {}
 }
 
 export function matchedEditLocations(
@@ -156,4 +204,57 @@ function truncateUtf8(value: string, maxBytes: number): string {
     bytes += width
   }
   return `${result}${marker}`
+}
+
+export function editFailure(
+  code: string,
+  message: string,
+  details: JsonObject = {},
+): ToolFailure {
+  return {
+    ok: false,
+    code,
+    message,
+    content: renderEditFailure(code, message, details),
+    ...(Object.keys(details).length === 0 ? {} : { output: details }),
+  }
+}
+
+function renderEditFailure(
+  code: string,
+  message: string,
+  details: JsonObject,
+): string {
+  const lines = [`${code}: ${message}`]
+  if (typeof details.suggestion === "string") {
+    lines.push(`Suggestion: ${details.suggestion}`)
+  }
+  if (Array.isArray(details.nearMatches)) {
+    lines.push("Near matches:")
+    for (const match of details.nearMatches) {
+      if (!isRecord(match)) continue
+      lines.push(
+        `Lines ${String(match.startLine)}-${String(match.endLine)} (score ${String(match.score)}):`,
+      )
+      if (typeof match.text === "string") lines.push(match.text)
+    }
+  }
+  if (Array.isArray(details.locations)) {
+    lines.push(
+      typeof details.diagnostic === "string"
+        ? "Matching locations:"
+        : "Exact match locations:",
+    )
+    for (const location of details.locations) {
+      if (!isRecord(location)) continue
+      lines.push(
+        `- lines ${String(location.startLine)}-${String(location.endLine)}`,
+      )
+    }
+  }
+  return lines.join("\n")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

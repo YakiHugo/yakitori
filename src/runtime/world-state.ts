@@ -147,7 +147,7 @@ function toolInstructionsSection(
       ? "Use apply_patch for source patches, following its schema."
       : "",
     names.has("edit_file")
-      ? "edit_file replaces matching text. To create a new file, pass an empty oldString and its contents as newString."
+      ? "edit_file replaces matching text. Pass an edits array for changes across files. To create a new file, pass an empty oldString and its contents as newString."
       : "",
     names.has("write_file")
       ? "write_file creates files and can intentionally replace whole files."

@@ -38,8 +38,28 @@ export function completeFileChangeExecution(
   output: JsonValue,
   succeeded = true,
 ): ToolExecutionDescriptor {
-  if (started.type !== "file_change" || !succeeded) return started
+  if (started.type !== "file_change") return started
   const fields = recordOf(output)
+  if (Array.isArray(fields?.changes)) {
+    return {
+      ...started,
+      changes: fields.changes.flatMap((value) => {
+        const change = recordOf(value)
+        const path = stringOf(change?.path)
+        const kind = change?.kind
+        if (path === undefined || (kind !== "add" && kind !== "update"))
+          return []
+        const diff = unifiedDiffOf(change?.diff)
+        return [{ path, kind, ...(diff === undefined ? {} : { diff }) }]
+      }),
+    }
+  }
+  if (
+    !succeeded ||
+    (typeof fields?.sha256 === "string" &&
+      fields.sha256 === fields.previousSha256)
+  )
+    return started
   const path = stringOf(fields?.path) ?? started.request.paths[0]
   if (path === undefined) return started
   const diff = unifiedDiffOf(fields?.diff)
@@ -110,8 +130,12 @@ export function fileReadExecution(input: JsonValue): ToolExecutionDescriptor {
   return {
     type: "file_read",
     path: stringOf(fields?.path) ?? "",
-    ...(offset === undefined ? {} : { offset }),
-    ...(limit === undefined ? {} : { limit }),
+    ...(offset === undefined || !Number.isSafeInteger(offset) || offset === 0
+      ? {}
+      : { offset }),
+    ...(limit === undefined || !Number.isSafeInteger(limit) || limit < 1
+      ? {}
+      : { limit }),
   }
 }
 

@@ -131,6 +131,7 @@ export type ModelNativeItem = Readonly<{
 }>
 export type FileObservation = Readonly<{
   path: string
+  aliases?: readonly string[]
   kind:
     | "delete"
     | "edit"

@@ -12,6 +12,11 @@ export class InvalidImageDataError extends Error {}
 export function inspectImageBytes(bytes: Uint8Array): ImageMetadata {
   const buffer = asBuffer(bytes)
   const mediaType = detectImageMediaType(buffer)
+  if (mediaType === undefined) {
+    throw new InvalidImageDataError(
+      "Only PNG, JPEG, GIF, and WebP images can be attached.",
+    )
+  }
   const dimensions = readImageDimensions(buffer, mediaType)
   if (dimensions === undefined) {
     throw new InvalidImageDataError(
@@ -36,8 +41,8 @@ export function readImageDimensions(
   if (
     mediaType === "image/gif" &&
     buffer.length >= 10 &&
-    (buffer.toString("ascii", 0, 6) === "GIF87a" ||
-      buffer.toString("ascii", 0, 6) === "GIF89a")
+    (buffer.toString("latin1", 0, 6) === "GIF87a" ||
+      buffer.toString("latin1", 0, 6) === "GIF89a")
   ) {
     return dimensions(buffer.readUInt16LE(6), buffer.readUInt16LE(8))
   }
@@ -54,7 +59,9 @@ function asBuffer(bytes: Uint8Array): Buffer {
     : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 }
 
-function detectImageMediaType(bytes: Buffer): ImageAttachment["mediaType"] {
+export function detectImageMediaType(
+  bytes: Buffer,
+): ImageAttachment["mediaType"] | undefined {
   if (
     bytes.length >= 8 &&
     bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
@@ -78,9 +85,7 @@ function detectImageMediaType(bytes: Buffer): ImageAttachment["mediaType"] {
   ) {
     return "image/webp"
   }
-  throw new InvalidImageDataError(
-    "Only PNG, JPEG, GIF, and WebP images can be attached.",
-  )
+  return undefined
 }
 
 function readJpegDimensions(
@@ -122,12 +127,12 @@ function readWebpDimensions(
 ): { readonly width: number; readonly height: number } | undefined {
   if (
     bytes.length < 25 ||
-    bytes.toString("ascii", 0, 4) !== "RIFF" ||
-    bytes.toString("ascii", 8, 12) !== "WEBP"
+    bytes.toString("latin1", 0, 4) !== "RIFF" ||
+    bytes.toString("latin1", 8, 12) !== "WEBP"
   ) {
     return undefined
   }
-  const kind = bytes.toString("ascii", 12, 16)
+  const kind = bytes.toString("latin1", 12, 16)
   if (kind === "VP8X" && bytes.length >= 30) {
     return dimensions(1 + bytes.readUIntLE(24, 3), 1 + bytes.readUIntLE(27, 3))
   }

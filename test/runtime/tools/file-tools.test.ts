@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto"
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises"
@@ -16,6 +18,7 @@ import { createEditFileTool } from "../../../src/runtime/tools/edit-file.ts"
 import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
+import { compareAndWriteTextFile } from "../../../src/runtime/tools/text-file-write.ts"
 import {
   createVisibleFileObservations,
   type FileObservationGrant,
@@ -44,14 +47,6 @@ describe("bounded file tools", () => {
         },
       })
 
-      const collision = await write.execute(
-        { path: "new.txt", content: "nope" },
-        { workspaceRoot: workspace },
-      )
-      expect(collision.ok).toBe(false)
-      if (collision.ok) return
-      expect(collision.code).toBe("file_not_observed")
-
       const observed = observedContext(workspace, "new.txt", "hello")
       await writeFile(join(workspace, "new.txt"), "external")
       const stale = await write.execute(
@@ -68,7 +63,7 @@ describe("bounded file tools", () => {
         },
       })
       expect(stale.content).toBe(
-        `stale_sha256: The file changed since it was observed.\nCurrent sha256: ${sha256("external")}\nSuggestion: Read the file again before retrying the write.`,
+        "stale_sha256: The file changed since it was observed.\nSuggestion: Read the file again before retrying the write.",
       )
 
       await writeFile(join(workspace, "new.txt"), "hello")
@@ -86,48 +81,197 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("requires a complete observation before replacing an existing file", async () => {
+  it("allows an intentional overwrite and checks the revision from a live page", async () => {
     await withWorkspace(async (workspace) => {
-      await writeFile(join(workspace, "revision.txt"), "before")
+      const path = "revision.txt"
       const write = createWriteFileTool()
-
-      const unobserved = await write.execute(
-        { path: "revision.txt", content: "after" },
-        { workspaceRoot: workspace },
-      )
-      expect(unobserved).toMatchObject({
-        ok: false,
-        code: "file_not_observed",
-      })
-
-      const partial = visibleReadObservation({
-        path: "revision.txt",
-        complete: false,
-        kind: "ranged_read",
-        ranges: [{ startLine: 1, endLine: 1 }],
-      })
+      const read = createReadFileTool()
+      const bareContext = { workspaceRoot: workspace }
+      await writeFile(join(workspace, path), "before")
       expect(
-        await write.execute(
-          { path: "revision.txt", content: "after" },
-          {
-            workspaceRoot: workspace,
-            visibleFileObservations: partial,
-          },
-        ),
+        await write.execute({ path, content: "one\ntwo\n" }, bareContext),
+      ).toMatchObject({
+        ok: true,
+        output: { previousSha256: sha256("before"), created: false },
+      })
+
+      const first = await read.execute({ path, limit: 1 }, bareContext)
+      if (!first.ok) throw new Error(first.content)
+      const context = {
+        ...bareContext,
+        visibleFileObservations: observeToolOutputs(first.output),
+      }
+      await writeFile(join(workspace, path), "one\nexternal\n")
+      expect(
+        await write.execute({ path, content: "stale" }, context),
       ).toMatchObject({
         ok: false,
-        code: "file_not_fully_observed",
+        code: "stale_sha256",
       })
-
-      const updated = await write.execute(
-        { path: "revision.txt", content: "after" },
-        observedContext(workspace, "revision.txt", "before"),
+      expect(await readFile(join(workspace, path), "utf8")).toBe(
+        "one\nexternal\n",
       )
 
-      expect(updated.ok).toBe(true)
-      expect(await readFile(join(workspace, "revision.txt"), "utf8")).toBe(
-        "after",
+      const fresh = await read.execute({ path, limit: 1 }, bareContext)
+      if (!fresh.ok) throw new Error(fresh.content)
+      const freshContext = {
+        ...bareContext,
+        visibleFileObservations: observeToolOutputs(first.output, fresh.output),
+      }
+      expect(
+        await write.execute({ path, content: "after" }, freshContext),
+      ).toMatchObject({ ok: true })
+      expect(await readFile(join(workspace, path), "utf8")).toBe("after")
+    })
+  })
+
+  it("leaves deleted parent directories absent when an observed overwrite is stale", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const path = "nested/parent/file.txt"
+      await mkdir(join(workspaceRoot, "nested", "parent"), { recursive: true })
+      await writeFile(join(workspaceRoot, path), "before")
+      const read = await createReadFileTool().execute(
+        { path },
+        { workspaceRoot },
       )
+      if (!read.ok) throw new Error(read.content)
+      await rm(join(workspaceRoot, "nested"), { recursive: true })
+      const result = await createWriteFileTool().execute(
+        { path, content: "after" },
+        {
+          workspaceRoot,
+          visibleFileObservations: observeToolOutputs(read.output),
+        },
+      )
+      expect(result).toMatchObject({ ok: false, code: "file_missing" })
+      await expect(stat(join(workspaceRoot, "nested"))).rejects.toMatchObject({
+        code: "ENOENT",
+      })
+    })
+  })
+
+  it.skipIf(process.platform === "win32")(
+    "requires a fresh read when an observed symlink points to a new file",
+    async () => {
+      await withWorkspace(async (workspaceRoot) => {
+        const path = "alias.txt"
+        await writeFile(join(workspaceRoot, "first.txt"), "shared anchor")
+        await writeFile(join(workspaceRoot, "second.txt"), "shared anchor")
+        await symlink("first.txt", join(workspaceRoot, path))
+        const read = createReadFileTool()
+        const observed = await read.execute({ path }, { workspaceRoot })
+        if (!observed.ok) throw new Error(observed.content)
+        const context = {
+          workspaceRoot,
+          visibleFileObservations: observeToolOutputs(observed.output),
+        }
+        await rm(join(workspaceRoot, path))
+        await symlink("second.txt", join(workspaceRoot, path))
+        const write = createWriteFileTool()
+        const edit = createEditFileTool()
+        await expect(
+          write.execute({ path, content: "unchecked overwrite" }, context),
+        ).resolves.toMatchObject({
+          ok: false,
+          code: "path_changed",
+        })
+        await expect(
+          edit.execute(
+            {
+              path,
+              oldString: "shared",
+              newString: "unsafe",
+              replaceAll: true,
+            },
+            context,
+          ),
+        ).resolves.toMatchObject({
+          ok: false,
+          code: "path_changed",
+        })
+        expect(await readFile(join(workspaceRoot, "second.txt"), "utf8")).toBe(
+          "shared anchor",
+        )
+
+        const refreshed = await read.execute({ path }, context)
+        if (!refreshed.ok) throw new Error(refreshed.content)
+        for (const grant of grantsFromToolOutput(refreshed.output))
+          context.visibleFileObservations.apply(grant)
+        await expect(
+          write.execute({ path, content: "checked overwrite" }, context),
+        ).resolves.toMatchObject({ ok: true })
+        expect(await readFile(join(workspaceRoot, "second.txt"), "utf8")).toBe(
+          "checked overwrite",
+        )
+        expect(await readFile(join(workspaceRoot, "first.txt"), "utf8")).toBe(
+          "shared anchor",
+        )
+      })
+    },
+  )
+
+  it.skipIf(process.platform === "win32")(
+    "separates a literal backslash filename from a directory path",
+    async () => {
+      await withWorkspace(async (workspaceRoot) => {
+        const path = "nested/file.txt"
+        const literal = "nested\\file.txt"
+        await mkdir(join(workspaceRoot, "nested"))
+        await writeFile(join(workspaceRoot, path), "old\n")
+        const read = createReadFileTool()
+        const original = await read.execute({ path }, { workspaceRoot })
+        if (!original.ok) throw new Error(original.content)
+        await writeFile(join(workspaceRoot, path), "external\ncontents\n")
+        await writeFile(join(workspaceRoot, literal), "external\ncontents\n")
+        const other = await read.execute(
+          { path: literal, limit: 1 },
+          { workspaceRoot },
+        )
+        if (!other.ok) throw new Error(other.content)
+        const context = {
+          workspaceRoot,
+          visibleFileObservations: observeToolOutputs(
+            original.output,
+            other.output,
+          ),
+        }
+        await expect(
+          createWriteFileTool().execute(
+            { path, content: "overwritten" },
+            context,
+          ),
+        ).resolves.toMatchObject({
+          ok: false,
+          code: "stale_sha256",
+        })
+        expect(await readFile(join(workspaceRoot, path), "utf8")).toBe(
+          "external\ncontents\n",
+        )
+      })
+    },
+  )
+
+  it("creates nested paths and preserves filesystem identity for a byte-identical write", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "nested/folder/new.txt"
+      const context = { workspaceRoot: workspace }
+      const write = createWriteFileTool()
+      expect(
+        await write.execute({ path, content: "value" }, context),
+      ).toMatchObject({
+        ok: true,
+        content: "Created nested/folder/new.txt (5 bytes).",
+      })
+      const before = await stat(join(workspace, path))
+      expect(
+        await write.execute({ path, content: "value" }, context),
+      ).toMatchObject({
+        ok: true,
+        content: "Already up to date: nested/folder/new.txt.",
+      })
+      const after = await stat(join(workspace, path))
+      expect(after.ino).toBe(before.ino)
+      expect(after.mtimeMs).toBe(before.mtimeMs)
     })
   })
 
@@ -402,9 +546,11 @@ describe("bounded file tools", () => {
       })
       if (!unread.ok) return
       expect(unread.output).not.toHaveProperty("observation")
-      expect(
-        observeToolOutputs(unread.output).latest("observed.ts"),
-      ).toBeUndefined()
+      expect(observeToolOutputs(unread.output).latest("observed.ts")).toEqual({
+        complete: false,
+        observation: "edit",
+        sha256: sha256("const value = 2\n"),
+      })
       expect(await readFile(join(workspace, "observed.ts"), "utf8")).toBe(
         "const value = 2\n",
       )
@@ -422,7 +568,7 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("rejects unread edits without an exact unique anchor or with replaceAll", async () => {
+  it("requires an unambiguous unread anchor unless replaceAll is explicit", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(
         join(workspace, "unread.ts"),
@@ -467,9 +613,9 @@ describe("bounded file tools", () => {
           },
           context,
         ),
-      ).toMatchObject({ ok: false, code: "file_not_fully_observed" })
+      ).toMatchObject({ ok: true, output: { replacementCount: 2 } })
       expect(await readFile(join(workspace, "unread.ts"), "utf8")).toBe(
-        "const first = “hi”\nconst next = 1\nconst next = 1\n",
+        "const first = “hi”\nconst next = 2\nconst next = 2\n",
       )
     })
   })
@@ -786,34 +932,52 @@ describe("bounded file tools", () => {
     })
   })
 
+  it("rejects bulk expansion before materializing the replacement file", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "repeat.txt"
+      const before = "x".repeat(32768)
+      await writeFile(join(workspace, path), before)
+      const result = await createEditFileTool().execute(
+        {
+          path,
+          oldString: "x",
+          newString: "y".repeat(32768),
+          replaceAll: true,
+        },
+        observedContext(workspace, path, before),
+      )
+      expect(result).toMatchObject({ ok: false, code: "content_too_large" })
+      expect(await readFile(join(workspace, path), "utf8")).toBe(before)
+    })
+  })
+
+  it("bounds the UTF-8 result of replaceAll including untouched text", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "text.txt"
+      const before = "x-x!"
+      await writeFile(join(workspace, path), before)
+      const context = observedContext(workspace, path, before)
+      const input = { path, oldString: "x", newString: "界", replaceAll: true }
+      expect(await createEditFileTool(7).execute(input, context)).toMatchObject(
+        {
+          ok: false,
+          code: "content_too_large",
+        },
+      )
+      expect(await readFile(join(workspace, path), "utf8")).toBe(before)
+      expect(await createEditFileTool(8).execute(input, context)).toMatchObject(
+        { ok: true },
+      )
+      expect(await readFile(join(workspace, path), "utf8")).toBe("界-界!")
+    })
+  })
+
   it("supports explicit replaceAll and rejects files changed since observation", async () => {
     await withWorkspace(async (workspace) => {
       const before = "enabled = false\nenabled = false\n"
       const edit = createEditFileTool()
       await writeFile(join(workspace, "flags.txt"), before)
       const context = observedContext(workspace, "flags.txt", before)
-
-      const ranged = await edit.execute(
-        {
-          path: "flags.txt",
-          oldString: "enabled = false",
-          newString: "enabled = true",
-          replaceAll: true,
-        },
-        {
-          workspaceRoot: workspace,
-          visibleFileObservations: visibleReadObservation({
-            path: "flags.txt",
-            complete: false,
-            kind: "ranged_read",
-            ranges: [{ startLine: 1, endLine: 1 }],
-          }),
-        },
-      )
-      expect(ranged).toMatchObject({
-        ok: false,
-        code: "file_not_fully_observed",
-      })
 
       await writeFile(
         join(workspace, "flags.txt"),
@@ -853,6 +1017,279 @@ describe("bounded file tools", () => {
       })
       expect(await readFile(join(workspace, "flags.txt"), "utf8")).toBe(
         "enabled = true\nenabled = true\n",
+      )
+    })
+  })
+
+  it("edits a BOM first line from a live LF page and preserves local mixed endings", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "mixed.txt"
+      const body = "\uFEFFalpha\r\nbeta\nlast\n"
+      await writeFile(join(workspace, path), body)
+      const read = await createReadFileTool().execute(
+        { path, limit: 2 },
+        { workspaceRoot: workspace },
+      )
+      if (!read.ok) throw new Error(read.content)
+      expect(read.content).toContain("1\talpha\n\tbeta")
+      const context = {
+        workspaceRoot: workspace,
+        visibleFileObservations: observeToolOutputs(read.output),
+      }
+      await writeFile(join(workspace, path), `${body}externally appended\n`)
+      expect(
+        await createEditFileTool().execute(
+          {
+            path,
+            oldString: "alpha\nbeta\n",
+            newString: "first\nsecond\n",
+          },
+          context,
+        ),
+      ).toMatchObject({
+        ok: true,
+        output: { matchMode: "line_endings", optimisticRebase: true },
+      })
+      expect(await readFile(join(workspace, path), "utf8")).toBe(
+        "\uFEFFfirst\r\nsecond\nlast\nexternally appended\n",
+      )
+    })
+  })
+
+  it("rejects an overlapping stale anchor while bulk replacement consumes each match once", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const path = "overlap.txt"
+      const old = "a\r\nb\r\na\r\n"
+      const current = "a\r\nb\r\na\r\nb\r\na\r\n"
+      await writeFile(join(workspaceRoot, path), current)
+      const edit = createEditFileTool()
+      const input = { path, oldString: "a\nb\na", newString: "replaced" }
+      await expect(
+        edit.execute(input, observedContext(workspaceRoot, path, old)),
+      ).resolves.toMatchObject({
+        ok: false,
+        code: "file_changed_since_observation",
+      })
+      expect(await readFile(join(workspaceRoot, path), "utf8")).toBe(current)
+      await expect(
+        edit.execute({ ...input, replaceAll: true }, { workspaceRoot }),
+      ).resolves.toMatchObject({
+        ok: true,
+        output: { replacementCount: 1 },
+      })
+      expect(await readFile(join(workspaceRoot, path), "utf8")).toBe(
+        "replaced\r\nb\r\na\r\n",
+      )
+    })
+  })
+
+  it("counts LF and CRLF anchors together for uniqueness and replaceAll", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "duplicates.txt"
+      await writeFile(join(workspace, path), "a\nb\na\r\nb\r\n")
+      const context = { workspaceRoot: workspace }
+      const edit = createEditFileTool()
+      const input = { path, oldString: "a\nb", newString: "x\ny" }
+      expect(await edit.execute(input, context)).toMatchObject({
+        ok: false,
+        code: "old_string_ambiguous",
+      })
+      expect(
+        await edit.execute({ ...input, replaceAll: true }, context),
+      ).toMatchObject({
+        ok: true,
+        output: { replacementCount: 2 },
+      })
+      expect(await readFile(join(workspace, path), "utf8")).toBe(
+        "x\ny\nx\r\ny\r\n",
+      )
+    })
+  })
+
+  it("explains failed matches with evidence from the current file", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "mismatch.txt"
+      const body =
+        "  steps: alpha–beta\n  second\nconst replacement = alreadyHere;\n"
+      await writeFile(join(workspace, path), body)
+      const edit = createEditFileTool()
+      const context = { workspaceRoot: workspace }
+      for (const [oldString, newString, diagnostic] of [
+        [
+          "    steps: alpha–beta\n    second",
+          "changed",
+          "indentation_mismatch",
+        ],
+        ["steps: alpha-beta", "changed", "unicode_punctuation_mismatch"],
+        [
+          "previous definition",
+          "const replacement = alreadyHere;",
+          "already_applied",
+        ],
+      ] as const) {
+        const result = await edit.execute(
+          { path, oldString, newString },
+          context,
+        )
+        expect(result).toMatchObject({
+          ok: false,
+          code: "old_string_not_found",
+          output: { diagnostic },
+        })
+        if (diagnostic === "unicode_punctuation_mismatch") {
+          expect(result).toMatchObject({
+            output: { locations: [{ startLine: 1, endLine: 1 }] },
+          })
+        }
+      }
+      expect(await readFile(join(workspace, path), "utf8")).toBe(body)
+    })
+  })
+
+  it("preflights all batch edits and records each committed file", async () => {
+    await withWorkspace(async (workspace) => {
+      const edit = createEditFileTool()
+      const context = { workspaceRoot: workspace }
+      await writeFile(join(workspace, "a.txt"), "alpha\n")
+      const entries = [
+        { path: "nested/b.txt", oldString: "", newString: "beta\n" },
+        { path: "a.txt", oldString: "alpha", newString: "first" },
+        { path: "nested/b.txt", oldString: "beta", newString: "second" },
+      ]
+      const invalid = {
+        edits: [
+          ...entries,
+          { path: "a.txt", oldString: "missing", newString: "invalid" },
+        ],
+      }
+      expect(await edit.execute(invalid, context)).toMatchObject({
+        ok: false,
+        code: "old_string_not_found",
+      })
+      await expect(stat(join(workspace, "nested"))).rejects.toMatchObject({
+        code: "ENOENT",
+      })
+      expect(await readFile(join(workspace, "a.txt"), "utf8")).toBe("alpha\n")
+
+      const input = { edits: entries }
+      expect(
+        typeof edit.approvalRequirement === "function" &&
+          (await edit.approvalRequirement(input, context)),
+      ).toMatchObject({
+        subject: "nested/b.txt, a.txt",
+      })
+      const start = edit.describeExecution?.(input)
+      expect(start).toMatchObject({
+        request: { paths: ["nested/b.txt", "a.txt"] },
+      })
+      const result = await edit.execute(input, context)
+      if (!result.ok || start === undefined) throw new Error(result.content)
+      expect(
+        edit.completeExecution?.(start, result.output, true),
+      ).toMatchObject({
+        changes: [
+          { path: "nested/b.txt", kind: "add" },
+          { path: "a.txt", kind: "update" },
+        ],
+      })
+      expect(grantsFromToolOutput(result.output)).toMatchObject([
+        { path: "nested/b.txt", kind: "edit", sha256: sha256("second\n") },
+        { path: "a.txt", kind: "edit", sha256: sha256("first\n") },
+      ])
+      expect(await readFile(join(workspace, "nested/b.txt"), "utf8")).toBe(
+        "second\n",
+      )
+      expect(await readFile(join(workspace, "a.txt"), "utf8")).toBe("first\n")
+    })
+  })
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports committed edits when a later file cannot be written",
+    async () => {
+      await withWorkspace(async (workspaceRoot) => {
+        const blocked = join(workspaceRoot, "blocked")
+        await mkdir(blocked)
+        await writeFile(join(workspaceRoot, "a.txt"), "before")
+        await writeFile(join(blocked, "b.txt"), "before")
+        await chmod(blocked, 0o500)
+        try {
+          const edit = createEditFileTool()
+          const input = {
+            edits: [
+              { path: "a.txt", oldString: "before", newString: "first" },
+              {
+                path: "blocked/b.txt",
+                oldString: "before",
+                newString: "second",
+              },
+            ],
+          }
+          const started = edit.describeExecution?.(input)
+          const result = await edit.execute(input, { workspaceRoot })
+          expect(result).toMatchObject({
+            ok: false,
+            code: "write_failed",
+            content: expect.stringContaining("blocked/b.txt"),
+          })
+          if (started === undefined || result.output === undefined)
+            throw new Error("Missing file changes")
+          expect(
+            edit.completeExecution?.(started, result.output, false),
+          ).toMatchObject({
+            changes: [{ path: "a.txt", kind: "update" }],
+          })
+          expect(grantsFromToolOutput(result.output)).toMatchObject([
+            { path: "a.txt", sha256: sha256("first") },
+          ])
+          expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe(
+            "first",
+          )
+          expect(await readFile(join(blocked, "b.txt"), "utf8")).toBe("before")
+        } finally {
+          await chmod(blocked, 0o700)
+        }
+      })
+    },
+  )
+
+  it("returns a match diagnostic for long anchors that exceed the normalization engine's capacity", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "long.txt"
+      const body = "x".repeat(100_000)
+      await writeFile(join(workspace, path), body)
+      const result = await createEditFileTool().execute(
+        { path, oldString: `${body}q`, newString: "replacement" },
+        observedContext(workspace, path, body),
+      )
+      expect(result).toMatchObject({ ok: false, code: "old_string_not_found" })
+    })
+  })
+
+  it("serializes overlapping batches with reversed file order", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "a.txt"), "start a")
+      await writeFile(join(workspace, "b.txt"), "start b")
+      const edit = createEditFileTool()
+      const results = await Promise.all(
+        ["first", "second"].map((value, index) => {
+          const edits = ["a", "b"].map((name) => ({
+            path: `${name}.txt`,
+            oldString: `start ${name}`,
+            newString: `${value} ${name}`,
+          }))
+          return edit.execute(
+            { edits: index === 0 ? edits : edits.reverse() },
+            { workspaceRoot: workspace },
+          )
+        }),
+      )
+      expect(results.filter((result) => result.ok)).toHaveLength(1)
+      const winner = results[0]?.ok ? "first" : "second"
+      expect(await readFile(join(workspace, "a.txt"), "utf8")).toBe(
+        `${winner} a`,
+      )
+      expect(await readFile(join(workspace, "b.txt"), "utf8")).toBe(
+        `${winner} b`,
       )
     })
   })
@@ -898,12 +1335,15 @@ describe("bounded file tools", () => {
     expect(
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema,
     ).toMatchObject({
-      required: ["path", "oldString", "newString"],
       properties: {
         path: { type: "string" },
         oldString: { type: "string" },
         newString: { type: "string" },
         replaceAll: { type: "boolean" },
+        edits: {
+          type: "array",
+          items: { required: ["path", "oldString", "newString"] },
+        },
       },
     })
     expect(
@@ -1130,24 +1570,25 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("creates a new file exclusively under concurrent writes", async () => {
-    await withWorkspace(async (workspace) => {
-      const write = createWriteFileTool()
-      const results = await Promise.all([
-        write.execute(
-          { path: "created.txt", content: "first" },
-          { workspaceRoot: workspace },
+  it("creates a file exclusively when concurrent writes require absence", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const results = await Promise.all(
+        ["first", "second"].map((content) =>
+          compareAndWriteTextFile({
+            workspaceRoot,
+            path: "created.txt",
+            content,
+            expectedSha256: null,
+          }),
         ),
-        write.execute(
-          { path: "created.txt", content: "second" },
-          { workspaceRoot: workspace },
-        ),
-      ])
-
+      )
       expect(results.filter((result) => result.ok)).toHaveLength(1)
-      const failures = results.filter((result) => !result.ok)
-      expect(failures).toHaveLength(1)
-      expect(["file_exists", "file_not_observed"]).toContain(failures[0]?.code)
+      expect(results.filter((result) => !result.ok)).toEqual([
+        expect.objectContaining({ code: "file_exists" }),
+      ])
+      expect(await readFile(join(workspaceRoot, "created.txt"), "utf8")).toBe(
+        results[0]?.ok ? "first" : "second",
+      )
     })
   })
 
@@ -1212,8 +1653,10 @@ function visibleReadObservation(grant: FileObservationGrant) {
   return observations
 }
 
-function observeToolOutputs(output: JsonValue) {
+function observeToolOutputs(...outputs: JsonValue[]) {
   const observations = createVisibleFileObservations()
-  for (const grant of grantsFromToolOutput(output)) observations.apply(grant)
+  for (const output of outputs) {
+    for (const grant of grantsFromToolOutput(output)) observations.apply(grant)
+  }
   return observations
 }

@@ -13,19 +13,37 @@ export type TextMatch = {
 export function locateEditMatches(
   content: string,
   oldString: string,
+  allowFormattingEquivalence: boolean,
+  replaceAll: boolean,
 ): { readonly mode: EditMatchMode; readonly matches: readonly TextMatch[] } {
-  const exact = findExactMatches(content, oldString)
-  if (exact.length > 0) return { mode: "exact", matches: exact }
-
-  for (const mode of flexibleMatchModes) {
-    const matches = findFlexibleMatches(content, oldString, mode)
-    if (matches.length > 0) return { mode, matches }
+  if (
+    /[\r\n]/u.test(oldString) &&
+    (oldString.includes("\r") || content.includes("\r"))
+  ) {
+    const equivalent = findLineEndingMatches(content, oldString, replaceAll)
+    if (equivalent.length > 0) {
+      const mode = equivalent.every(
+        ({ start, end }) => content.slice(start, end) === oldString,
+      )
+        ? "exact"
+        : "line_endings"
+      return { mode, matches: equivalent }
+    }
+  } else {
+    const exact = findExactMatches(content, oldString, replaceAll)
+    if (exact.length > 0) return { mode: "exact", matches: exact }
+  }
+  if (allowFormattingEquivalence) {
+    for (const mode of formattingMatchModes) {
+      const matches = findFlexibleMatches(content, oldString, mode, replaceAll)
+      if (matches.length > 0) return { mode, matches }
+    }
   }
   return { mode: "exact", matches: [] }
 }
 
-const flexibleMatchModes: readonly Exclude<EditMatchMode, "exact">[] = [
-  "line_endings",
+type FormattingMatchMode = Exclude<EditMatchMode, "exact" | "line_endings">
+const formattingMatchModes: readonly FormattingMatchMode[] = [
   "curly_quotes",
   "trailing_whitespace",
   "curly_quotes_and_trailing_whitespace",
@@ -34,6 +52,7 @@ const flexibleMatchModes: readonly Exclude<EditMatchMode, "exact">[] = [
 function findExactMatches(
   content: string,
   oldString: string,
+  replaceAll: boolean,
 ): readonly TextMatch[] {
   const matches: TextMatch[] = []
   let offset = 0
@@ -43,13 +62,60 @@ function findExactMatches(
     matches.push({ start, end: start + oldString.length })
     offset = start + oldString.length
   }
+  const first = matches[0]
+  // Bulk replacements consume non-overlapping spans. A single anchor still
+  // has to be unique, including overlaps the bulk scan would skip.
+  if (!replaceAll && matches.length === 1 && first !== undefined) {
+    const overlapping = content.indexOf(oldString, first.start + 1)
+    if (overlapping !== -1)
+      matches.push({ start: overlapping, end: overlapping + oldString.length })
+  }
   return matches
+}
+
+function findLineEndingMatches(
+  content: string,
+  oldString: string,
+  replaceAll: boolean,
+): readonly TextMatch[] {
+  const removed: number[] = []
+  const normalized = content.replace(
+    /\r\n|\r/g,
+    (ending: string, offset: number) => {
+      if (ending === "\r\n") removed.push(offset - removed.length)
+      return "\n"
+    },
+  )
+  const matches = findExactMatches(
+    normalized,
+    oldString.replace(/\r\n|\r/g, "\n"),
+    replaceAll,
+  )
+  // Start and end offsets are independently ordered, even for overlapping spans.
+  const mapOffsets = () => {
+    let preceding = 0
+    return (offset: number) => {
+      while (
+        preceding < removed.length &&
+        (removed[preceding] ?? Infinity) < offset
+      )
+        preceding++
+      return offset + preceding
+    }
+  }
+  const originalStart = mapOffsets()
+  const originalEnd = mapOffsets()
+  return matches.map(({ start, end }) => ({
+    start: originalStart(start),
+    end: originalEnd(end),
+  }))
 }
 
 function findFlexibleMatches(
   content: string,
   oldString: string,
-  mode: Exclude<EditMatchMode, "exact">,
+  mode: FormattingMatchMode,
+  replaceAll: boolean,
 ): readonly TextMatch[] {
   const trailingWhitespace =
     mode === "trailing_whitespace" ||
@@ -60,12 +126,29 @@ function findFlexibleMatches(
     trailingWhitespace,
     curlyQuotes,
   })
-  if (new RegExp(`^(?:${pattern})$`, "u").test("")) return []
-  const expression = new RegExp(pattern, "gu")
-  return [...content.matchAll(expression)].map((match) => ({
-    start: match.index,
-    end: match.index + match[0].length,
-  }))
+  try {
+    const expression = new RegExp(pattern, "gu")
+    const matches = [...content.matchAll(expression)]
+    const first = matches[0]
+    if (!replaceAll && matches.length === 1 && first !== undefined) {
+      expression.lastIndex =
+        first.index + ((first[0].codePointAt(0) ?? 0) > 0xffff ? 2 : 1)
+      const overlapping = expression.exec(content)
+      if (overlapping !== null) matches.push(overlapping)
+    }
+    return matches.map((match) => ({
+      start: match.index,
+      end: match.index + match[0].length,
+    }))
+  } catch (error) {
+    // Large escaped literals can exceed V8's regexp compiler capacity.
+    if (
+      error instanceof SyntaxError &&
+      error.message.endsWith("Regular expression too large")
+    )
+      return []
+    throw error
+  }
 }
 
 function buildFlexiblePattern(
@@ -88,7 +171,7 @@ function buildFlexiblePattern(
       ) {
         pattern += "[ \\t]*"
       }
-      pattern += "(?:\\r\\n|\\n|\\r)"
+      pattern += "(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))"
       index += char === "\r" && value[index + 1] === "\n" ? 2 : 1
       continue
     }

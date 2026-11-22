@@ -255,6 +255,8 @@ export class ContextManager {
 
 // Rollouts retain the original result. Live and restored history both use the
 // budget captured at tool completion; a later model change cannot enlarge it.
+const HISTORY_TRUNCATION_MARKER = "[Output truncated.]"
+
 function projectHistoryItem(
   envelope: ResponseItemEnvelope,
 ): ResponseItemEnvelope {
@@ -274,6 +276,7 @@ function projectHistoryItem(
   let remainingBytes = budget.maxBytes
   let remainingLines = budget.maxLines
   let toolContentTruncated = false
+  let retainedToolText = false
   let textBlockCount = 0
   let retainedToolContentBlockCount = 0
   const content = copied.item.content.flatMap<ModelToolContentBlock>(
@@ -291,6 +294,9 @@ function projectHistoryItem(
       })
       if (isToolContent) {
         toolContentTruncated ||= text !== block.text
+        retainedToolText ||=
+          text !== "" &&
+          (text === block.text || text !== HISTORY_TRUNCATION_MARKER)
       }
       if (text === "") return []
       if (isToolContent) retainedToolContentBlockCount++
@@ -304,7 +310,27 @@ function projectHistoryItem(
     },
   )
   const item = { ...copied.item, content }
-  if (toolContentTruncated) delete item.fileObservations
+  if (toolContentTruncated && item.fileObservations !== undefined) {
+    // A clipped read can still establish the revision of the bytes it showed.
+    // Mutation receipts describe completed effects, regardless of preview size.
+    const observations = item.fileObservations.flatMap((grant) => {
+      if (grant.kind !== "whole_file_read" && grant.kind !== "ranged_read")
+        return [grant]
+      if (!retainedToolText || grant.sha256 === undefined) return []
+      const { path, sha256, aliases } = grant
+      return [
+        {
+          path,
+          sha256,
+          kind: "ranged_read" as const,
+          complete: false,
+          ...(aliases === undefined ? {} : { aliases }),
+        },
+      ]
+    })
+    if (observations.length === 0) delete item.fileObservations
+    else item.fileObservations = observations
+  }
   return {
     ...copied,
     item,
@@ -325,7 +351,7 @@ function truncateHistoryText(
   )
     return text
   if (budget.maxBytes === 0 || budget.maxLines === 0) return ""
-  const marker = "[Output truncated.]"
+  const marker = HISTORY_TRUNCATION_MARKER
   if (budget.maxBytes < Buffer.byteLength(marker)) return ""
   if (budget.maxLines === 1) return marker
   const bytes = budget.maxBytes - Buffer.byteLength(marker) - 2

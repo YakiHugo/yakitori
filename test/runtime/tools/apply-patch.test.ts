@@ -1,5 +1,7 @@
 import {
+  chmod,
   mkdir,
+  readdir,
   mkdtemp,
   readFile,
   rm,
@@ -188,32 +190,116 @@ describe("apply_patch", () => {
     ).resolves.toMatchObject({ ok: false, code: "duplicate_patch_path" })
   })
 
-  it("preserves applied changes when a later action fails", async () => {
+  it("leaves files and directories untouched when a later hunk fails preflight", async () => {
     const root = await temporaryDirectory()
+    await writeFile(join(root, "later.txt"), "actual\n")
     const tool = createApplyPatchTool()
-
     const result = await tool.execute(
       `*** Begin Patch
-*** Add File: created.txt
+*** Add File: nested/created.txt
 +hello
-*** Update File: missing.txt
+*** Update File: later.txt
 @@
--old
+-stale
 +new
 *** End Patch`,
       { workspaceRoot: root },
     )
+    expect(result).toMatchObject({ ok: false, code: "patch_context_mismatch" })
+    expect(await readdir(root)).toEqual(["later.txt"])
+    expect(await readFile(join(root, "later.txt"), "utf8")).toBe("actual\n")
+  })
 
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "records earlier committed changes when a later write fails",
+    async () => {
+      const root = await temporaryDirectory()
+      const blocked = join(root, "blocked")
+      await mkdir(blocked)
+      await writeFile(join(blocked, "later.txt"), "actual\n")
+      await chmod(blocked, 0o500)
+      const tool = createApplyPatchTool()
+      try {
+        const result = await tool.execute(
+          `*** Begin Patch
+*** Add File: created.txt
++hello
+*** Update File: blocked/later.txt
+@@
+-actual
++new
+*** End Patch`,
+          { workspaceRoot: root },
+        )
+        expect(result).toMatchObject({
+          ok: false,
+          code: "write_failed",
+          output: {
+            changes: [{ path: "created.txt", kind: "add" }],
+            fileObservations: [{ path: "created.txt", kind: "write" }],
+          },
+        })
+        expect(await readFile(join(root, "created.txt"), "utf8")).toBe(
+          "hello\n",
+        )
+        expect(await readFile(join(blocked, "later.txt"), "utf8")).toBe(
+          "actual\n",
+        )
+      } finally {
+        await chmod(blocked, 0o700)
+      }
+    },
+  )
+
+  it.each([
+    ["CRLF", "\r\n"],
+    ["none", ""],
+  ])("matches the BOM first line and Unicode punctuation through an EOF sentinel (%s)", async (_endingType, ending) => {
+    const root = await temporaryDirectory()
+    await writeFile(join(root, "file.txt"), `\uFEFFone–two\u00a0three${ending}`)
+    const result = await createApplyPatchTool().execute(
+      `<<'EOF'
+*** Begin Patch
+*** Update File: file.txt
+@@
+-one-two three
++changed
+ ${""}
+*** End of File
+*** End Patch
+EOF`,
+      { workspaceRoot: root },
+    )
+    expect(result).toMatchObject({ ok: true })
+    expect(await readFile(join(root, "file.txt"), "utf8")).toBe(
+      `\uFEFFchanged${ending}`,
+    )
+  })
+
+  it("retains exactly the requested filename after a case-only move with edits", async () => {
+    const root = await temporaryDirectory()
+    await writeFile(join(root, "file.txt"), "before\n")
+    const result = await createApplyPatchTool().execute(
+      `*** Begin Patch
+*** Update File: file.txt
+*** Move to: File.txt
+@@
+-before
++after
+*** End Patch`,
+      { workspaceRoot: root },
+    )
     expect(result).toMatchObject({
-      ok: false,
+      ok: true,
       output: {
-        changes: [{ path: "created.txt", kind: "add" }],
-        fileObservations: [{ path: "created.txt", kind: "write" }],
+        changes: [
+          { path: "File.txt", kind: "move" },
+          { path: "file.txt", kind: "delete" },
+        ],
       },
     })
-    await expect(readFile(join(root, "created.txt"), "utf8")).resolves.toBe(
-      "hello\n",
-    )
+    expect(await readdir(root)).toEqual(["File.txt"])
+    expect(await readFile(join(root, "File.txt"), "utf8")).toBe("after\n")
   })
 
   it("appends pure additions and starts named-context chunks after the marker", async () => {
@@ -261,6 +347,24 @@ describe("apply_patch", () => {
     await expect(readFile(join(root, "mixed.txt"), "utf8")).resolves.toBe(
       "one\r\ntwo\rTHREE\r\nfour\r\n",
     )
+  })
+
+  it("reports an Add over an existing file as an update and recognizes identical content", async () => {
+    const workspaceRoot = await temporaryDirectory()
+    await writeFile(join(workspaceRoot, "a.txt"), "before\n")
+    const tool = createApplyPatchTool()
+    const patch = "*** Begin Patch\n*** Add File: a.txt\n+after\n*** End Patch"
+    const updated = await tool.execute(patch, { workspaceRoot })
+    expect(updated).toMatchObject({
+      ok: true,
+      output: {
+        changes: [{ path: "a.txt", kind: "update" }],
+        fileObservations: [{ path: "a.txt", kind: "write", complete: true }],
+      },
+    })
+    const unchanged = await tool.execute(patch, { workspaceRoot })
+    expect(unchanged).toMatchObject({ ok: true, output: { changes: [] } })
+    expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe("after\n")
   })
 
   it("overwrites Add and Move destinations and creates move parents", async () => {

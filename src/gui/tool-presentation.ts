@@ -66,6 +66,7 @@ export type ToolDetail =
   | {
       readonly kind: "file_changes"
       readonly changes: readonly FileChange[]
+      readonly errorText?: string
     }
   | {
       readonly kind: "command"
@@ -132,11 +133,17 @@ function presentReadFile(
   const path = result?.path ?? execution.path
   const resultText = entry.resultText
   const isDirectory = result?.kind === "directory"
-  const offset = result?.range?.offset ?? execution.offset
+  const requestedOffset = execution.offset
+  const offset =
+    result?.range?.offset ??
+    (requestedOffset !== undefined && requestedOffset > 0
+      ? requestedOffset
+      : undefined)
+  const line = isDirectory ? undefined : offset
   const length = result?.range?.limit ?? execution.limit
   const meta = [
     offset !== undefined && length !== undefined && length > 0
-      ? `lines ${offset}–${offset + length - 1}`
+      ? `${isDirectory ? "entries" : "lines"} ${offset}–${offset + length - 1}`
       : undefined,
     result?.empty === true ? "empty" : undefined,
     result?.truncated === true ? "partial" : undefined,
@@ -150,7 +157,7 @@ function presentReadFile(
     target: {
       kind: "file",
       path,
-      ...(offset === undefined ? {} : { line: offset }),
+      ...(line === undefined ? {} : { line }),
     },
     ...(resultText === undefined
       ? {}
@@ -274,18 +281,23 @@ function presentDiff(
     (current) => current.diff !== undefined,
   )
   const created = change?.kind === "add"
-  const multiple = execution.changes.length > 1
+  const fileCount = execution.changes.length || execution.request.paths.length
+  const multiple = fileCount > 1
+  const errorText = entry.resultError ? entry.resultText : undefined
+  const showChanges =
+    execution.changes.length > 0 && (multiple || errorText !== undefined)
   return {
     verb: multiple ? "Change" : created ? "Create" : verb,
     activeVerb: multiple ? "Changing" : created ? "Creating" : activeVerb,
     subject: multiple
-      ? `${execution.changes.length} files`
+      ? `${fileCount} files`
       : movePath === undefined
         ? sourcePath
         : `${sourcePath} → ${movePath}`,
     subjectTone: "code",
     meta: [
       hasDiff ? `+${counts.added} −${counts.deleted}` : undefined,
+      execution.exact === false ||
       execution.changes.some((current) => current.diff?.truncated === true)
         ? "partial"
         : undefined,
@@ -293,11 +305,12 @@ function presentDiff(
     ...(multiple
       ? {}
       : { target: { kind: "file" as const, path: targetPath } }),
-    ...(multiple
+    ...(showChanges
       ? {
           detail: {
             kind: "file_changes" as const,
             changes: execution.changes,
+            ...(errorText === undefined ? {} : { errorText }),
           },
         }
       : diff === undefined
