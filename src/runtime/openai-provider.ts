@@ -803,11 +803,13 @@ async function* streamOpenAI(
           event.part.type === "reasoning_text")
       ) {
         const received =
-          "part" in event
-            ? event.part.text
-            : event.type === "response.reasoning_text.delta"
-              ? event.delta
-              : event.text
+          event.type === "response.reasoning_text.delta"
+            ? event.delta
+            : event.type === "response.reasoning_text.done"
+              ? event.text
+              : "text" in event.part
+                ? event.part.text
+                : undefined
         if (
           typeof event.item_id !== "string" ||
           event.item_id.length === 0 ||
