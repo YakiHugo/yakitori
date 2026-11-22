@@ -52,6 +52,8 @@ export type HookOutcome = Readonly<{
   updatedInput?: JsonValue
 }>
 
+export class HookCommandError extends Error {}
+
 export type HookRunner = Readonly<{
   run(request: HookRequest): Promise<HookOutcome>
   // Cancel and join all owned command processes, including foreground runs.
@@ -164,7 +166,7 @@ async function runCommandHook(
         else resolve({ code: exitCode })
       }
       const cancelTimeout = scheduleHookTimeout(timeoutMs, () => {
-        terminationError ??= new Error(
+        terminationError ??= new HookCommandError(
           `${request.event} hook timed out after ${timeoutMs}ms.`,
         )
         if (forceKill !== undefined) clearTimeout(forceKill)
@@ -189,12 +191,16 @@ async function runCommandHook(
       }
       request.signal?.addEventListener("abort", onAbort, { once: true })
       child.once("error", (error) => {
-        terminationError ??= error
+        terminationError ??= new HookCommandError(error.message, {
+          cause: error,
+        })
       })
       child.stdin.on("error", (error: NodeJS.ErrnoException) => {
         // Hooks are allowed to finish without consuming their input.
         if (error.code === "EPIPE") return
-        terminationError ??= error
+        terminationError ??= new HookCommandError(error.message, {
+          cause: error,
+        })
         signalProcessGroup(child, "SIGKILL")
       })
       // Like wait_with_output in the reference runners, completion includes
@@ -218,7 +224,7 @@ async function runCommandHook(
     }
   }
   if (result.code !== 0) {
-    throw new Error(
+    throw new HookCommandError(
       `${request.event} hook exited with code ${String(result.code)}.${stderr.trim() === "" ? "" : ` ${stderr.trim()}`}`,
     )
   }
@@ -227,10 +233,14 @@ async function runCommandHook(
   try {
     parsed = JSON.parse(stdout)
   } catch (cause) {
-    throw new Error(`${request.event} hook returned invalid JSON.`, { cause })
+    throw new HookCommandError(`${request.event} hook returned invalid JSON.`, {
+      cause,
+    })
   }
   if (!isRecord(parsed)) {
-    throw new Error(`${request.event} hook output must be a JSON object.`)
+    throw new HookCommandError(
+      `${request.event} hook output must be a JSON object.`,
+    )
   }
   const hookSpecific = isRecord(parsed.hookSpecificOutput)
     ? parsed.hookSpecificOutput

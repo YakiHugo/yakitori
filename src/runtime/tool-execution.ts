@@ -8,7 +8,7 @@ import type {
 import type { SessionPermissionEvent } from "../protocol/permissions.ts"
 import type { BoundAgentControl } from "./agent-control.ts"
 import { isAbortError } from "./errors.ts"
-import { HookEvent, type HookRunner } from "./hooks.ts"
+import { HookCommandError, HookEvent, type HookRunner } from "./hooks.ts"
 import type { ModelToolCallBlock } from "./model.ts"
 import { toolContentText } from "./model-tool-content.ts"
 import type { PermissionGate } from "./permission-gate.ts"
@@ -532,12 +532,19 @@ async function executePreparedTool(
           signal: input.signal,
         })
       } catch (cause) {
-        if (!input.signal.aborted || !isAbortError(cause)) throw cause
-        // The tool already confirmed its effect. Cancellation of the later
-        // check must not erase that fact from the ordered durable result drain.
-        hookContext.push(
-          "PostToolUse was interrupted after the tool completed. The result records the completed effect; do not replay it automatically.",
-        )
+        // A later hook failure cannot undo effects already confirmed by the tool.
+        if (input.signal.aborted && isAbortError(cause)) {
+          hookContext.push(
+            "PostToolUse was interrupted after the tool completed. The result records the completed effect; do not replay it automatically.",
+          )
+        } else if (cause instanceof HookCommandError) {
+          input.reportOperationalFailure(cause)
+          hookContext.push(
+            `PostToolUse failed after the tool completed: ${cause.message}`,
+          )
+        } else {
+          throw cause
+        }
       }
       if (postHook?.continue === false) {
         const reason =
