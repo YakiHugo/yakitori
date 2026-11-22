@@ -208,15 +208,30 @@ export function ConversationMessages({
         .filter((entry) => entry.turnId === turnId)
       const last = pieces.at(-1)
       if (last === undefined) continue
-      const text = pieces.map((entry) => entry.text).join("")
+      let text = ""
       const incomplete = pieces.some((entry) => entry.incomplete)
-      const sources = pieces.flatMap((piece) =>
-        (piece.sources ?? []).map((source) => ({
+      const sources = pieces.flatMap((piece) => {
+        const offset = text.length
+        text += piece.text
+        return (piece.sources ?? []).map((source) => ({
           ...source,
           // Citation IDs are local to each recorded assistant item.
           id: JSON.stringify([piece.itemId, source.id]),
-        })),
-      )
+          ...(source.mentions === undefined || offset === 0
+            ? {}
+            : {
+                mentions: source.mentions.map(
+                  ({ responseSpan, ...mention }) => ({
+                    ...mention,
+                    responseSpan: {
+                      start: responseSpan.start + offset,
+                      end: responseSpan.end + offset,
+                    },
+                  }),
+                ),
+              }),
+        }))
+      })
       const previous = previousAnswers.current.get(turnId)
       answers.set(
         turnId,

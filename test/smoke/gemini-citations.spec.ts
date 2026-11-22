@@ -10,15 +10,18 @@ import { createAppRpcClient } from "../../src/gui/lib/rpc-client.ts"
 import { createSmokeEnvironment } from "./fixtures.ts"
 
 const prompt = "Show the grounded answer and its sources."
-const answer = "Gemini grounded answer"
+const introduction = "前😀 **Gemini** "
+const conclusion = "grounded answer"
+const answer = introduction + conclusion
 const sourceURL = "https://example.org/reference"
 const sourceTitle = "Trusted reference"
+const sourceQuote = "An excerpt from the source document."
 
 for (const wireApi of [
   "gemini_generate_content",
   "gemini_interactions",
 ] as const) {
-  test(`Gemini Sources appear on completion and after server restart (${wireApi})`, async ({
+  test(`Gemini citation markers appear on completion and after server restart (${wireApi})`, async ({
     page,
   }) => {
     const environment = await createSmokeEnvironment()
@@ -117,18 +120,40 @@ for (const wireApi of [
       const main = page.getByRole("main")
       const sources = main.getByRole("region", { name: "Sources", exact: true })
       const link = sources.getByRole("link", { name: sourceTitle, exact: true })
+      const marker = page.getByRole("link", {
+        name: `Citation 1, ${sourceTitle}`,
+      })
       const checkSources = async () => {
         await expect(link).toHaveAttribute("href", sourceURL)
+        await expect(marker).toHaveAttribute("href", sourceURL)
+        await expect(main.locator("p").filter({ has: marker })).toHaveText(
+          interactions
+            ? "前😀 Gemini grounded[1] answer"
+            : "前😀 Gemini[1] grounded answer",
+        )
+        await marker.hover()
+        const preview = page.locator('[data-slot="tooltip-content"]')
+        await expect(preview).toBeVisible()
+        await expect(preview).toContainText(sourceTitle)
+        if (!interactions) await expect(preview).toContainText(sourceQuote)
+        await page.mouse.move(0, 0)
         if (interactions) {
           const file = sources
             .getByRole("listitem")
             .filter({ hasText: "report.pdf" })
           await expect(file).toHaveText("report.pdf · from page 12")
           await expect(file.getByRole("link")).toHaveCount(0)
+          await expect(
+            main.getByRole("button", { name: "Citation 2, report.pdf" }),
+          ).toHaveCount(0)
         }
       }
-      await expect(main.getByText(answer, { exact: true })).toBeVisible()
+      await expect(main.getByText("Gemini", { exact: true })).toBeVisible()
+      await expect(
+        main.locator(".markdown p").filter({ hasText: conclusion }),
+      ).toBeVisible()
       await expect(sources).toHaveCount(0)
+      await expect(marker).toHaveCount(0)
       if (pending === undefined) throw new Error("Missing live Gemini stream.")
       pending.end(finish)
       await checkSources()
@@ -139,12 +164,12 @@ for (const wireApi of [
       await server.stop()
       server = await startServer(new URL(sessionURL).port)
       await page.goto(sessionURL)
-      await expect(main.getByText(answer, { exact: true })).toBeVisible()
       await checkSources()
     } finally {
+      pending?.destroy()
+      await server?.stop()
       endpoint.closeAllConnections()
       await new Promise<void>((done) => endpoint.close(() => done()))
-      await server?.stop()
       await environment.cleanup()
     }
   })
@@ -160,10 +185,18 @@ function generateStream(text: string) {
         {
           finishReason: "STOP",
           groundingMetadata: {
-            groundingChunks: [{ web: { uri: sourceURL, title: sourceTitle } }],
+            groundingChunks: [
+              {
+                retrievedContext: {
+                  uri: sourceURL,
+                  title: sourceTitle,
+                  text: sourceQuote,
+                },
+              },
+            ],
             groundingSupports: [
               {
-                segment: { endIndex: 6, text: "Gemini" },
+                segment: { startIndex: 10, endIndex: 16, text: "Gemini" },
                 groundingChunkIndices: [0],
               },
             ],
@@ -176,23 +209,37 @@ function generateStream(text: string) {
 
 function interactionStream(text: string) {
   const id = "citation-interaction"
+  const completeAnswer = text === answer
+  const index = completeAnswer ? 1 : 0
   return {
-    start: sse(
-      {
-        event_type: "interaction.created",
-        interaction: { id, status: "in_progress" },
-      },
-      { event_type: "step.start", index: 0, step: { type: "model_output" } },
-      {
-        event_type: "step.delta",
-        index: 0,
-        delta: { type: "text", text },
-      },
-    ),
+    start:
+      sse(
+        {
+          event_type: "interaction.created",
+          interaction: { id, status: "in_progress" },
+        },
+        { event_type: "step.start", index: 0, step: { type: "model_output" } },
+        {
+          event_type: "step.delta",
+          index: 0,
+          delta: { type: "text", text: completeAnswer ? introduction : text },
+        },
+      ) +
+      (completeAnswer
+        ? sse(
+            { event_type: "step.stop", index: 0 },
+            { event_type: "step.start", index, step: { type: "model_output" } },
+            {
+              event_type: "step.delta",
+              index,
+              delta: { type: "text", text: conclusion },
+            },
+          )
+        : ""),
     finish: sse(
       {
         event_type: "step.delta",
-        index: 0,
+        index,
         delta: {
           type: "text_annotation_delta",
           annotations: [
@@ -201,20 +248,18 @@ function interactionStream(text: string) {
               url: sourceURL,
               title: sourceTitle,
               start_index: 0,
-              end_index: 6,
+              end_index: 8,
             },
             {
               type: "file_citation",
               document_uri: "files/report",
               file_name: "report.pdf",
               page_number: 12,
-              start_index: 7,
-              end_index: 15,
             },
           ],
         },
       },
-      { event_type: "step.stop", index: 0 },
+      { event_type: "step.stop", index },
       {
         event_type: "interaction.completed",
         interaction: { id, status: "completed" },

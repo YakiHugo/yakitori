@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { AssistantMessageCell } from "../../src/gui/components/cells/assistant-message-cell.tsx"
+import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import type { ExecutionEntry } from "../../src/gui/execution-view.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
@@ -60,6 +61,86 @@ afterEach(() => {
 })
 
 describe("assistant message sources", () => {
+  it("places repeated markers at Markdown text boundaries and previews the source quote on focus", async () => {
+    const text = "A &amp; B \\*C\\* [link](https://example.test/) tail."
+    const { container } = render(
+      <TooltipProvider>
+        <AssistantMessageCell
+          sessionId="work"
+          apiBase="http://localhost"
+          entry={{
+            ...entry,
+            text,
+            sources: [
+              {
+                ...entry.sources?.[0],
+                id: "web",
+                label: "Web source",
+                mentions: [
+                  {
+                    responseSpan: { start: 0, end: 9 },
+                    citedText: "From the original source.",
+                  },
+                  { responseSpan: { start: 17, end: 20 } },
+                ],
+              },
+            ],
+          }}
+        />
+      </TooltipProvider>,
+    )
+    expect(container.querySelector(".markdown p")?.textContent).toBe(
+      "A & B[1] *C* link[1] tail.",
+    )
+    const markers = screen.getAllByRole("link", {
+      name: "Citation 1, Web source",
+    })
+    expect(markers).toHaveLength(2)
+    expect(markers[1]?.parentElement?.previousElementSibling?.textContent).toBe(
+      "link",
+    )
+    const marker = markers[0]
+    if (marker === undefined) throw new Error("Missing inline citation.")
+    fireEvent.focus(marker)
+    const preview = await screen.findByRole("tooltip")
+    expect(preview.textContent).toContain("Web source")
+    expect(preview.textContent).toContain("From the original source.")
+    expect(fireEvent.click(marker)).toBe(false)
+    expect(openBrowser).toHaveBeenCalledExactlyOnceWith(
+      "https://example.com/source",
+    )
+  })
+
+  it("focuses the matching Sources row when a cited document has no web URL", () => {
+    render(
+      <TooltipProvider>
+        <AssistantMessageCell
+          sessionId="work"
+          apiBase="http://localhost"
+          entry={{
+            ...entry,
+            sources: [
+              {
+                id: "file",
+                label: "Report",
+                mentions: [{ responseSpan: { start: 0, end: 9 } }],
+              },
+              { id: "unplaced", label: "Unplaced source" },
+            ],
+          }}
+        />
+      </TooltipProvider>,
+    )
+    const marker = screen.getByRole("button", { name: "Citation 1, Report" })
+    fireEvent.click(marker)
+    const sources = screen.getByRole("region", { name: "Sources" })
+    expect(document.activeElement).toBe(
+      within(sources).getByText("Report").closest("li"),
+    )
+    expect(within(sources).getByText("Unplaced source")).toBeDefined()
+    expect(openBrowser).not.toHaveBeenCalled()
+  })
+
   it("renders source links and non-clickable file/page labels after the answer", () => {
     render(
       <AssistantMessageCell

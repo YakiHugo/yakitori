@@ -95,6 +95,7 @@
     "katex": "0.16.47",
     "lucide-react": "^1.27.0",
     "mermaid": "^12.1.0",
+    "micromark-util-decode-string": "2.0.1",
     "node-pty": "1.2.0-beta.15",
     "openai": "^6.48.0",
     "pdfjs-dist": "^6.3.289",

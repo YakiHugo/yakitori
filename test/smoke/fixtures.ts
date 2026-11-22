@@ -1050,7 +1050,9 @@ export async function runProviderFlow(
       .fill("Verify the configured provider turn.")
     await page.getByRole("button", { name: "Send", exact: true }).click()
     await expect(
-      page.getByRole("main").getByText("Mock provider reply", { exact: true }),
+      page
+        .getByRole("main")
+        .getByText("Mock[1][2] provider reply", { exact: true }),
     ).toBeVisible()
     const checkToolImage = async () => {
       await expect(
@@ -1058,7 +1060,7 @@ export async function runProviderFlow(
       ).toHaveCount(0)
       const response = page
         .getByRole("region", { name: "Response", exact: true })
-        .filter({ hasText: "Mock provider reply" })
+        .filter({ hasText: "Mock[1][2] provider reply" })
       const activity = response.getByRole("button", { name: /^Worked for/ })
       await expect(activity).toHaveAttribute("aria-expanded", "false")
       await activity.click()
@@ -1101,7 +1103,9 @@ export async function runProviderFlow(
     ).toHaveCount(0)
     await page.reload()
     await expect(
-      page.getByRole("main").getByText("Mock provider reply", { exact: true }),
+      page
+        .getByRole("main")
+        .getByText("Mock[1][2] provider reply", { exact: true }),
     ).toBeVisible()
     await expect(
       page
@@ -1334,7 +1338,7 @@ async function runApprovalAndInterruption(
   await expect(
     page
       .getByRole("region", { name: "Response", exact: true })
-      .getByText("New turn provider reply", { exact: true }),
+      .getByText("New[1][2] turn provider reply", { exact: true }),
   ).toHaveCount(1)
   await expect(interrupt).toHaveCount(0)
 }
@@ -1454,7 +1458,7 @@ async function runOrderedInputFlow(
     })
     await expect(responses).toHaveCount(2)
     await expect(
-      responses.getByText("Mock provider reply", { exact: true }),
+      responses.getByText("Mock[1][2] provider reply", { exact: true }),
     ).toHaveCount(2)
     await expect(
       page.getByRole("button", { name: "Interrupt", exact: true }),
