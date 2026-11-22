@@ -1,4 +1,4 @@
-import { textPreview } from "./result-output.ts"
+import type { Dirent } from "node:fs"
 import { readdir } from "node:fs/promises"
 import { isAbortError } from "../errors.ts"
 import { ToolLimitDefaults } from "../limits.ts"
@@ -15,12 +15,13 @@ import {
   type TextFilePage,
   UnsupportedTextFileTypeError,
 } from "./read-file-page.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { textPreview } from "./result-output.ts"
 import { plainToolName } from "./tool-name.ts"
+import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_LINE_CHARACTERS = 2_000
 const LINE_TRUNCATION_MARKER = "…[line truncated]…"
-const MAX_DIRECTORY_ENTRIES = 100
+const LINE_NUMBER_INTERVAL = 10
 
 type ReadInput = {
   readonly path: string
@@ -37,7 +38,7 @@ export function createReadFileTool(
   return {
     toolName: plainToolName("read_file"),
     description:
-      "Read a live, bounded page from a regular UTF-8 text file, or list a directory. Accepts paths relative to the workspace and absolute paths. File lines are prefixed {N}\\t for display only. Exclude those prefixes when matching file contents. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
+      "Read a live, bounded page from a regular UTF-8 text file, or list a directory. Accepts paths relative to the workspace and absolute paths. Each page shows a line number on its first line and on every tenth numbered line. A tab separates the optional number from the file text. Exclude the display prefix when matching contents. offset is a 1-based starting line or directory entry; a negative offset counts from the end. limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     supportsParallelToolCalls: true,
@@ -54,8 +55,8 @@ export function createReadFileTool(
         },
         offset: {
           type: "integer",
-          minimum: 1,
-          description: "1-based starting line. Defaults to 1.",
+          description:
+            "1-based starting line or directory entry; negative values count from the end. Defaults to 1.",
         },
         limit: {
           type: "integer",
@@ -75,7 +76,12 @@ export function createReadFileTool(
         return readFailure(resolved.error.code, resolved.error.message)
       }
       if (resolved.kind === "directory") {
-        return listDirectory(resolved.displayPath, resolved.absolutePath)
+        return listDirectory(
+          resolved.displayPath,
+          resolved.absolutePath,
+          parsed,
+          maxBytes,
+        )
       }
 
       let page: TextFilePage
@@ -85,6 +91,8 @@ export function createReadFileTool(
           offset: parsed.offset,
           limit: parsed.limit,
           maxLineCharacters,
+          revisionBytes: ToolLimitDefaults.fileWriteBytes,
+          allowAppend: true,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
         })
       } catch (error) {
@@ -110,25 +118,35 @@ export function createReadFileTool(
       if (page.binary) {
         return readFailure(
           "binary_file",
-          "read_file only supports UTF-8 text; the first 4 KB appears binary.",
+          page.media === "pdf"
+            ? "This file is a PDF."
+            : page.media === "image"
+              ? "This file is an image."
+              : "read_file only supports UTF-8 text; the first 4 KB appears binary.",
+          page.media === "pdf"
+            ? { suggestion: "Use read_document to read this PDF." }
+            : page.media === "image" && context.documentReading?.images === true
+              ? { suggestion: "Use view_image to view this image." }
+              : {},
         )
       }
 
+      const offset = page.startLine
       if (
         page.reachedEof &&
         page.lineCount !== undefined &&
-        parsed.offset > Math.max(1, page.lineCount)
+        offset > Math.max(1, page.lineCount)
       ) {
         return readFailure(
           "offset_out_of_bounds",
-          `offset ${parsed.offset} is outside this file's ${page.lineCount} lines.`,
+          `offset ${offset} is outside this file's ${page.lineCount} lines.`,
           { lineCount: page.lineCount },
         )
       }
 
       const selected = selectPageLines({
         lines: page.lines,
-        start: parsed.offset,
+        start: offset,
         limit: parsed.limit,
         byteBudget: maxBytes > 4_096 ? maxBytes - 2_048 : maxBytes,
         maxLineCharacters,
@@ -136,7 +154,7 @@ export function createReadFileTool(
       const canContinue = page.hasMore || selected.truncatedByBytes
       const nextOffset =
         canContinue && selected.lineCount > 0
-          ? parsed.offset + selected.lineCount
+          ? offset + selected.lineCount
           : undefined
       const fullMetadata =
         page.sha256 !== undefined &&
@@ -153,9 +171,8 @@ export function createReadFileTool(
             }
           : undefined
       const complete =
-        parsed.offset === 1 &&
+        offset === 1 &&
         page.reachedEof &&
-        fullMetadata !== undefined &&
         selected.lineCount === (page.lineCount ?? 0) &&
         !selected.truncatedByBytes &&
         selected.truncatedLineCount === 0
@@ -172,30 +189,37 @@ export function createReadFileTool(
                 : selected.lineCount === lineLimit
                   ? `Output capped at ${lineLimit} lines. `
                   : ""
-            }Showing lines ${parsed.offset}-${Math.max(parsed.offset, nextOffset - 1)}. Use offset=${nextOffset} to continue from the file's current contents.)`
+            }Showing lines ${offset}-${Math.max(offset, nextOffset - 1)}. Use offset=${nextOffset} to continue from the file's current contents.)`
       const visibleContent =
         page.reachedEof && page.lineCount === 0
           ? "(File is empty.)"
           : maxBytes <= 4_096 && selected.truncatedByBytes
             ? addShortTruncationMarker(selected.content, maxBytes)
             : fitUtf8(`${selected.content}${hint}`, maxBytes)
+      const aliases =
+        resolved.requestedDisplayPath === resolved.displayPath
+          ? {}
+          : { aliases: [resolved.requestedDisplayPath] }
       const fileObservation =
-        complete && fullMetadata !== undefined
+        complete && page.sha256 !== undefined
           ? {
               path: resolved.displayPath,
               kind: "whole_file_read" as const,
+              ...aliases,
               complete: true,
-              sha256: fullMetadata.sha256,
+              sha256: page.sha256,
             }
           : selected.lineCount > 0
             ? {
                 path: resolved.displayPath,
                 kind: "ranged_read" as const,
+                ...aliases,
                 complete: false,
+                ...(page.sha256 === undefined ? {} : { sha256: page.sha256 }),
                 ranges: [
                   {
-                    startLine: parsed.offset,
-                    endLine: parsed.offset + selected.lineCount - 1,
+                    startLine: offset,
+                    endLine: offset + selected.lineCount - 1,
                   },
                 ],
               }
@@ -216,7 +240,7 @@ export function createReadFileTool(
         truncatedLineCount: selected.truncatedLineCount,
         lineCharacterLimit: maxLineCharacters,
         range: {
-          offset: parsed.offset,
+          offset,
           limit: selected.lineCount,
           requestedLimit: parsed.limit,
         },
@@ -252,24 +276,52 @@ export function createReadFileTool(
 async function listDirectory(
   displayPath: string,
   absolutePath: string,
+  input: ReadInput,
+  maxBytes: number,
 ): Promise<ToolExecutionResult> {
-  let names: string[]
+  let names: Dirent[]
   try {
-    names = await readdir(absolutePath)
+    names = await readdir(absolutePath, { withFileTypes: true })
   } catch {
     return readFailure("read_failed", "The directory could not be listed.")
   }
-  names.sort()
-  const truncated = names.length > MAX_DIRECTORY_ENTRIES
-  const entries = names.slice(0, MAX_DIRECTORY_ENTRIES)
-  const noun = entries.length === 1 ? "entry" : "entries"
-  const content = [
-    `Listed ${entries.length} ${noun} in ${displayPath}.`,
-    ...entries,
-    ...(truncated
-      ? [`(Listing truncated at ${MAX_DIRECTORY_ENTRIES} entries.)`]
-      : []),
-  ].join("\n")
+  names.sort(
+    (a, b) =>
+      Number(b.isDirectory()) - Number(a.isDirectory()) ||
+      (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  )
+  const offset =
+    input.offset < 0
+      ? Math.max(1, names.length + input.offset + 1)
+      : input.offset
+  if (offset > Math.max(1, names.length)) {
+    return readFailure(
+      "offset_out_of_bounds",
+      `offset ${offset} is outside this directory's ${names.length} entries.`,
+    )
+  }
+  const entries: string[] = []
+  const header = `Directory ${displayPath} (${names.length} entries)`
+  let bytes = Buffer.byteLength(header, "utf8")
+  for (const entry of names.slice(offset - 1, offset - 1 + input.limit)) {
+    const name = entry.name + (entry.isDirectory() ? "/" : "")
+    bytes += 1 + Buffer.byteLength(name, "utf8")
+    if (bytes > maxBytes - 90) break
+    entries.push(name)
+  }
+  const truncated = offset - 1 + entries.length < names.length
+  const nextOffset =
+    truncated && entries.length > 0 ? offset + entries.length : undefined
+  const content = fitUtf8(
+    [
+      header,
+      ...entries,
+      ...(nextOffset === undefined
+        ? []
+        : [`Use offset=${nextOffset} for the next page.`]),
+    ].join("\n"),
+    maxBytes,
+  )
   return {
     ok: true,
     output: {
@@ -278,6 +330,8 @@ async function listDirectory(
       count: entries.length,
       entries,
       truncated,
+      range: { offset, limit: entries.length, requestedLimit: input.limit },
+      ...(nextOffset === undefined ? {} : { continuation: { nextOffset } }),
       content,
     },
     content,
@@ -304,7 +358,12 @@ function selectPageLines(input: {
   for (let number = input.start; number < end; number += 1) {
     const line = input.lines.get(number)
     if (line === undefined) break
-    const bounded = renderBoundedLine(number, line, input.maxLineCharacters)
+    const bounded = renderBoundedLine(
+      number,
+      line,
+      input.maxLineCharacters,
+      number === input.start,
+    )
     const value = parts.length === 0 ? bounded.content : `\n${bounded.content}`
     const width = Buffer.byteLength(value, "utf8")
     if (bytes + width > input.byteBudget) {
@@ -327,8 +386,10 @@ function renderBoundedLine(
   number: number,
   line: CapturedLine,
   maxCharacters: number,
+  first: boolean,
 ): { readonly content: string; readonly truncated: boolean } {
-  const prefix = `${number}\t`
+  const prefix =
+    first || number % LINE_NUMBER_INTERVAL === 0 ? `${number}\t` : "\t"
   if (line.full !== undefined && prefix.length + line.length <= maxCharacters) {
     return { content: `${prefix}${line.full}`, truncated: false }
   }
@@ -375,9 +436,9 @@ function parseReadInput(
   }
   if (
     input.offset !== undefined &&
-    !(Number.isInteger(input.offset) && (input.offset as number) >= 1)
+    !(Number.isSafeInteger(input.offset) && input.offset !== 0)
   ) {
-    return readInputFailure("read_file offset must be a positive integer.")
+    return readInputFailure("read_file offset must be a nonzero safe integer.")
   }
   if (
     input.limit !== undefined &&

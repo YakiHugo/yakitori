@@ -19,17 +19,37 @@ export type VisibleFileRevision = {
 
 export type VisibleFileObservations = {
   latest(path: string): VisibleFileRevision | undefined
+  targetChanged(path: string, requestedPath: string): boolean
+  requiresRefresh(path: string): boolean
   apply(grant: FileObservationGrant): void
 }
 
 export function createVisibleFileObservations(): VisibleFileObservations {
   const revisions = new Map<string, VisibleFileRevision>()
+  const aliases = new Map<string, string>()
   return {
     latest(path) {
       return revisions.get(normalizePath(path))
     },
+    targetChanged(path, requestedPath) {
+      const previous = aliases.get(normalizePath(requestedPath))
+      return (
+        previous !== undefined &&
+        previous !== normalizePath(path) &&
+        revisions.has(previous)
+      )
+    },
+    requiresRefresh(path) {
+      return revisions.get(normalizePath(path))?.observation === "invalidate"
+    },
     apply(grant) {
       applyGrant(revisions, grant)
+      if (grant.kind === "delete" || grant.kind === "invalidate") return
+      const path = normalizePath(grant.path)
+      if (!revisions.has(path)) return
+      aliases.set(path, path)
+      for (const alias of grant.aliases ?? [])
+        aliases.set(normalizePath(alias), path)
     },
   }
 }
@@ -70,8 +90,12 @@ function applyGrant(
   const path = normalizePath(grant.path)
   const previous = revisions.get(path)
 
-  if (grant.kind === "delete" || grant.kind === "invalidate") {
+  if (grant.kind === "delete") {
     revisions.delete(path)
+    return
+  }
+  if (grant.kind === "invalidate") {
+    revisions.set(path, { complete: false, observation: "invalidate" })
     return
   }
 
@@ -87,20 +111,34 @@ function applyGrant(
 
   if (grant.kind === "ranged_read") {
     const observedRange = grant.ranges?.[0]
-    if (observedRange === undefined) return
-    if (previous?.complete === true) {
+    if (
+      grant.sha256 === undefined &&
+      (observedRange === undefined || previous?.observation === "invalidate")
+    )
+      return
+    // Legacy pages have no revision. Keep a known revision conservatively
+    // until a read supplies a newer one.
+    const sameRevision =
+      grant.sha256 === undefined || grant.sha256 === previous?.sha256
+    if (previous?.complete === true && sameRevision) {
       revisions.set(path, {
-        complete: true,
-        observation: previous.observation,
-        ...(previous.sha256 === undefined ? {} : { sha256: previous.sha256 }),
-        ranges: mergeRanges(previous.ranges, grant.ranges),
+        ...previous,
+        ...(grant.ranges === undefined
+          ? {}
+          : { ranges: mergeRanges(previous.ranges, grant.ranges) }),
       })
       return
     }
+    const sha256 = grant.sha256 ?? previous?.sha256
+    const ranges = mergeRanges(
+      sameRevision ? previous?.ranges : undefined,
+      grant.ranges,
+    )
     revisions.set(path, {
       complete: false,
       observation: "ranged_read",
-      ranges: mergeRanges(previous?.ranges, grant.ranges),
+      ...(sha256 === undefined ? {} : { sha256 }),
+      ...(ranges.length === 0 ? {} : { ranges }),
     })
     return
   }
@@ -118,10 +156,9 @@ function applyGrant(
     })
     return
   }
-  if (previous === undefined) return
   revisions.set(path, {
     sha256: grant.sha256,
-    complete: grant.optimisticRebase !== true && previous.complete,
+    complete: grant.optimisticRebase !== true && previous?.complete === true,
     observation: "edit",
   })
 }
@@ -143,9 +180,15 @@ function parseExplicitGrant(value: unknown): FileObservationGrant | undefined {
   }
   const ranges = parseRanges(value.ranges)
   const sha256 = shaField(value)
+  const aliases = Array.isArray(value.aliases)
+    ? value.aliases.filter(
+        (alias): alias is string => typeof alias === "string",
+      )
+    : []
   return {
     path,
     kind,
+    ...(aliases.length === 0 ? {} : { aliases }),
     complete: value.complete === true,
     ...(sha256 === undefined ? {} : { sha256 }),
     ...(ranges === undefined ? {} : { ranges }),
@@ -189,7 +232,7 @@ function mergeRanges(
 }
 
 function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/")
+  return process.platform === "win32" ? path.replaceAll("\\", "/") : path
 }
 
 function shaField(value: Record<string, unknown>): string | undefined {

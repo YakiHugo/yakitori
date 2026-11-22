@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto"
-import { constants } from "node:fs"
-import { open } from "node:fs/promises"
+import { type FileHandle, open } from "node:fs/promises"
+import { detectImageMediaType } from "../../kernel/image-metadata.ts"
+import { regularFileReadFlags } from "./text-file-snapshot.ts"
 
 const BINARY_SAMPLE_BYTES = 4 * 1024
-const REGULAR_FILE_READ_FLAGS =
-  constants.O_RDONLY |
-  (process.platform === "win32"
-    ? 0
-    : constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+// Some regular virtual files report a zero size even when their contents are readable.
+const UNKNOWN_SIZE_READ_LIMIT = 1024 * 1024
 
 export type CapturedLine = {
   readonly length: number
@@ -17,10 +15,12 @@ export type CapturedLine = {
 }
 
 export type TextFilePage = {
+  readonly startLine: number
   readonly lines: ReadonlyMap<number, CapturedLine>
   readonly reachedEof: boolean
   readonly hasMore: boolean
   readonly binary: boolean
+  readonly media?: "image" | "pdf"
   readonly lineCount?: number
   readonly sha256?: string
   readonly byteCount?: number
@@ -48,20 +48,38 @@ export async function captureTextFilePage(input: {
   readonly limit: number
   readonly maxLineCharacters: number
   readonly signal?: AbortSignal
+  readonly revisionBytes?: number
+  readonly allowAppend?: boolean
 }): Promise<TextFilePage> {
   input.signal?.throwIfAborted()
   // The path-policy check provides an early diagnostic, but only the opened
   // descriptor can close the race where the final path is replaced by a FIFO
   // or another special file between lstat and open.
-  const handle = await open(input.absolutePath, REGULAR_FILE_READ_FLAGS)
+  const handle = await open(input.absolutePath, regularFileReadFlags)
   try {
-    const before = await handle.stat()
+    const before = await handle.stat({ bigint: true })
     if (!before.isFile()) throw new UnsupportedTextFileTypeError()
-    const hash = input.offset === 1 ? createHash("sha256") : undefined
+    const size = Number(before.size)
+    const readLimit = size === 0 ? UNKNOWN_SIZE_READ_LIMIT + 1 : size
+    const tail =
+      input.offset < 0
+        ? await scanFilePrefix(handle, readLimit, true, input.signal)
+        : undefined
+    if (size === 0 && tail !== undefined && tail.byteCount >= readLimit) {
+      throw new Error("The virtual file exceeded the bounded tail scan.")
+    }
+    const startLine =
+      tail === undefined
+        ? input.offset
+        : Math.max(1, tail.lineCount + input.offset + 1)
+    const captureRevision =
+      size > 0 &&
+      input.revisionBytes !== undefined &&
+      size <= input.revisionBytes
+    const hash = createHash("sha256")
     const decoder = new TextDecoder("utf-8", { fatal: true })
-    const sample: Buffer[] = []
     const selected = new Map<number, CapturedLine>()
-    let sampleBytes = 0
+    let encodedBytes = 0
     let byteCount = 0
     let lineCount = 0
     let finalNewline = false
@@ -76,7 +94,7 @@ export async function captureTextFilePage(input: {
 
     const finishLine = (ending?: "CR" | "CRLF" | "LF") => {
       lineCount += 1
-      if (lineCount >= input.offset && lineCount < input.offset + input.limit) {
+      if (lineCount >= startLine && lineCount - startLine < input.limit) {
         selected.set(lineCount, finishLineBuilder(line))
         if (selected.size === input.limit) pageFilled = true
       }
@@ -111,7 +129,7 @@ export async function captureTextFilePage(input: {
           finishLine("LF")
         } else {
           currentLineHasContent = true
-          if (lineCount + 1 >= input.offset) {
+          if (lineCount + 1 >= startLine) {
             appendCharacter(line, character)
           }
           finalNewline = false
@@ -120,33 +138,55 @@ export async function captureTextFilePage(input: {
       return true
     }
 
-    const stream = handle.createReadStream({
-      autoClose: false,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    })
     let reachedEof = true
-    for await (const chunk of stream) {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    for await (const bytes of readFilePrefix(handle, readLimit, input.signal)) {
+      if (encodedBytes === 0) {
+        const media =
+          bytes.toString("latin1", 0, 5) === "%PDF-"
+            ? "pdf"
+            : detectImageMediaType(bytes) === undefined
+              ? undefined
+              : "image"
+        if (media !== undefined) {
+          return {
+            startLine,
+            lines: selected,
+            binary: true,
+            reachedEof: false,
+            hasMore: false,
+            media,
+          }
+        }
+      }
+      hash.update(bytes)
+      encodedBytes += bytes.byteLength
       if (pageFilled) {
         hasMore = true
         reachedEof = false
-        break
+        if (!captureRevision) break
+        continue
       }
       const boundary = findPageByteBoundary({
         bytes,
         completedLines: lineCount,
-        targetLines: input.offset + input.limit - 1,
+        targetLines: startLine + input.limit - 1,
         pendingCarriageReturn,
       })
       const consumed =
         boundary === undefined ? bytes : bytes.subarray(0, boundary.byteLength)
-      hash?.update(consumed)
-      byteCount += consumed.byteLength
-      if (sampleBytes < BINARY_SAMPLE_BYTES) {
-        const part = consumed.subarray(0, BINARY_SAMPLE_BYTES - sampleBytes)
-        sample.push(part)
-        sampleBytes += part.byteLength
+      if (
+        byteCount === 0 &&
+        looksBinary(consumed.subarray(0, BINARY_SAMPLE_BYTES))
+      ) {
+        return {
+          startLine,
+          lines: selected,
+          binary: true,
+          reachedEof: false,
+          hasMore: false,
+        }
       }
+      byteCount += consumed.byteLength
       consume(decoder.decode(consumed, { stream: true }))
       if (boundary?.finishStandaloneCarriageReturn === true) {
         pendingCarriageReturn = false
@@ -155,10 +195,13 @@ export async function captureTextFilePage(input: {
       if (boundary?.hasMore === true) {
         hasMore = true
         reachedEof = false
-        break
+        if (!captureRevision) break
       }
     }
 
+    if (size === 0 && encodedBytes >= readLimit && !pageFilled) {
+      throw new Error("The virtual file exceeded the bounded page scan.")
+    }
     if (reachedEof) {
       consume(decoder.decode())
       if (pendingCarriageReturn) {
@@ -168,36 +211,106 @@ export async function captureTextFilePage(input: {
       }
     }
 
-    const after = await handle.stat()
+    const capturedHash = hash.digest("hex")
+    const after = await handle.stat({ bigint: true })
+    const unchanged =
+      before.size === after.size &&
+      before.mtimeNs === after.mtimeNs &&
+      before.ctimeNs === after.ctimeNs
+    if (!unchanged) {
+      // A growing log is safe to display only when the captured prefix still
+      // matches. Tail offsets also depend on the bytes counted in the first pass.
+      if (
+        input.allowAppend !== true ||
+        after.size <= before.size ||
+        (await scanFilePrefix(handle, encodedBytes, false, input.signal))
+          .sha256 !== capturedHash ||
+        (tail !== undefined &&
+          (await scanFilePrefix(handle, tail.byteCount, false, input.signal))
+            .sha256 !== tail.sha256)
+      ) {
+        throw new FileChangedDuringReadError()
+      }
+      const verified = await handle.stat({ bigint: true })
+      if (
+        verified.size !== after.size ||
+        verified.mtimeNs !== after.mtimeNs ||
+        verified.ctimeNs !== after.ctimeNs
+      ) {
+        throw new FileChangedDuringReadError()
+      }
+    }
     if (
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs
+      tail !== undefined &&
+      ((size > 0 && tail.byteCount !== size) ||
+        (encodedBytes === tail.byteCount && tail.sha256 !== capturedHash))
     ) {
       throw new FileChangedDuringReadError()
     }
-
-    const completeMetadata =
-      reachedEof && hash !== undefined
-        ? {
-            sha256: hash.digest("hex"),
-            byteCount,
-            lineCount,
-            lineEnding: newlineStyle(lf, crlf, cr),
-            finalNewline,
-          }
-        : reachedEof
-          ? { lineCount }
-          : {}
+    const wholeFile = reachedEof && startLine === 1
+    const sha256 =
+      encodedBytes === size && (captureRevision || wholeFile)
+        ? capturedHash
+        : undefined
     return {
+      startLine,
       lines: selected,
       reachedEof,
       hasMore,
-      binary: looksBinary(Buffer.concat(sample)),
-      ...completeMetadata,
+      binary: false,
+      ...(sha256 === undefined ? {} : { sha256 }),
+      ...(reachedEof ? { lineCount } : {}),
+      ...(wholeFile
+        ? { byteCount, lineEnding: newlineStyle(lf, crlf, cr), finalNewline }
+        : {}),
     }
   } finally {
     await handle.close()
+  }
+}
+
+async function scanFilePrefix(
+  handle: FileHandle,
+  size: number,
+  countLines: boolean,
+  signal?: AbortSignal,
+): Promise<{ sha256: string; lineCount: number; byteCount: number }> {
+  const hash = createHash("sha256")
+  let lineCount = 0
+  let byteCount = 0
+  let previous: number | undefined
+  for await (const bytes of readFilePrefix(handle, size, signal)) {
+    hash.update(bytes)
+    byteCount += bytes.length
+    if (!countLines) continue
+    for (const byte of bytes) {
+      if (byte === 0x0d || (byte === 0x0a && previous !== 0x0d)) lineCount++
+      previous = byte
+    }
+  }
+  if (previous !== undefined && previous !== 0x0a && previous !== 0x0d)
+    lineCount++
+  return { sha256: hash.digest("hex"), lineCount, byteCount }
+}
+
+async function* readFilePrefix(
+  handle: FileHandle,
+  size: number,
+  signal?: AbortSignal,
+) {
+  const buffer = Buffer.allocUnsafe(Math.min(size, 64 * 1024))
+  let offset = 0
+  while (offset < size) {
+    signal?.throwIfAborted()
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      Math.min(buffer.length, size - offset),
+      offset,
+    )
+    if (bytesRead === 0) break
+    offset += bytesRead
+    yield buffer.subarray(0, bytesRead)
   }
 }
 

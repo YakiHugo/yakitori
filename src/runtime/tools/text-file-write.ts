@@ -1,20 +1,18 @@
 import { createHash, randomBytes } from "node:crypto"
-import {
-  link,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-  unlink,
-} from "node:fs/promises"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { link, mkdir, open, rename, rm, unlink } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import { ToolLimitDefaults } from "../limits.ts"
 import {
+  fileWriteLockKey,
+  isSameWriteTarget,
   type ResolvedFileTarget,
-  resolveWorkspaceRoot,
+  type ResolvedWriteTarget,
   resolveWritePath,
 } from "./path-policy.ts"
+import {
+  readRegularFileSnapshot,
+  regularFileReadFlags,
+} from "./text-file-snapshot.ts"
 import type { ToolFailure } from "./types.ts"
 import {
   type BoundedUnifiedDiff,
@@ -27,6 +25,8 @@ export type CompareAndWriteTextFileInput = Readonly<{
   content: string
   expectedSha256: string | null
   createParentDirectories?: boolean
+  maxBytes?: number
+  preflightDiff?: BoundedUnifiedDiff
   // GUI writes enforce a narrower path boundary than agent file tools.
   validateTarget?: (absolutePath: string) => Promise<void>
 }>
@@ -47,6 +47,23 @@ export type TextFileDeleteOutput = Readonly<{
   diff: BoundedUnifiedDiff
 }>
 
+export function fileCommitFailureAtPath(
+  failure: ToolFailure,
+  path: string,
+): ToolFailure {
+  const output = failure.output
+  const details =
+    typeof output === "object" && output !== null && !Array.isArray(output)
+      ? output
+      : {}
+  return {
+    ...failure,
+    message: `${path}: ${failure.message}`,
+    content: `File: ${path}\n${failure.content}`,
+    output: { ...details, failedPath: path },
+  }
+}
+
 type TextFileResult<Output> =
   | ToolFailure
   | Readonly<{ ok: true; output: Output; content: string }>
@@ -54,99 +71,55 @@ type TextFileResult<Output> =
 export async function compareAndWriteTextFile(
   input: CompareAndWriteTextFileInput,
 ): Promise<TextFileResult<TextFileWriteOutput>> {
-  if (input.createParentDirectories === true) {
-    if (input.path.length === 0 || input.path.includes("\0")) {
-      return writeFailure("path_denied", "Path must be a non-empty string.")
-    }
-    try {
-      const root = await resolveWorkspaceRoot(input.workspaceRoot)
-      const candidate = resolve(
-        isAbsolute(input.path) ? input.path : resolve(root, input.path),
-      )
-      await mkdir(dirname(candidate), { recursive: true })
-    } catch {
-      return writeFailure(
-        "write_failed",
-        "The destination parent directory could not be created.",
-      )
-    }
-  }
-  const resolved = await resolveWritePath(input.workspaceRoot, input.path)
+  return writeTextFile(input)
+}
+
+async function writeTextFile(
+  input: CompareAndWriteTextFileInput,
+  lockedPath?: string,
+): Promise<TextFileResult<TextFileWriteOutput>> {
+  const resolved = await resolveWritePath(
+    input.workspaceRoot,
+    input.path,
+    input.createParentDirectories,
+  )
   if (!resolved.ok) return pathError(resolved)
   await input.validateTarget?.(resolved.absolutePath)
 
   try {
-    return await withPathWriteLock(resolved.absolutePath, async () => {
-      const target = await resolveWritePath(input.workspaceRoot, input.path)
-      if (!target.ok) return pathError(target)
-      if (target.absolutePath !== resolved.absolutePath) {
-        return writeFailure(
-          "path_changed",
-          "File path changed before the write.",
+    return await withWriteLock(
+      input.workspaceRoot,
+      resolved,
+      lockedPath,
+      input.expectedSha256 === null,
+      async () => {
+        const target = await resolveWritePath(
+          input.workspaceRoot,
+          input.path,
+          input.createParentDirectories,
         )
-      }
-      await input.validateTarget?.(target.absolutePath)
-
-      const checked = await checkPrecondition(target, input.expectedSha256)
-      if (!checked.ok) return checked.result
-
-      const tempPath = join(
-        dirname(target.absolutePath),
-        `.yakitori-write-${randomBytes(8).toString("hex")}.tmp`,
-      )
-      let mode: number | undefined
-      if (target.exists) {
-        const handle = await open(target.absolutePath, "r")
-        try {
-          mode = (await handle.stat()).mode
-        } finally {
-          await handle.close()
-        }
-      }
-
-      try {
-        const handle = await open(tempPath, "wx", mode)
-        try {
-          await handle.writeFile(input.content, "utf8")
-          await handle.sync()
-        } finally {
-          await handle.close()
-        }
-
-        const latest = await resolveWritePath(input.workspaceRoot, input.path)
-        if (!latest.ok) return pathError(latest)
-        if (latest.absolutePath !== target.absolutePath) {
+        if (!target.ok) return pathError(target)
+        if (
+          !(await isSameWriteTarget(
+            input.workspaceRoot,
+            resolved.absolutePath,
+            target.absolutePath,
+            !resolved.exists,
+          ))
+        ) {
           return writeFailure(
             "path_changed",
-            "File path changed while the write was being prepared.",
-            { suggestion: "Resolve the path again and retry the write." },
+            "File path changed before the write.",
           )
         }
-        await input.validateTarget?.(latest.absolutePath)
+        await input.validateTarget?.(target.absolutePath)
 
-        const rechecked = await checkPrecondition(latest, input.expectedSha256)
-        if (!rechecked.ok) return rechecked.result
-        await input.validateTarget?.(latest.absolutePath)
-
-        if (target.exists) {
-          await rename(tempPath, target.absolutePath)
-        } else {
-          try {
-            await link(tempPath, target.absolutePath)
-          } catch (error) {
-            if (isAlreadyExists(error)) {
-              return writeFailure(
-                "file_exists",
-                "File was created concurrently; refusing to overwrite it.",
-                {
-                  suggestion:
-                    "Read the new file before deciding whether to edit it.",
-                },
-              )
-            }
-            throw error
-          }
-        }
+        const checked = await checkPrecondition(
+          target,
+          input.expectedSha256,
+          input.maxBytes,
+        )
+        if (!checked.ok) return checked.result
 
         const written = Buffer.from(input.content, "utf8")
         const output = {
@@ -155,39 +128,150 @@ export async function compareAndWriteTextFile(
           sha256: sha256(written),
           byteCount: written.byteLength,
           created: !target.exists,
-          diff: createBoundedUnifiedDiff({
-            path: target.displayPath,
-            before:
-              checked.currentContent === null
-                ? null
-                : checked.currentContent.toString("utf8"),
-            after: input.content,
-            maxBytes: ToolLimitDefaults.toolDiffBytes,
-          }),
+          diff:
+            input.preflightDiff ??
+            createBoundedUnifiedDiff({
+              path: target.displayPath,
+              before: checked.currentContent?.toString("utf8") ?? null,
+              after: input.content,
+              maxBytes: ToolLimitDefaults.toolDiffBytes,
+            }),
+        }
+        if (checked.currentContent?.equals(written)) {
+          return {
+            ok: true,
+            output,
+            content: `Already up to date: ${output.path}.`,
+          }
+        }
+
+        if (!target.exists && input.createParentDirectories === true) {
+          await mkdir(dirname(target.absolutePath), { recursive: true })
+          const pending = await resolveWritePath(
+            input.workspaceRoot,
+            input.path,
+          )
+          if (!pending.ok) return pathError(pending)
+          if (pending.absolutePath !== target.absolutePath) {
+            return writeFailure(
+              "path_changed",
+              "File path changed while creating its parent directories.",
+            )
+          }
+          await input.validateTarget?.(pending.absolutePath)
+        }
+
+        const tempPath = join(
+          dirname(target.absolutePath),
+          `.yakitori-write-${randomBytes(8).toString("hex")}.tmp`,
+        )
+        let mode: number | undefined
+        if (target.exists) {
+          const handle = await open(target.absolutePath, regularFileReadFlags)
+          try {
+            const stat = await handle.stat()
+            if (!stat.isFile())
+              return writeFailure(
+                "path_changed",
+                "The write target is no longer a regular file.",
+              )
+            mode = stat.mode
+          } finally {
+            await handle.close()
+          }
+        }
+
+        const handle = await open(tempPath, "wx", mode)
+        let committed = false
+        try {
+          try {
+            await handle.writeFile(input.content, "utf8")
+            await handle.sync()
+          } finally {
+            await handle.close()
+          }
+
+          const latest = await resolveWritePath(input.workspaceRoot, input.path)
+          if (!latest.ok) return pathError(latest)
+          if (latest.absolutePath !== target.absolutePath) {
+            return writeFailure(
+              "path_changed",
+              "File path changed while the write was being prepared.",
+              { suggestion: "Resolve the path again and retry the write." },
+            )
+          }
+          await input.validateTarget?.(latest.absolutePath)
+
+          const rechecked = await checkPrecondition(
+            latest,
+            input.expectedSha256,
+            input.maxBytes,
+          )
+          if (!rechecked.ok) return rechecked.result
+          await input.validateTarget?.(latest.absolutePath)
+
+          if (target.exists) {
+            await rename(tempPath, target.absolutePath)
+          } else {
+            try {
+              await link(tempPath, target.absolutePath)
+            } catch (error) {
+              if (isAlreadyExists(error)) {
+                return writeFailure(
+                  "file_exists",
+                  "File was created concurrently; refusing to overwrite it.",
+                  {
+                    suggestion:
+                      "Read the new file before deciding whether to edit it.",
+                  },
+                )
+              }
+              throw error
+            }
+          }
+
+          committed = true
+        } finally {
+          if (!committed) await rm(tempPath, { force: true })
+        }
+        let cleanupFailed = false
+        if (!target.exists) {
+          try {
+            await rm(tempPath, { force: true })
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error)) throw error
+            cleanupFailed = true
+          }
         }
         return {
           ok: true,
           output,
-          content: `${output.created ? "Created" : "Updated"} ${output.path} (${output.byteCount} bytes, sha256 ${output.sha256}).`,
+          content: `${output.created ? "Created" : "Updated"} ${output.path} (${output.byteCount} bytes).${cleanupFailed ? " A temporary file could not be removed." : ""}`,
         }
-      } finally {
-        await rm(tempPath, { force: true })
-      }
-    })
-  } catch {
+      },
+    )
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error)) throw error
     return writeFailure(
       "write_failed",
-      "The file could not be written safely.",
+      `Could not write ${resolved.displayPath} safely.`,
       { suggestion: "Inspect the file and retry with its latest revision." },
     )
   }
 }
 
-export async function compareAndDeleteTextFile(input: {
-  readonly workspaceRoot: string
-  readonly path: string
-  readonly expectedSha256: string
-}): Promise<TextFileResult<TextFileDeleteOutput>> {
+type DeleteTextFileInput = Readonly<{
+  workspaceRoot: string
+  path: string
+  expectedSha256: string
+  maxBytes: number
+  preflightDiff?: BoundedUnifiedDiff
+}>
+
+async function deleteTextFile(
+  input: DeleteTextFileInput,
+  lockedPath: string,
+): Promise<TextFileResult<TextFileDeleteOutput>> {
   const resolved = await resolveWritePath(input.workspaceRoot, input.path)
   if (!resolved.ok) return pathError(resolved)
   if (!resolved.exists) {
@@ -195,41 +279,116 @@ export async function compareAndDeleteTextFile(input: {
   }
 
   try {
-    return await withPathWriteLock(resolved.absolutePath, async () => {
-      const target = await resolveWritePath(input.workspaceRoot, input.path)
-      if (!target.ok) return pathError(target)
-      if (!target.exists || target.absolutePath !== resolved.absolutePath) {
-        return writeFailure(
-          "path_changed",
-          "File path changed while the deletion was being prepared.",
+    return await withWriteLock(
+      input.workspaceRoot,
+      resolved,
+      lockedPath,
+      false,
+      async () => {
+        const target = await resolveWritePath(input.workspaceRoot, input.path)
+        if (!target.ok) return pathError(target)
+        if (!target.exists || target.absolutePath !== resolved.absolutePath) {
+          return writeFailure(
+            "path_changed",
+            "File path changed while the deletion was being prepared.",
+          )
+        }
+        const checked = await checkPrecondition(
+          target,
+          input.expectedSha256,
+          input.maxBytes,
         )
-      }
-      const checked = await checkPrecondition(target, input.expectedSha256)
-      if (!checked.ok) return checked.result
-      await unlink(target.absolutePath)
-      return {
-        ok: true,
-        output: {
-          path: target.displayPath,
-          previousSha256: checked.currentSha256,
-          deleted: true,
-          diff: createBoundedUnifiedDiff({
+        if (!checked.ok) return checked.result
+        await unlink(target.absolutePath)
+        return {
+          ok: true,
+          output: {
             path: target.displayPath,
-            before: checked.currentContent?.toString("utf8") ?? "",
-            after: null,
-            maxBytes: ToolLimitDefaults.toolDiffBytes,
-          }),
-        },
-        content: `Deleted ${target.displayPath}.`,
-      }
-    })
-  } catch {
+            previousSha256: checked.currentSha256,
+            deleted: true,
+            diff:
+              input.preflightDiff ??
+              createBoundedUnifiedDiff({
+                path: target.displayPath,
+                before: checked.currentContent?.toString("utf8") ?? "",
+                after: null,
+                maxBytes: ToolLimitDefaults.toolDiffBytes,
+              }),
+          },
+          content: `Deleted ${target.displayPath}.`,
+        }
+      },
+    )
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error)) throw error
     return writeFailure(
       "delete_failed",
-      "The file could not be deleted safely.",
+      `Could not delete ${resolved.displayPath} safely.`,
       { suggestion: "Inspect the path and retry from its latest revision." },
     )
   }
+}
+
+export type LockedTextFileChanges = Readonly<{
+  write(
+    path: string,
+    input: CompareAndWriteTextFileInput,
+  ): Promise<TextFileResult<TextFileWriteOutput>>
+  delete(
+    path: string,
+    input: DeleteTextFileInput,
+  ): Promise<TextFileResult<TextFileDeleteOutput>>
+}>
+
+export async function withTextFileWriteLocks<T>(
+  paths: readonly string[],
+  run: (changes: LockedTextFileChanges) => Promise<T>,
+): Promise<T> {
+  const ordered = [...new Set(paths.map(fileWriteLockKey))].sort()
+  const heldPaths = new Set(ordered)
+  const requireHeldPath = (path: string) => {
+    if (!heldPaths.has(fileWriteLockKey(path)))
+      throw new Error(`Cannot mutate an unlocked batch path: ${path}`)
+    return path
+  }
+  const acquire = (index: number): Promise<T> => {
+    const path = ordered[index]
+    return path === undefined
+      ? run({
+          write: (path, input) => writeTextFile(input, requireHeldPath(path)),
+          delete: (path, input) => deleteTextFile(input, requireHeldPath(path)),
+        })
+      : withPathWriteLock(path, () => acquire(index + 1))
+  }
+  return acquire(0)
+}
+
+async function withWriteLock<T extends TextFileResult<unknown>>(
+  workspaceRoot: string,
+  target: ResolvedWriteTarget,
+  lockedPath: string | undefined,
+  allowCreatedParentSpelling: boolean,
+  run: () => Promise<T>,
+): Promise<T | ToolFailure> {
+  if (lockedPath === undefined) {
+    return withTextFileWriteLocks(
+      [target.absolutePath, ...target.missingParents],
+      run,
+    )
+  }
+  if (
+    await isSameWriteTarget(
+      workspaceRoot,
+      lockedPath,
+      target.absolutePath,
+      allowCreatedParentSpelling,
+    )
+  )
+    return run()
+  return writeFailure(
+    "path_changed",
+    "The resolved path changed before the batch could commit.",
+  )
 }
 
 const writeQueues = new Map<string, Promise<void>>()
@@ -257,6 +416,7 @@ async function withPathWriteLock<T>(
 async function checkPrecondition(
   target: Extract<ResolvedFileTarget, { readonly ok: true }>,
   expectedSha256: string | null,
+  maxBytes = ToolLimitDefaults.fileWriteBytes,
 ): Promise<
   | {
       readonly ok: true
@@ -290,14 +450,19 @@ async function checkPrecondition(
         "File was created before this new-file write could commit.",
         {
           suggestion:
-            "Read the complete file before deciding whether to replace it.",
+            "Inspect the new file before deciding whether to replace it.",
         },
       ),
     }
   }
 
-  const currentContent = await readFile(target.absolutePath)
-  const currentSha256 = sha256(currentContent)
+  const snapshot = await readRegularFileSnapshot(
+    target.absolutePath,
+    target.displayPath,
+    maxBytes,
+  )
+  if (!snapshot.ok) return { ok: false, result: snapshot }
+  const { bytes: currentContent, sha256: currentSha256 } = snapshot
   if (currentSha256 === expectedSha256) {
     return { ok: true, currentSha256, currentContent }
   }
@@ -334,9 +499,6 @@ function writeFailure(
     message,
     content: [
       `${code}: ${message}`,
-      ...(details?.currentSha256 === undefined
-        ? []
-        : [`Current sha256: ${details.currentSha256}`]),
       ...(details?.suggestion === undefined
         ? []
         : [`Suggestion: ${details.suggestion}`]),

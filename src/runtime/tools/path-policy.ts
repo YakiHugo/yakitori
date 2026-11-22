@@ -1,4 +1,6 @@
-import { lstat, readdir, realpath } from "node:fs/promises"
+import { realpath as filesystemRealpath } from "node:fs"
+import { lstat, readdir } from "node:fs/promises"
+import { promisify } from "node:util"
 import {
   basename,
   dirname,
@@ -8,6 +10,8 @@ import {
   resolve,
   sep,
 } from "node:path"
+
+const realpath = promisify(filesystemRealpath.native)
 
 const SUGGESTION_TIMEOUT_MS = 1_000
 const MAX_PATH_SUGGESTIONS = 3
@@ -22,6 +26,7 @@ export type ResolvedFileTarget =
       readonly ok: true
       readonly absolutePath: string
       readonly displayPath: string
+      readonly requestedDisplayPath: string
       readonly exists: boolean
       readonly kind: "file" | "directory"
     }
@@ -30,11 +35,19 @@ export type ResolvedFileTarget =
       readonly error: PathPolicyError
     }
 
+export type ResolvedWriteTarget = Extract<ResolvedFileTarget, { ok: true }> & {
+  readonly missingParents: readonly string[]
+}
+
+class InvalidWorkspaceRootError extends Error {}
+
 export async function resolveWorkspaceRoot(workspace: string): Promise<string> {
   const resolved = await realpath(workspace)
   const stats = await lstat(resolved)
   if (!stats.isDirectory()) {
-    throw new Error(`Workspace is not a directory: ${workspace}`)
+    throw new InvalidWorkspaceRootError(
+      `Workspace is not a directory: ${workspace}`,
+    )
   }
   return resolved
 }
@@ -63,6 +76,7 @@ export async function resolveCommandCwd(
       ok: true,
       absolutePath,
       displayPath: toRelativePath(canonicalRoot, absolutePath) || ".",
+      requestedDisplayPath: displayPath(canonicalRoot, candidate) || ".",
       exists: true,
       kind: "directory",
     }
@@ -87,6 +101,7 @@ export async function resolveReadPath(
         ok: true,
         absolutePath,
         displayPath: displayPath(canonicalRoot, absolutePath) || ".",
+        requestedDisplayPath: displayPath(canonicalRoot, candidate) || ".",
         exists: true,
         kind: "directory",
       }
@@ -101,6 +116,7 @@ export async function resolveReadPath(
       ok: true,
       absolutePath,
       displayPath: displayPath(canonicalRoot, absolutePath),
+      requestedDisplayPath: displayPath(canonicalRoot, candidate),
       exists: true,
       kind: "file",
     }
@@ -120,48 +136,215 @@ export async function resolveReadPath(
 export async function resolveWritePath(
   workspaceRoot: string,
   requestedPath: string,
-): Promise<ResolvedFileTarget> {
+  allowMissingParents = false,
+): Promise<ResolvedWriteTarget | Extract<ResolvedFileTarget, { ok: false }>> {
   const validated = validatePathInput(requestedPath)
   if (!validated.ok) return validated
-  const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
-  const candidate = pathCandidate(canonicalRoot, validated.path)
+  let canonicalRoot: string
   try {
-    const absolutePath = await realpath(candidate)
-    const stats = await lstat(absolutePath)
-    if (stats.isDirectory()) {
-      return pathDenied("Path is a directory; a file is required.")
-    }
-    return {
-      ok: true,
-      absolutePath,
-      displayPath: displayPath(canonicalRoot, absolutePath),
-      exists: true,
-      kind: "file",
-    }
-  } catch {
-    // New files resolve through an existing canonical parent.
-    const parentCandidate = dirname(candidate)
+    canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
+  } catch (error) {
+    if (
+      !(error instanceof InvalidWorkspaceRootError) &&
+      !(error instanceof Error && "code" in error)
+    )
+      throw error
+    return pathError(
+      "workspace_unavailable",
+      "The workspace directory could not be resolved.",
+    )
+  }
+  const candidate = pathCandidate(canonicalRoot, validated.path)
+  const suffix: string[] = []
+  let ancestor = candidate
+  for (;;) {
     try {
-      const parentPath = await realpath(parentCandidate)
-      const parentStats = await lstat(parentPath)
-      if (!parentStats.isDirectory()) {
-        return pathDenied("Parent path is not a directory.")
+      const canonical = await realpath(ancestor)
+      const stats = await lstat(canonical)
+      if (suffix.length > 0 ? !stats.isDirectory() : !stats.isFile()) {
+        return pathDenied(
+          suffix.length > 0
+            ? "Parent path is not a directory."
+            : "Path must be a regular file.",
+        )
       }
-      const absolutePath = join(
-        parentPath,
-        validated.path.split(/[/\\]/).at(-1) ?? validated.path,
-      )
+      const absolutePath = join(canonical, ...suffix)
       return {
         ok: true,
         absolutePath,
         displayPath: displayPath(canonicalRoot, absolutePath),
-        exists: false,
+        requestedDisplayPath: displayPath(canonicalRoot, candidate),
+        exists: suffix.length === 0,
         kind: "file",
+        missingParents: suffix
+          .slice(0, -1)
+          .map((_, index) => join(canonical, ...suffix.slice(0, index + 1))),
       }
-    } catch {
-      return pathDenied("Parent directory does not exist.")
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        if (!(error instanceof Error && "code" in error)) throw error
+        return pathDenied("File path could not be resolved.")
+      }
+      // A dangling link occupies its path and cannot serve as a parent.
+      try {
+        await lstat(ancestor)
+        return pathDenied("Path contains an invalid symbolic link.")
+      } catch (cause) {
+        if (!hasErrorCode(cause, "ENOENT") && !hasErrorCode(cause, "ENOTDIR")) {
+          if (!(cause instanceof Error && "code" in cause)) throw cause
+          return pathDenied("File path could not be resolved.")
+        }
+      }
+      const parent = dirname(ancestor)
+      if (parent === ancestor || (!allowMissingParents && suffix.length > 0)) {
+        return pathDenied("Parent directory does not exist.")
+      }
+      suffix.unshift(basename(ancestor))
+      ancestor = parent
     }
   }
+}
+
+export async function conflictingFileTargets(
+  targets: readonly ResolvedWriteTarget[],
+): Promise<{ kind: "parent" | "alias"; path: string } | undefined> {
+  const paths = new Set(targets.map((target) => target.absolutePath))
+  const missing = new Map<string, string[]>()
+  const caseProbes = new Map<string, Promise<boolean>>()
+  const mayAlias = async (first: string, second: string) => {
+    // Darwin volumes can match Unicode normalization variants even when
+    // letter case stays significant. Missing entries have no native identity.
+    if (
+      process.platform === "darwin" &&
+      first.normalize("NFC") === second.normalize("NFC")
+    )
+      return true
+    const directory = dirname(second)
+    const probe =
+      caseProbes.get(directory) ?? hasCaseInsensitiveAncestor(directory)
+    caseProbes.set(directory, probe)
+    return probe
+  }
+  for (const target of targets) {
+    if (target.exists) continue
+    const path = target.absolutePath
+    const folded = fileNameComparisonKey(path)
+    const others = missing.get(folded) ?? []
+    for (const other of others) {
+      if (other !== path && (await mayAlias(other, path)))
+        return { kind: "alias", path }
+    }
+    others.push(path)
+    missing.set(folded, others)
+  }
+  for (const { missingParents } of targets) {
+    for (const parent of missingParents) {
+      if (paths.has(parent)) return { kind: "parent", path: parent }
+      for (const file of missing.get(fileNameComparisonKey(parent)) ?? []) {
+        if (await mayAlias(file, parent))
+          return { kind: "parent", path: parent }
+      }
+    }
+  }
+}
+
+function fileNameComparisonKey(path: string): string {
+  return path
+    .toLowerCase()
+    .replaceAll("ς", "σ")
+    .replaceAll("ß", "ss")
+    .normalize("NFC")
+}
+
+// Lock conservatively across filesystem-specific spellings. Actual identity
+// still comes from the filesystem, including on a case-sensitive volume.
+export function fileWriteLockKey(path: string): string {
+  return fileNameComparisonKey(path.toUpperCase())
+}
+
+export async function isSameWriteTarget(
+  workspaceRoot: string,
+  plannedPath: string,
+  resolvedPath: string,
+  allowCreatedParentSpelling = false,
+): Promise<boolean> {
+  if (plannedPath === resolvedPath) return true
+  if (
+    !allowCreatedParentSpelling ||
+    basename(plannedPath) !== basename(resolvedPath) ||
+    fileWriteLockKey(plannedPath) !== fileWriteLockKey(resolvedPath)
+  )
+    return false
+  const planned = await resolveWritePath(workspaceRoot, plannedPath, true)
+  if (!planned.ok || planned.exists || planned.absolutePath !== resolvedPath)
+    return false
+
+  // A sibling creation can establish the spelling of a shared directory.
+  // A new symbolic link in the previously canonical path is a retarget.
+  for (
+    let parent = dirname(plannedPath);
+    parent !== dirname(parent);
+    parent = dirname(parent)
+  ) {
+    try {
+      if ((await lstat(parent)).isSymbolicLink()) return false
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) continue
+      if (!(error instanceof Error && "code" in error)) throw error
+      return false
+    }
+  }
+  return true
+}
+
+// Probe an existing name on the target volume without creating an entry.
+async function hasCaseInsensitiveAncestor(path: string): Promise<boolean> {
+  for (
+    let candidate = path;
+    candidate !== dirname(candidate);
+    candidate = dirname(candidate)
+  ) {
+    try {
+      const existing = await realpath(candidate)
+      const parent = dirname(existing)
+      if ((await lstat(existing)).dev !== (await lstat(parent)).dev)
+        return process.platform === "win32"
+      const name = basename(existing)
+      const alternate = name.replace(/[a-z]/iu, (letter) =>
+        letter === letter.toLowerCase()
+          ? letter.toUpperCase()
+          : letter.toLowerCase(),
+      )
+      if (name === alternate) continue
+      const alias = join(parent, alternate)
+      return (
+        !(await lstat(alias)).isSymbolicLink() &&
+        (await realpath(alias)) === existing
+      )
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR"))
+        throw error
+      // Walk up only when the candidate itself is missing. An existing name
+      // without a case variant establishes a case-sensitive lookup.
+      try {
+        await lstat(candidate)
+        return false
+      } catch (cause) {
+        if (!hasErrorCode(cause, "ENOENT") && !hasErrorCode(cause, "ENOTDIR"))
+          throw cause
+      }
+    }
+  }
+  return process.platform === "win32"
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  )
 }
 
 export async function resolveSearchPath(
@@ -179,6 +362,7 @@ export async function resolveSearchPath(
       ok: true,
       absolutePath,
       displayPath: displayPath(canonicalRoot, absolutePath) || ".",
+      requestedDisplayPath: displayPath(canonicalRoot, candidate) || ".",
       exists: true,
       kind: stats.isDirectory() ? "directory" : "file",
     }

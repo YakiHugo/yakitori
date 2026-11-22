@@ -111,6 +111,9 @@ export function ToolDetailView({
     case "file_changes":
       return (
         <div className="space-y-4">
+          {detail.errorText === undefined ? null : (
+            <TextOutput text={detail.errorText} />
+          )}
           {detail.changes.map((change) => (
             <div key={`${change.kind}:${change.path}`} className="space-y-2">
               <div className="flex items-center gap-2">

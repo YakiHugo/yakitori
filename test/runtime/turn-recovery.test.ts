@@ -383,7 +383,7 @@ describe("Turn recovery", () => {
   it.each([
     "retry",
     "same response",
-  ] as const)("uses only model-visible reads for file replacement after %s", async (continuation) => {
+  ] as const)("uses only model-visible revisions to reject a stale replacement after %s", async (continuation) => {
     let requests = 0
     const read = {
       type: "tool_call" as const,
@@ -397,6 +397,7 @@ describe("Turn recovery", () => {
       name: "write_file",
       input: { path: "existing.txt", content: "updated" },
     }
+    const readTool = createReadFileTool()
     const runtime = await fixture(
       async function* (request) {
         requests += 1
@@ -460,7 +461,20 @@ describe("Turn recovery", () => {
           },
         }
       },
-      [createReadFileTool(), createWriteFileTool()],
+      [
+        {
+          ...readTool,
+          async execute(input, context) {
+            const result = await readTool.execute(input, context)
+            await writeFile(
+              join(context.workspaceRoot, "existing.txt"),
+              "external",
+            )
+            return result
+          },
+        },
+        createWriteFileTool(),
+      ],
     )
     await writeFile(join(runtime.root, "existing.txt"), "original")
     const thread = await runtime.createThread()
@@ -469,7 +483,7 @@ describe("Turn recovery", () => {
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(await readFile(join(runtime.root, "existing.txt"), "utf8")).toBe(
-      continuation === "retry" ? "updated" : "original",
+      continuation === "retry" ? "external" : "updated",
     )
     expect(requests).toBe(continuation === "retry" ? 3 : 2)
     const results = thread
@@ -479,13 +493,13 @@ describe("Turn recovery", () => {
       )
     expect(results).toHaveLength(2)
     expect(results[1]).toMatchObject({ toolCallId: "write" })
-    if (continuation === "retry")
+    if (continuation === "same response")
       expect(results[1]).not.toHaveProperty("isError", true)
     else
       expect(results[1]).toMatchObject({
         isError: true,
         content: [
-          { type: "text", text: expect.stringContaining("file_not_observed") },
+          { type: "text", text: expect.stringContaining("stale_sha256") },
         ],
       })
   })

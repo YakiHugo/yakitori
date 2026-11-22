@@ -1,22 +1,31 @@
 export type LineEnding = "\n" | "\r\n" | "\r"
 
-export function dominantLineEnding(content: string): LineEnding {
-  const crlf = content.match(/\r\n/g)?.length ?? 0
-  const lf = (content.match(/\n/g)?.length ?? 0) - crlf
-  const cr = (content.match(/\r/g)?.length ?? 0) - crlf
-  if (crlf > lf && crlf >= cr) return "\r\n"
-  if (cr > lf && cr > crlf) return "\r"
-  return "\n"
+export function decodeTextFile(bytes: Buffer): string | undefined {
+  const content = bytes.toString("utf8")
+  return content.includes("\0") || !Buffer.from(content, "utf8").equals(bytes)
+    ? undefined
+    : content
 }
 
-export function normalizeReplacementLineEndings(
+export function preserveReplacementLineEndings(
   replacement: string,
-  lineEnding: LineEnding,
+  matchedText: string,
+  adjacentEnding: LineEnding,
 ): string {
-  const normalized = replacement.replace(/\r\n|\r/g, "\n")
-  return lineEnding === "\n"
-    ? normalized
-    : normalized.replace(/\n/g, lineEnding)
+  const endings = matchedText.match(/\r\n|\r|\n/g) ?? []
+  let index = 0
+  return replacement.replace(
+    /\r\n|\r|\n/g,
+    () => endings[index++] ?? endings.at(-1) ?? adjacentEnding,
+  )
+}
+
+export function normalizeUnicodePunctuation(value: string): string {
+  return value
+    .replace(/[‐‑‒–—―−]/gu, "-")
+    .replace(/[‘’‚‛]/gu, "'")
+    .replace(/[“”„‟]/gu, '"')
+    .replace(/[\u00a0\u2002-\u200a\u202f\u205f\u3000]/gu, " ")
 }
 
 export function preserveCurlyQuoteStyle(

@@ -1,36 +1,59 @@
-import { createHash } from "node:crypto"
-import { readFile } from "node:fs/promises"
 import type { JsonObject } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
 import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
+import { editFailure } from "./edit-file-diagnostics.ts"
 import {
-  closestEditCandidates,
-  matchedEditLocations,
-} from "./edit-file-diagnostics.ts"
-import { locateEditMatches } from "./edit-file-match.ts"
+  type EditReplacement,
+  prepareEdit,
+  staleEditFailure,
+} from "./edit-file-replacement.ts"
+import { completeFileChangeExecution } from "./execution-descriptors.ts"
 import {
-  completeFileChangeExecution,
-  fileChangeExecution,
-} from "./execution-descriptors.ts"
-import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
+  conflictingFileTargets,
+  isSameWriteTarget,
+  resolveReadPath,
+  resolveWritePath,
+} from "./path-policy.ts"
 import {
-  dominantLineEnding,
-  normalizeReplacementLineEndings,
-  preserveCurlyQuoteStyle,
-} from "./text-file-format.ts"
-import {
-  compareAndWriteTextFile,
+  fileCommitFailureAtPath,
+  withTextFileWriteLocks,
   type TextFileWriteOutput,
 } from "./text-file-write.ts"
+import { readTextFileSnapshot } from "./text-file-snapshot.ts"
 import { plainToolName } from "./tool-name.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import type { RuntimeTool, ToolFailure } from "./types.ts"
 
-type EditInput = {
-  readonly path: string
-  readonly oldString: string
-  readonly newString: string
-  readonly replaceAll: boolean
-}
+// The batch holds one bounded snapshot and diff per target in memory.
+const MAX_BATCH_EDITS = 32
+
+type EditInput = EditReplacement & Readonly<{ path: string }>
+
+type EditTarget = Extract<
+  Awaited<ReturnType<typeof resolveWritePath>>,
+  { ok: true }
+>
+
+const editProperties = {
+  path: {
+    type: "string",
+    description: "Workspace-relative or absolute path of the text file.",
+  },
+  oldString: {
+    type: "string",
+    description:
+      "Unique existing text to replace, or an empty string to create a new file without overwriting.",
+  },
+  newString: {
+    type: "string",
+    description:
+      "Replacement text, which must differ from oldString when editing.",
+  },
+  replaceAll: {
+    type: "boolean",
+    description: "Replace every match. Defaults to false.",
+  },
+} satisfies JsonObject
+const requiredEditFields = ["path", "oldString", "newString"]
 
 export function createEditFileTool(
   maxBytes = ToolLimitDefaults.fileWriteBytes,
@@ -38,284 +61,371 @@ export function createEditFileTool(
   return {
     toolName: plainToolName("edit_file"),
     description:
-      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read the relevant text before editing when possible. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. An unread file or a ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
-    approvalRequirement: fileChangeApprovalRequirement,
+      "Replace matching UTF-8 text or create a new file with an empty oldString. For one change, pass path, oldString, and newString directly. For multiple changes, pass an edits array with those fields on each entry. Entries are checked before writing any file and run in order, including edits to the same file. Read the relevant text when possible. Omit read_file’s display prefixes. Use a unique anchor of a few lines, or set replaceAll for an intentional global replacement. Line-ending differences are allowed. Other normalization requires a complete current observation. A stale revision permits only a unique exact or line-ending-equivalent anchor.",
+    approvalRequirement(input) {
+      const parsed = parseEdits(input, maxBytes)
+      return {
+        ...fileChangeApprovalRequirement(input),
+        ...(parsed.ok
+          ? {
+              subject: [...new Set(parsed.edits.map((edit) => edit.path))].join(
+                ", ",
+              ),
+            }
+          : {}),
+      }
+    },
     effect: "mutate",
-    describeExecution: fileChangeExecution("edit"),
+    describeExecution(input) {
+      const parsed = parseEdits(input, maxBytes)
+      return {
+        type: "file_change",
+        changes: [],
+        request: {
+          operation: "edit",
+          paths: parsed.ok
+            ? [...new Set(parsed.edits.map((edit) => edit.path))]
+            : [],
+        },
+      }
+    },
     completeExecution: completeFileChangeExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        path: {
-          type: "string",
-          description: "Workspace-relative or absolute path of the text file.",
-        },
-        oldString: {
-          type: "string",
+        ...editProperties,
+        edits: {
+          type: "array",
           description:
-            "Existing text to replace, or an empty string to create a new file without overwriting. Include surrounding context when replacement text is not unique.",
-        },
-        newString: {
-          type: "string",
-          description:
-            "Replacement text. For an existing file, it must differ from oldString.",
-        },
-        replaceAll: {
-          type: "boolean",
-          description:
-            "Replace every match instead of requiring exactly one match. Defaults to false.",
+            "Ordered changes across one or more files. Use only this field for a batch.",
+          minItems: 1,
+          maxItems: MAX_BATCH_EDITS,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: editProperties,
+            required: requiredEditFields,
+          },
         },
       },
-      required: ["path", "oldString", "newString"],
     },
-    async execute(input, context): Promise<ToolExecutionResult> {
-      const parsed = parseEditInput(input, maxBytes)
+    async execute(input, context) {
+      const parsed = parseEdits(input, maxBytes)
       if (!parsed.ok) return parsed.result
-      if (parsed.oldString === "") {
-        const resolved = await resolveWritePath(
-          context.workspaceRoot,
-          parsed.path,
-        )
-        if (!resolved.ok) {
-          return editFailure(resolved.error.code, resolved.error.message)
-        }
-        if (resolved.exists) return fileExistsFailure(resolved.displayPath)
-
-        const written = await compareAndWriteTextFile({
-          workspaceRoot: context.workspaceRoot,
-          path: resolved.displayPath,
-          content: parsed.newString,
-          expectedSha256: null,
-        })
-        if (!written.ok) {
-          return written.code === "file_exists"
-            ? fileExistsFailure(resolved.displayPath)
-            : written
-        }
-        const result = {
-          ok: true,
-          output: {
-            ...written.output,
-            action: "create",
-            fileObservation: editGrant(written.output, { created: true }),
-          },
-          content: `Created ${resolved.displayPath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
-        } satisfies ToolExecutionResult
-        return result
-      }
-
-      const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
-      if (!resolved.ok) {
-        return editFailure(resolved.error.code, resolved.error.message, {
-          suggestion: "Read an existing workspace text file before editing it.",
-        })
-      }
-
-      const observed = context.visibleFileObservations?.latest(
-        resolved.displayPath,
+      const selected = await resolveEditTargets(
+        parsed.edits,
+        context.workspaceRoot,
       )
-      const observedSha256 = observed?.sha256
-      if (!observed?.complete && parsed.replaceAll) {
-        return editFailure(
-          "file_not_fully_observed",
-          "replaceAll requires a complete visible file revision.",
-          { suggestion: "Read the complete file before retrying replaceAll." },
+      if (!selected.ok) return selected
+      const writePaths = selected.entries.flatMap(({ target }) => [
+        target.absolutePath,
+        ...target.missingParents,
+      ])
+      return withTextFileWriteLocks(writePaths, async (locked) => {
+        context.signal?.throwIfAborted()
+        const current = await resolveEditTargets(
+          parsed.edits,
+          context.workspaceRoot,
         )
-      }
-
-      let bytes: Buffer
-      try {
-        bytes = await readFile(resolved.absolutePath)
-      } catch {
-        return editFailure(
-          "read_failed",
-          "The file could not be read safely.",
-          {
-            suggestion: "Read the file again before retrying the edit.",
-          },
+        if (!current.ok) return current
+        for (const [index, { target }] of current.entries.entries()) {
+          const planned = selected.entries[index]?.target
+          if (
+            planned === undefined ||
+            !(await isSameWriteTarget(
+              context.workspaceRoot,
+              planned.absolutePath,
+              target.absolutePath,
+              !planned.exists,
+            ))
+          ) {
+            return editFailure(
+              "path_changed",
+              `The target ${target.requestedDisplayPath} changed before preflight.`,
+            )
+          }
+        }
+        const conflict = await conflictingFileTargets(
+          current.entries.map(({ target }) => target),
         )
-      }
-      if (bytes.byteLength > maxBytes) {
-        return editFailure(
-          "content_too_large",
-          `edit_file cannot edit files larger than ${maxBytes} bytes.`,
-        )
-      }
-
-      const currentSha256 = sha256(bytes)
-      const observedRevisionKnown = observedSha256 !== undefined
-      const optimisticRebase =
-        observedRevisionKnown && currentSha256 !== observedSha256
-      const exactAnchorRequired = !observed?.complete || optimisticRebase
-      if (optimisticRebase && parsed.replaceAll) {
-        return editFailure(
-          "file_changed_since_observation",
-          "The file changed since it was observed; replaceAll requires the observed revision.",
-          {
-            suggestion:
-              "Read the file again and rebuild the edit from its latest contents.",
-          },
-        )
-      }
-
-      const content = bytes.toString("utf8")
-      if (
-        Buffer.from(content, "utf8").compare(bytes) !== 0 ||
-        content.includes("\0")
-      ) {
-        return editFailure(
-          "unsupported_text_encoding",
-          "edit_file only supports UTF-8 text files without NUL bytes.",
-        )
-      }
-
-      const located = locateEditMatches(content, parsed.oldString)
-      if (exactAnchorRequired && located.mode !== "exact") {
-        if (optimisticRebase) {
+        if (conflict !== undefined) {
           return editFailure(
-            "file_changed_since_observation",
-            "The file changed since it was observed and the edit anchor no longer matches exactly.",
-            {
-              suggestion:
-                "Read the file again and rebuild the edit from its latest contents.",
-            },
+            "conflicting_edit_paths",
+            conflict.kind === "parent"
+              ? `An edit target cannot also be a parent directory: ${conflict.path}`
+              : `Multiple edit targets resolve to the same filename: ${conflict.path}`,
           )
         }
-        return editFailure(
-          "old_string_not_found",
-          `oldString was not found exactly in the current ${resolved.displayPath}.`,
-          {
-            suggestion: "Read the current text and use an exact unique anchor.",
-          },
-        )
-      }
-      if (optimisticRebase && located.matches.length !== 1) {
-        return editFailure(
-          "file_changed_since_observation",
-          "The file changed since it was observed and the exact edit anchor is no longer unique.",
-          {
-            suggestion:
-              "Read the file again and rebuild the edit from its latest contents.",
-          },
-        )
-      }
-      if (located.matches.length === 0) {
-        const nearMatches = closestEditCandidates(content, parsed.oldString)
-        return editFailure(
-          "old_string_not_found",
-          `oldString was not found in ${resolved.displayPath}.`,
-          nearMatches.length === 0 ? {} : { nearMatches },
-        )
-      }
-      if (!parsed.replaceAll && located.matches.length > 1) {
-        return editFailure(
-          "old_string_ambiguous",
-          `oldString matched ${located.matches.length} locations in ${resolved.displayPath}.`,
-          {
-            matchMode: located.mode,
-            matchCount: located.matches.length,
-            locations: matchedEditLocations(content, located.matches),
-          },
-        )
-      }
-
-      const matches = parsed.replaceAll
-        ? located.matches
-        : located.matches.slice(0, 1)
-      const changedRanges = matchedEditLocations(content, matches)
-      const editWithinObservedRanges =
-        observed?.complete === true ||
-        changedRanges.every((changed) =>
-          observed?.ranges?.some(
-            (range) =>
-              range.startLine <= changed.startLine &&
-              range.endLine >= changed.endLine,
-          ),
-        )
-      const replacement = normalizeReplacementLineEndings(
-        parsed.newString,
-        dominantLineEnding(content),
-      )
-      let updated = content
-      for (const match of [...matches].reverse()) {
-        const styledReplacement = located.mode.startsWith("curly_quotes")
-          ? preserveCurlyQuoteStyle(
-              content.slice(match.start, match.end),
-              replacement,
+        const plans = new Map<string, EditPlan>()
+        for (const { target, edit } of current.entries) {
+          const observations = context.visibleFileObservations
+          if (
+            observations?.targetChanged(
+              target.displayPath,
+              target.requestedDisplayPath,
             )
-          : replacement
-        updated = `${updated.slice(0, match.start)}${styledReplacement}${updated.slice(match.end)}`
-      }
-      if (updated === content) {
-        return editFailure(
-          "no_change",
-          "The requested replacement does not change the file.",
-        )
-      }
-      if (Buffer.byteLength(updated, "utf8") > maxBytes) {
-        return editFailure(
-          "content_too_large",
-          `The edited file would exceed ${maxBytes} bytes.`,
-        )
-      }
+          ) {
+            return editFailure(
+              "path_changed",
+              `The target of ${edit.path} changed since it was observed. Read it again before editing.`,
+            )
+          }
+          if (
+            edit.replaceAll &&
+            observations?.requiresRefresh(target.displayPath)
+          ) {
+            return editFailure(
+              "file_revision_unknown",
+              `Read ${target.displayPath} before replacing all matches after the incomplete change.`,
+            )
+          }
+          let plan = plans.get(target.absolutePath)
+          if (edit.oldString === "") {
+            if (target.exists || plan !== undefined)
+              return fileExistsFailure(target.displayPath)
+            plans.set(target.absolutePath, {
+              target,
+              requestedPath: edit.path,
+              content: edit.newString,
+              expectedSha256: null,
+              edits: [],
+              aliases: new Set([target.requestedDisplayPath]),
+            })
+            continue
+          }
+          if (plan === undefined) {
+            const snapshot = await readTextFileSnapshot(
+              target.absolutePath,
+              target.displayPath,
+              maxBytes,
+            )
+            if (!snapshot.ok) return snapshot
+            plan = {
+              target,
+              requestedPath: edit.path,
+              content: snapshot.content,
+              expectedSha256: snapshot.sha256,
+              edits: [],
+              aliases: new Set([target.requestedDisplayPath]),
+            }
+            plans.set(target.absolutePath, plan)
+          }
+          plan.aliases.add(target.requestedDisplayPath)
+          const observed = observations?.latest(target.displayPath)
+          const result = prepareEdit(
+            plan.content,
+            edit,
+            target.displayPath,
+            plan.expectedSha256,
+            observed,
+            maxBytes,
+          )
+          if (!result.ok) return result
+          plan.content = result.content
+          plan.edits.push(result.details)
+        }
 
-      const written = await compareAndWriteTextFile({
-        workspaceRoot: context.workspaceRoot,
-        path: resolved.displayPath,
-        content: updated,
-        expectedSha256: currentSha256,
-      })
-      if (!written.ok) {
-        if (written.code !== "stale_sha256") return written
-        return editFailure(
-          observed === undefined
-            ? "file_changed_during_edit"
-            : "file_changed_since_observation",
-          "The file changed while edit_file was preparing the write.",
-          {
-            suggestion:
-              observed === undefined
-                ? "Retry with an exact anchor from the current file."
-                : "Read it again before rebuilding the edit.",
-          },
-        )
-      }
-
-      const output = {
-        ...written.output,
-        replacementCount: matches.length,
-        matchMode: located.mode,
-        optimisticRebase,
-        observedRevisionKnown,
-        ...(observedSha256 === undefined ? {} : { observedSha256 }),
-        changedRanges,
-        ...(observed === undefined
-          ? {}
-          : {
-              observation: {
-                kind: observed.observation,
-                complete: observed.complete,
-                editWithinObservedRanges,
+        context.signal?.throwIfAborted()
+        const results: {
+          output: TextFileWriteOutput
+          grant: JsonObject
+          edits: JsonObject[]
+          content: string
+        }[] = []
+        const batchOutput = () => ({
+          changes: results
+            .filter(({ output }) => output.sha256 !== output.previousSha256)
+            .map(({ output, edits }) => ({
+              path: output.path,
+              kind: output.created ? "add" : "update",
+              diff: output.diff,
+              edits,
+            })),
+          fileObservations: results.map(({ grant }) => grant),
+        })
+        const failureWithProgress = (failure: ToolFailure, path: string) => {
+          if (!parsed.batch) return failure
+          const atPath = fileCommitFailureAtPath(failure, path)
+          if (results.length === 0) return atPath
+          return {
+            ...atPath,
+            output: {
+              ...(isRecord(atPath.output) ? atPath.output : {}),
+              ...batchOutput(),
+            },
+            content: [
+              atPath.content,
+              "Processed before failure:",
+              ...results.map((result) => result.content),
+            ].join("\n"),
+          }
+        }
+        for (const plan of plans.values()) {
+          if (context.signal?.aborted && results.length > 0) {
+            return failureWithProgress(
+              editFailure(
+                "batch_cancelled",
+                "The edit batch stopped before writing the next file.",
+              ),
+              plan.target.displayPath,
+            )
+          }
+          const written = await locked.write(plan.target.absolutePath, {
+            workspaceRoot: context.workspaceRoot,
+            path: plan.requestedPath,
+            content: plan.content,
+            expectedSha256: plan.expectedSha256,
+            maxBytes,
+            createParentDirectories: plan.expectedSha256 === null,
+          })
+          if (!written.ok) {
+            const failure =
+              written.code === "file_exists" && plan.expectedSha256 === null
+                ? fileExistsFailure(plan.target.displayPath)
+                : written.code === "stale_sha256"
+                  ? staleEditFailure(
+                      context.visibleFileObservations?.latest(
+                        plan.target.displayPath,
+                      )?.sha256 !== undefined,
+                      "The file changed while edit_file was preparing the write.",
+                    )
+                  : written
+            return failureWithProgress(
+              {
+                ...failure,
+                ...(isRecord(written.output)
+                  ? {
+                      output: {
+                        ...written.output,
+                        ...(isRecord(failure.output) ? failure.output : {}),
+                      },
+                    }
+                  : {}),
               },
+              plan.target.displayPath,
+            )
+          }
+          const optimisticRebase = plan.edits.some(
+            (entry) => entry.optimisticRebase === true,
+          )
+          const { output } = written
+          results.push({
+            output,
+            grant: editGrant(output, plan.aliases, {
+              created: output.created,
+              optimisticRebase,
             }),
-        fileObservation: editGrant(written.output, { optimisticRebase }),
-      }
-      return {
-        ok: true,
-        output,
-        content: `Updated ${resolved.displayPath}: replaced ${matches.length} ${matches.length === 1 ? "match" : "matches"} (${located.mode}).`,
-      }
+            edits: plan.edits,
+            content: written.content,
+          })
+        }
+
+        const single = results[0]
+        if (!parsed.batch && single !== undefined) {
+          const details = single.edits[0]
+          return {
+            ok: true,
+            output: {
+              ...single.output,
+              ...details,
+              ...(single.output.created ? { action: "create" } : {}),
+              fileObservation: single.grant,
+            },
+            content:
+              details === undefined
+                ? single.content
+                : `Updated ${single.output.path} (replaced ${details.replacementCount} ${details.replacementCount === 1 ? "match" : "matches"}, ${details.matchMode}).`,
+          }
+        }
+        return {
+          ok: true,
+          output: batchOutput(),
+          content: results.map((result) => result.content).join("\n"),
+        }
+      })
     },
   }
 }
 
+async function resolveEditTargets(
+  edits: readonly EditInput[],
+  workspaceRoot: string,
+): Promise<
+  { ok: true; entries: { target: EditTarget; edit: EditInput }[] } | ToolFailure
+> {
+  const entries: { target: EditTarget; edit: EditInput }[] = []
+  const newPaths = new Set<string>()
+  for (const edit of edits) {
+    const target = await resolveWritePath(workspaceRoot, edit.path, true)
+    if (!target.ok) return editFailure(target.error.code, target.error.message)
+    if (edit.oldString === "") {
+      if (target.exists) return fileExistsFailure(target.displayPath)
+      newPaths.add(target.absolutePath)
+    } else if (!target.exists && !newPaths.has(target.absolutePath)) {
+      const read = await resolveReadPath(workspaceRoot, edit.path)
+      if (read.ok)
+        return editFailure(
+          "path_changed",
+          `The target ${edit.path} changed before preflight.`,
+        )
+      return editFailure(read.error.code, read.error.message, {
+        suggestion: "Read an existing workspace text file before editing it.",
+      })
+    }
+    entries.push({ target, edit })
+  }
+  return { ok: true, entries }
+}
+
+type EditPlan = {
+  target: EditTarget
+  requestedPath: string
+  content: string
+  expectedSha256: string | null
+  edits: JsonObject[]
+  aliases: Set<string>
+}
+
+function parseEdits(
+  input: unknown,
+  maxBytes: number,
+):
+  | { ok: true; batch: boolean; edits: EditInput[] }
+  | { ok: false; result: ToolFailure } {
+  const batch = isRecord(input) && Object.hasOwn(input, "edits")
+  let entries: unknown[] = [input]
+  if (batch) {
+    if (
+      Object.keys(input).length !== 1 ||
+      !Array.isArray(input.edits) ||
+      input.edits.length === 0 ||
+      input.edits.length > MAX_BATCH_EDITS
+    ) {
+      return editInputFailure(
+        `Use either a single edit or an edits array of 1 to ${MAX_BATCH_EDITS} edits.`,
+      )
+    }
+    entries = input.edits
+  }
+  const edits: EditInput[] = []
+  for (const entry of entries) {
+    const parsed = parseEditInput(entry, maxBytes)
+    if (!parsed.ok) return parsed
+    edits.push(parsed.edit)
+  }
+  return { ok: true, batch, edits }
+}
+
 function editGrant(
   output: TextFileWriteOutput,
+  requestedPaths: ReadonlySet<string>,
   flags: Readonly<{ created?: boolean; optimisticRebase?: boolean }>,
 ): JsonObject {
+  const aliases = [...requestedPaths].filter((path) => path !== output.path)
   return {
     path: output.path,
+    ...(aliases.length === 0 ? {} : { aliases }),
     kind: "edit",
     complete: flags.created === true,
     sha256: output.sha256,
@@ -327,9 +437,7 @@ function editGrant(
 function parseEditInput(
   input: unknown,
   maxBytes: number,
-):
-  | ({ readonly ok: true } & EditInput)
-  | { readonly ok: false; readonly result: ToolExecutionResult } {
+): { ok: true; edit: EditInput } | { ok: false; result: ToolFailure } {
   if (!isRecord(input)) {
     return editInputFailure("edit_file input must be an object.")
   }
@@ -356,6 +464,9 @@ function parseEditInput(
   }
   if (input.replaceAll !== undefined && typeof input.replaceAll !== "boolean") {
     return editInputFailure("edit_file replaceAll must be a boolean.")
+  }
+  if (input.oldString.includes("\0") || input.newString.includes("\0")) {
+    return editInputFailure("edit_file strings cannot contain NUL bytes.")
   }
   if (input.oldString === "" && input.replaceAll === true) {
     return editInputFailure(
@@ -390,21 +501,23 @@ function parseEditInput(
 
   return {
     ok: true,
-    path: input.path,
-    oldString: input.oldString,
-    newString: input.newString,
-    replaceAll: input.replaceAll ?? false,
+    edit: {
+      path: input.path,
+      oldString: input.oldString,
+      newString: input.newString,
+      replaceAll: input.replaceAll ?? false,
+    },
   }
 }
 
 function editInputFailure(
   message: string,
   code = "invalid_tool_input",
-): { readonly ok: false; readonly result: ToolExecutionResult } {
+): { readonly ok: false; readonly result: ToolFailure } {
   return { ok: false, result: editFailure(code, message) }
 }
 
-function fileExistsFailure(path: string): ToolExecutionResult {
+function fileExistsFailure(path: string): ToolFailure {
   return editFailure(
     "file_exists",
     `Cannot create ${path} because the file already exists.`,
@@ -412,55 +525,6 @@ function fileExistsFailure(path: string): ToolExecutionResult {
       suggestion: "Use a non-empty oldString to edit the existing file.",
     },
   )
-}
-
-function editFailure(
-  code: string,
-  message: string,
-  details: JsonObject = {},
-): ToolExecutionResult {
-  return {
-    ok: false,
-    code,
-    message,
-    content: renderEditFailure(code, message, details),
-    ...(Object.keys(details).length === 0 ? {} : { output: details }),
-  }
-}
-
-function renderEditFailure(
-  code: string,
-  message: string,
-  details: JsonObject,
-): string {
-  const lines = [`${code}: ${message}`]
-  if (typeof details.suggestion === "string") {
-    lines.push(`Suggestion: ${details.suggestion}`)
-  }
-  if (Array.isArray(details.nearMatches)) {
-    lines.push("Near matches:")
-    for (const match of details.nearMatches) {
-      if (!isRecord(match)) continue
-      lines.push(
-        `Lines ${String(match.startLine)}-${String(match.endLine)} (score ${String(match.score)}):`,
-      )
-      if (typeof match.text === "string") lines.push(match.text)
-    }
-  }
-  if (Array.isArray(details.locations)) {
-    lines.push("Exact match locations:")
-    for (const location of details.locations) {
-      if (!isRecord(location)) continue
-      lines.push(
-        `- lines ${String(location.startLine)}-${String(location.endLine)}`,
-      )
-    }
-  }
-  return lines.join("\n")
-}
-
-function sha256(value: Buffer): string {
-  return createHash("sha256").update(value).digest("hex")
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

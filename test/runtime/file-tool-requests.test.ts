@@ -59,9 +59,14 @@ it.each([
             type: "function_call",
             name: "edit_file",
             arguments: JSON.stringify({
-              path: "created.txt",
-              oldString: "",
-              newString: "created\n",
+              edits: [
+                { path: "created.txt", oldString: "", newString: "created\n" },
+                {
+                  path: "nested/second.txt",
+                  oldString: "",
+                  newString: "second\n",
+                },
+              ],
             }),
           }
         : {
@@ -207,6 +212,10 @@ it.each([
   if (route === "xai") {
     expect(editing).toMatchObject([{ type: "function", name: "edit_file" }])
     expect(guidance).toContain("empty oldString")
+    expect(guidance).toContain("edits array")
+    expect(await readFile(join(root, "nested/second.txt"), "utf8")).toBe(
+      "second\n",
+    )
     expect(guidance).not.toContain("write_file")
   } else if (route === "relay") {
     expect(editing.map((tool) => "name" in tool && tool.name).sort()).toEqual([

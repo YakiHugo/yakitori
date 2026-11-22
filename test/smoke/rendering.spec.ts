@@ -1451,7 +1451,7 @@ test("tool rows expose file actions without opening output and keep narrow layou
   await renderingApp.send(prompt)
   await renderingApp.callTool(prompt, "read_file", {
     path,
-    offset: 12,
+    offset: -19,
     limit: 3,
   })
   await renderingApp.append(prompt, "The source file has been checked.")
@@ -1475,6 +1475,9 @@ test("tool rows expose file actions without opening output and keep narrow layou
   await trigger.focus()
   await page.keyboard.press("Enter")
   await expect(row.getByText(/Source line 12/)).toBeVisible()
+  expect(await row.locator(".tool-output").textContent()).toContain(
+    "12\tSource line 12\n\tSource line 13",
+  )
   await trigger.press("Enter")
   await expect(trigger).toHaveAttribute("aria-expanded", "false")
   await page.setViewportSize({ width: 600, height: 700 })
@@ -1488,6 +1491,39 @@ test("tool rows expose file actions without opening output and keep narrow layou
     path: testInfo.outputPath("tool-row-narrow.png"),
     animations: "disabled",
   })
+})
+
+test("a multi-file edit displays each committed diff", async ({
+  page,
+  renderingApp,
+}) => {
+  const path = "source.txt"
+  await writeFile(join(renderingApp.workspace, path), "before\n")
+  const prompt = "Edit two files."
+  await renderingApp.send(prompt)
+  await renderingApp.callTool(prompt, "edit_file", {
+    edits: [
+      { path, oldString: "before", newString: "after" },
+      { path: "nested/new.txt", oldString: "", newString: "another file\n" },
+    ],
+  })
+  await renderingApp.append(prompt, "Edited both files.")
+  await renderingApp.finish(prompt)
+
+  const response = page.getByRole("region", { name: "Response", exact: true })
+  await response.getByRole("button", { name: /^Worked for/ }).click()
+  const row = response.locator(".tool-cell")
+  await row.getByRole("button", { name: /Change 2 files/ }).click()
+  await expect(
+    row.getByRole("button", { name: "source.txt", exact: true }),
+  ).toBeVisible()
+  await expect(
+    row.getByRole("button", { name: "nested/new.txt", exact: true }),
+  ).toBeVisible()
+  await expect(row.locator('tr[data-kind="addition"] code')).toHaveText([
+    "+after",
+    "+another file",
+  ])
 })
 
 test("failed tools show their full error on narrow screens and command output stays bounded", async ({

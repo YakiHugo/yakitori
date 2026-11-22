@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto"
-import { readFile, realpath } from "node:fs/promises"
-import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { lstat, rename } from "node:fs/promises"
+import { basename, dirname, relative, resolve, sep } from "node:path"
 import type {
   FileChange,
   JsonObject,
@@ -8,52 +7,40 @@ import type {
   ToolExecutionDescriptor,
 } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
-import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
-import { resolveReadPath, resolveWorkspaceRoot } from "./path-policy.ts"
 import {
-  compareAndDeleteTextFile,
-  compareAndWriteTextFile,
+  APPLY_PATCH_GRAMMAR,
+  applyChunks,
+  parsePatch,
+  type PatchAction,
+  PatchContextError,
+  PatchInputError,
+  patchPaths,
+} from "./apply-patch-text.ts"
+import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
+import {
+  conflictingFileTargets,
+  fileWriteLockKey,
+  isSameWriteTarget,
+  resolveWorkspaceRoot,
+  resolveWritePath,
+} from "./path-policy.ts"
+import {
+  fileCommitFailureAtPath,
+  type LockedTextFileChanges,
   type TextFileDeleteOutput,
   type TextFileWriteOutput,
+  withTextFileWriteLocks,
 } from "./text-file-write.ts"
+import { readTextFileSnapshot } from "./text-file-snapshot.ts"
 import { plainToolName } from "./tool-name.ts"
 import type { RuntimeTool, ToolExecutionResult, ToolFailure } from "./types.ts"
+import {
+  type BoundedUnifiedDiff,
+  createBoundedUnifiedDiff,
+} from "./unified-diff.ts"
 
-const APPLY_PATCH_GRAMMAR = `start: begin_patch hunk+ end_patch
-begin_patch: "*** Begin Patch" LF
-end_patch: "*** End Patch" LF?
-
-hunk: add_hunk | delete_hunk | update_hunk
-add_hunk: "*** Add File: " filename LF add_line+
-delete_hunk: "*** Delete File: " filename LF
-update_hunk: "*** Update File: " filename LF change_move? change?
-
-filename: /(.+)/
-add_line: "+" /(.*)/ LF -> line
-
-change_move: "*** Move to: " filename LF
-change: (change_context | change_line)+ eof_line?
-change_context: ("@@" | "@@ " /(.+)/) LF
-change_line: ("+" | "-" | " ") /(.*)/ LF
-eof_line: "*** End of File" LF
-
-%import common.LF`
-
-type PatchChunk = Readonly<{
-  context?: string
-  lines: readonly string[]
-  endOfFile: boolean
-}>
-
-type PatchAction =
-  | Readonly<{ kind: "add"; path: string; content: string }>
-  | Readonly<{ kind: "delete"; path: string }>
-  | Readonly<{
-      kind: "update"
-      path: string
-      movePath?: string
-      chunks: readonly PatchChunk[]
-    }>
+// Preflight retains bounded file snapshots and planned changes in memory.
+const MAX_PATCH_PATHS = 32
 
 type AppliedChange = Readonly<{
   path: string
@@ -61,6 +48,9 @@ type AppliedChange = Readonly<{
   diff?: PatchDiff
   sha256?: string
   created?: boolean
+  unchanged?: boolean
+  authored?: boolean
+  aliases?: readonly string[]
 }>
 
 type PatchDiff = Readonly<{
@@ -93,7 +83,15 @@ export function createApplyPatchTool(
       },
       required: ["patch"],
     },
-    approvalRequirement: fileChangeApprovalRequirement,
+    approvalRequirement(input) {
+      const parsed = parseApplyPatchInput(input, maxBytes)
+      return {
+        ...fileChangeApprovalRequirement(input),
+        ...(parsed.ok
+          ? { subject: patchPaths(parsed.actions).join(", ") }
+          : {}),
+      }
+    },
     effect: "mutate",
     describeExecution(input) {
       const parsed = parseApplyPatchInput(input, maxBytes)
@@ -119,30 +117,98 @@ export function createApplyPatchTool(
     async execute(input, context) {
       const parsed = parseApplyPatchInput(input, maxBytes)
       if (!parsed.ok) return parsed.result
-      const pathValidation = await validateDistinctPatchPaths(
+      const targets = await resolvePatchTargets(
         parsed.actions,
         context.workspaceRoot,
       )
-      if (!pathValidation.ok) return pathValidation
-      const changes: AppliedChange[] = []
-      for (const action of parsed.actions) {
-        const result = await applyAction(
-          action,
-          context.workspaceRoot,
-          maxBytes,
-        )
-        if (!result.ok) {
-          return failureWithChanges(result, changes)
-        }
-        changes.push(...result.changes)
-      }
-      return {
-        ok: true,
-        output: patchOutput(changes),
-        content: changes
-          .map((change) => `${change.kind}: ${change.path}`)
-          .join("\n"),
-      }
+      if (!targets.ok) return targets
+      const paths = resolvedPatchPaths(targets.entries)
+      const plannedCreates = new Set(
+        targets.entries.flatMap(({ source, destination }) =>
+          [source, destination].flatMap((target) =>
+            target !== undefined && !target.exists ? [target.absolutePath] : [],
+          ),
+        ),
+      )
+      const lockPaths = targets.entries.flatMap(({ source, destination }) => [
+        ...source.missingParents,
+        ...(destination?.missingParents ?? []),
+      ])
+      return withTextFileWriteLocks(
+        [...paths, ...lockPaths],
+        async (locked) => {
+          context.signal?.throwIfAborted()
+          const current = await resolvePatchTargets(
+            parsed.actions,
+            context.workspaceRoot,
+          )
+          if (!current.ok) return current
+          const resolved = resolvedPatchPaths(current.entries)
+          if (resolved.length !== paths.length) {
+            return patchFailure(
+              "path_changed",
+              "A patch path changed before preflight.",
+            )
+          }
+          for (const [index, path] of resolved.entries()) {
+            const plannedPath = paths[index]
+            if (
+              plannedPath === undefined ||
+              !(await isSameWriteTarget(
+                context.workspaceRoot,
+                plannedPath,
+                path,
+                plannedCreates.has(plannedPath),
+              ))
+            ) {
+              return patchFailure(
+                "path_changed",
+                "A patch path changed before preflight.",
+              )
+            }
+          }
+          const plans: PatchPlan[] = []
+          for (const entry of current.entries) {
+            const plan = await prepareAction(entry, maxBytes)
+            if (!plan.ok) return plan
+            plans.push(plan.plan)
+          }
+          context.signal?.throwIfAborted()
+          const changes: AppliedChange[] = []
+          for (const plan of plans) {
+            if (context.signal?.aborted && changes.length > 0) {
+              return failureWithChanges(
+                fileCommitFailureAtPath(
+                  patchFailure(
+                    "batch_cancelled",
+                    "The patch stopped before its next action.",
+                  ),
+                  plan.source.displayPath,
+                ),
+                changes,
+              )
+            }
+            const result = await commitAction(
+              plan,
+              locked,
+              context.workspaceRoot,
+              maxBytes,
+            )
+            if (!result.ok) return failureWithChanges(result, changes)
+            changes.push(...result.changes)
+          }
+          return {
+            ok: true,
+            output: patchOutput(changes),
+            content: changes
+              .map(
+                (change) =>
+                  `${change.unchanged ? "unchanged" : change.kind}: ${change.path}`,
+              )
+              .join("\n"),
+          }
+        },
+      )
     },
   }
 }
@@ -166,496 +232,443 @@ function parseApplyPatchInput(
       "apply_patch input must be freeform patch text or {patch: string}.",
     )
   }
+  if (patch.includes("\0"))
+    return patchInputFailure("Patch text cannot contain NUL bytes.")
   if (Buffer.byteLength(patch, "utf8") > maxBytes) {
     return patchInputFailure(`apply_patch exceeds ${maxBytes} bytes.`)
   }
   try {
-    return { ok: true, actions: parsePatch(patch) }
+    const actions = parsePatch(patch)
+    if (patchPaths(actions).length > MAX_PATCH_PATHS) {
+      return patchInputFailure(
+        `apply_patch supports at most ${MAX_PATCH_PATHS} paths per call.`,
+      )
+    }
+    return { ok: true, actions }
   } catch (error) {
-    return patchInputFailure(
-      error instanceof Error ? error.message : "Invalid apply_patch input.",
+    if (!(error instanceof PatchInputError)) throw error
+    return patchInputFailure(error.message)
+  }
+}
+
+type PatchTarget = Extract<
+  Awaited<ReturnType<typeof resolveWritePath>>,
+  { ok: true }
+>
+type PatchEntry = {
+  action: PatchAction
+  source: PatchTarget
+  destination?: PatchTarget
+  caseRename?: { absolutePath: string; displayPath: string }
+}
+type PatchPlan = PatchEntry & {
+  before: FileSnapshot | null
+  after: string | null
+  destinationBefore: FileSnapshot | null
+  writeDiff?: BoundedUnifiedDiff
+  deleteDiff?: BoundedUnifiedDiff
+  caseMoveDiff?: BoundedUnifiedDiff
+}
+
+type FileSnapshot = Readonly<{ content: string; sha256: string }>
+
+function resolvedPatchPaths(entries: readonly PatchEntry[]): string[] {
+  return entries.flatMap(({ source, destination, caseRename }) => [
+    source.absolutePath,
+    ...(destination === undefined ? [] : [destination.absolutePath]),
+    ...(caseRename === undefined ? [] : [caseRename.absolutePath]),
+  ])
+}
+
+async function resolvePatchTargets(
+  actions: readonly PatchAction[],
+  workspaceRoot: string,
+): Promise<{ ok: true; entries: PatchEntry[] } | ToolFailure> {
+  const root = await resolveWorkspaceRoot(workspaceRoot)
+  const identities = new Map<string, PatchTarget>()
+  const entries: PatchEntry[] = []
+  for (const action of actions) {
+    const source = await resolveWritePath(workspaceRoot, action.path, true)
+    if (!source.ok) return patchFailure(source.error.code, source.error.message)
+    let destination: PatchTarget | undefined
+    let caseRename: PatchEntry["caseRename"]
+    if (action.kind === "update" && action.movePath !== undefined) {
+      const target = await resolveWritePath(
+        workspaceRoot,
+        action.movePath,
+        true,
+      )
+      if (!target.ok)
+        return patchFailure(target.error.code, target.error.message)
+      destination = target
+      if (source.absolutePath === target.absolutePath) {
+        const requested = resolve(root, action.movePath)
+        const name = basename(requested)
+        const current = basename(source.absolutePath)
+        if (
+          name !== current &&
+          fileWriteLockKey(name) === fileWriteLockKey(current) &&
+          !(await lstat(requested)).isSymbolicLink()
+        ) {
+          const absolutePath = resolve(dirname(source.absolutePath), name)
+          const relativePath = relative(root, absolutePath)
+          const inside =
+            relativePath !== ".." &&
+            !relativePath.startsWith(`..${sep}`) &&
+            resolve(root, relativePath) === absolutePath
+          caseRename = {
+            absolutePath,
+            displayPath: inside
+              ? relativePath.split(sep).join("/")
+              : absolutePath,
+          }
+        }
+      }
+    }
+
+    for (const target of destination === undefined || caseRename !== undefined
+      ? [source]
+      : [source, destination]) {
+      if (identities.has(target.absolutePath)) {
+        return patchFailure(
+          "duplicate_patch_path",
+          `apply_patch cannot modify the same resolved path twice: ${target.displayPath}`,
+        )
+      }
+      identities.set(target.absolutePath, target)
+    }
+    entries.push({
+      action,
+      source,
+      ...(destination === undefined ? {} : { destination }),
+      ...(caseRename === undefined ? {} : { caseRename }),
+    })
+  }
+  const conflict = await conflictingFileTargets([...identities.values()])
+  if (conflict !== undefined) {
+    return patchFailure(
+      "conflicting_patch_paths",
+      conflict.kind === "parent"
+        ? `A patch file cannot also be a parent directory: ${conflict.path}`
+        : `Multiple patch targets resolve to the same filename: ${conflict.path}`,
     )
   }
+  for (const { source, action } of entries) {
+    if (!source.exists && action.kind !== "add") {
+      return patchFailure(
+        "path_not_found",
+        `Path does not exist: ${action.path}.`,
+      )
+    }
+  }
+  return { ok: true, entries }
 }
 
-function parsePatch(patch: string): readonly PatchAction[] {
-  const normalized = patch.replace(/\r\n|\r/gu, "\n").trim()
-  const lines = normalized.split("\n")
-  if (lines.shift()?.trim() !== "*** Begin Patch") {
-    throw new Error("apply_patch must start with *** Begin Patch.")
-  }
-  if (lines.pop()?.trim() !== "*** End Patch") {
-    throw new Error("apply_patch must end with *** End Patch.")
-  }
-  const actions: PatchAction[] = []
-  for (let index = 0; index < lines.length; ) {
-    const header = lines[index]?.trim()
-    if (header?.startsWith("*** Add File: ")) {
-      const path = patchPath(header.slice("*** Add File: ".length))
-      index += 1
-      const content: string[] = []
-      while (index < lines.length && !isHunkHeader(lines[index])) {
-        const line = lines[index]
-        if (line?.startsWith("+") !== true) {
-          throw new Error(`Add File lines must start with + (${path}).`)
-        }
-        content.push(line.slice(1))
-        index += 1
-      }
-      if (content.length === 0) {
-        throw new Error(`Add File requires at least one + line (${path}).`)
-      }
-      actions.push({ kind: "add", path, content: `${content.join("\n")}\n` })
-      continue
-    }
-    if (header?.startsWith("*** Delete File: ")) {
-      actions.push({
-        kind: "delete",
-        path: patchPath(header.slice("*** Delete File: ".length)),
-      })
-      index += 1
-      continue
-    }
-    if (header?.startsWith("*** Update File: ")) {
-      const path = patchPath(header.slice("*** Update File: ".length))
-      index += 1
-      let movePath: string | undefined
-      const possibleMove = lines[index]?.trim()
-      if (possibleMove?.startsWith("*** Move to: ")) {
-        movePath = patchPath(possibleMove.slice("*** Move to: ".length))
-        index += 1
-      }
-      const chunks: PatchChunk[] = []
-      let context: string | undefined
-      let changeLines: string[] = []
-      let endOfFile = false
-      const pushChunk = () => {
-        if (changeLines.length === 0 && context === undefined) return
-        chunks.push({
-          ...(context === undefined ? {} : { context }),
-          lines: changeLines,
-          endOfFile,
-        })
-        context = undefined
-        changeLines = []
-        endOfFile = false
-      }
-      while (index < lines.length && !isHunkHeader(lines[index])) {
-        const line = lines[index] as string
-        const marker = line.trim()
-        if (marker === "@@" || marker.startsWith("@@ ")) {
-          pushChunk()
-          context = marker === "@@" ? undefined : marker.slice(3)
-        } else if (marker === "*** End of File") {
-          endOfFile = true
-        } else if (line.length === 0) {
-          changeLines.push(" ")
-        } else if (/^[ +-]/u.test(line)) {
-          changeLines.push(line)
-        } else {
-          throw new Error(`Invalid Update File line (${path}): ${line}`)
-        }
-        index += 1
-      }
-      pushChunk()
-      if (movePath === undefined && chunks.length === 0) {
-        throw new Error(`Update File has no changes (${path}).`)
-      }
-      actions.push({
-        kind: "update",
-        path,
-        chunks,
-        ...(movePath === undefined ? {} : { movePath }),
-      })
-      continue
-    }
-    throw new Error(`Unknown apply_patch hunk: ${header ?? "<missing>"}`)
-  }
-  if (actions.length === 0) throw new Error("apply_patch has no hunks.")
-  return actions
-}
-
-async function applyAction(
-  action: PatchAction,
-  workspaceRoot: string,
+async function prepareAction(
+  entry: PatchEntry,
   maxBytes: number,
-): Promise<
-  | { readonly ok: true; readonly changes: readonly AppliedChange[] }
-  | ToolFailure
-> {
-  if (action.kind === "add") {
-    const existing = await readOptionalPatchFile(
-      workspaceRoot,
-      action.path,
+): Promise<{ ok: true; plan: PatchPlan } | ToolFailure> {
+  const { action, source, destination, caseRename } = entry
+  let before: FileSnapshot | null = null
+  if (source.exists) {
+    const snapshot = await readTextFileSnapshot(
+      source.absolutePath,
+      source.displayPath,
       maxBytes,
     )
-    if (!existing.ok) return existing
-    const result = await compareAndWriteTextFile({
-      workspaceRoot,
-      path: action.path,
-      content: action.content,
-      expectedSha256: existing.sha256,
-      createParentDirectories: true,
-    })
-    return result.ok
-      ? { ok: true, changes: [changeFromResult("add", result.output)] }
-      : result
+    if (!snapshot.ok) return snapshot
+    before = snapshot
   }
-
-  const source = await resolveReadPath(workspaceRoot, action.path)
-  if (!source.ok) return patchFailure(source.error.code, source.error.message)
-  if (source.kind !== "file") {
-    return patchFailure("unsupported_file_type", "Patch paths must be files.")
+  let after: string | null = null
+  if (action.kind === "add") {
+    after = action.content
+  } else if (action.kind === "update" && before !== null) {
+    const bom = before.content.startsWith("\uFEFF") ? "\uFEFF" : ""
+    try {
+      after = bom + applyChunks(before.content.slice(bom.length), action.chunks)
+    } catch (error) {
+      if (!(error instanceof PatchContextError)) throw error
+      return patchFailure(
+        "patch_context_mismatch",
+        `${source.displayPath}: ${error.message}`,
+      )
+    }
+    if (after === before.content && destination === undefined) {
+      return patchFailure(
+        "no_change",
+        `Patch does not change ${source.displayPath}.`,
+      )
+    }
   }
-  let bytes: Buffer
-  try {
-    bytes = await readFile(source.absolutePath)
-  } catch {
-    return patchFailure("read_failed", `Could not read ${source.displayPath}.`)
-  }
-  if (bytes.byteLength > maxBytes) {
-    return patchFailure(
-      "content_too_large",
-      `${source.displayPath} exceeds ${maxBytes} bytes.`,
-    )
-  }
-  const content = bytes.toString("utf8")
-  if (
-    Buffer.from(content, "utf8").compare(bytes) !== 0 ||
-    content.includes("\0")
-  ) {
-    return patchFailure(
-      "unsupported_text_encoding",
-      `${source.displayPath} is not supported UTF-8 text.`,
-    )
-  }
-  const expectedSha256 = sha256(bytes)
-  if (action.kind === "delete") {
-    const result = await compareAndDeleteTextFile({
-      workspaceRoot,
-      path: action.path,
-      expectedSha256,
-    })
-    return result.ok
-      ? { ok: true, changes: [changeFromResult("delete", result.output)] }
-      : result
-  }
-
-  let updated: string
-  try {
-    updated = applyChunks(content, action.chunks)
-  } catch (error) {
-    return patchFailure(
-      "patch_context_mismatch",
-      error instanceof Error ? error.message : "Patch context did not match.",
-    )
-  }
-  if (Buffer.byteLength(updated, "utf8") > maxBytes) {
+  if (after !== null && Buffer.byteLength(after, "utf8") > maxBytes) {
     return patchFailure(
       "content_too_large",
       `Updated ${source.displayPath} would exceed ${maxBytes} bytes.`,
     )
   }
-  if (updated === content && action.movePath === undefined) {
-    return patchFailure(
-      "no_change",
-      `Patch does not change ${source.displayPath}.`,
+  let destinationBefore: FileSnapshot | null = null
+  if (destination?.exists === true && caseRename === undefined) {
+    const snapshot = await readTextFileSnapshot(
+      destination.absolutePath,
+      destination.displayPath,
+      maxBytes,
     )
+    if (!snapshot.ok) return snapshot
+    destinationBefore = snapshot
   }
-  if (action.movePath === undefined) {
-    const result = await compareAndWriteTextFile({
+  const move = destination !== undefined
+  const writeDiff =
+    after === null
+      ? undefined
+      : createBoundedUnifiedDiff({
+          path:
+            caseRename === undefined
+              ? (destination?.displayPath ?? source.displayPath)
+              : source.displayPath,
+          before:
+            (move && caseRename === undefined ? destinationBefore : before)
+              ?.content ?? null,
+          after,
+          maxBytes: ToolLimitDefaults.toolDiffBytes,
+        })
+  const caseMoveDiff =
+    caseRename !== undefined && after !== null && before !== null
+      ? createBoundedUnifiedDiff({
+          path: caseRename.displayPath,
+          before: before.content,
+          after,
+          maxBytes: ToolLimitDefaults.toolDiffBytes,
+        })
+      : undefined
+  const deleteDiff =
+    before !== null && (after === null || move)
+      ? createBoundedUnifiedDiff({
+          path: source.displayPath,
+          before: before.content,
+          after: null,
+          maxBytes: ToolLimitDefaults.toolDiffBytes,
+        })
+      : undefined
+  return {
+    ok: true,
+    plan: {
+      ...entry,
+      before,
+      after,
+      destinationBefore,
+      ...(writeDiff === undefined ? {} : { writeDiff }),
+      ...(deleteDiff === undefined ? {} : { deleteDiff }),
+      ...(caseMoveDiff === undefined ? {} : { caseMoveDiff }),
+    },
+  }
+}
+
+async function commitAction(
+  plan: PatchPlan,
+  locked: LockedTextFileChanges,
+  workspaceRoot: string,
+  maxBytes: number,
+): Promise<{ ok: true; changes: readonly AppliedChange[] } | ToolFailure> {
+  const {
+    action,
+    source,
+    before,
+    after,
+    destination,
+    destinationBefore,
+    caseRename,
+    writeDiff,
+    deleteDiff,
+    caseMoveDiff,
+  } = plan
+  if (after === null) {
+    if (before === null) throw new Error("Missing patch source snapshot")
+    const result = await locked.delete(source.absolutePath, {
       workspaceRoot,
       path: action.path,
-      content: updated,
-      expectedSha256,
+      expectedSha256: before.sha256,
+      maxBytes,
+      ...(deleteDiff === undefined ? {} : { preflightDiff: deleteDiff }),
     })
     return result.ok
-      ? { ok: true, changes: [changeFromResult("update", result.output)] }
-      : result
+      ? { ok: true, changes: [changeFromResult("delete", result.output)] }
+      : fileCommitFailureAtPath(result, source.displayPath)
   }
-  const destinationBefore = await readOptionalPatchFile(
+
+  const destinationPath = action.kind === "update" ? action.movePath : undefined
+  const writeTarget =
+    caseRename === undefined ? (destination ?? source) : source
+  const written = await locked.write(writeTarget.absolutePath, {
     workspaceRoot,
-    action.movePath,
+    path:
+      caseRename === undefined ? (destinationPath ?? action.path) : action.path,
+    content: after,
     maxBytes,
-  )
-  if (!destinationBefore.ok) return destinationBefore
-  const written = await compareAndWriteTextFile({
-    workspaceRoot,
-    path: action.movePath,
-    content: updated,
-    expectedSha256: destinationBefore.sha256,
-    createParentDirectories: true,
+    ...(writeDiff === undefined ? {} : { preflightDiff: writeDiff }),
+    expectedSha256:
+      (caseRename === undefined && destination !== undefined
+        ? destinationBefore
+        : before
+      )?.sha256 ?? null,
+    createParentDirectories: action.kind === "add" || destination !== undefined,
   })
-  if (!written.ok) return written
-  const deleted = await compareAndDeleteTextFile({
+  if (!written.ok)
+    return fileCommitFailureAtPath(written, writeTarget.displayPath)
+  if (destination === undefined) {
+    return {
+      ok: true,
+      changes: [
+        {
+          ...changeFromResult(
+            written.output.created ? "add" : "update",
+            written.output,
+            source.requestedDisplayPath,
+          ),
+          ...(action.kind === "add" ? { authored: true } : {}),
+        },
+      ],
+    }
+  }
+  if (before === null || destinationPath === undefined)
+    throw new Error("Missing patch move source or destination")
+
+  if (caseRename !== undefined) {
+    const target = await resolveWritePath(workspaceRoot, destinationPath)
+    const latest = await readTextFileSnapshot(
+      source.absolutePath,
+      source.displayPath,
+      maxBytes,
+    )
+    if (
+      target.ok &&
+      target.absolutePath === source.absolutePath &&
+      latest.ok &&
+      latest.sha256 === written.output.sha256
+    ) {
+      try {
+        if (!(await lstat(caseRename.absolutePath)).isSymbolicLink()) {
+          await rename(source.absolutePath, caseRename.absolutePath)
+          return {
+            ok: true,
+            changes: [
+              {
+                ...changeFromResult("move", written.output),
+                path: caseRename.displayPath,
+                ...(caseMoveDiff === undefined ? {} : { diff: caseMoveDiff }),
+                ...(destination.requestedDisplayPath === caseRename.displayPath
+                  ? {}
+                  : { aliases: [destination.requestedDisplayPath] }),
+              },
+              {
+                path: source.displayPath,
+                kind: "delete",
+                ...(deleteDiff === undefined ? {} : { diff: deleteDiff }),
+              },
+            ],
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error)) throw error
+      }
+    }
+    const message = `Could not rename ${source.displayPath} to ${destinationPath}; inspect both paths.`
+    return after === before.content
+      ? fileCommitFailureAtPath(
+          patchFailure("move_failed", message),
+          source.displayPath,
+        )
+      : patchFailureWithChanges(
+          "partial_move",
+          message,
+          [changeFromResult("update", written.output)],
+          [source.displayPath, caseRename.displayPath],
+        )
+  }
+
+  const deleted = await locked.delete(source.absolutePath, {
     workspaceRoot,
     path: action.path,
-    expectedSha256,
+    expectedSha256: before.sha256,
+    maxBytes,
+    ...(deleteDiff === undefined ? {} : { preflightDiff: deleteDiff }),
   })
   if (!deleted.ok) {
     const rollback =
-      destinationBefore.content === undefined
-        ? await compareAndDeleteTextFile({
+      destinationBefore === null
+        ? await locked.delete(destination.absolutePath, {
             workspaceRoot,
-            path: action.movePath,
+            path: destinationPath,
             expectedSha256: written.output.sha256,
+            maxBytes,
           })
-        : await compareAndWriteTextFile({
+        : await locked.write(destination.absolutePath, {
             workspaceRoot,
-            path: action.movePath,
+            path: destinationPath,
             content: destinationBefore.content,
             expectedSha256: written.output.sha256,
+            maxBytes,
           })
     return rollback.ok
-      ? deleted
+      ? fileCommitFailureAtPath(deleted, source.displayPath)
       : patchFailureWithChanges(
           "partial_move",
-          `Could not delete ${source.displayPath} or roll back ${action.movePath}; inspect both paths.`,
+          `Could not delete ${source.displayPath} or roll back ${destinationPath}; inspect both paths.`,
           [changeFromResult("move", written.output)],
-          false,
+          [source.displayPath, written.output.path],
         )
   }
   return {
     ok: true,
     changes: [
-      changeFromResult("move", written.output),
+      changeFromResult(
+        "move",
+        written.output,
+        destination.requestedDisplayPath,
+      ),
       changeFromResult("delete", deleted.output),
     ],
   }
 }
 
-type SourceLine = { text: string; ending: "\r\n" | "\n" | "\r" | "" }
-
-function applyChunks(content: string, chunks: readonly PatchChunk[]): string {
-  const lines = parseSourceLines(content)
-  const preferredEnding =
-    lines.find((line) => line.ending !== "")?.ending ?? "\n"
-  let cursor = 0
-  for (const chunk of chunks) {
-    if (chunk.context !== undefined) {
-      const contextIndex = findSequence(lines, [chunk.context], cursor, false)
-      if (contextIndex < 0) {
-        throw new Error(`Could not find @@ context: ${chunk.context}`)
-      }
-      cursor = contextIndex + 1
-    }
-    const oldLines = chunk.lines
-      .filter((line) => line[0] !== "+")
-      .map((line) => line.slice(1))
-    const index =
-      oldLines.length === 0
-        ? lines.length
-        : findSequence(lines, oldLines, cursor, chunk.endOfFile)
-    if (index < 0) {
-      throw new Error(
-        `Could not find patch context: ${oldLines.slice(0, 3).join(" | ")}`,
-      )
-    }
-    const replaced = lines.slice(index, index + oldLines.length)
-    let oldOffset = 0
-    const replacement: SourceLine[] = []
-    for (const patchLine of chunk.lines) {
-      const marker = patchLine[0]
-      const text = patchLine.slice(1)
-      if (marker === "-") {
-        oldOffset += 1
-        continue
-      }
-      if (marker === " ") {
-        replacement.push(
-          replaced[oldOffset] ?? { text, ending: preferredEnding },
-        )
-        oldOffset += 1
-        continue
-      }
-      replacement.push({ text, ending: preferredEnding })
-    }
-    if (oldLines.length === 0) {
-      const previous = lines.at(-1)
-      if (previous !== undefined && previous.ending === "") {
-        previous.ending = preferredEnding
-      }
-    } else if (
-      index + oldLines.length === lines.length &&
-      replacement.length > 0 &&
-      chunk.lines.at(-1)?.startsWith("+") === true
-    ) {
-      const lastReplacement = replacement.at(-1)
-      if (lastReplacement !== undefined) {
-        lastReplacement.ending = replaced.at(-1)?.ending ?? preferredEnding
-      }
-    }
-    lines.splice(index, oldLines.length, ...replacement)
-    cursor = index + replacement.length
-  }
-  return lines.map((line) => `${line.text}${line.ending}`).join("")
-}
-
-function findSequence(
-  lines: readonly SourceLine[],
-  expected: readonly string[],
-  from: number,
-  endOfFile: boolean,
-): number {
-  for (const normalize of [identity, trimEnd, trim] as const) {
-    const last = lines.length - expected.length
-    for (let index = from; index <= last; index += 1) {
-      if (endOfFile && index + expected.length !== lines.length) continue
-      if (
-        expected.every(
-          (line, offset) =>
-            normalize(lines[index + offset]?.text ?? "") === normalize(line),
-        )
-      ) {
-        return index
-      }
-    }
-  }
-  return -1
-}
-
-function parseSourceLines(content: string): SourceLine[] {
-  const lines: SourceLine[] = []
-  let start = 0
-  for (let index = 0; index < content.length; index += 1) {
-    const character = content[index]
-    if (character !== "\r" && character !== "\n") continue
-    const ending: SourceLine["ending"] =
-      character === "\r" && content[index + 1] === "\n" ? "\r\n" : character
-    lines.push({ text: content.slice(start, index), ending })
-    if (ending === "\r\n") index += 1
-    start = index + 1
-  }
-  if (start < content.length) {
-    lines.push({ text: content.slice(start), ending: "" })
-  }
-  return lines
-}
-
-function patchPaths(actions: readonly PatchAction[]): string[] {
-  return actions.flatMap((action) => [
-    action.path,
-    ...(action.kind === "update" && action.movePath !== undefined
-      ? [action.movePath]
-      : []),
-  ])
-}
-
-async function validateDistinctPatchPaths(
-  actions: readonly PatchAction[],
-  workspaceRoot: string,
-): Promise<{ readonly ok: true } | ToolFailure> {
-  const root = await resolveWorkspaceRoot(workspaceRoot)
-  const identities = new Set<string>()
-  for (const path of patchPaths(actions)) {
-    const resolved = await resolveReadPath(workspaceRoot, path)
-    const identity = resolved.ok
-      ? resolved.absolutePath
-      : await resolveThroughNearestExistingAncestor(
-          resolve(isAbsolute(path) ? path : resolve(root, path)),
-        )
-    if (identities.has(identity)) {
-      return patchFailure(
-        "duplicate_patch_path",
-        `apply_patch cannot modify the same resolved path twice: ${path}`,
-      )
-    }
-    identities.add(identity)
-  }
-  return { ok: true }
-}
-
-async function resolveThroughNearestExistingAncestor(
-  candidate: string,
-): Promise<string> {
-  const suffix: string[] = []
-  let ancestor = candidate
-  for (;;) {
-    try {
-      return resolve(await realpath(ancestor), ...suffix.reverse())
-    } catch {
-      const parent = dirname(ancestor)
-      if (parent === ancestor) return candidate
-      suffix.push(basename(ancestor))
-      ancestor = parent
-    }
-  }
-}
-
-async function readOptionalPatchFile(
-  workspaceRoot: string,
-  path: string,
-  maxBytes: number,
-): Promise<
-  | {
-      readonly ok: true
-      readonly sha256: string | null
-      readonly content?: string
-    }
-  | ToolFailure
-> {
-  const resolved = await resolveReadPath(workspaceRoot, path)
-  if (!resolved.ok) {
-    return resolved.error.code === "path_not_found"
-      ? { ok: true, sha256: null }
-      : patchFailure(resolved.error.code, resolved.error.message)
-  }
-  if (resolved.kind !== "file") {
-    return patchFailure("unsupported_file_type", "Patch paths must be files.")
-  }
-  let bytes: Buffer
-  try {
-    bytes = await readFile(resolved.absolutePath)
-  } catch {
-    return patchFailure(
-      "read_failed",
-      `Could not read ${resolved.displayPath}.`,
-    )
-  }
-  if (bytes.byteLength > maxBytes) {
-    return patchFailure(
-      "content_too_large",
-      `${resolved.displayPath} exceeds ${maxBytes} bytes.`,
-    )
-  }
-  const content = bytes.toString("utf8")
-  if (
-    Buffer.from(content, "utf8").compare(bytes) !== 0 ||
-    content.includes("\0")
-  ) {
-    return patchFailure(
-      "unsupported_text_encoding",
-      `${resolved.displayPath} is not supported UTF-8 text.`,
-    )
-  }
-  return { ok: true, sha256: sha256(bytes), content }
-}
-
 function patchOutput(
   changes: readonly AppliedChange[],
-  exact = true,
+  uncertainPaths: readonly string[] = [],
 ): JsonObject {
   return {
-    changes: [...changes],
-    fileObservations: changes.flatMap((change) => {
-      if (!exact) {
-        return [{ path: change.path, kind: "invalidate", complete: true }]
-      }
-      if (change.kind === "delete") {
-        return [{ path: change.path, kind: "delete", complete: true }]
-      }
-      return change.sha256 === undefined
-        ? []
-        : [
-            {
-              path: change.path,
-              kind: change.kind === "add" ? "write" : "edit",
-              complete: true,
-              sha256: change.sha256,
-              ...(change.created === true ? { created: true } : {}),
-            },
-          ]
-    }),
+    changes: changes.filter((change) => change.unchanged !== true),
+    fileObservations: [
+      ...changes.flatMap((change) => {
+        if (uncertainPaths.includes(change.path)) return []
+        if (change.kind === "delete") {
+          return [{ path: change.path, kind: "delete", complete: true }]
+        }
+        return change.sha256 === undefined
+          ? []
+          : [
+              {
+                path: change.path,
+                kind:
+                  change.authored === true || change.kind === "add"
+                    ? "write"
+                    : "edit",
+                complete:
+                  change.authored === true ||
+                  change.kind === "add" ||
+                  change.created === true,
+                sha256: change.sha256,
+                ...(change.aliases === undefined
+                  ? {}
+                  : { aliases: change.aliases }),
+                ...(change.created === true ? { created: true } : {}),
+              },
+            ]
+      }),
+      ...uncertainPaths.map((path) => ({
+        path,
+        kind: "invalidate",
+        complete: false,
+      })),
+    ],
   }
 }
 
@@ -666,12 +679,15 @@ function failureWithChanges(
   if (changes.length === 0) return failure
   const details = isRecord(failure.output) ? failure.output : {}
   const ownChanges = appliedChangesFromOutput(failure.output)
-  const allChanges = [...changes, ...ownChanges]
+  const allChanges = [
+    ...changes.filter((change) => change.unchanged !== true),
+    ...ownChanges,
+  ]
   const deltaExact = details.deltaExact !== false
   const priorObservations = patchOutput(changes).fileObservations
   const ownObservations = Array.isArray(details.fileObservations)
     ? details.fileObservations
-    : patchOutput(ownChanges, deltaExact).fileObservations
+    : patchOutput(ownChanges).fileObservations
   return {
     ...failure,
     output: {
@@ -683,8 +699,11 @@ function failureWithChanges(
       ],
       deltaExact,
     },
-    content: `${failure.content}\nApplied before failure:\n${changes
-      .map((change) => `${change.kind}: ${change.path}`)
+    content: `${failure.content}\nProcessed before failure:\n${changes
+      .map(
+        (change) =>
+          `${change.unchanged ? "unchanged" : change.kind}: ${change.path}`,
+      )
       .join("\n")}`,
   }
 }
@@ -693,11 +712,15 @@ function patchFailureWithChanges(
   code: string,
   message: string,
   changes: readonly AppliedChange[],
-  deltaExact: boolean,
+  uncertainPaths: readonly string[],
 ): ToolFailure {
   return {
     ...patchFailure(code, message),
-    output: { ...patchOutput(changes, deltaExact), deltaExact },
+    output: {
+      ...patchOutput(changes, uncertainPaths),
+      deltaExact: false,
+      failedPath: uncertainPaths[0] ?? "",
+    },
   }
 }
 
@@ -729,32 +752,25 @@ function appliedChangesFromOutput(
   })
 }
 
-function patchPath(value: string): string {
-  if (value.length === 0 || value.includes("\0")) {
-    throw new Error("Patch paths must be non-empty and contain no NUL bytes.")
-  }
-  return value
-}
-
-function isHunkHeader(line: string | undefined): boolean {
-  const marker = line?.trim()
-  return (
-    marker?.startsWith("*** Add File: ") === true ||
-    marker?.startsWith("*** Delete File: ") === true ||
-    marker?.startsWith("*** Update File: ") === true
-  )
-}
-
 function changeFromResult(
   kind: AppliedChange["kind"],
   output: TextFileWriteOutput | TextFileDeleteOutput,
+  requestedPath?: string,
 ): AppliedChange {
   return {
     path: output.path,
     kind,
+    ...(requestedPath === undefined || requestedPath === output.path
+      ? {}
+      : { aliases: [requestedPath] }),
     diff: output.diff,
     ...("sha256" in output ? { sha256: output.sha256 } : {}),
     ...("created" in output && output.created ? { created: true } : {}),
+    ...(kind === "update" &&
+    "sha256" in output &&
+    output.previousSha256 === output.sha256
+      ? { unchanged: true }
+      : {}),
   }
 }
 
@@ -804,22 +820,6 @@ function patchInputFailure(message: string): {
 
 function patchFailure(code: string, message: string): ToolFailure {
   return { ok: false, code, message, content: `${code}: ${message}` }
-}
-
-function sha256(value: Buffer): string {
-  return createHash("sha256").update(value).digest("hex")
-}
-
-function identity(value: string): string {
-  return value
-}
-
-function trimEnd(value: string): string {
-  return value.trimEnd()
-}
-
-function trim(value: string): string {
-  return value.trim()
 }
 
 function isRecord(value: unknown): value is JsonObject {

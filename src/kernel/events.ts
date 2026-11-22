@@ -504,7 +504,8 @@ function isToolExecutionItemWithLifecycle(
       return (
         onlyKeys(value, [...commonKeys, "path", "offset", "limit", "result"]) &&
         isString(value.path) &&
-        (value.offset === undefined || isPositiveInteger(value.offset)) &&
+        (value.offset === undefined ||
+          (Number.isSafeInteger(value.offset) && value.offset !== 0)) &&
         (value.limit === undefined || isPositiveInteger(value.limit)) &&
         (value.result === undefined || isFileReadResult(value.result))
       )
@@ -869,6 +870,7 @@ function isFileObservation(value: unknown): value is FileObservation {
     !isRecord(value) ||
     !onlyKeys(value, [
       "path",
+      "aliases",
       "kind",
       "complete",
       "sha256",
@@ -877,6 +879,8 @@ function isFileObservation(value: unknown): value is FileObservation {
       "optimisticRebase",
     ]) ||
     !isString(value.path) ||
+    (value.aliases !== undefined &&
+      (!Array.isArray(value.aliases) || !value.aliases.every(isString))) ||
     (value.kind !== "delete" &&
       value.kind !== "edit" &&
       value.kind !== "invalidate" &&

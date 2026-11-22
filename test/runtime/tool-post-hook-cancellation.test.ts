@@ -17,9 +17,13 @@ import { createTurnLoop } from "../../src/runtime/turn-loop.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
 it.each([
-  false,
-  true,
-])("persists a completed tool effect when its post hook is interrupted and recovers it without replay (toolFails=%s)", async (toolFails) => {
+  { toolFails: false, hookFailure: "interruption" },
+  { toolFails: true, hookFailure: "interruption" },
+  { toolFails: true, hookFailure: "timeout" },
+])("persists a completed tool effect after post hook $hookFailure (toolFails=$toolFails)", async ({
+  toolFails,
+  hookFailure,
+}) => {
   const root = await mkdtemp(join(tmpdir(), "yakitori-post-hook-cancel-")),
     ready = join(root, "hook-ready"),
     effect = join(root, "effect"),
@@ -33,6 +37,7 @@ it.each([
     handler = {
       type: "command" as const,
       command: `exec ${quote(process.execPath)} ${quote(script)}`,
+      ...(hookFailure === "timeout" ? { timeoutMs: 400 } : {}),
     },
     hooks = createHookRunner({
       [HookEvent.PostToolUse]: [
@@ -98,27 +103,31 @@ it.each([
       submissionId: "post_hook_turn",
       content: createUserInput("commit the effect"),
     })
-    await expect
-      .poll(async () => {
-        try {
-          return Number(await readFile(ready, "utf8"))
-        } catch (cause) {
-          if (
-            cause instanceof Error &&
-            "code" in cause &&
-            cause.code === "ENOENT"
-          )
-            return 0
-          throw cause
-        }
-      })
-      .toBeGreaterThan(0)
-    const hookPid = Number(await readFile(ready, "utf8"))
-    expect(await thread.interruptTurn("post_hook_turn")).toBe(true)
-    await expect.poll(() => thread.status).toBe(SessionStatus.Idle)
-    expect(() => process.kill(hookPid, 0)).toThrow(
-      expect.objectContaining({ code: "ESRCH" }),
-    )
+    if (hookFailure === "interruption") {
+      await expect
+        .poll(async () => {
+          try {
+            return Number(await readFile(ready, "utf8"))
+          } catch (cause) {
+            if (
+              cause instanceof Error &&
+              "code" in cause &&
+              cause.code === "ENOENT"
+            )
+              return 0
+            throw cause
+          }
+        })
+        .toBeGreaterThan(0)
+      const hookPid = Number(await readFile(ready, "utf8"))
+      expect(await thread.interruptTurn("post_hook_turn")).toBe(true)
+      await expect.poll(() => thread.status).toBe(SessionStatus.Idle)
+      expect(() => process.kill(hookPid, 0)).toThrow(
+        expect.objectContaining({ code: "ESRCH" }),
+      )
+    } else {
+      await expect.poll(() => thread.status).toBe(SessionStatus.Idle)
+    }
     expect(await readFile(effect, "utf8")).toBe("committed exactly once")
     const durable = await store.readThread(thread.id)
     const completion = durable?.rollout.flatMap(({ item }) =>
@@ -157,7 +166,11 @@ it.each([
         },
         {
           type: "text",
-          text: expect.stringContaining("PostToolUse was interrupted"),
+          text: expect.stringContaining(
+            hookFailure === "timeout"
+              ? "hook timed out"
+              : "PostToolUse was interrupted",
+          ),
         },
       ]),
     })
