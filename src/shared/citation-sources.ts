@@ -1,6 +1,5 @@
 import type { ModelAssistantTextBlock } from "../protocol/conversation.ts"
 import type { CitationSource } from "../protocol/execution-view.ts"
-import { isJsonObject } from "../protocol/json.ts"
 
 export type { CitationSource } from "../protocol/execution-view.ts"
 
@@ -8,138 +7,39 @@ export function citationSources(
   blocks: readonly ModelAssistantTextBlock[],
 ): CitationSource[] {
   const sources: CitationSource[] = []
+  const seenURLs = new Set<string>()
   for (const [blockIndex, block] of blocks.entries()) {
-    if (block.annotations !== undefined) {
-      for (const [index, annotation] of block.annotations.entries()) {
-        const url = citationURL(annotation.url)
-        const title = annotation.title?.trim()
-        const label =
-          annotation.kind === "file"
-            ? title?.split(/[\\/]/).at(-1) || "File source"
-            : title ||
-              (url === undefined
-                ? annotation.kind === "document"
-                  ? "Document source"
-                  : "Source"
-                : new URL(url).hostname)
-        const location =
-          annotation.sourceLocation?.unit === "page"
-            ? `from page ${annotation.sourceLocation.start}`
-            : undefined
-        addSource(
-          sources,
-          `citation_${blockIndex}_${index}`,
-          label,
-          url,
-          location,
-        )
-      }
-      continue
-    }
-    for (const provider of [
-      "openai",
-      "anthropic",
-      "chatCompletions",
-    ] as const) {
-      const metadata = block.providerMetadata?.[provider]
-      if (!isJsonObject(metadata)) continue
-      const part = metadata.part
-      const annotations =
-        provider === "openai"
-          ? isJsonObject(part)
-            ? part.annotations
-            : undefined
-          : provider === "anthropic"
-            ? metadata.citations
-            : metadata.annotations
-      if (!Array.isArray(annotations)) continue
-      for (const [annotationIndex, annotation] of annotations.entries()) {
-        if (!isJsonObject(annotation)) continue
-        const value = isJsonObject(annotation.url_citation)
-          ? annotation.url_citation
-          : annotation
-        const type = annotation.type
-        let label: string | undefined
-        let url: string | undefined
-        let location: string | undefined
-        if (
-          type === "url_citation" ||
-          type === "web_search_result_location" ||
-          type === "search_result_location"
-        ) {
-          url = citationURL(value.url ?? value.source)
-          label =
-            typeof value.title === "string" && value.title.trim()
-              ? value.title.trim()
-              : url
-                ? new URL(url).hostname
+    for (const [index, annotation] of (block.annotations ?? []).entries()) {
+      const url = citationURL(annotation.url)
+      const title = annotation.title?.trim()
+      const label =
+        annotation.kind === "file"
+          ? title?.split(/[\\/]/).at(-1) || "File source"
+          : title ||
+            (url === undefined
+              ? annotation.kind === "document"
+                ? "Document source"
                 : "Source"
-        } else if (
-          type === "file_citation" ||
-          type === "container_file_citation" ||
-          type === "file_path"
-        ) {
-          const filename = annotation.filename ?? annotation.file_path
-          label =
-            typeof filename === "string" && filename.trim()
-              ? filename.split(/[\\/]/).at(-1) || "File source"
-              : "File source"
-        } else if (
-          type === "page_location" ||
-          type === "char_location" ||
-          type === "content_block_location"
-        ) {
-          label =
-            typeof annotation.document_title === "string" &&
-            annotation.document_title.trim()
-              ? annotation.document_title.trim()
-              : "Document source"
-          if (
-            type === "page_location" &&
-            typeof annotation.start_page_number === "number" &&
-            Number.isInteger(annotation.start_page_number) &&
-            annotation.start_page_number > 0
-          )
-            location = `from page ${annotation.start_page_number}`
-        }
-        if (label === undefined) continue
-        addSource(
-          sources,
-          `citation_${blockIndex}_${provider}_${annotationIndex}`,
-          label,
-          url,
-          location,
-        )
+              : new URL(url).hostname)
+      const location =
+        annotation.sourceLocation?.unit === "page"
+          ? `from page ${annotation.sourceLocation.start}`
+          : undefined
+      // Matching local titles alone cannot prove that two documents are equal.
+      if (url !== undefined) {
+        const key = JSON.stringify([url, label, location])
+        if (seenURLs.has(key)) continue
+        seenURLs.add(key)
       }
+      sources.push({
+        id: `citation_${blockIndex}_${index}`,
+        label,
+        ...(url === undefined ? {} : { url }),
+        ...(location === undefined ? {} : { location }),
+      })
     }
   }
   return sources
-}
-
-function addSource(
-  sources: CitationSource[],
-  id: string,
-  label: string,
-  url: string | undefined,
-  location: string | undefined,
-): void {
-  // Matching local titles alone cannot prove that two documents are equal.
-  if (
-    url !== undefined &&
-    sources.some(
-      (source) =>
-        source.url === url &&
-        source.label === label &&
-        source.location === location,
-    )
-  )
-    return
-  sources.push({
-    id,
-    label,
-    ...(url === undefined ? {} : { url }),
-    ...(location === undefined ? {} : { location }),
-  })
 }
 
 export function citationURL(value: unknown): string | undefined {

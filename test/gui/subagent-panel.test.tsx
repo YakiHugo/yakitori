@@ -317,19 +317,9 @@ it("replays a continued code block as one completed answer", () => {
                 type: "text",
                 text,
                 purpose: "final_answer",
-                providerMetadata: {
-                  openai: {
-                    part: {
-                      annotations: [
-                        {
-                          type: "url_citation",
-                          url: `https://example.com/${itemId}`,
-                          title,
-                        },
-                      ],
-                    },
-                  },
-                },
+                annotations: [
+                  { kind: "url", url: `https://example.com/${itemId}`, title },
+                ],
               },
             ],
           },

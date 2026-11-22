@@ -1512,6 +1512,14 @@ describe("Chat Completions provider", () => {
           {
             type: "text",
             text: "Source",
+            annotations: [
+              {
+                kind: "url",
+                title: "Source",
+                url: "https://example.com/source",
+                responseSpan: { start: 0, end: 6 },
+              },
+            ],
             providerMetadata: {
               chatCompletions: { annotations: [annotation] },
             },

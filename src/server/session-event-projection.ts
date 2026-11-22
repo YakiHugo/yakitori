@@ -7,7 +7,13 @@ import {
   type InputContent,
   InputRole,
 } from "../kernel/index.ts"
+import type { ModelAssistantTextBlock } from "../protocol/conversation.ts"
 import type { AppSessionEventEnvelope } from "../protocol/events.ts"
+import { isJsonObject } from "../protocol/json.ts"
+import {
+  anthropicCitations,
+  openAICitations,
+} from "../runtime/model-citations.ts"
 import { invalidInput } from "./thread-handler-errors.ts"
 
 export function mapRolloutEvent(
@@ -166,11 +172,21 @@ export function mapRolloutEvent(
     })
   }
   if (item.type === "item_completed") {
+    const completed = item.item
     return createEventEnvelope({
       ...base,
       event: {
         type: "item.completed",
-        data: { turnId: item.turnId, item: item.item },
+        data: {
+          turnId: item.turnId,
+          item:
+            completed.type === "agent_message"
+              ? {
+                  ...completed,
+                  content: completed.content.map(readAssistantCitations),
+                }
+              : completed,
+        },
       },
     })
   }
@@ -180,6 +196,27 @@ export function mapRolloutEvent(
     type: "session.cursor",
     data: {},
   }
+}
+
+function readAssistantCitations(
+  block: ModelAssistantTextBlock,
+): ModelAssistantTextBlock {
+  const metadata = block.providerMetadata
+  if (block.annotations !== undefined || metadata === undefined) return block
+  // Existing turns stored citations only in their provider-owned payloads.
+  // Restore the display annotations at the rollout projection without rewriting history.
+  const part = isJsonObject(metadata.openai) ? metadata.openai.part : undefined
+  const annotations = openAICitations(
+    isJsonObject(part) ? part.annotations : undefined,
+    block.text,
+  )
+  if (isJsonObject(metadata.anthropic))
+    annotations.push(...anthropicCitations(metadata.anthropic.citations))
+  if (isJsonObject(metadata.chatCompletions))
+    annotations.push(
+      ...openAICitations(metadata.chatCompletions.annotations, block.text),
+    )
+  return annotations.length === 0 ? block : { ...block, annotations }
 }
 
 export function modelUserInputContent(message: ModelUserMessage): InputContent {

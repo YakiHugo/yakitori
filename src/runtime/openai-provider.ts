@@ -62,6 +62,7 @@ import {
   modelFailureFromUnknown,
   providerErrorMessage,
 } from "./model-failure.ts"
+import { openAICitations } from "./model-citations.ts"
 import {
   ModelHistoryScopeError,
   modelNativeItems,
@@ -1804,9 +1805,14 @@ function fromOpenAIOutput(
           throw new OpenAIProtocolError(
             "Invalid OpenAI message content metadata.",
           )
+        const annotations =
+          part.type === "output_text"
+            ? openAICitations(part.annotations, part.text)
+            : []
         content.push({
           type: "text",
           text: part.type === "output_text" ? part.text : part.refusal,
+          ...(annotations.length === 0 ? {} : { annotations }),
           ...(item.phase === "commentary" || item.phase === "final_answer"
             ? { purpose: item.phase }
             : {}),

@@ -1,76 +1,40 @@
 import { describe, expect, it } from "vitest"
 import { citationSources } from "../../src/gui/citation-sources.ts"
-import type { JsonObject, ModelTextBlock } from "../../src/kernel/events.ts"
+import type {
+  ModelAssistantTextBlock,
+  ModelCitation,
+} from "../../src/protocol/conversation.ts"
 
 describe("citation sources", () => {
-  it("lists sources from all three providers and deduplicates URLs without changing native annotations", () => {
-    const citation = {
-      type: "url_citation",
+  it("deduplicates the same web source across claims and text blocks", () => {
+    const source = {
+      kind: "url",
       title: "Shared source",
       url: "https://example.com/source",
-      start_index: 1,
-      end_index: 4,
-    }
-    const blocks: ModelTextBlock[] = [
-      openaiBlock("First answer", [citation, citation]),
-      {
-        type: "text",
-        text: "Next",
-        providerMetadata: {
-          chatCompletions: {
-            annotations: [
-              { type: "url_citation", url_citation: citation },
-              {
-                type: "url_citation",
-                url_citation: { ...citation, start_index: 0, end_index: 1 },
-              },
-            ],
-          },
-        },
-      },
-      {
-        type: "text",
-        text: "Last answer",
-        providerMetadata: {
-          anthropic: {
-            citations: [
-              {
-                type: "web_search_result_location",
-                title: "Shared source",
-                url: "https://example.com/source",
-                cited_text: "Last",
-                encrypted_index: "private-index",
-              },
-            ],
-          },
-        },
-      },
+    } as const
+    const blocks = [
+      answer("First claim", [
+        { ...source, responseSpan: { start: 0, end: 4 } },
+        { ...source, responseSpan: { start: 4, end: 10 } },
+      ]),
+      answer("Last claim", [{ ...source, citedText: "Quoted from source" }]),
     ]
-    const original = structuredClone(blocks)
-
     expect(sourceDetails(blocks)).toEqual([
-      {
-        label: "Shared source",
-        url: "https://example.com/source",
-      },
+      { label: "Shared source", url: "https://example.com/source" },
     ])
-    expect(blocks).toEqual(original)
   })
 
-  it("keeps distinct stable row identities for different local citations sharing a title", () => {
+  it("keeps stable row identities for different local citations sharing a title", () => {
     const blocks = [
-      openaiBlock("Answer", [
-        { type: "file_citation", filename: "report.pdf", file_id: "private-a" },
-        { type: "file_citation", filename: "report.pdf", file_id: "private-b" },
+      answer("Answer", [
+        { kind: "file", title: "report.pdf" },
+        { kind: "file", title: "report.pdf" },
       ]),
     ]
     const first = citationSources(blocks)
     expect(first).toHaveLength(2)
     expect(new Set(first.map((source) => source.id)).size).toBe(2)
-    expect(citationSources(blocks).map((source) => source.id)).toEqual(
-      first.map((source) => source.id),
-    )
-    expect(JSON.stringify(first)).not.toContain("private-")
+    expect(citationSources(blocks)).toEqual(first)
   })
 
   it.each([
@@ -88,159 +52,64 @@ describe("citation sources", () => {
   ])("keeps an unsafe or malformed URL non-clickable: %j", (url) => {
     expect(
       sourceDetails([
-        openaiBlock("Answer", [
-          { type: "url_citation", title: "Named source", url },
-        ]),
+        answer("Answer", [{ kind: "url", title: "Named source", url }]),
       ]),
-    ).toEqual([
-      {
-        label: "Named source",
-      },
-    ])
+    ).toEqual([{ label: "Named source" }])
   })
 
-  it("uses parsed HTTP URLs and a hostname fallback for untitled sources", () => {
+  it("uses the parsed HTTP URL and a hostname fallback for untitled sources", () => {
     expect(
       sourceDetails([
-        openaiBlock("Answer", [
-          { type: "url_citation", url: "HTTP://EXAMPLE.COM:80/a" },
+        answer("Answer", [{ kind: "url", url: "HTTP://EXAMPLE.COM:80/a" }]),
+        answer("More", [
+          { kind: "url", title: " Result ", url: "https://example.com/result" },
         ]),
-        {
-          type: "text",
-          text: "More",
-          providerMetadata: {
-            anthropic: {
-              citations: [
-                {
-                  type: "search_result_location",
-                  title: " Result ",
-                  source: "https://example.com/result",
-                },
-              ],
-            },
-          },
-        },
       ]),
     ).toEqual([
-      {
-        label: "example.com",
-        url: "http://example.com/a",
-      },
-      {
-        label: "Result",
-        url: "https://example.com/result",
-      },
+      { label: "example.com", url: "http://example.com/a" },
+      { label: "Result", url: "https://example.com/result" },
     ])
   })
 
-  it("shows local file and document provenance without exposing provider identifiers or inventing URLs", () => {
-    const blocks: ModelTextBlock[] = [
-      openaiBlock("Answer", [
-        {
-          type: "file_citation",
-          filename: "/private/reports/report.pdf",
-          file_id: "private-file",
-        },
-        {
-          type: "container_file_citation",
-          filename: "C:\\private\\notes.txt",
-          container_id: "private-container",
-        },
-        {
-          type: "file_path",
-          file_path: "/private/output.csv",
-          file_id: "private-output",
-        },
-        { type: "file_citation", file_id: "private-unnamed" },
+  it("uses file basenames and source pages for local and document labels", () => {
+    const blocks = [
+      answer("Answer", [
+        { kind: "file", title: "/private/reports/report.pdf" },
+        { kind: "file", title: "C:\\private\\notes.txt" },
+        { kind: "file" },
       ]),
-      {
-        type: "text",
-        text: "Quote",
-        providerMetadata: {
-          anthropic: {
-            citations: [
-              {
-                type: "page_location",
-                document_title: " Report ",
-                document_index: 3,
-                start_page_number: 2,
-                end_page_number: 4,
-                file_id: "private-file",
-                encrypted_index: "private-index",
-                cited_text: "private quotation",
-              },
-              {
-                type: "char_location",
-                document_title: "Report",
-                start_char_index: 100,
-                end_char_index: 200,
-              },
-              {
-                type: "content_block_location",
-                document_index: 4,
-                start_block_index: 0,
-                end_block_index: 1,
-              },
-            ],
-          },
+      answer("Quote", [
+        {
+          kind: "document",
+          title: " Report ",
+          sourceLocation: { unit: "page", start: 2, end: 4 },
         },
-      },
+        {
+          kind: "document",
+          title: "Report",
+          sourceLocation: { unit: "character", start: 100, end: 200 },
+        },
+        { kind: "document" },
+      ]),
     ]
-    const original = structuredClone(blocks)
-
     expect(sourceDetails(blocks)).toEqual([
       { label: "report.pdf" },
       { label: "notes.txt" },
-      { label: "output.csv" },
       { label: "File source" },
-      {
-        label: "Report",
-        location: "from page 2",
-      },
+      { label: "Report", location: "from page 2" },
       { label: "Report" },
       { label: "Document source" },
     ])
-    expect(blocks).toEqual(original)
-  })
-
-  it("ignores absent, malformed, and unknown provider metadata", () => {
-    expect(
-      sourceDetails([
-        { type: "text", text: "No metadata" },
-        {
-          type: "text",
-          text: "Malformed",
-          providerMetadata: {
-            openai: { part: null },
-            anthropic: { citations: {} },
-            chatCompletions: false,
-          },
-        },
-        openaiBlock("Unknown", [
-          null,
-          false,
-          {
-            type: "unknown",
-            url: "https://example.com/",
-            encrypted_index: "private-index",
-          },
-        ]),
-      ]),
-    ).toEqual([])
   })
 })
 
-function openaiBlock(
+function answer(
   text: string,
-  annotations: JsonObject["annotations"],
-): ModelTextBlock {
-  return {
-    type: "text",
-    text,
-    providerMetadata: { openai: { part: { annotations } } },
-  }
+  annotations: readonly ModelCitation[],
+): ModelAssistantTextBlock {
+  return { type: "text", text, annotations }
 }
 
-function sourceDetails(blocks: readonly ModelTextBlock[]) {
+function sourceDetails(blocks: readonly ModelAssistantTextBlock[]) {
   return citationSources(blocks).map(({ id: _id, ...details }) => details)
 }

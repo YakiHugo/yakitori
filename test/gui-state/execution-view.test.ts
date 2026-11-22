@@ -1187,40 +1187,26 @@ describe("execution view", () => {
               {
                 type: "text",
                 text: "First ",
-                providerMetadata: {
-                  openai: {
-                    part: {
-                      annotations: [
-                        {
-                          type: "url_citation",
-                          title: "Source",
-                          url: "https://example.com/source",
-                          start_index: 0,
-                          end_index: 5,
-                        },
-                      ],
-                    },
+                annotations: [
+                  {
+                    kind: "url",
+                    title: "Source",
+                    url: "https://example.com/source",
+                    responseSpan: { start: 0, end: 5 },
                   },
-                },
+                ],
               },
               {
                 type: "text",
                 text: "second",
-                providerMetadata: {
-                  chatCompletions: {
-                    annotations: [
-                      {
-                        type: "url_citation",
-                        url_citation: {
-                          title: "Source",
-                          url: "https://example.com/source",
-                          start_index: 1,
-                          end_index: 6,
-                        },
-                      },
-                    ],
+                annotations: [
+                  {
+                    kind: "url",
+                    title: "Source",
+                    url: "https://example.com/source",
+                    responseSpan: { start: 1, end: 6 },
                   },
-                },
+                ],
               },
             ],
           },
@@ -1272,7 +1258,7 @@ describe("execution view", () => {
         at: "2026-10-05T00:00:01.000Z",
         sources: [
           {
-            id: "citation_0_openai_0",
+            id: "citation_0_0",
             label: "Source",
             url: "https://example.com/source",
           },
