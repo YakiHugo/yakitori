@@ -94,6 +94,9 @@ describe("native Gemini provider", () => {
                         uri: "gs://reports/doc",
                       },
                     },
+                    {
+                      retrievedContext: { text: "Untitled document excerpt." },
+                    },
                   ],
                   groundingSupports: [
                     {
@@ -103,7 +106,7 @@ describe("native Gemini provider", () => {
                         endIndex: 10,
                         text: "😀答",
                       },
-                      groundingChunkIndices: [1],
+                      groundingChunkIndices: [1, 3],
                     },
                     {
                       segment: { partIndex: 1, startIndex: 1, endIndex: 7 },
@@ -134,6 +137,11 @@ describe("native Gemini provider", () => {
               kind: "url",
               title: "Reference",
               url: "https://example.test/first",
+              responseSpan: { start: 1, end: 4 },
+            },
+            {
+              kind: "document",
+              citedText: "Untitled document excerpt.",
               responseSpan: { start: 1, end: 4 },
             },
             { kind: "document", title: "Report", url: "gs://reports/doc" },

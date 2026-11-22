@@ -202,14 +202,22 @@ function citationSource(
 ): ModelCitation | undefined {
   const label = typeof title === "string" && title.trim() ? title : undefined
   const uri = typeof url === "string" && url.trim() ? url : undefined
-  if (label === undefined && uri === undefined && kind !== "file") return
+  const citedText =
+    typeof retrievedText === "string" && retrievedText.trim()
+      ? retrievedText
+      : undefined
+  if (
+    label === undefined &&
+    uri === undefined &&
+    citedText === undefined &&
+    kind !== "file"
+  )
+    return
   return {
     kind,
     ...(label === undefined ? {} : { title: label }),
     ...(uri === undefined ? {} : { url: uri }),
-    ...(typeof retrievedText === "string" && retrievedText.trim()
-      ? { citedText: retrievedText }
-      : {}),
+    ...(citedText === undefined ? {} : { citedText }),
   }
 }
 

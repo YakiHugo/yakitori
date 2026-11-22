@@ -156,10 +156,10 @@ for (const wireApi of [
       await expect(marker).toHaveCount(0)
       if (pending === undefined) throw new Error("Missing live Gemini stream.")
       pending.end(finish)
-      await checkSources()
       await expect(
         page.getByRole("button", { name: "Interrupt", exact: true }),
       ).toHaveCount(0)
+      await checkSources()
       const sessionURL = page.url()
       await server.stop()
       server = await startServer(new URL(sessionURL).port)
