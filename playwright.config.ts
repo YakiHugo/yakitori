@@ -27,6 +27,7 @@ export default defineConfig({
         "browser-drag.spec.ts",
         "chatgpt-connections.spec.ts",
         "rendering.spec.ts",
+        "gemini-citations.spec.ts",
         "account-financials.spec.ts",
         "title-model.spec.ts",
         "app-update-renderer.spec.ts",

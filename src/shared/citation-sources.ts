@@ -1,14 +1,41 @@
-import type { ModelTextBlock } from "../protocol/conversation.ts"
+import type { ModelAssistantTextBlock } from "../protocol/conversation.ts"
 import type { CitationSource } from "../protocol/execution-view.ts"
 import { isJsonObject } from "../protocol/json.ts"
 
 export type { CitationSource } from "../protocol/execution-view.ts"
 
 export function citationSources(
-  blocks: readonly ModelTextBlock[],
+  blocks: readonly ModelAssistantTextBlock[],
 ): CitationSource[] {
   const sources: CitationSource[] = []
   for (const [blockIndex, block] of blocks.entries()) {
+    if (block.annotations !== undefined) {
+      for (const [index, annotation] of block.annotations.entries()) {
+        const url = citationURL(annotation.url)
+        const title = annotation.title?.trim()
+        const label =
+          annotation.kind === "file"
+            ? title?.split(/[\\/]/).at(-1) || "File source"
+            : title ||
+              (url === undefined
+                ? annotation.kind === "document"
+                  ? "Document source"
+                  : "Source"
+                : new URL(url).hostname)
+        const location =
+          annotation.sourceLocation?.unit === "page"
+            ? `from page ${annotation.sourceLocation.start}`
+            : undefined
+        addSource(
+          sources,
+          `citation_${blockIndex}_${index}`,
+          label,
+          url,
+          location,
+        )
+      }
+      continue
+    }
     for (const provider of [
       "openai",
       "anthropic",
@@ -76,28 +103,43 @@ export function citationSources(
             location = `from page ${annotation.start_page_number}`
         }
         if (label === undefined) continue
-        // Sources is a display list; native annotations stay on the response blocks.
-        // Matching local titles alone cannot prove that two documents are equal.
-        if (
-          url !== undefined &&
-          sources.some(
-            (source) =>
-              source.url === url &&
-              source.label === label &&
-              source.location === location,
-          )
-        )
-          continue
-        sources.push({
-          id: `citation_${blockIndex}_${provider}_${annotationIndex}`,
+        addSource(
+          sources,
+          `citation_${blockIndex}_${provider}_${annotationIndex}`,
           label,
-          ...(url === undefined ? {} : { url }),
-          ...(location === undefined ? {} : { location }),
-        })
+          url,
+          location,
+        )
       }
     }
   }
   return sources
+}
+
+function addSource(
+  sources: CitationSource[],
+  id: string,
+  label: string,
+  url: string | undefined,
+  location: string | undefined,
+): void {
+  // Matching local titles alone cannot prove that two documents are equal.
+  if (
+    url !== undefined &&
+    sources.some(
+      (source) =>
+        source.url === url &&
+        source.label === label &&
+        source.location === location,
+    )
+  )
+    return
+  sources.push({
+    id,
+    label,
+    ...(url === undefined ? {} : { url }),
+    ...(location === undefined ? {} : { location }),
+  })
 }
 
 export function citationURL(value: unknown): string | undefined {

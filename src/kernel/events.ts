@@ -921,14 +921,26 @@ function isFileObservationRange(
 function isModelContentBlock(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.type)) return false
   if (value.type === "text") {
+    const { text } = value
     return (
-      onlyKeys(value, ["type", "text", "providerMetadata", "purpose"]) &&
-      isString(value.text) &&
+      onlyKeys(value, [
+        "type",
+        "text",
+        "providerMetadata",
+        "purpose",
+        "annotations",
+      ]) &&
+      isString(text) &&
       (value.purpose === undefined ||
         value.purpose === "commentary" ||
         value.purpose === "final_answer") &&
       (value.providerMetadata === undefined ||
-        isJsonObject(value.providerMetadata))
+        isJsonObject(value.providerMetadata)) &&
+      (value.annotations === undefined ||
+        (Array.isArray(value.annotations) &&
+          value.annotations.every((annotation) =>
+            isModelCitation(annotation, text.length),
+          )))
     )
   }
   if (value.type === "reasoning") {
@@ -987,6 +999,49 @@ function isModelContentBlock(value: unknown): boolean {
           value.toolKind === "tool_search") &&
         value.customInputFallbackKey === undefined)
   )
+}
+
+function isModelCitation(value: unknown, textLength: number): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "kind",
+      "title",
+      "url",
+      "sourceLocation",
+      "citedText",
+      "responseSpan",
+    ]) &&
+    (value.kind === "url" ||
+      value.kind === "file" ||
+      value.kind === "document") &&
+    [value.title, value.url, value.citedText].every(
+      (field) => field === undefined || isString(field),
+    ) &&
+    (value.sourceLocation === undefined ||
+      (isRecord(value.sourceLocation) &&
+        onlyKeys(value.sourceLocation, ["unit", "start", "end"]) &&
+        (value.sourceLocation.unit === "page" ||
+          value.sourceLocation.unit === "character" ||
+          value.sourceLocation.unit === "content_block") &&
+        isCitationOffset(value.sourceLocation.start) &&
+        (value.sourceLocation.unit !== "page" ||
+          value.sourceLocation.start > 0) &&
+        (value.sourceLocation.end === undefined ||
+          (isCitationOffset(value.sourceLocation.end) &&
+            value.sourceLocation.end > value.sourceLocation.start)))) &&
+    (value.responseSpan === undefined ||
+      (isRecord(value.responseSpan) &&
+        onlyKeys(value.responseSpan, ["start", "end"]) &&
+        isCitationOffset(value.responseSpan.start) &&
+        isCitationOffset(value.responseSpan.end) &&
+        value.responseSpan.end > value.responseSpan.start &&
+        value.responseSpan.end <= textLength))
+  )
+}
+
+function isCitationOffset(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
 }
 
 function isModelToolDefinition(value: unknown): boolean {

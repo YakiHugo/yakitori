@@ -17,7 +17,27 @@ export type ModelTextBlock = Readonly<{
 export type ModelAssistantTextBlock = ModelTextBlock &
   Readonly<{
     purpose?: AssistantTextPurpose
+    annotations?: readonly ModelCitation[]
   }>
+
+export type CitationRange = Readonly<{
+  start: number
+  end: number
+}>
+
+export type ModelCitation = Readonly<{
+  kind: "url" | "file" | "document"
+  title?: string
+  url?: string
+  sourceLocation?: Readonly<{
+    unit: "page" | "character" | "content_block"
+    start: number
+    end?: number
+  }>
+  citedText?: string
+  // Half-open UTF-16 offsets within the containing assistant text block.
+  responseSpan?: CitationRange
+}>
 
 export type ModelImageBlock =
   | Readonly<{

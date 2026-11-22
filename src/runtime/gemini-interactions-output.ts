@@ -4,6 +4,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
+import { geminiInteractionCitations } from "./gemini-citations.ts"
 import {
   GeminiIncompleteStreamError,
   GeminiProtocolError,
@@ -365,11 +366,14 @@ export function createGeminiInteractionOutput(
               text: parts.map((part) => part.text).join(""),
               representation: "summary",
             })
-          } else
+          } else {
+            const annotations = geminiInteractionCitations(parts)
             content.push({
               type: "text",
               text: parts.map((part) => part.text).join(""),
+              ...(annotations.length === 0 ? {} : { annotations }),
             })
+          }
         } else if (value.type === "function_call") {
           if (
             typeof value.id !== "string" ||

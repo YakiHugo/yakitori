@@ -12,6 +12,7 @@ import {
   type JsonValue,
 } from "../kernel/index.ts"
 import { AssetMediaError, prepareProviderMedia } from "./asset-media.ts"
+import { createGeminiGrounding } from "./gemini-citations.ts"
 import {
   GeminiIncompleteStreamError,
   GeminiProtocolError,
@@ -321,6 +322,7 @@ async function* streamGemini(
     stage = "response_body"
     const content: ModelContentBlock[] = []
     const nativeParts: JsonObject[] = []
+    const grounding = createGeminiGrounding()
     let responseMetadata: JsonObject = {}
     let candidateMetadata: JsonObject = {}
     const ids = new Set<string>()
@@ -386,6 +388,7 @@ async function* streamGemini(
           throw new GeminiProtocolError("Unexpected Gemini candidate.")
         const { content: _content, ...metadata } = candidate
         candidateMetadata = { ...candidateMetadata, ...metadata }
+        const firstPart = nativeParts.length
         if (candidate.content !== undefined) {
           if (
             !isJsonObject(candidate.content) ||
@@ -425,6 +428,13 @@ async function* streamGemini(
               const type = part.thought === true ? "reasoning" : "text"
               const previous = content.at(-1)
               const continuation = previous?.type === type
+              if (type === "text")
+                grounding.noteTextPart(
+                  nativeParts.length - 1,
+                  continuation ? content.length - 1 : content.length,
+                  continuation ? previous.text.length : 0,
+                  part.text,
+                )
               const partIndex =
                 content.filter((block) => block.type === type).length -
                 (continuation ? 1 : 0)
@@ -523,6 +533,11 @@ async function* streamGemini(
             }
           }
         }
+        grounding.accept(
+          candidate.groundingMetadata,
+          firstPart,
+          nativeParts.length - firstPart,
+        )
         if (candidate.finishReason !== undefined) {
           if (
             typeof candidate.finishReason !== "string" ||
@@ -557,6 +572,7 @@ async function* streamGemini(
       throw new GeminiProtocolError(
         "Gemini could not complete a valid response.",
       )
+    grounding.annotate(content)
     // Only a natural completed response may execute functions. A truncated or
     // filtered response never commits a possibly incomplete tool batch.
     const incompleteToolCalls =
