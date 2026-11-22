@@ -43,6 +43,119 @@ const signedParts = [
 ]
 
 describe("native Gemini provider", () => {
+  it("projects grounding accumulated across SSE events onto the coalesced answer", async () => {
+    const textParts = [{ text: "前😀" }, { text: "答案" }]
+    await withServer(
+      async (_incoming, outgoing) => {
+        send(outgoing, [
+          {
+            candidates: [
+              {
+                ...chunk([{ text: "Plan", thought: true }, textParts[0]])
+                  .candidates[0],
+                groundingMetadata: {
+                  groundingChunks: [
+                    { unsupported: {} },
+                    {
+                      web: {
+                        title: "Reference",
+                        uri: "https://example.test/first",
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            candidates: [
+              {
+                ...chunk([textParts[1]]).candidates[0],
+                groundingMetadata: {
+                  groundingSupports: [
+                    {
+                      segment: { startIndex: 3, endIndex: 6, text: "案" },
+                      groundingChunkIndices: [1],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            candidates: [
+              {
+                finishReason: "STOP",
+                groundingMetadata: {
+                  groundingChunks: [
+                    {
+                      retrievedContext: {
+                        title: "Report",
+                        uri: "gs://reports/doc",
+                      },
+                    },
+                  ],
+                  groundingSupports: [
+                    {
+                      segment: {
+                        partIndex: 1,
+                        startIndex: 3,
+                        endIndex: 10,
+                        text: "😀答",
+                      },
+                      groundingChunkIndices: [1],
+                    },
+                    {
+                      segment: { partIndex: 1, startIndex: 1, endIndex: 7 },
+                      groundingChunkIndices: [2],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ])
+      },
+      async (baseURL) => {
+        const events = await collect(
+          provider(baseURL)(request({ streamOutputItems: true })),
+        )
+        const answer = {
+          type: "text",
+          text: "前😀答案",
+          annotations: [
+            {
+              kind: "url",
+              title: "Reference",
+              url: "https://example.test/first",
+              responseSpan: { start: 4, end: 5 },
+            },
+            {
+              kind: "url",
+              title: "Reference",
+              url: "https://example.test/first",
+              responseSpan: { start: 1, end: 4 },
+            },
+            { kind: "document", title: "Report", url: "gs://reports/doc" },
+          ],
+        }
+        const result = terminal(events)
+        expect(result.content[1]).toHaveProperty(
+          "annotations",
+          answer.annotations,
+        )
+        expect(
+          events.find((event) => event.type === "output_item"),
+        ).toMatchObject({
+          content: [{ type: "reasoning" }, answer],
+        })
+        expect(result.native?.slice(1).map((item) => item.value)).toEqual(
+          textParts,
+        )
+      },
+    )
+  })
+
   it("coalesces display fragments without changing signed replay parts", async () => {
     const parts = [
       { text: "Hello " },

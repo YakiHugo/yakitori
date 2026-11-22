@@ -508,8 +508,24 @@ describe("Gemini Interactions wire boundary", () => {
     expect(events.filter((event) => event.type === "delta")).toMatchObject([
       { text: "Hello", partIndex: 0 },
     ])
+    const answer = {
+      type: "text",
+      text: "Hello",
+      annotations: [
+        {
+          kind: "url",
+          title: "Source",
+          url: "https://example.test/source",
+          responseSpan: { start: 0, end: 5 },
+        },
+      ],
+    }
+    expect(events.find((event) => event.type === "output_item")).toMatchObject({
+      content: [{ type: "reasoning" }, answer],
+    })
     expect(result).toMatchObject({
       stopReason: "end_turn",
+      content: [{ type: "reasoning" }, answer],
       usage: {
         inputTokens: 12,
         outputTokens: 8,
@@ -535,6 +551,53 @@ describe("Gemini Interactions wire boundary", () => {
       {
         type: "model_output",
         content: [{ type: "text", text: "Hello", annotations: [annotation] }],
+      },
+    ])
+  })
+
+  it("keeps the source page separate from the UTF-16 span in a multipart answer", async () => {
+    const events = await collect(
+      provider([
+        created,
+        complete("completed", {
+          steps: [
+            {
+              type: "model_output",
+              content: [
+                { type: "text", text: "See " },
+                {
+                  type: "text",
+                  text: "前😀答案",
+                  annotations: [
+                    {
+                      type: "file_citation",
+                      document_uri: "files/report",
+                      file_name: "report.pdf",
+                      page_number: 12,
+                      start_index: 3,
+                      end_index: 10,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      ])(request()),
+    )
+    expect(terminal(events).content).toEqual([
+      {
+        type: "text",
+        text: "See 前😀答案",
+        annotations: [
+          {
+            kind: "file",
+            title: "report.pdf",
+            url: "files/report",
+            sourceLocation: { unit: "page", start: 12 },
+            responseSpan: { start: 5, end: 8 },
+          },
+        ],
       },
     ])
   })
