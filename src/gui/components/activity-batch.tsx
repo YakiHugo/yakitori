@@ -21,18 +21,24 @@ export function ActivityBatch({
   const [expanded, setExpanded] = useState<boolean>()
   const contentId = useId()
   const tools = entries.filter((entry) => entry.kind === "tool")
-  const active = entries.some((entry) =>
-    entry.kind === "reasoning"
-      ? entry.status === "streaming"
-      : entry.state === "requested",
+  const streamingReasoning = entries.some(
+    (entry) => entry.kind === "reasoning" && entry.status === "streaming",
   )
+  const active =
+    streamingReasoning || tools.some((entry) => entry.state === "requested")
   const failed = tools.some(
     (entry) => entry.state === "failed" || entry.resultError === true,
   )
   const interrupted = tools.some((entry) => entry.state === "interrupted")
   const hasProblem = failed || interrupted
   const grouped = entries.length > 1
-  const open = !grouped || expanded === true
+  const streamingRaw = entries.some(
+    (entry) =>
+      entry.kind === "reasoning" &&
+      entry.status === "streaming" &&
+      (entry.representation === undefined || entry.representation === "raw"),
+  )
+  const open = !grouped || (expanded ?? streamingRaw)
   const summary = tools.length > 0 ? summarizeToolBatch(tools) : "Reasoning"
   const Icon = active ? LoaderCircle : tools.length > 0 ? Wrench : Brain
 

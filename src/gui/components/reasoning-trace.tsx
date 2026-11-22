@@ -2,6 +2,8 @@ import type { ExecutionEntry } from "../execution-view.ts"
 import { LiveTextNotice } from "./cells/live-text-notice.tsx"
 import { MarkdownView } from "./markdown.tsx"
 
+export const encryptedReasoningLabel = "Reasoning hidden (encrypted)"
+
 export function reasoningSections(text: string): {
   line: number
   summary?: string

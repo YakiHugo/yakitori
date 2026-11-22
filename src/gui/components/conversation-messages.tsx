@@ -36,7 +36,10 @@ import {
   findContextSource,
   revealContextSourceEvent,
 } from "./excerpt-source.tsx"
-import { reasoningSections } from "./reasoning-trace.tsx"
+import {
+  encryptedReasoningLabel,
+  reasoningSections,
+} from "./reasoning-trace.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { TranscriptDisclosureContent } from "./transcript-disclosure.tsx"
 import { TurnActivityLabel } from "./turn-activity-label.tsx"
@@ -401,6 +404,7 @@ const TurnBlock = memo(
         entries.filter(
           (entry) =>
             entry.kind !== "reasoning" ||
+            entry.representation === "redacted" ||
             entry.incomplete ||
             entry.text.trim().length > 0,
         ),
@@ -419,6 +423,7 @@ const TurnBlock = memo(
     }, [entries, finalAnswer])
     const currentSummary = active
       ? reasoning
+          .filter((entry) => entry.representation === "summary")
           .flatMap((entry) =>
             reasoningSections(entry.text).map((section) => section.summary),
           )
@@ -426,6 +431,9 @@ const TurnBlock = memo(
       : undefined
     // Live activity is visible, but completion starts with the process closed.
     const expanded = completed ? activityExpanded : !liveActivityCollapsed
+    const hasEncryptedReasoning = reasoning.some(
+      (entry) => entry.representation === "redacted",
+    )
     const hasDeferredActivity =
       activityPage !== undefined && activityPage !== "loaded"
     const hasDisclosure = timeline.length > 0 || hasDeferredActivity
@@ -523,6 +531,14 @@ const TurnBlock = memo(
               {currentSummary && !expanded ? (
                 <span className="min-w-0 truncate" title={currentSummary}>
                   · {currentSummary}
+                </span>
+              ) : null}
+              {!expanded && hasEncryptedReasoning ? (
+                <span
+                  className="min-w-0 truncate"
+                  title={encryptedReasoningLabel}
+                >
+                  · {encryptedReasoningLabel}
                 </span>
               ) : null}
               {retry ? (

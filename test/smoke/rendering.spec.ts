@@ -18,7 +18,10 @@ type RenderingApp = {
   imageDataURL: string
   send(prompt: string): Promise<void>
   append(prompt: string, text: string): Promise<void>
-  think(prompt: string, text: string): Promise<void>
+  think(
+    prompt: string,
+    value: string | readonly Record<string, string | number>[],
+  ): Promise<void>
   callTool(
     prompt: string,
     name: string,
@@ -26,6 +29,7 @@ type RenderingApp = {
     count?: number,
   ): Promise<void>
   finish(prompt: string): Promise<void>
+  reopen(): Promise<void>
 }
 
 const test = base.extend<{ renderingApp: RenderingApp }>({
@@ -45,7 +49,7 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
     page.on("pageerror", (error) => errors.push(error.message))
     const chunk = (
       completionId: string,
-      text: string,
+      value: string | readonly Record<string, string | number>[],
       finish = false,
       field = "content",
     ) =>
@@ -57,7 +61,7 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
         choices: [
           {
             index: 0,
-            delta: finish ? {} : { role: "assistant", [field]: text },
+            delta: finish ? {} : { role: "assistant", [field]: value },
             finish_reason: finish ? "stop" : null,
           },
         ],
@@ -156,19 +160,22 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
           },
         }),
       )
-      server = await spawnServerProcess({
-        command: process.execPath,
-        args: [resolve("src/server/start.ts")],
-        cwd: environment.root,
-        env: {
-          ...environment.env,
-          YAKITORI_PROVIDER: "rendering",
-          YAKITORI_MODEL: "rendering-model",
-          YAKITORI_GUI_DIR: resolve("dist/gui"),
-        },
-        onStdout: (line) => logs.push(line),
-        onStderr: (line) => logs.push(line),
-      })
+      const startServer = (port: string) =>
+        spawnServerProcess({
+          command: process.execPath,
+          args: [resolve("src/server/start.ts")],
+          cwd: environment.root,
+          env: {
+            ...environment.env,
+            PORT: port,
+            YAKITORI_PROVIDER: "rendering",
+            YAKITORI_MODEL: "rendering-model",
+            YAKITORI_GUI_DIR: resolve("dist/gui"),
+          },
+          onStdout: (line) => logs.push(line),
+          onStderr: (line) => logs.push(line),
+        })
+      server = await startServer("0")
       await page.goto(server.url)
       await page
         .getByRole("button", { name: "New session", exact: true })
@@ -192,12 +199,19 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
           if (!stream) throw new Error("Rendering stream disappeared.")
           stream.response.write(chunk(stream.completionId, text))
         },
-        async think(prompt, text) {
+        async think(prompt, value) {
           await expect.poll(() => streams.has(prompt)).toBe(true)
           const stream = streams.get(prompt)
           if (!stream) throw new Error("Rendering stream disappeared.")
           stream.response.write(
-            chunk(stream.completionId, text, false, "reasoning_content"),
+            chunk(
+              stream.completionId,
+              value,
+              false,
+              typeof value === "string"
+                ? "reasoning_content"
+                : "reasoning_details",
+            ),
           )
         },
         async callTool(prompt, name, input, count = 1) {
@@ -241,6 +255,12 @@ const test = base.extend<{ renderingApp: RenderingApp }>({
           await expect(
             page.getByRole("button", { name: "Interrupt", exact: true }),
           ).toHaveCount(0)
+        },
+        async reopen() {
+          const url = page.url()
+          await server?.stop()
+          server = await startServer(new URL(url).port)
+          await page.goto(url)
         },
       })
       expect(errors).toEqual([])
@@ -1836,6 +1856,96 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     await expect(reasoning).toHaveAttribute("aria-expanded", "true")
   })
 }
+
+test("shows summary, raw and encrypted reasoning live and after reopening persisted history", async ({
+  page,
+  renderingApp,
+}) => {
+  const prompt = "Show the three reasoning formats"
+  const hidden = "Reasoning hidden (encrypted)"
+  const ciphertext = "private-reasoning-fixture"
+  const finalAnswer = "The three formats are ready."
+  await renderingApp.send(prompt)
+  await renderingApp.think(prompt, [
+    {
+      type: "reasoning.summary",
+      index: 0,
+      summary: "**Summary heading**\n\nSummary body.",
+    },
+    { type: "reasoning.text", index: 1, text: "**Raw provider text.**" },
+    { type: "reasoning.encrypted", index: 2, data: ciphertext },
+  ])
+  const live = page.getByRole("region", {
+    name: "Current response",
+    exact: true,
+  })
+  await expect(
+    live.getByRole("button", { name: "Reasoning…", exact: true }),
+  ).toBeVisible()
+  await expect(
+    live.getByText("**Raw provider text.**", { exact: true }),
+  ).toBeVisible()
+  await expect(live.getByText(hidden, { exact: true })).toBeVisible()
+  await expect(live.getByText(ciphertext, { exact: true })).toHaveCount(0)
+  await live
+    .getByRole("button", { name: "Reasoning summary…", exact: true })
+    .click()
+  await expect(live.getByText("Summary body.", { exact: true })).toBeVisible()
+  // The simulated provider leaves time between raw deltas so the runtime can
+  // record a visible reasoning interval.
+  await new Promise<void>((resolve) => setTimeout(resolve, 1100))
+  await renderingApp.think(prompt, [
+    { type: "reasoning.text", index: 1, text: " More." },
+  ])
+  await expect(live.getByText(/Raw provider text.*More\./)).toBeVisible()
+  await renderingApp.append(prompt, finalAnswer)
+  await renderingApp.finish(prompt)
+
+  const completed = page.getByRole("region", { name: "Response", exact: true })
+  let durationLabel: string | undefined
+  const checkCompleted = async () => {
+    await expect(
+      completed.getByText(finalAnswer, { exact: true }),
+    ).toBeVisible()
+    await expect(completed.getByTitle(hidden)).toBeVisible()
+    await completed.getByRole("button", { name: /^Worked for/ }).click()
+    const batch = completed
+      .getByRole("button", { name: "Reasoning", exact: true })
+      .first()
+    if ((await batch.getAttribute("aria-expanded")) === "false")
+      await batch.click()
+    const details = completed.getByRole("region", { name: "Activity details" })
+    const summary = details.getByRole("button", {
+      name: "Reasoning summary",
+      exact: true,
+    })
+    if ((await summary.getAttribute("aria-expanded")) === "false")
+      await summary.click()
+    await expect(
+      details.getByText("Summary heading", { exact: true }),
+    ).toBeVisible()
+    await expect(
+      details.getByText("Summary body.", { exact: true }),
+    ).toBeVisible()
+    await expect(details.getByRole("button", { name: hidden })).toHaveCount(0)
+    await expect(details.getByText(hidden, { exact: true })).toBeVisible()
+    await expect(details.getByText(ciphertext, { exact: true })).toHaveCount(0)
+    await expect(
+      details.getByText("Raw provider text.", { exact: true }),
+    ).toHaveCount(0)
+    const raw = details.getByRole("button", { name: /^Thought for / })
+    const label = await raw.innerText()
+    if (durationLabel === undefined) durationLabel = label
+    expect(label).toBe(durationLabel)
+    await raw.click()
+    await expect(
+      details.getByText("Raw provider text.", { exact: true }),
+    ).toBeVisible()
+  }
+  await checkCompleted()
+  await renderingApp.reopen()
+  await checkCompleted()
+})
 
 test("preserves streamed reasoning and the final answer through completion and reload", async ({
   page,
