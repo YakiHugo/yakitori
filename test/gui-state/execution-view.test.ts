@@ -1171,7 +1171,7 @@ describe("execution view", () => {
     ).toBe(false)
   })
 
-  it("preserves completed citation sources equally after live text and durable replay", () => {
+  it("rebases citation mentions onto the completed answer in both live delivery and replay", () => {
     const completion = createExecutionEnvelope({
       sessionId,
       seq: 1,
@@ -1205,6 +1205,7 @@ describe("execution view", () => {
                     title: "Source",
                     url: "https://example.com/source",
                     responseSpan: { start: 1, end: 6 },
+                    citedText: "Source excerpt",
                   },
                 ],
               },
@@ -1261,6 +1262,13 @@ describe("execution view", () => {
             id: "citation_0_0",
             label: "Source",
             url: "https://example.com/source",
+            mentions: [
+              { responseSpan: { start: 0, end: 5 } },
+              {
+                responseSpan: { start: 7, end: 12 },
+                citedText: "Source excerpt",
+              },
+            ],
           },
         ],
       },

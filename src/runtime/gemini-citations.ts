@@ -76,6 +76,7 @@ export function createGeminiGrounding() {
                     "document",
                     chunk.retrievedContext.title,
                     chunk.retrievedContext.uri,
+                    chunk.retrievedContext.text,
                   )
                 : isJsonObject(chunk.maps)
                   ? citationSource("url", chunk.maps.title, chunk.maps.uri)
@@ -197,14 +198,26 @@ function citationSource(
   kind: ModelCitation["kind"],
   title: unknown,
   url: unknown,
+  retrievedText?: unknown,
 ): ModelCitation | undefined {
   const label = typeof title === "string" && title.trim() ? title : undefined
   const uri = typeof url === "string" && url.trim() ? url : undefined
-  if (label === undefined && uri === undefined && kind !== "file") return
+  const citedText =
+    typeof retrievedText === "string" && retrievedText.trim()
+      ? retrievedText
+      : undefined
+  if (
+    label === undefined &&
+    uri === undefined &&
+    citedText === undefined &&
+    kind !== "file"
+  )
+    return
   return {
     kind,
     ...(label === undefined ? {} : { title: label }),
     ...(uri === undefined ? {} : { url: uri }),
+    ...(citedText === undefined ? {} : { citedText }),
   }
 }
 

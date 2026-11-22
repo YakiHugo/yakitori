@@ -1,4 +1,4 @@
-import type { ModelToolContentBlock } from "./conversation.ts"
+import type { CitationRange, ModelToolContentBlock } from "./conversation.ts"
 import type {
   TokenUsage,
   ToolExecutionItem,
@@ -10,11 +10,18 @@ import type { ModelFailureKind } from "./model-failure.ts"
 import type { ModelOutputPresentation } from "./model-output.ts"
 import type { InputDraft } from "./user-input.ts"
 
+export type CitationMention = Readonly<{
+  // Half-open UTF-16 offsets in the associated assistant entry text.
+  responseSpan: CitationRange
+  citedText?: string
+}>
+
 export type CitationSource = Readonly<{
   id: string
   label: string
   url?: string
   location?: string
+  mentions?: readonly CitationMention[]
 }>
 
 export type ExecutionEntry =

@@ -1,14 +1,22 @@
 import type { ModelAssistantTextBlock } from "../protocol/conversation.ts"
-import type { CitationSource } from "../protocol/execution-view.ts"
+import type {
+  CitationMention,
+  CitationSource,
+} from "../protocol/execution-view.ts"
 
 export type { CitationSource } from "../protocol/execution-view.ts"
 
 export function citationSources(
   blocks: readonly ModelAssistantTextBlock[],
 ): CitationSource[] {
-  const sources: CitationSource[] = []
-  const seenURLs = new Set<string>()
+  const sources: (Omit<CitationSource, "mentions"> & {
+    mentions?: CitationMention[]
+  })[] = []
+  const byURL = new Map<string, (typeof sources)[number]>()
+  let offset = 0
   for (const [blockIndex, block] of blocks.entries()) {
+    const blockOffset = offset
+    offset += block.text.length
     for (const [index, annotation] of (block.annotations ?? []).entries()) {
       const url = citationURL(annotation.url)
       const title = annotation.title?.trim()
@@ -26,20 +34,51 @@ export function citationSources(
           ? `from page ${annotation.sourceLocation.start}`
           : undefined
       // Matching local titles alone cannot prove that two documents are equal.
-      if (url !== undefined) {
-        const key = JSON.stringify([url, label, location])
-        if (seenURLs.has(key)) continue
-        seenURLs.add(key)
+      const key =
+        url === undefined ? undefined : JSON.stringify([url, label, location])
+      let source = key === undefined ? undefined : byURL.get(key)
+      if (source === undefined) {
+        source = {
+          id: `citation_${blockIndex}_${index}`,
+          label,
+          ...(url === undefined ? {} : { url }),
+          ...(location === undefined ? {} : { location }),
+        }
+        sources.push(source)
+        if (key !== undefined) byURL.set(key, source)
       }
-      sources.push({
-        id: `citation_${blockIndex}_${index}`,
-        label,
-        ...(url === undefined ? {} : { url }),
-        ...(location === undefined ? {} : { location }),
+      const span = annotation.responseSpan
+      if (
+        span === undefined ||
+        !Number.isSafeInteger(span.start) ||
+        !Number.isSafeInteger(span.end) ||
+        span.start < 0 ||
+        span.end <= span.start ||
+        span.end > block.text.length ||
+        splitsSurrogate(block.text, span.start) ||
+        splitsSurrogate(block.text, span.end)
+      )
+        continue
+      const citedText = annotation.citedText?.trim()
+      source.mentions ??= []
+      source.mentions.push({
+        responseSpan: {
+          start: blockOffset + span.start,
+          end: blockOffset + span.end,
+        },
+        ...(citedText ? { citedText } : {}),
       })
     }
   }
   return sources
+}
+
+function splitsSurrogate(text: string, offset: number): boolean {
+  const before = text.charCodeAt(offset - 1)
+  const after = text.charCodeAt(offset)
+  return (
+    before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff
+  )
 }
 
 export function citationURL(value: unknown): string | undefined {

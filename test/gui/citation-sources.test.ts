@@ -6,7 +6,7 @@ import type {
 } from "../../src/protocol/conversation.ts"
 
 describe("citation sources", () => {
-  it("deduplicates the same web source across claims and text blocks", () => {
+  it("keeps one source row and a separate mention for each range", () => {
     const source = {
       kind: "url",
       title: "Shared source",
@@ -17,11 +17,38 @@ describe("citation sources", () => {
         { ...source, responseSpan: { start: 0, end: 4 } },
         { ...source, responseSpan: { start: 4, end: 10 } },
       ]),
-      answer("Last claim", [{ ...source, citedText: "Quoted from source" }]),
+      answer("Last claim", [
+        {
+          ...source,
+          responseSpan: { start: 5, end: 10 },
+          citedText: "Quoted from source",
+        },
+      ]),
     ]
     expect(sourceDetails(blocks)).toEqual([
-      { label: "Shared source", url: "https://example.com/source" },
+      {
+        label: "Shared source",
+        url: "https://example.com/source",
+        mentions: [
+          { responseSpan: { start: 0, end: 4 } },
+          { responseSpan: { start: 4, end: 10 } },
+          {
+            responseSpan: { start: 16, end: 21 },
+            citedText: "Quoted from source",
+          },
+        ],
+      },
     ])
+  })
+
+  it("keeps the source row when a range splits a Unicode surrogate pair", () => {
+    expect(
+      sourceDetails([
+        answer("A😀B", [
+          { kind: "file", title: "Report", responseSpan: { start: 0, end: 2 } },
+        ]),
+      ]),
+    ).toEqual([{ label: "Report" }])
   })
 
   it("keeps stable row identities for different local citations sharing a title", () => {

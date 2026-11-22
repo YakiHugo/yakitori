@@ -18,7 +18,12 @@ import rehypeSanitize from "rehype-sanitize"
 import type { HighlighterCore } from "shiki/core"
 import type { PluggableList } from "unified"
 import "katex/dist/katex.min.css"
+import type { CitationSource } from "../../protocol/execution-view.ts"
 import { markdownRemarkPlugins } from "../../shared/markdown-plugins.ts"
+import {
+  createMarkdownCitationPlugin,
+  type InlineCitation,
+} from "../lib/markdown-citations.ts"
 import { openFileTarget, openUrlTarget } from "../lib/open-resource.ts"
 import { createStreamingMarkdownPlugin } from "../lib/streaming-markdown.ts"
 import {
@@ -30,6 +35,7 @@ import { cn } from "../lib/utils.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { FileGlyph } from "./file-glyph.tsx"
+import { MarkdownCitation } from "./markdown-citation.tsx"
 import { MarkdownImage } from "./markdown-image.tsx"
 import { MermaidDiagram } from "./mermaid-diagram.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
@@ -314,6 +320,8 @@ function createMarkdownComponents(
   workspaceRoot: string | undefined,
   documentPath: string | undefined,
   apiBase: string,
+  citations: readonly InlineCitation[],
+  citationListId: string | undefined,
 ): Components {
   return {
     a: (props) => (
@@ -334,6 +342,20 @@ function createMarkdownComponents(
       />
     ),
     pre: MarkdownPre,
+    ...(citations.length && citationListId !== undefined
+      ? {
+          sup: ({ node, ...props }) => {
+            const index = node?.properties.dataCitationIndex
+            const citation =
+              typeof index === "number" ? citations[index] : undefined
+            return citation === undefined ? (
+              <sup {...props} />
+            ) : (
+              <MarkdownCitation citation={citation} listId={citationListId} />
+            )
+          },
+        }
+      : {}),
   }
 }
 
@@ -345,6 +367,8 @@ export const MarkdownView = memo(function MarkdownView({
   apiBase: apiBaseOverride,
   streaming = false,
   allowRawHtml = false,
+  sources,
+  citationListId,
 }: Readonly<{
   text: string
   className?: string
@@ -353,12 +377,34 @@ export const MarkdownView = memo(function MarkdownView({
   apiBase?: string | undefined
   streaming?: boolean
   allowRawHtml?: boolean
+  sources?: readonly CitationSource[] | undefined
+  citationListId?: string
 }>) {
   const defaultApiBase = useAppStore((state) => state.apiBase)
   const apiBase = apiBaseOverride ?? defaultApiBase
+  const citations = useMemo(
+    () =>
+      streaming || allowRawHtml || citationListId === undefined
+        ? []
+        : (sources ?? []).flatMap((source, index) =>
+            (source.mentions ?? []).map((mention) => ({
+              ...mention,
+              source,
+              number: index + 1,
+            })),
+          ),
+    [sources, streaming, allowRawHtml, citationListId],
+  )
   const components = useMemo(
-    () => createMarkdownComponents(workspaceRoot, documentPath, apiBase),
-    [workspaceRoot, documentPath, apiBase],
+    () =>
+      createMarkdownComponents(
+        workspaceRoot,
+        documentPath,
+        apiBase,
+        citations,
+        citationListId,
+      ),
+    [workspaceRoot, documentPath, apiBase, citations, citationListId],
   )
   const useIncrementalParser =
     streaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text)
@@ -366,8 +412,9 @@ export const MarkdownView = memo(function MarkdownView({
     () => [
       ...markdownRemarkPlugins,
       ...(useIncrementalParser ? [createStreamingMarkdownPlugin()] : []),
+      ...(citations.length ? [createMarkdownCitationPlugin(citations)] : []),
     ],
-    [useIncrementalParser],
+    [useIncrementalParser, citations],
   )
   const rehypePlugins = useMemo<PluggableList>(() => {
     const plugins: PluggableList = []

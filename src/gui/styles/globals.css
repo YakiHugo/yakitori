@@ -310,6 +310,30 @@
 .markdown a :where(strong, b) {
   color: inherit;
 }
+.markdown-citation {
+  margin-inline-start: 0.2em;
+  top: auto;
+  line-height: 0;
+  vertical-align: super;
+  font-size: 0.72em;
+  font-weight: 600;
+  white-space: nowrap;
+  user-select: none;
+}
+.markdown-citation :is(a, button) {
+  display: inline-block;
+  color: var(--link);
+  cursor: pointer;
+  line-height: 1.15;
+}
+.markdown-citation :is(a, button):hover {
+  text-decoration: underline;
+}
+.markdown-citation button:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--link);
+  outline-offset: 3px;
+}
 .markdown .markdown-resource-link {
   display: inline;
   margin-inline: 2px;
